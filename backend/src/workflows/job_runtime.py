@@ -1308,6 +1308,13 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
     return normalized
 
 
+async def _verify_native_child_sql_scope(db, run):
+    """Compile a private canonical journal witness before every child CAS."""
+    if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
+        from src.workflows.general_task_guard import assert_general_task_child_phase_current
+        await assert_general_task_child_phase_current(db, run)
+
+
 def _append_parent_fence_condition(
     conditions: list[Any], run: WorkflowRunState, *, now: datetime
 ) -> None:
@@ -3108,6 +3115,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import publish_step_receipt
         return await publish_step_receipt(self, parent_id, **bindings)
 
+    async def publish_general_task_tool_closure(self, child_id, **bindings):
+        from src.workflows.general_task_guard import publish_tool_closure
+        return await publish_tool_closure(self, child_id, **bindings)
+
+    async def wait_general_task_native_approval(self, child_id, **bindings):
+        from src.workflows.general_task_guard import wait_native_approval
+        return await wait_native_approval(self, child_id, **bindings)
+
+    async def resume_general_task_native_approval(self, child_id, **bindings):
+        from src.workflows.general_task_guard import resume_native_approval
+        return await resume_native_approval(self, child_id, **bindings)
+
     async def pause_general_task_native_parent(self, parent_id, **bindings):
         from src.workflows.general_task_guard import pause_parent
         return await pause_parent(self, parent_id, **bindings)
@@ -3340,6 +3359,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == fencing_token,
                 WorkflowRunState.lease_expires_at > now,
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -3822,6 +3842,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
                 )
             if to_status not in {"failed", "cancelled"}:
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(conditions, run, now=now)
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -4359,6 +4380,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         WorkflowRunState.lease_expires_at <= now,
                     ),
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(deadline_conditions, run, now=now)
                 expired = await db.execute(
                     update(WorkflowRunState)
@@ -4402,6 +4424,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.fencing_token == expected_fence,
                     or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(malformed_conditions, run, now=now)
                 malformed = await db.execute(
                     update(WorkflowRunState)
@@ -4447,6 +4470,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.fencing_token == expected_fence,
                     or_(WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at <= now),
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(recovery_conditions, run, now=now)
                 recovered = await db.execute(
                     update(WorkflowRunState)
@@ -4491,6 +4515,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         WorkflowRunState.lease_expires_at <= now,
                     ),
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(dependency_failure_conditions, run, now=now)
                 failed = await db.execute(
                     update(WorkflowRunState)
@@ -4532,6 +4557,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         WorkflowRunState.lease_expires_at <= now,
                     ),
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(dependency_block_conditions, run, now=now)
                 blocked = await db.execute(
                     update(WorkflowRunState)
@@ -4602,6 +4628,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == expected_fence,
                 or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             claim_values: dict[str, Any] = {
                 "status": "running",
@@ -4692,6 +4719,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.fencing_token == expected_fence,
                     WorkflowRunState.lease_expires_at > now,
                 ]
+                await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(deadline_conditions, run, now=now)
                 expired = await db.execute(
                     update(WorkflowRunState)
@@ -4743,6 +4771,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == expected_fence,
                 WorkflowRunState.lease_expires_at > now,
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(heartbeat_conditions, run, now=now)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -4841,6 +4870,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == expected_fence,
                 or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(transfer_conditions, run, now=now)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -4889,6 +4919,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     ) -> dict[str, Any]:
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:")):
+            raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
         if not _text(checkpoint_id):
@@ -5000,6 +5032,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner == owner,
                 WorkflowRunState.lease_expires_at > now,
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(checkpoint_conditions, run, now=now)
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -6081,6 +6114,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -6185,6 +6219,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -6278,6 +6313,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -7007,6 +7043,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -7262,6 +7299,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == fencing_token,
                 WorkflowRunState.lease_expires_at > now,
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             effects.append(receipt)
             updated = await db.execute(
@@ -7509,6 +7547,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
+            await _verify_native_child_sql_scope(db, run)
             _append_parent_fence_condition(conditions, run, now=now)
             values: dict[str, Any] = {
                 "status": "succeeded",

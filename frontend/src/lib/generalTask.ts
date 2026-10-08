@@ -47,6 +47,7 @@ export interface GeneralTaskApprovalPause {
   step_id: string; tool_id: string; workflow_run_id: string; attempt_id: string;
   fencing_token: number; workflow_revision: number; original_deadline_at: string;
   can_resume: boolean; reason: string | null;
+  child_job_id?: string; expected_manifest_revision?: number;
 }
 export function canResumeGeneralTask(read: GeneralTaskPlanRead, task: WorkBoardTask): boolean {
   const pause = read.approval_pause, attempt = task.latest_attempt;
@@ -54,6 +55,12 @@ export function canResumeGeneralTask(read: GeneralTaskPlanRead, task: WorkBoardT
     && read.task_revision === task.task_revision && task.status === "blocked"
     && task.recovery_action === "approve_existing_run" && attempt && !attempt.ended_at
     && read.plan.steps.some(step => step.step_id === pause.step_id && step.tool_id === pause.tool_id)
+    && (!read.native_execution || (read.native_execution.phase === "approval_wait"
+      && pause.expected_manifest_revision === read.native_execution.manifest_revision
+      && Boolean(pause.child_job_id && read.native_execution.admitted_invocation_ids.includes(pause.child_job_id))
+      && read.native_execution.steps.some(step => step.step_id === pause.step_id
+        && step.invocation_id === pause.child_job_id && step.status === "awaiting_approval"
+        && step.contact_state === "not_contacted")))
     && pause.attempt_id === attempt.attempt_id && pause.workflow_run_id === attempt.workflow_run_id
     && pause.fencing_token === attempt.fencing_token && Date.parse(pause.original_deadline_at) > Date.now());
 }
@@ -127,6 +134,12 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || typeof pause.original_deadline_at !== "string" || !Number.isFinite(Date.parse(pause.original_deadline_at))
     || typeof pause.can_resume !== "boolean" || !(pause.reason === null || typeof pause.reason === "string"))) {
     throw new Error("Approval pause receipt is incomplete. Refresh Work before continuing.");
+  }
+  if (record(pause) && ((pause.child_job_id !== undefined) !== (pause.expected_manifest_revision !== undefined)
+    || (pause.child_job_id !== undefined && (typeof pause.child_job_id !== "string" || !pause.child_job_id
+      || pause.child_job_id.length > 256 || !Number.isSafeInteger(pause.expected_manifest_revision)
+      || Number(pause.expected_manifest_revision) < 1)))) {
+    throw new Error("Native approval binding is incomplete. Refresh Work before continuing.");
   }
   if (descriptors.some(d => !record(d) || typeof d.tool_id !== "string" || typeof d.version !== "string"
     || !record(d.input_schema) || !record(d.output_schema) || !Array.isArray(d.effects) || !Array.isArray(d.permissions)

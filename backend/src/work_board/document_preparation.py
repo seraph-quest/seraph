@@ -107,6 +107,11 @@ async def invocation(db, principal, job_id, fencing_token):
     from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.dispatcher import _parse_typed_input
+    from src.work_board.contracts import GENERAL_TASK_NATIVE_CHILD_KIND
+    candidate = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == job_id).execution_options(populate_existing=True))
+    if candidate is not None and candidate.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
+        return await _native_invocation(db, principal, candidate, fencing_token)
     attempt = (await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == job_id))).one_or_none()
     run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id).execution_options(populate_existing=True))
     if (attempt is None or attempt.ended_at is not None or attempt.cancel_requested_at is not None
@@ -130,6 +135,51 @@ async def invocation(db, principal, job_id, fencing_token):
         or run.lease_expires_at is None or sources.utc(run.lease_expires_at) <= datetime.now(timezone.utc)):
         raise BoardError("document_preparation_deadline_expired", "The original execution window expired", status_code=409)
     await resolve(db, owner, envelope.task_input.document_source, goal_id=task.goal_id)
+    return owner, envelope
+
+
+async def _native_invocation(db, principal, child, fencing_token):
+    """The fixed child derives its original source through the shared compiler."""
+    from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
+    from src.work_board.contracts import WorkBoardOwner
+    from src.workflows.general_task_guard import child_binding, assert_general_task_child_current, read_manifest
+    from src.work_board.general_task_runtime_artifacts import (
+        verify_general_task_manifest, read_current_native_tool_input,
+    )
+    from src.work_board.general_task_native import current_plan
+    if (not principal or not principal.authenticated or principal.revoked
+        or principal.job_id != child.run_identity or child.fencing_token != fencing_token):
+        raise BoardError("document_preparation_job_changed", "Exact current native child is required", status_code=409)
+    binding = child_binding(child)
+    # Includes the exact declared capability before any private input/source access.
+    await assert_general_task_child_current(db, child)
+    parent = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == binding.parent_job_id).execution_options(populate_existing=True))
+    task = await db.scalar(select(WorkBoardTask).where(
+        WorkBoardTask.task_id == binding.task_id).execution_options(populate_existing=True))
+    attempt = await db.scalar(select(WorkBoardAttempt).where(
+        WorkBoardAttempt.attempt_id == binding.attempt_id).execution_options(populate_existing=True))
+    if (parent is None or task is None or attempt is None
+        or attempt.workflow_run_id != parent.run_identity or attempt.task_id != task.task_id
+        or principal.principal_id != binding.owner_principal_id
+        or principal.session_id != binding.original_root_id
+        or principal.operator_session_id != binding.original_root_id):
+        raise BoardError("document_preparation_owner_changed", "Original native task owner is required", status_code=409)
+    manifest = read_manifest(parent)
+    envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
+    check_envelope(envelope)
+    private = await read_current_native_tool_input(db, child)
+    step = next((item for item in current_plan(manifest, envelope).steps
+        if item.step_id == binding.step_id), None)
+    contract = descriptor()
+    source = envelope.task_input.document_source
+    if (source is None or private.tool_id != "document_prepare" or step is None
+        or step.tool_id != "document_prepare" or step.input != private.inputs
+        or binding.descriptor_digest != digest(contract.model_dump(mode="json"))
+        or private.inputs != {"selection_digest": source.selection_digest}):
+        raise BoardError("document_selection_changed", "Exact selected native document step is required", status_code=409)
+    owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
+    await resolve(db, owner, source, goal_id=task.goal_id)
     return owner, envelope
 
 

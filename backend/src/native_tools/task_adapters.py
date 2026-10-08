@@ -36,13 +36,72 @@ _APPROVAL_FIELDS = (
     "execution_ready", "operator_visible", "expires_at",
 )
 
+_PRECONTACT_SEAL = object()
+_CLOSURE_SEAL = object()
+
+
+@dataclass(frozen=True)
+class TaskToolClosureWitness:
+    """Private evidence emitted after the original synchronous callback exits."""
+    binding: TaskToolApprovalBinding
+    outcome: str
+    output_digest: str | None
+    approval_id: str | None
+    _seal: object
+
+
+def verify_task_tool_closure(witness, *, binding, fencing_token):
+    from src.work_board.contracts import GeneralTaskToolClosureV1, GeneralTaskNativeChildBindingV1
+    if (type(witness) is not TaskToolClosureWitness or witness._seal is not _CLOSURE_SEAL
+        or type(binding) is not GeneralTaskNativeChildBindingV1
+        or witness.binding != TaskToolApprovalBinding(binding.descriptor_digest,
+            binding.input_digest, binding.invocation_id, fencing_token)):
+        raise PermissionError("original native callback closure witness required")
+    return GeneralTaskToolClosureV1(original_binding_digest=_digest(binding.model_dump(mode="json")),
+        invocation_id=binding.invocation_id, child_fence=fencing_token,
+        descriptor_digest=binding.descriptor_digest, input_digest=binding.input_digest,
+        outcome=witness.outcome, output_digest=witness.output_digest, approval_id=witness.approval_id)
+
+
+@dataclass(frozen=True)
+class _InvocationCompletion:
+    output: object
+    error: BaseException | None
+    witness: TaskToolClosureWitness
+
+
+class TaskToolInvocation:
+    """Retains the original callback future; cancelling its waiter cannot close it."""
+    def __init__(self, future):
+        self._future = future
+
+    @property
+    def closed(self):
+        return self._future.done() and not self._future.cancelled()
+
+    @property
+    def witness(self):
+        if not self.closed:
+            raise PermissionError("original native callback has not closed")
+        return self._future.result().witness
+
+    async def wait(self, *, timeout=None):
+        waiting = asyncio.shield(self._future)
+        completion = (await waiting if timeout is None
+            else await asyncio.wait_for(waiting, timeout=timeout))
+        if completion.error is not None:
+            raise completion.error
+        return completion.output
+
 
 class TaskToolApprovalRequired(ApprovalRequired):
     """Existing wrapper approval with adapter-proven absence of tool contact."""
 
-    def __init__(self, approval: ApprovalRequired, *, binding: TaskToolApprovalBinding):
+    def __init__(self, approval: ApprovalRequired, *, binding: TaskToolApprovalBinding,
+                 _producer_seal=None):
         super().__init__(**{name: getattr(approval, name) for name in _APPROVAL_FIELDS})
         self._binding = binding
+        self._producer_seal = _producer_seal
 
     @property
     def binding(self):
@@ -233,6 +292,11 @@ class ToolRegistry:
                 "fingerprint": fingerprint_tool_call(tool.name, inputs, approval_context=context)}
 
     async def invoke(self, descriptor, inputs, *, principal, job_id, fencing_token):
+        invocation = self.begin_invocation(descriptor, inputs, principal=principal,
+            job_id=job_id, fencing_token=fencing_token)
+        return await invocation.wait()
+
+    def begin_invocation(self, descriptor, inputs, *, principal, job_id, fencing_token):
         if not principal or not principal.authenticated or principal.revoked or not principal.session_id:
             raise PermissionError("authenticated task principal is required")
         if principal.job_id != job_id or not job_id or type(fencing_token) is not int or fencing_token < 1:
@@ -247,33 +311,65 @@ class ToolRegistry:
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
         if descriptor.tool_id == "document_prepare":
-            from src.work_board.document_preparation import invoke
-            from src.audit.repository import audit_repository
             from src.security.trust_contract import AuthorityGrant
             if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants:
                 raise PermissionError("current capability execution permission is required")
-            # This one async native owner accepts only a hexadecimal digest,
-            # has no credential fields and uses task-bound local consent. Keep
-            # the existing audit owner without moving async SQL to a thread.
-            async def audit(event_type, details):
-                await audit_repository.log_event(session_id=principal.session_id,
-                    actor="agent", event_type=event_type, tool_name="document_prepare",
-                    risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
-                    summary="Local document preparation " + event_type,
-                    details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
-            from src.tools.policy import get_task_policy_snapshot
-            await audit("tool_call", {"input_digest": _digest(inputs)})
-            try:
-                result = await invoke(principal, job_id, fencing_token, inputs)
-            except Exception as exc:
-                await audit("tool_failed", {"error_type": type(exc).__name__})
-                raise
-            await audit("tool_result", {"result_digest": _digest(result), "provider_contacts": 0})
-            return result
+            return TaskToolInvocation(asyncio.create_task(self._invoke_document_with_closure(
+                descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
         # ContextVars are copied by to_thread. Existing wrappers remain the
         # last authority/approval/audit/secret boundary, including MCP calls.
-        return await asyncio.to_thread(self._invoke_sync, descriptor, inputs,
-            principal, job_id, fencing_token)
+        # The handle belongs to the current native interpreter invocation.
+        # A timed-out/cancelled waiter retains it until actual callback closure.
+        future = asyncio.create_task(asyncio.to_thread(self._invoke_with_closure,
+            descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token))
+        return TaskToolInvocation(future)
+
+    async def _invoke_document_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            output = await self._invoke_document(descriptor, inputs, principal, job_id, fencing_token)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
+
+    async def _invoke_document(self, descriptor, inputs, principal, job_id, fencing_token):
+        from src.work_board.document_preparation import invoke
+        from src.audit.repository import audit_repository
+        # This one async native owner accepts only a hexadecimal digest,
+        # has no credential fields and uses task-bound local consent. Keep
+        # the existing audit owner without moving async SQL to a thread.
+        async def audit(event_type, details):
+            await audit_repository.log_event(session_id=principal.session_id,
+                actor="agent", event_type=event_type, tool_name="document_prepare",
+                risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
+                summary="Local document preparation " + event_type,
+                details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
+        from src.tools.policy import get_task_policy_snapshot
+        await audit("tool_call", {"input_digest": _digest(inputs)})
+        try:
+            result = await invoke(principal, job_id, fencing_token, inputs)
+        except Exception as exc:
+            await audit("tool_failed", {"error_type": type(exc).__name__})
+            raise
+        await audit("tool_result", {"result_digest": _digest(result), "provider_contacts": 0})
+        return result
+
+    def _invoke_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            output = self._invoke_sync(descriptor, inputs, principal, job_id, fencing_token)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            precontact = (type(error) is TaskToolApprovalRequired
+                and error._producer_seal is _PRECONTACT_SEAL and error.binding == binding)
+            witness = TaskToolClosureWitness(binding, "approval_precontact" if precontact else "unknown",
+                None, error.approval_id if precontact else None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
 
     def _invoke_sync(self, descriptor, inputs, principal, job_id, fencing_token):
         from src.approval.runtime import (set_runtime_context, reset_runtime_context,
@@ -318,7 +414,7 @@ class ToolRegistry:
                     raise TaskToolApprovalRequired(approval, binding=TaskToolApprovalBinding(
                         descriptor_digest=_digest(descriptor.model_dump(mode="json")),
                         input_digest=_digest(inputs), job_id=job_id,
-                        fencing_token=fencing_token)) from approval
+                        fencing_token=fencing_token), _producer_seal=_PRECONTACT_SEAL) from approval
                 if isinstance(approval, TaskToolApprovalRequired):
                     raise ApprovalRequired(**{name: getattr(approval, name)
                         for name in _APPROVAL_FIELDS}) from approval

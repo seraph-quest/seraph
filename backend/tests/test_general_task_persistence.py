@@ -125,12 +125,15 @@ async def test_accepted_task_executes_real_durable_root_and_private_artifact_rea
         task = await service.repository.get_task(db, owner, task_id)
         assert task.status == WorkBoardStatus.review
         runs = (await db.execute(select(WorkflowRunState))).scalars().all()
-        assert len(runs) == 1
-        assert runs[0].job_kind == "agent.task.v1"
-        assert runs[0].status == "succeeded"
-        assert runs[0].owner_principal_id == OWNER
+        assert len(runs) == 2
+        roots = [run for run in runs if run.job_kind == "agent.task.v1"]
+        children = [run for run in runs if run.job_kind == "general_task_native_tool_v1"]
+        assert len(roots) == len(children) == 1
+        assert roots[0].status == children[0].status == "succeeded"
+        assert roots[0].owner_principal_id == children[0].owner_principal_id == OWNER
+        assert children[0].parent_job_id == roots[0].run_identity and children[0].attempt_count == 1
     assert len(registry.calls) == 1
-    assert registry.calls[0][2]["principal"].job_id == runs[0].run_identity
+    assert registry.calls[0][2]["principal"].job_id == children[0].run_identity
     assert list((workspace / "artifacts/work-board/general-tasks").glob("*.json"))
 
 
@@ -158,12 +161,22 @@ async def test_sixteen_step_dependency_chain_has_independent_verified_artifacts(
     assert result["completed"] == 1, result
     assert len(registry.calls) == 16
     assert all(call[1] == {"text": "literal"} for call in registry.calls)
-    assert len(list((workspace / "artifacts/work-board/general-tasks").glob("*.json"))) == 16
     async with sessions() as db:
-        run = (await db.execute(select(WorkflowRunState))).scalar_one()
+        runs = list((await db.execute(select(WorkflowRunState))).scalars().all())
+        roots = [run for run in runs if run.job_kind == "agent.task.v1"]
+        children = [run for run in runs if run.job_kind == "general_task_native_tool_v1"]
+        assert len(roots) == 1 and len(children) == 16
+        run = roots[0]
+        assert all(child.status == "succeeded" and child.attempt_count == 1
+            and child.parent_job_id == run.run_identity for child in children)
         import json
         checkpoints = json.loads(run.checkpoint_receipts_json)
-        assert len([item for item in checkpoints if item["checkpoint_id"].startswith("general:verified:")]) == 16
+        verified = [item for item in checkpoints if item["checkpoint_id"].startswith("general:verified:")]
+        assert len(verified) == 16
+        paths = {item["payload"]["file_path"] for item in verified}
+        assert len(paths) == 16 and all((workspace / path).is_file() for path in paths)
+        for path in paths:
+            assert json.loads((workspace / path).read_text())["output"] == {"text": "literal"}
 
 
 @pytest.mark.asyncio

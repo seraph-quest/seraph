@@ -107,12 +107,18 @@ def read_native_artifact_reference(reference, *, parent_job_id, creation_digest)
 
 async def read_current_native_envelope(db, run, task, attempt):
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
+    from src.db.models import WorkBoardInputArtifact
     if (task.capability_id != "agent.task.v1" or attempt.task_id != task.task_id
         or attempt.workflow_run_id != run.run_identity or attempt.ended_at is not None
         or attempt.cancel_requested_at is not None or task.owner_principal_id != run.owner_principal_id
         or task.owner_session_id != run.session_id or run.operator_session_id != task.owner_session_id
         or task.goal_id != run.goal_id or task.goal_revision != run.goal_revision):
         raise BoardError("general_task_native_binding_changed", "Original native task binding changed", status_code=409)
+    source = await db.get(WorkBoardInputArtifact, task.input_artifact_id,
+        populate_existing=True)
+    if (source is None or source.typed_input_ref != task.typed_input_ref
+        or source.payload_sha256 != task.typed_input_digest):
+        raise BoardError("general_task_native_binding_changed", "Original native input reference changed", status_code=409)
     resolved = await resolve_input_artifact_for_task(db,
         WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
         artifact_id=task.input_artifact_id, goal_id=task.goal_id, goal_revision=task.goal_revision,
@@ -229,22 +235,36 @@ async def read_current_native_tool_input(db, child):
 
 async def resolve_current_native_step_inputs(db, parent, task, attempt, manifest, envelope, step):
     """Resolve dependencies from canonical successful native readbacks only."""
+    from src.work_board.general_task import resolve_input, validate_schema, validate_data
+    from src.work_board.general_task_native import current_plan
+    plan = current_plan(manifest, envelope)
+    if next((item for item in plan.steps if item.step_id == step.step_id), None) != step:
+        raise BoardError("general_task_native_input_changed", "Current canonical plan step required", status_code=409)
+    outputs = await read_current_native_outputs(db, parent, task, attempt, manifest, envelope,
+        step.depends_on)
+    inputs = resolve_input(step.input, outputs)
+    validate_data(inputs, dependencies=set())
+    descriptors = {item.tool_id: item for item in envelope.descriptors}
+    validate_schema(descriptors[step.tool_id].input_schema, inputs)
+    return inputs
+
+
+async def read_current_native_outputs(db, parent, task, attempt, manifest, envelope, step_ids):
+    """Read retained outputs only through their original successful child receipts."""
     from sqlalchemy import select
     from src.db.models import WorkflowRunState
     from src.workflows.general_task_guard import child_binding
     from src.workflows.job_runtime import _digest
-    from src.work_board.general_task import digest, resolve_input, validate_schema, validate_data
+    from src.work_board.general_task import digest, validate_schema
     from src.work_board.input_artifacts import _safe_file_bytes
     from src.artifacts.registry import artifact_id_for
     from src.workspace import canonical_workspace_root
     from config.settings import settings
     from src.work_board.general_task_native import current_plan
     plan = current_plan(manifest, envelope)
-    if next((item for item in plan.steps if item.step_id == step.step_id), None) != step:
-        raise BoardError("general_task_native_input_changed", "Current canonical plan step required", status_code=409)
     outputs = {}
     descriptors = {item.tool_id: item for item in envelope.descriptors}
-    for dependency in step.depends_on:
+    for dependency in step_ids:
         if dependency not in manifest.step_ids:
             raise BoardError("general_task_dependency_unverified", "Canonical verified predecessor required", status_code=409)
         index = manifest.step_ids.index(dependency)
@@ -296,10 +316,7 @@ async def resolve_current_native_step_inputs(db, parent, task, attempt, manifest
             raise BoardError("general_task_dependency_unverified", "Frozen predecessor step missing", status_code=409)
         validate_schema(predecessor.output_contract, body["output"])
         outputs[dependency] = body["output"]
-    inputs = resolve_input(step.input, outputs)
-    validate_data(inputs, dependencies=set())
-    validate_schema(descriptors[step.tool_id].input_schema, inputs)
-    return inputs
+    return outputs
 
 
 async def verify_general_task_manifest(db, parent, task, attempt, manifest):

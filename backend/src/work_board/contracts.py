@@ -410,6 +410,66 @@ class GeneralTaskNativeChildBindingV1(ClosedTaskModel):
         return self
 
 
+class GeneralTaskToolClosureV1(ClosedTaskModel):
+    schema_version: Literal["general_task.tool_closure.v1"] = "general_task.tool_closure.v1"
+    original_binding_digest: TaskDigest
+    invocation_id: NativeInvocationIdentity
+    child_fence: int = Field(ge=1)
+    descriptor_digest: TaskDigest
+    input_digest: TaskDigest
+    outcome: Literal["returned", "approval_precontact", "unknown"]
+    output_digest: TaskDigest | None = None
+    approval_id: TaskIdentity | None = None
+    no_learning: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_outcome(self):
+        if ((self.outcome == "returned" and (self.output_digest is None or self.approval_id is not None))
+            or (self.outcome == "approval_precontact" and (self.approval_id is None or self.output_digest is not None))
+            or (self.outcome == "unknown" and (self.output_digest is not None or self.approval_id is not None))):
+            raise ValueError("closure outcome requires its exact callback evidence")
+        return self
+
+
+class GeneralTaskApprovalTransitionV1(ClosedTaskModel):
+    schema_version: Literal["general_task.native_approval_transition.v1"] = "general_task.native_approval_transition.v1"
+    original_binding: GeneralTaskNativeChildBindingV1
+    original_binding_digest: TaskDigest
+    original_claim_fence: int = Field(ge=1)
+    positive_attempt_count: Literal[1] = 1
+    waiting_child_fence: int = Field(ge=1)
+    current_child_fence: int = Field(ge=1)
+    approval_id: TaskIdentity
+    approval_fingerprint: TaskDigest
+    approval_context_digest: TaskDigest
+    no_contact_effect_digest: TaskDigest
+    awaiting_receipt: GeneralTaskArtifactRef
+    cleanup_receipt_digest: TaskDigest
+    phase: Literal["approval_wait", "native_wait"]
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    manifest_revision: int = Field(ge=1)
+    task_revision: int = Field(ge=1)
+    board_fence: int = Field(ge=1)
+    job_fence: int = Field(ge=1)
+    approved_receipt_digest: TaskDigest | None = None
+    no_learning: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_transition(self):
+        from src.work_board.general_task import digest
+        if self.original_binding_digest != digest(self.original_binding.model_dump(mode="json")):
+            raise ValueError("original native admission binding changed")
+        if (self.awaiting_receipt.schema_version != "StepReceipt.v1"
+            or self.waiting_child_fence < self.original_claim_fence
+            or (self.phase == "approval_wait" and (self.current_child_fence != self.waiting_child_fence
+                or self.approved_receipt_digest is not None))
+            or (self.phase == "native_wait" and (self.current_child_fence <= self.waiting_child_fence
+                or self.approved_receipt_digest is None))):
+            raise ValueError("exact same-attempt approval phase and fence required")
+        return self
+
+
 class GeneralTaskPlanRevisionV1(ClosedTaskModel):
     schema_version: Literal["GeneralTaskPlanRevision.v1"] = "GeneralTaskPlanRevision.v1"
     parent_job_id: NativeInvocationIdentity
@@ -503,6 +563,14 @@ class GeneralTaskResume(ClosedTaskModel):
     fencing_token: int = Field(ge=1)
     workflow_revision: int = Field(ge=1)
     approval_id: str = Field(min_length=1, max_length=128)
+    child_job_id: NativeInvocationIdentity | None = None
+    expected_manifest_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def native_child_scope(self):
+        if (self.child_job_id is None) != (self.expected_manifest_revision is None):
+            raise ValueError("native child resume requires both child and current manifest revision")
+        return self
 
 
 class WorkBoardAction(str, Enum):
@@ -511,6 +579,8 @@ class WorkBoardAction(str, Enum):
     unblock = "unblock"
     retry = "retry"
     cancel = "cancel"
+    pause = "pause"
+    resume = "resume"
     archive = "archive"
     request_review = "request_review"
     request_changes = "request_changes"

@@ -101,7 +101,7 @@ async def publish_positive_claim(jobs, binding, *, child_owner, child_fence):
         fencing_token=child_fence, expected_parent_revision=parent["revision"])
 
 
-async def run_native_step(service, jobs, binding, *, child_owner, principal):
+async def run_native_step(service, jobs, binding, *, child_owner, principal, approved_resume=False):
     """Execute through the existing registry after positive durable admission."""
     import asyncio
     import json
@@ -111,10 +111,33 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal):
     from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input
     from src.work_board.contracts import GeneralTaskStepReceiptV1
     from src.workflows.job_runtime import _digest
-    await jobs.queue_job(binding.invocation_id)
-    child = await jobs.claim_job(binding.invocation_id, owner=child_owner)
+    from src.workflows.general_task_guard import effective_child_phase
+    if approved_resume:
+        async with jobs._session() as db:
+            row = await jobs._fetch(db, binding.invocation_id)
+            effective = await effective_child_phase(db, row)
+            if not effective.approval_binding_digest or row.status != "running" or row.lease_owner != child_owner:
+                raise BoardError("general_task_resume_binding_changed", "Exact canonical approved child required", status_code=409)
+            from src.workflows.job_runtime import _effect_ledger_or_raise, DurableJobLeaseError
+            resumed_effect = "general:" + binding.step_id + ":" + str(row.fencing_token)
+            if any(item.get("effect_type") == "general_tool_call" and item.get("effect_id") == resumed_effect
+                for item in _effect_ledger_or_raise(row.effect_receipts_json)):
+                raise DurableJobLeaseError("original approved native invocation requires closure reconciliation")
+        child = await jobs.get_job(binding.invocation_id)
+    else:
+        from src.workflows.job_runtime import DurableJobLeaseError
+        pending = await jobs.get_job(binding.invocation_id)
+        if (pending["attempt_count"] != 0 or pending["lease"]["fencing_token"] != 0
+            or pending["effects"] or pending["lease"]["owner"] or pending["lease"]["expires_at"]):
+            raise DurableJobLeaseError("original unclaimed native child required; never replay")
+        if pending["status"] == "accepted":
+            await jobs.queue_job(binding.invocation_id)
+        elif pending["status"] != "queued":
+            raise DurableJobLeaseError("original accepted or queued native child required")
+        child = await jobs.claim_job(binding.invocation_id, owner=child_owner)
     fence = child["lease"]["fencing_token"]
-    await publish_positive_claim(jobs, binding, child_owner=child_owner, child_fence=fence)
+    if not approved_resume:
+        await publish_positive_claim(jobs, binding, child_owner=child_owner, child_fence=fence)
     async with jobs._session() as db:
         row = await jobs._fetch(db, binding.invocation_id)
         private = await read_current_native_tool_input(db, row)
@@ -132,24 +155,49 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal):
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
     if remaining <= 0:
         raise BoardError("general_task_deadline", "Original native cutoff expired", status_code=409)
+    from math import ceil
+    await jobs.heartbeat_job(binding.invocation_id, owner=child_owner, fencing_token=fence,
+        lease_seconds=max(1, ceil(min(descriptor.deadline, remaining)) + 5))
     effect_id = "general:" + binding.step_id + ":" + str(fence)
     await jobs.record_effect(binding.invocation_id, effect_type="general_tool_call",
         effect_id=effect_id, status="intent", target_path="general-step:" + digest([binding.invocation_id, binding.step_id]),
         details={"tool_id": private.tool_id, "step_id": binding.step_id,
             "input_digest": binding.input_digest, "no_learning": True}, owner=child_owner, fencing_token=fence)
-    output = await asyncio.wait_for(service.registry.invoke(descriptor, private.inputs,
+    from src.native_tools.task_adapters import TaskToolApprovalRequired
+    invocation = service.registry.begin_invocation(descriptor, private.inputs,
         principal=replace(principal, job_id=binding.invocation_id), job_id=binding.invocation_id,
-        fencing_token=fence), timeout=min(descriptor.deadline, remaining))
+        fencing_token=fence)
+    service._native_invocations[binding.invocation_id] = invocation
+    try:
+        output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
+    except TaskToolApprovalRequired:
+        metadata = service.registry.approval_context(descriptor, private.inputs, job_id=binding.invocation_id)
+        parent = await jobs.get_job(binding.parent_job_id)
+        waiting = await jobs.wait_general_task_native_approval(binding.invocation_id,
+            owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
+            producer_witness=invocation.witness, tool_name=metadata["tool_name"],
+            approval_context=metadata["approval_context"])
+        service._native_invocations.pop(binding.invocation_id, None)
+        return {"awaiting_approval": True, "approval_id": waiting["transition"]["approval_id"],
+            "child_id": binding.invocation_id}, None, None
     validate_schema(descriptor.output_schema, output)
     validate_schema(step.output_contract, output)
+    document_authority = None
+    if descriptor.tool_id == "document_prepare":
+        from src.work_board.document_preparation import invocation as document_invocation
+        async def document_authority(db, run):
+            await document_invocation(db, replace(principal, job_id=binding.invocation_id),
+                binding.invocation_id, fence)
     artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
-        owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id, output=output)
+        owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id,
+        output=output, authority_check=document_authority)
     await jobs.record_readback(binding.invocation_id, effect_type="general_tool_call", effect_id=effect_id,
         status="succeeded", target_path="general-step:" + digest([binding.invocation_id, binding.step_id]),
         content_sha256=artifact["content_sha256"], readback_id="general-step-readback:" + digest([binding.invocation_id, binding.step_id])[:32],
         verified_at=datetime.now(timezone.utc).isoformat(), details={"step_id": binding.step_id,
             "tool_id": private.tool_id, "verified": True, "output_exists": True,
-            "file_path": artifact["file_path"], "no_learning": True}, owner=child_owner, fencing_token=fence)
+            "file_path": artifact["file_path"], "no_learning": True}, owner=child_owner, fencing_token=fence,
+        **({"readback_authority_check": document_authority} if document_authority is not None else {}))
     current = await jobs.get_job(binding.invocation_id)
     matching = [item for item in current["artifacts"] if item["file_path"] == artifact["file_path"]
         and item["content_sha256"] == artifact["content_sha256"]]
@@ -157,17 +205,24 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal):
         raise BoardError("general_task_artifact_changed", "Canonical child output adoption required", status_code=409)
     reference = GeneralTaskArtifactRef(artifact_id=matching[0]["artifact_id"],
         digest=artifact["content_sha256"], schema_version="GeneralTaskOutput.v1")
+    parent = await jobs.get_job(binding.parent_job_id)
+    cleanup = await jobs.publish_general_task_tool_closure(binding.invocation_id,
+        owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
+        producer_witness=invocation.witness)
     async with jobs._session() as db:
         canonical_child = await jobs._fetch(db, binding.invocation_id)
         effect_digest = _digest(json.loads(canonical_child.effect_receipts_json))
+        effective = await effective_child_phase(db, canonical_child)
     staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
         payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
             invocation_id=binding.invocation_id, input_digest=binding.input_digest, contact_state="settled", status="verified",
             descriptor_digest=binding.descriptor_digest, selected_grant_digest=binding.selected_grant_digest,
             task_id=binding.task_id, attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
             child_attempt_count=current["attempt_count"], child_fence=fence,
-            parent_creation_digest=binding.creation_digest, phase_digest=binding.phase_digest,
-            artifact_refs=[reference], effect_receipt_digest=effect_digest))
+            parent_creation_digest=binding.creation_digest, phase_digest=effective.phase_digest,
+            approval_binding_digest=effective.approval_binding_digest,
+            artifact_refs=[reference], effect_receipt_digest=effect_digest,
+            cleanup_receipt_digest=digest(cleanup["closure"])))
     parent = await jobs.get_job(binding.parent_job_id)
     await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
         child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
@@ -175,6 +230,7 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal):
     await jobs.transition_job(binding.invocation_id, "succeeded", owner=child_owner, fencing_token=fence,
         result={"verified": True, "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True},
         result_summary="Native tool output physically read back")
+    service._native_invocations.pop(binding.invocation_id, None)
     return verified, artifact, reference
 
 
@@ -186,6 +242,224 @@ def current_plan(manifest, envelope):
         artifact_id=manifest.current_plan_artifact_id,
         digest=manifest.revision_artifact_digests[-1], schema_version="GeneralTaskPlanRevision.v1"),
         parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest).plan
+
+
+async def retain_native_failure(service, jobs, binding, *, child_owner):
+    """Retain actual invocation uncertainty without granting closure or replay."""
+    import json
+    from src.work_board.contracts import GeneralTaskStepReceiptV1
+    from src.work_board.general_task import digest
+    from src.workflows.general_task_guard import effective_child_phase
+    from src.workflows.job_runtime import _digest, DurableJobError
+    child = await jobs.get_job(binding.invocation_id)
+    fence = child["lease"]["fencing_token"]
+    if child["status"] != "running" or child["lease"]["owner"] != child_owner:
+        return
+    invocation = service._native_invocations.get(binding.invocation_id)
+    try:
+        cleanup_digest = None
+        if invocation is not None and invocation.closed:
+            parent = await jobs.get_job(binding.parent_job_id)
+            closure = await jobs.publish_general_task_tool_closure(binding.invocation_id,
+                owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
+                producer_witness=invocation.witness)
+            cleanup_digest = digest(closure["closure"])
+        await jobs.record_effect(binding.invocation_id, effect_type="general_tool_call",
+            effect_id="general:" + binding.step_id + ":" + str(fence), status="unknown",
+            target_path="general-step:" + digest([binding.invocation_id, binding.step_id]),
+            details={"step_id": binding.step_id, "input_digest": binding.input_digest,
+                "no_learning": True, "reconciliation_required": True}, owner=child_owner, fencing_token=fence)
+        async with jobs._session() as db:
+            row = await jobs._fetch(db, binding.invocation_id)
+            effective = await effective_child_phase(db, row)
+            effect_digest = _digest(json.loads(row.effect_receipts_json))
+        staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
+            payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
+                invocation_id=binding.invocation_id, input_digest=binding.input_digest,
+                contact_state="unknown", status="unknown", descriptor_digest=binding.descriptor_digest,
+                selected_grant_digest=binding.selected_grant_digest, task_id=binding.task_id,
+                attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
+                child_attempt_count=1, child_fence=fence, parent_creation_digest=binding.creation_digest,
+                phase_digest=effective.phase_digest, approval_binding_digest=effective.approval_binding_digest,
+                effect_receipt_digest=effect_digest, cleanup_receipt_digest=cleanup_digest))
+        parent = await jobs.get_job(binding.parent_job_id)
+        await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
+            child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
+            expected_parent_revision=parent["revision"])
+        await jobs.transition_job(binding.invocation_id, "unknown_external_effect", owner=child_owner,
+            fencing_token=fence, reason="general_task_native_unknown")
+        if cleanup_digest is not None:
+            service._native_invocations.pop(binding.invocation_id, None)
+    except (BoardError, DurableJobError):
+        # Canonical drift invalidates the writer. Keep its original intent and
+        # phase inspectable; failure never supplies substitute authority.
+        return
+
+
+async def _execute_interpreter_child(service, jobs, binding, *, child_owner, principal, approved_resume=False):
+    try:
+        return await run_native_step(service, jobs, binding, child_owner=child_owner,
+            principal=principal, approved_resume=approved_resume)
+    except Exception:
+        await retain_native_failure(service, jobs, binding, child_owner=child_owner)
+        return {"verified": False, "unknown_effect": True, "reason": "general_task_native_unknown",
+            "no_learning": True, "native_execution": True}, None, None
+
+
+async def continue_native_wait(service, jobs, parent_id, *, principal):
+    """Execute only the original zero-attempt child admitted before a crash."""
+    if not service.started:
+        raise BoardError("general_task_inactive", "Task service is inactive", status_code=503)
+    from src.db.models import WorkflowRunState
+    from src.workflows.general_task_guard import (_current, _assert_joint_manifest,
+        child_binding, assert_general_task_child_phase_current)
+    from src.workflows.job_runtime import DurableJobLeaseError
+    async with jobs._session() as db:
+        parent, task, attempt, manifest, _ = await _current(jobs, db, parent_id)
+        _assert_joint_manifest(parent, task, attempt, manifest)
+        rows = list((await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.parent_job_id == parent_id))).scalars().all())
+        pending = [row for row in rows if row.status in {"accepted", "queued"}]
+        if (parent.status != "paused" or manifest.phase != "native_wait"
+            or {row.run_identity for row in rows} != set(manifest.admitted_invocation_ids)
+            or len(pending) != 1 or not principal or not principal.authenticated or principal.revoked
+            or principal.principal_id != task.owner_principal_id or principal.session_id != task.owner_session_id
+            or principal.operator_session_id != task.owner_session_id):
+            raise DurableJobLeaseError("exact original unclaimed native wait required")
+        child = pending[0]
+        if (child.attempt_count != 0 or child.fencing_token != 0 or child.lease_owner
+            or child.lease_expires_at or child.effect_receipts_json != "[]"):
+            raise DurableJobLeaseError("original native child has prior claim or contact; never replay")
+        await assert_general_task_child_phase_current(db, child)
+        binding = child_binding(child)
+    return await _execute_interpreter_child(service, jobs, binding,
+        child_owner="general-task-native:" + binding.invocation_id, principal=principal)
+
+
+async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal, resume_child=None):
+    """Advance the original accepted Plan through serial, durable native children."""
+    from datetime import datetime, timezone
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.general_task import digest, validate_schema, write_step_artifact
+    from src.work_board.general_task_runtime_artifacts import (
+        read_current_native_outputs, resolve_current_native_step_inputs,
+    )
+    async with jobs._session() as db:
+        original_attempt = await db.scalar(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.workflow_run_id == job_id))
+        original_task = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == original_attempt.task_id)) if original_attempt else None
+        if (original_task is None or not principal or not principal.authenticated or principal.revoked
+            or principal.principal_id != original_task.owner_principal_id
+            or principal.session_id != original_task.owner_session_id
+            or principal.operator_session_id != original_task.owner_session_id):
+            raise BoardError("general_task_owner_changed", "Original authenticated task operator required", status_code=403)
+    if resume_child is not None:
+        binding = resume_child["binding"]
+        if binding.parent_job_id != job_id:
+            raise BoardError("general_task_resume_binding_changed", "Original native parent required", status_code=409)
+        output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
+            child_owner=resume_child["runtime_owner"], principal=principal, approved_resume=True)
+        if _artifact is None:
+            return {**output, "verified": False, "no_learning": True, "native_execution": True}
+        async with jobs._session() as db:
+            parent = await jobs._fetch(db, job_id)
+            manifest = read_manifest(parent)
+        resumed = await jobs.resume_general_task_native_parent(job_id, owner=owner,
+            expected_revision=parent.revision, expected_manifest_revision=manifest.manifest_revision)
+        owner, fence = resumed["job"]["lease"]["owner"], resumed["job"]["lease"]["fencing_token"]
+    else:
+        async with jobs._session() as db:
+            parent = await jobs._fetch(db, job_id)
+            existing = read_manifest(parent)
+        if existing is not None and parent.status == "paused" and existing.phase == "native_wait":
+            # A crash after successful child adoption may precede assembly.
+            # The fixed writer requires each original callback/readback; an
+            # admitted or uncertain child cannot be replayed by this branch.
+            from src.db.models import WorkflowRunState
+            async with jobs._session() as db:
+                pending = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.parent_job_id == job_id, WorkflowRunState.status.in_(("accepted", "queued"))))
+            if pending is not None:
+                output, _artifact, _reference = await continue_native_wait(service, jobs, job_id, principal=principal)
+                if _artifact is None:
+                    return {**output, "verified": False, "no_learning": True, "native_execution": True}
+                async with jobs._session() as db:
+                    parent = await jobs._fetch(db, job_id)
+                    existing = read_manifest(parent)
+            resumed = await jobs.resume_general_task_native_parent(job_id, owner=owner,
+                expected_revision=parent.revision, expected_manifest_revision=existing.manifest_revision)
+            owner, fence = resumed["job"]["lease"]["owner"], resumed["job"]["lease"]["fencing_token"]
+    await initialize_interpreter(jobs, job_id, owner=owner, fence=fence)
+    while True:
+        parent, task, attempt, envelope, manifest = await current_interpreter(jobs, job_id,
+            owner=owner, fence=fence)
+        async with jobs._session() as db:
+            await service.recheck_authority(db, WorkBoardOwner(principal_id=principal.principal_id,
+                session_id=principal.operator_session_id), envelope)
+        plan = current_plan(manifest, envelope)
+        async with jobs._session() as db:
+            outputs = await read_current_native_outputs(db, parent, task, attempt, manifest,
+                envelope, manifest.step_ids)
+        remaining = [step for step in plan.steps if step.step_id not in outputs]
+        if not remaining:
+            break
+        ready = next((step for step in remaining if set(step.depends_on) <= outputs.keys()), None)
+        if ready is None:
+            raise BoardError("general_task_dependency_unverified", "Ready verified dependencies required", status_code=409)
+        descriptor = next(item for item in envelope.descriptors if item.tool_id == ready.tool_id)
+        async with jobs._session() as db:
+            inputs = await resolve_current_native_step_inputs(db, parent, task, attempt,
+                manifest, envelope, ready)
+        binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
+            step=ready, descriptor=descriptor, inputs=inputs)
+        output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
+            child_owner="general-task-native:" + binding.invocation_id, principal=principal)
+        if _artifact is None:
+            return {**output, "verified": False, "no_learning": True, "native_execution": True}
+        async with jobs._session() as db:
+            parent = await jobs._fetch(db, job_id)
+            manifest = read_manifest(parent)
+        resumed = await jobs.resume_general_task_native_parent(job_id, owner=owner,
+            expected_revision=parent.revision, expected_manifest_revision=manifest.manifest_revision)
+        owner, fence = resumed["job"]["lease"]["owner"], resumed["job"]["lease"]["fencing_token"]
+    # Assembly consumes original successful child readbacks; no tool replay.
+    active_envelope = envelope.model_copy(update={"plan": plan})
+    projection = await jobs.get_job(job_id)
+    recovered, artifacts = service.recovered_outputs(projection, active_envelope)
+    for step in plan.steps:
+        if step.step_id in recovered:
+            if recovered[step.step_id] != outputs[step.step_id]:
+                raise BoardError("general_task_artifact_changed", "Original native output changed", status_code=409)
+            continue
+        document_authority = None
+        if step.tool_id == "document_prepare":
+            from src.work_board.document_preparation import invocation
+            async def document_authority(db, run):
+                from dataclasses import replace
+                await invocation(db, replace(principal, job_id=job_id), job_id, fence)
+        artifact, _verified = await write_step_artifact(jobs, job_id=job_id, owner=owner, fence=fence,
+            plan_digest=digest(active_envelope.model_dump(mode="json")), step_id=step.step_id,
+            output=outputs[step.step_id], authority_check=document_authority)
+        await jobs.record_readback(job_id, effect_type="general_tool_call", status="succeeded",
+            target_path=artifact["file_path"], content_sha256=artifact["content_sha256"],
+            readback_id="general-native-assembly:" + digest([job_id, step.step_id])[:32],
+            verified_at=datetime.now(timezone.utc).isoformat(),
+            details={"step_id": step.step_id, "verified": True, "output_exists": True,
+                "file_path": artifact["file_path"], "no_learning": True}, owner=owner, fencing_token=fence,
+            **({"readback_authority_check": document_authority} if document_authority is not None else {}))
+        await jobs.record_checkpoint(job_id, checkpoint_id="general:verified:" + step.step_id,
+            state=artifact, checkpoint_payload=artifact, owner=owner, fencing_token=fence)
+        artifacts[step.step_id] = artifact
+    final = outputs[plan.steps[-1].step_id]
+    validate_schema(envelope.task_input.requested_output, final)
+    artifact = artifacts[plan.steps[-1].step_id]
+    return {"verified": True, "native_execution": True, "output_digest": digest(final),
+        "step_count": len(outputs), "learning": "no_learning", "no_learning": True,
+        "content_sha256": artifact["content_sha256"],
+        "readback_id": "general-readback:" + digest([job_id, artifact])[:32],
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "result_refs": [artifact], "artifact_refs": [artifact]}
 
 
 async def publish_plan_revision(service, jobs, parent_id, *, owner, fence, request):

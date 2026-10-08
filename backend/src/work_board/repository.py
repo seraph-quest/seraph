@@ -4106,7 +4106,7 @@ class WorkBoardRepository:
         *,
         limit: int = 20,
     ) -> list[tuple[WorkBoardTask, WorkBoardAttempt]]:
-        """Return running board attempts whose durable root is already linked."""
+        """Return linked open attempts, including fixed native GeneralTask waits."""
         newer_attempt = aliased(WorkBoardAttempt)
         result = await db.execute(
             select(WorkBoardTask, WorkBoardAttempt)
@@ -4126,6 +4126,14 @@ class WorkBoardRepository:
                             "awaiting_publication_approval",
                         )
                     ) & WorkBoardAttempt.ended_at.is_(None),
+                    (WorkBoardTask.status == WorkBoardStatus.blocked)
+                    & (WorkBoardTask.capability_id == "agent.task.v1")
+                    & WorkBoardTask.block_reason.in_((
+                        "general_task_native_wait",
+                        "general_task_operator_paused",
+                        "general_task_approval_required",
+                    ))
+                    & WorkBoardAttempt.ended_at.is_(None),
                     (WorkBoardTask.status == WorkBoardStatus.blocked)
                     & (WorkBoardTask.block_kind == "unknown_effect")
                     & (WorkBoardTask.capability_id == "work.github-followthrough.v1")

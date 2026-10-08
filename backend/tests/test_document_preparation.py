@@ -36,8 +36,9 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
     async with sessions() as db:
         db.add(goal)
     registry = ToolRegistry(); registry.start()
-    actual_invoke = registry.invoke
+    actual_invoke = registry._invoke_document
     async def diagnostic_invoke(*args, **kwargs):
+        job_id = args[3]
         try:
             result = await actual_invoke(*args, **kwargs)
             if scenario.startswith("late_"):
@@ -60,17 +61,18 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
                         from src.db.models import OperatorSession
                         current = await db.get(OperatorSession, owner.session_id); current.revoked_at = datetime.now(timezone.utc)
                     elif scenario == "late_cancel":
-                        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == kwargs["job_id"]))
+                        child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+                        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == child.parent_job_id))
                         attempt.cancel_requested_at = datetime.now(timezone.utc)
                     else:
-                        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == kwargs["job_id"]))
+                        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
                         if scenario == "late_fence": run.fencing_token += 1
                         else: run.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
             return result
         except Exception as exc:
             print("NATIVE ADAPTER ERROR", type(exc).__name__, getattr(exc, "code", str(exc)))
             raise
-    monkeypatch.setattr(registry, "invoke", diagnostic_invoke)
+    monkeypatch.setattr(registry, "_invoke_document", diagnostic_invoke)
     service = GeneralTaskService(registry); service.start()
     dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
     monkeypatch.setattr(work_board, "dispatcher", dispatcher)
@@ -164,8 +166,13 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
             assert len(json.dumps(view).encode()) < 16384
             async with sessions() as db:
                 runs = list((await db.scalars(select(WorkflowRunState))).all())
-            assert len(runs) == 1 and runs[0].job_kind == "agent.task.v1" and runs[0].status == "succeeded"
-            projection = await jobs.get_job(runs[0].run_identity)
+            roots = [run for run in runs if run.job_kind == "agent.task.v1"]
+            children = [run for run in runs if run.job_kind == "general_task_native_tool_v1"]
+            assert len(runs) == 2 and len(roots) == len(children) == 1
+            assert roots[0].status == children[0].status == "succeeded"
+            assert children[0].parent_job_id == roots[0].run_identity and children[0].attempt_count == 1
+            root = roots[0]
+            projection = await jobs.get_job(root.run_identity)
             encoded = json.dumps(projection)
             assert leaf["text"] not in encoded
             artifact = next(item["payload"] for item in projection["checkpoints"] if item["checkpoint_id"] == "general:verified:prepare")
@@ -178,12 +185,13 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
                 audit_events = list((await db.scalars(select(AuditEvent).where(AuditEvent.tool_name == "document_prepare"))).all())
             input_file = workspace / persisted_task.typed_input_ref.removeprefix("workspace-json:")
             generic_values = [input_file.read_text(), persisted_task.title, persisted_task.body,
-                *(event.metadata_json for event in events), runs[0].arguments_json,
-                runs[0].checkpoint_receipts_json, runs[0].artifact_receipts_json, runs[0].effect_receipts_json,
+                *(event.metadata_json for event in events), *(run.arguments_json for run in runs),
+                *(run.checkpoint_receipts_json for run in runs), *(run.artifact_receipts_json for run in runs),
+                *(run.effect_receipts_json for run in runs),
                 *(event.details_json for event in audit_events)]
             assert all(leaf["text"] not in value for value in generic_values)
             assert {event.event_type for event in audit_events} == {"tool_call", "tool_result"}
-            print(json.dumps({"format": fmt, "task_id": task_id, "job_id": runs[0].run_identity,
+            print(json.dumps({"format": fmt, "task_id": task_id, "job_id": root.run_identity,
                 "artifact_sha256": artifact["content_sha256"], "provider_contacts": 0, "no_learning": True}))
             accounting = await jobs.inference_accounting_snapshot()
             assert accounting["operation_count"] == 0

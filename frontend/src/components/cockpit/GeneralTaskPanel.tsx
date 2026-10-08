@@ -125,12 +125,16 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
         expected_revision: read.task_revision, expected_plan_revision: read.plan!.revision,
         workflow_run_id: pause.workflow_run_id, attempt_id: pause.attempt_id, fencing_token: pause.fencing_token,
         workflow_revision: pause.workflow_revision, approval_id: pause.approval_id,
+        ...(pause.child_job_id ? { child_job_id: pause.child_job_id,
+          expected_manifest_revision: pause.expected_manifest_revision } : {}),
       });
       if (version !== generation.current) return;
       const receipt = result && typeof result === "object" && "task" in result ? result.task as WorkBoardTask : null;
       if (!receipt || receipt.task_id !== task.task_id || receipt.owner_principal_id !== ownerPrincipalId
         || receipt.owner_session_id !== ownerSessionId || receipt.latest_attempt?.attempt_id !== pause.attempt_id
-        || receipt.latest_attempt.workflow_run_id !== pause.workflow_run_id || receipt.latest_attempt.fencing_token !== pause.fencing_token + 1) {
+        || receipt.latest_attempt.workflow_run_id !== pause.workflow_run_id
+        || (pause.child_job_id ? receipt.latest_attempt.fencing_token <= pause.fencing_token
+          : receipt.latest_attempt.fencing_token !== pause.fencing_token + 1)) {
         throw Error("Continuation receipt is unconfirmed. Refresh Work and the current plan before any further action.");
       }
       await onChanged?.();
@@ -164,6 +168,28 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } }
     finally { if (version === generation.current) setBusy(false); }
   }
+  async function control(action: "pause" | "resume" | "cancel") {
+    if (!task || !read?.native_execution || !owned || busy || read.task_revision !== task.task_revision) return;
+    const version = generation.current, originalAttempt = task.latest_attempt;
+    setBusy(true); setRead(null); setError(null);
+    try {
+      const result = await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/actions`, {
+        action, expected_revision: read.task_revision,
+      });
+      if (version !== generation.current) return;
+      const receipt = result && typeof result === "object" && "task" in result ? result.task as WorkBoardTask : null;
+      if (!receipt || receipt.task_id !== task.task_id || receipt.owner_principal_id !== ownerPrincipalId
+        || receipt.owner_session_id !== ownerSessionId || receipt.task_revision <= task.task_revision
+        || receipt.latest_attempt?.attempt_id !== originalAttempt?.attempt_id
+        || receipt.latest_attempt?.workflow_run_id !== originalAttempt?.workflow_run_id) {
+        throw Error("Task control receipt is unconfirmed.");
+      }
+      await onChanged?.();
+    } catch (e) { if (version === generation.current) {
+      setError(`${(e as Error).message} Refresh Work and inspect the original run before another action; controls are never automatically replayed.`);
+      await onChanged?.();
+    } } finally { if (version === generation.current) setBusy(false); }
+  }
   const documentBinding = read?.task_input.document_source;
   const documentPreparation = Boolean(documentBinding && read?.plan?.steps.length === 1 && read.plan.steps[0]?.tool_id === "document_prepare");
   return <section className="rounded border border-white/15 bg-slate-950 p-4 text-slate-100" aria-label={task ? (documentPreparation ? "Local document preparation plan" : "Ordinary task plan") : "Describe a task"}>
@@ -195,6 +221,16 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
           <p>Verified partial outputs: {read.native_execution.partial_output_refs.length}</p>
           {read.native_execution.partial_output_refs.map(ref => <p key={ref.artifact_id} className="break-all text-xs">{ref.artifact_id}</p>)}
           <p className="text-xs">Partial outputs remain separate from final task success. Unknown contact requires reconciliation before continuing.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" disabled={busy || !owned || !["native_ready", "assembly", "native_wait"].includes(read.native_execution.phase)
+              || read.native_execution.steps.some(step => !["verified", "cancelled"].includes(step.status))}
+              onClick={() => void control("pause")}>Pause remaining task work</button>
+            <button type="button" disabled={busy || !owned || read.native_execution.phase !== "operator_paused"}
+              onClick={() => void control("resume")}>Resume paused task work</button>
+            <button type="button" disabled={busy || !owned || !task.latest_attempt || Boolean(task.latest_attempt.ended_at)
+              || !["running", "blocked"].includes(task.status)} onClick={() => void control("cancel")}>Cancel native task work</button>
+          </div>
+          <p className="text-xs">Safe pause requires closed tool work. Cancellation fences future work and late output; an uncertain contacted tool remains visible until reconciliation.</p>
         </section>}
         {read.approval_pause && <section aria-label="Paused task approval" className="mt-3 rounded border border-white/10 p-2">
           <p role="status">Approval {read.approval_pause.approval_status} · {read.approval_pause.step_id} · {read.approval_pause.tool_id}{read.approval_pause.reason ? ` · ${read.approval_pause.reason}` : ""}</p>

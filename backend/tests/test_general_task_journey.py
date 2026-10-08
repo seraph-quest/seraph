@@ -23,6 +23,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
     from src.db.models import WorkBoardTask, WorkflowRunState
     from src.native_tools.registry import ToolRegistry
     from src.work_board.general_task import GeneralTaskService
+    from src.work_board.contracts import GENERAL_TASK_NATIVE_CHILD_KIND
     from src.work_board.general_task_planner import GeneralTaskPlanner
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
@@ -120,7 +121,10 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
             assert len(rows) == 1
             runs = list((await db.execute(select(WorkflowRunState))).scalars())
             execution = next(item for item in runs if item.job_kind == "agent.task.v1")
-            assert len(runs) == 2 and execution.status == "succeeded"
+            children = [item for item in runs if item.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND]
+            assert len(runs) == 3 and execution.status == "succeeded"
+            assert len(children) == 1 and children[0].status == "succeeded"
+            assert children[0].parent_job_id == execution.run_identity and children[0].attempt_count == 1
             assert execution.owner_principal_id == owner.principal_id
             execution_id = execution.run_identity
         projection = await jobs.get_job(execution_id)
@@ -133,6 +137,12 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
         assert artifact_data["output"] == {"content": source, "sha256": source_hash}
         assert artifact.stat().st_mode & 0o077 == 0
         assert (workspace / "notes.txt").read_text() == source
+        final_plan = await client.get(f"/api/work-board/tasks/{task_id}/plan")
+        assert final_plan.status_code == 200, final_plan.text
+        native = final_plan.json()["native_execution"]
+        assert native["steps"][0]["status"] == "verified" and native["steps"][0]["contact_state"] == "settled"
+        assert native["steps"][0]["invocation_id"] == children[0].run_identity
+        assert len(native["partial_output_refs"]) == 1 and native["no_learning"] is True
 
         # Restart current Python owners while retaining the canonical database,
         # accounting witness, exact descriptors and original task identity.
@@ -233,11 +243,18 @@ async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_le
             assert (await db.execute(select(WorkflowStepState).where(WorkflowStepState.run_identity == run.run_identity))).scalars().all() == []
             assert (await db.execute(select(MemoryProposal))).scalars().all() == []
         projection = await jobs.get_job(run.run_identity)
-        assert projection["effects"] and all(item["details"]["no_learning"] is True for item in projection["effects"])
-        assert observed and all(item["result"] == "no_change" for item in observed)
+        assert projection["status"] == "paused" and projection["failure_reason"] == "general_task_native_wait"
+        async with sessions() as db:
+            children = list((await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.parent_job_id == run.run_identity))).scalars())
+        assert len(children) == 1 and children[0].status == "unknown_external_effect"
+        child = await jobs.get_job(children[0].run_identity)
+        assert child["effects"] and all(item["details"]["no_learning"] is True for item in child["effects"])
+        # The native original attempt remains open for exact reconciliation;
+        # a held child is not a terminal automatic-learning source.
+        assert observed == []
         source = await task_lessons.eligible_lesson_source(operator, task.task_id)
         assert source["eligible"] is False
-        assert source["automatic_outcome"]["result"] == "no_change"
     finally:
         service.stop()
         registry.stop()

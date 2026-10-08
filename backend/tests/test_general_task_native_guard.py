@@ -342,10 +342,14 @@ async def test_claimed_child_cancel_without_original_callback_receipt_keeps_nati
     cancelled = await jobs.cancel_job(binding.invocation_id, owner='native-worker', fencing_token=fence)
     assert cancelled['attempt_count'] == 1
     assert cancelled['status'] == ('unknown_external_effect' if contact_intent else 'cancelled')
-    with pytest.raises(DurableJobLeaseError, match='callback closure proof|close under native_wait'):
+    with pytest.raises(DurableJobLeaseError, match='protected transition evidence|close under native_wait'):
         await jobs.pause_general_task_native_parent(binding.parent_job_id,
             operator_owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
             expected_task_revision=manifest.task_revision, expected_revision=original['revision'],
+            expected_manifest_revision=manifest.manifest_revision)
+    with pytest.raises(DurableJobLeaseError):
+        await jobs.resume_general_task_native_parent(binding.parent_job_id,
+            owner='native-worker', expected_revision=original['revision'],
             expected_manifest_revision=manifest.manifest_revision)
     parent = await jobs.get_job(binding.parent_job_id)
     current = read_manifest(type('Row', (), {'checkpoint_receipts_json': json.dumps(parent['checkpoints'])})())
@@ -356,15 +360,210 @@ async def test_claimed_child_cancel_without_original_callback_receipt_keeps_nati
 
 
 @pytest.mark.asyncio
+async def test_generic_checkpoint_and_caller_closure_cannot_forge_native_transition(task_runtime):
+    from src.work_board.general_task_native import publish_positive_claim
+    from src.work_board.contracts import GeneralTaskToolClosureV1
+    sessions, jobs, binding, _ = await admitted_child(task_runtime)
+    await jobs.queue_job(binding.invocation_id)
+    await jobs.claim_job(binding.invocation_id, owner='native-worker')
+    await publish_positive_claim(jobs, binding, child_owner='native-worker', child_fence=1)
+    parent = await jobs.get_job(binding.parent_job_id)
+    child = await jobs.get_job(binding.invocation_id)
+    for identity in ('general:approval:forged', 'general:cleanup:forged'):
+        with pytest.raises(DurableJobTransitionError, match='fixed writer'):
+            await jobs.record_checkpoint(binding.invocation_id, checkpoint_id=identity,
+                state={}, checkpoint_payload={}, owner='native-worker', fencing_token=1)
+    forged = GeneralTaskToolClosureV1(original_binding_digest=digest(binding.model_dump(mode='json')),
+        invocation_id=binding.invocation_id, child_fence=1, descriptor_digest=binding.descriptor_digest,
+        input_digest=binding.input_digest, outcome='returned', output_digest='a' * 64)
+    with pytest.raises(PermissionError, match='original native callback closure witness'):
+        await jobs.publish_general_task_tool_closure(binding.invocation_id, owner='native-worker',
+            fencing_token=1, expected_parent_revision=parent['revision'], producer_witness=forged)
+    assert (await jobs.get_job(binding.parent_job_id))['checkpoints'] == parent['checkpoints']
+    assert (await jobs.get_job(binding.invocation_id))['revision'] == child['revision']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('drift', ['capability', 'source_ref', 'input_owner'])
+async def test_wrong_native_capability_denies_before_private_input_read(task_runtime, monkeypatch, drift):
+    from src.work_board.general_task_native import publish_positive_claim
+    from src.work_board import general_task_runtime_artifacts as artifacts
+    sessions, jobs, binding, _ = await admitted_child(task_runtime)
+    await jobs.queue_job(binding.invocation_id)
+    await jobs.claim_job(binding.invocation_id, owner='native-worker')
+    await publish_positive_claim(jobs, binding, child_owner='native-worker', child_fence=1)
+    async with sessions() as db:
+        if drift == 'capability':
+            row = await jobs._fetch(db, binding.invocation_id)
+            authority = json.loads(row.declared_authority_json)
+            authority['capability_id'] = 'document.read.v1'
+            row.declared_authority_json = json.dumps(authority, sort_keys=True)
+            row.authority_digest = _digest(authority)
+        else:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            if drift == 'source_ref':
+                row = task
+                row.typed_input_ref = 'workspace-json:foreign-source.json'
+            else:
+                from src.db.models import WorkBoardInputArtifact
+                row = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+                row.owner_principal_id = 'foreign-owner'
+        db.add(row)
+    rejection = 'native child binding' if drift == 'capability' else 'original native phase'
+    reads = []
+    def forbidden_private_read(*args, **kwargs):
+        reads.append('private-read')
+        raise AssertionError('WRONG_CAP_PRIVATE_INPUT_CANARY')
+    monkeypatch.setattr(artifacts, 'read_native_artifact_reference', forbidden_private_read)
+    async with sessions() as db:
+        row = await jobs._fetch(db, binding.invocation_id)
+        with pytest.raises(DurableJobLeaseError, match=rejection):
+            await artifacts.read_current_native_tool_input(db, row)
+        with pytest.raises(DurableJobLeaseError, match=rejection):
+            await assert_general_task_child_current(db, row)
+    assert reads == []
+    before = await jobs.get_job(binding.invocation_id)
+    with pytest.raises(DurableJobLeaseError, match=rejection):
+        await jobs.heartbeat_job(binding.invocation_id, owner='native-worker', fencing_token=1)
+    with pytest.raises(DurableJobLeaseError, match=rejection):
+        await jobs.record_effect(binding.invocation_id, effect_type='tool-contact', status='intent',
+            owner='native-worker', fencing_token=1)
+    with pytest.raises(DurableJobLeaseError, match=rejection):
+        await jobs.record_artifact(binding.invocation_id, file_path='artifacts/wrong-capability.txt',
+            content='WRONG_CAP_PRIVATE_ARTIFACT_CANARY', owner='native-worker', fencing_token=1)
+    with pytest.raises(DurableJobLeaseError, match=rejection):
+        await jobs.record_checkpoint(binding.invocation_id, checkpoint_id='wrong-capability-receipt',
+            state={'verified': True}, owner='native-worker', fencing_token=1)
+    with pytest.raises(DurableJobLeaseError, match=rejection):
+        await jobs.transition_job(binding.invocation_id, 'succeeded',
+            owner='native-worker', fencing_token=1, result={'verified': True})
+    after = await jobs.get_job(binding.invocation_id)
+    assert after['revision'] == before['revision']
+    assert after['effects'] == before['effects']
+    assert after['artifacts'] == before['artifacts']
+    assert after['checkpoints'] == before['checkpoints']
+    assert after['status'] == 'running'
+    assert not (task_runtime[1] / 'artifacts/wrong-capability.txt').exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('drift', ['missing', 'malformed', 'foreign', 'stale_fence', 'expired_approval'])
+async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, drift, request):
+    from src.auth.service import authenticate_session
+    from src.approval.repository import ApprovalRepository
+    from src.db.models import ApprovalRequest
+    from src.native_tools.registry import ToolRegistry
+    from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec
+    from src.work_board.general_task_native import admit_native_step, run_native_step
+    from src.workflows.general_task_guard import approval_checkpoint_id
+    from tests.test_general_task_adapters import mcp_registry
+    registry = ToolRegistry()
+    registry.start()
+    request.addfinalizer(registry.stop)
+    registry, _manager, tool, _, _ = mcp_registry.__wrapped__(task_runtime[1], registry)
+    descriptors = registry.descriptors()
+    descriptor = next(item for item in descriptors if item.tool_id == 'mcp:local:repo_read')
+    creation = GeneralTaskCreate(goal_revision=1, idempotency_key='resumed-drift', expected_plan_revision=1,
+        input=GeneralTaskInput(goal_ref='goal-1', intent='Read one explicitly approved owned MCP source',
+            requested_output=descriptor.output_schema,
+            tool_set_digest=digest([item.model_dump(mode='json') for item in descriptors])),
+        plan=PlanSpec(revision=1, steps=[{'step_id': 'mcp-read', 'tool_id': descriptor.tool_id,
+            'input': {'query': 'literal owned repository'}, 'output_contract': descriptor.output_schema}]))
+    sessions, dispatcher, service, envelope, original = await running_task(task_runtime,
+        creation_request=creation, registry_override=registry)
+    jobs = dispatcher.jobs
+    binding, _ = await admit_native_step(jobs, original['job']['job_id'],
+        owner=original['job']['lease']['owner'], fence=original['job']['lease']['fencing_token'],
+        step=envelope.plan.steps[0], descriptor=descriptor, inputs=envelope.plan.steps[0].input)
+    operator = await authenticate_session(binding.original_root_id, touch=False)
+    waiting, _, _ = await run_native_step(service, jobs, binding,
+        child_owner='native-worker', principal=operator.principal)
+    assert waiting['awaiting_approval'] and tool.calls == 0
+    approved = await ApprovalRepository().resolve(waiting['approval_id'], 'approved')
+    assert approved is not None and approved.status == 'approved'
+    async with sessions() as db:
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        manifest = read_manifest(parent)
+        parent_revision = parent.revision
+    resumed = await jobs.resume_general_task_native_approval(binding.invocation_id,
+        operator_owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
+        expected_task_revision=manifest.task_revision, expected_parent_revision=parent_revision,
+        expected_manifest_revision=manifest.manifest_revision, approval_id=waiting['approval_id'])
+    owner, fence = resumed['runtime_owner'], resumed['child']['lease']['fencing_token']
+    async with sessions() as db:
+        await assert_general_task_child_current(db, await jobs._fetch(db, binding.invocation_id))
+        if drift == 'expired_approval':
+            approval = await db.get(ApprovalRequest, waiting['approval_id'])
+            approval.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.add(approval)
+        else:
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            history = json.loads(parent.checkpoint_receipts_json)
+            transition = next(item for item in history if item['checkpoint_id'] == approval_checkpoint_id(binding))
+            if drift == 'missing':
+                history.remove(transition)
+            elif drift == 'malformed':
+                transition['payload']['unrecognized_authority'] = True
+            elif drift == 'foreign':
+                transition['payload']['original_binding']['invocation_id'] = 'foreign-child'
+            elif drift == 'stale_fence':
+                transition['payload']['current_child_fence'] = fence - 1
+            transition['state_digest'] = _digest(transition['payload'])
+            parent.checkpoint_receipts_json = json.dumps(history)
+            db.add(parent)
+    before = await jobs.get_job(binding.invocation_id)
+    lease = dict(owner=owner, fencing_token=fence)
+    async with sessions() as db:
+        with pytest.raises(DurableJobLeaseError):
+            await assert_general_task_child_current(db, await jobs._fetch(db, binding.invocation_id))
+    for operation in (
+        lambda: jobs.heartbeat_job(binding.invocation_id, **lease),
+        lambda: jobs.record_effect(binding.invocation_id, effect_type='tool-contact', status='intent', **lease),
+        lambda: jobs.record_readback(binding.invocation_id, target_path='artifacts/drift.txt', status='succeeded', **lease),
+        lambda: jobs.record_artifact(binding.invocation_id, file_path='artifacts/drift.txt', content='PRIVATE_CANARY', **lease),
+        lambda: jobs.record_checkpoint(binding.invocation_id, checkpoint_id='drift-receipt', state={}, **lease),
+        lambda: jobs.transition_job(binding.invocation_id, 'succeeded', result={'verified': True}, **lease),
+    ):
+        with pytest.raises((DurableJobLeaseError, DurableJobTransitionError)):
+            await operation()
+    after = await jobs.get_job(binding.invocation_id)
+    assert after['revision'] == before['revision']
+    assert after['effects'] == before['effects'] and after['artifacts'] == before['artifacts']
+    assert after['checkpoints'] == before['checkpoints'] and after['status'] == 'running'
+    assert tool.calls == 0 and not (task_runtime[1] / 'artifacts/drift.txt').exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('tamper_output', [False, True])
-async def test_verified_terminal_receipt_never_reopens_contact_and_requires_physical_output(task_runtime, monkeypatch, tamper_output):
+async def test_verified_terminal_receipt_never_reopens_contact_and_requires_physical_output(task_runtime, monkeypatch, tamper_output, request):
     from dataclasses import replace
     from src.auth.service import authenticate_session
     from src.work_board.general_task_native import admit_native_step, run_native_step
     from src.work_board.repository import BoardError
     from src.workspace import canonical_workspace_root
     from config.settings import settings
-    sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
+    from src.native_tools.registry import ToolRegistry
+    from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec
+    from src.tools.filesystem_tool import read_file
+    registry = ToolRegistry()
+    registry.start()
+    request.addfinalizer(registry.stop)
+    descriptor = next(item for item in registry.descriptors() if item.tool_id == 'read_file')
+    (task_runtime[1] / 'terminal-source.txt').write_text('hello')
+    calls = []
+    real_read = read_file.forward
+    def counted_read(file_path):
+        calls.append(file_path)
+        return real_read(file_path)
+    monkeypatch.setattr(read_file, 'forward', counted_read)
+    creation = GeneralTaskCreate(goal_revision=1, idempotency_key='terminal-read', expected_plan_revision=1,
+        input=GeneralTaskInput(goal_ref='goal-1', intent='Read one owned local file',
+            requested_output=descriptor.output_schema,
+            tool_set_digest=digest([item.model_dump(mode='json') for item in registry.descriptors()])),
+        plan=PlanSpec(revision=1, steps=[{'step_id': 'terminal-read', 'tool_id': 'read_file',
+            'input': {'file_path': 'terminal-source.txt'}, 'output_contract': descriptor.output_schema}]))
+    sessions, dispatcher, service, envelope, original = await running_task(task_runtime,
+        creation_request=creation, registry_override=registry)
     jobs = dispatcher.jobs
     binding, _admitted = await admit_native_step(jobs, original['job']['job_id'],
         owner=original['job']['lease']['owner'], fence=original['job']['lease']['fencing_token'],
@@ -382,7 +581,7 @@ async def test_verified_terminal_receipt_never_reopens_contact_and_requires_phys
     monkeypatch.setattr(jobs, 'transition_job', defer_terminal)
     output, artifact, _reference = await run_native_step(service, jobs, binding,
         child_owner='native-verified-owner', principal=principal)
-    assert output == {'text': 'hello'} and len(service.registry.calls) == 1
+    assert output['content'] == 'hello' and calls == ['terminal-source.txt']
     with pytest.raises(DurableJobLeaseError, match='positive child claim changed'):
         await jobs.record_effect(binding.invocation_id, effect_type='general_tool_call', status='intent',
             owner=terminal['owner'], fencing_token=terminal['fencing_token'])
@@ -394,3 +593,54 @@ async def test_verified_terminal_receipt_never_reopens_contact_and_requires_phys
     else:
         result = await real_transition(binding.invocation_id, 'succeeded', **terminal)
         assert result['status'] == 'succeeded' and result['attempt_count'] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('attachment_failure', ['refused', 'crash'])
+async def test_actual_precontact_wait_attachment_failure_rolls_back_paired_state(task_runtime, monkeypatch, request, attachment_failure):
+    from src.auth.service import authenticate_session
+    from src.native_tools.registry import ToolRegistry
+    from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec
+    from src.work_board.general_task_native import admit_native_step, run_native_step
+    from src.approval.repository import approval_repository
+    from tests.test_general_task_adapters import mcp_registry
+    registry = ToolRegistry()
+    registry.start()
+    request.addfinalizer(registry.stop)
+    registry, _manager, tool, _, _ = mcp_registry.__wrapped__(task_runtime[1], registry)
+    descriptors = registry.descriptors()
+    descriptor = next(item for item in descriptors if item.tool_id == 'mcp:local:repo_read')
+    creation = GeneralTaskCreate(goal_revision=1, idempotency_key='wait-attachment-fault', expected_plan_revision=1,
+        input=GeneralTaskInput(goal_ref='goal-1', intent='Read using one explicitly approved local tool',
+            requested_output=descriptor.output_schema,
+            tool_set_digest=digest([item.model_dump(mode='json') for item in descriptors])),
+        plan=PlanSpec(revision=1, steps=[{'step_id': 'mcp-read', 'tool_id': descriptor.tool_id,
+            'input': {'query': 'literal owned repository'}, 'output_contract': descriptor.output_schema}]))
+    sessions, dispatcher, service, envelope, current = await running_task(task_runtime,
+        creation_request=creation, registry_override=registry)
+    jobs = dispatcher.jobs
+    binding, _ = await admit_native_step(jobs, current['job']['job_id'],
+        owner=current['job']['lease']['owner'], fence=current['job']['lease']['fencing_token'],
+        step=envelope.plan.steps[0], descriptor=descriptor, inputs=envelope.plan.steps[0].input)
+    before = await jobs.get_job(binding.parent_job_id)
+    async def attachment_fault(*args, **kwargs):
+        if attachment_failure == 'crash':
+            raise RuntimeError('fixture crash before approval wait attachment')
+        return None
+    monkeypatch.setattr(approval_repository, 'attach_general_task_native_child_wait_binding_in_session', attachment_fault)
+    operator = await authenticate_session(binding.original_root_id, touch=False)
+    expected = RuntimeError if attachment_failure == 'crash' else DurableJobLeaseError
+    with pytest.raises(expected):
+        await run_native_step(service, jobs, binding,
+            child_owner='general-task-native:' + binding.invocation_id, principal=operator.principal)
+    parent = await jobs.get_job(binding.parent_job_id)
+    child = await jobs.get_job(binding.invocation_id)
+    manifest = read_manifest(type('Row', (), {'checkpoint_receipts_json': json.dumps(parent['checkpoints'])})())
+    assert manifest.phase == 'native_wait' and manifest.admitted_invocation_ids == [binding.invocation_id]
+    assert child['status'] == 'running' and child['attempt_count'] == 1
+    assert tool.calls == 0
+    assert not any(item['checkpoint_id'].startswith(('general:approval:', 'general:cleanup:')) for item in parent['checkpoints'])
+    assert parent['revision'] == before['revision'] + 1  # only original positive claim receipt
+    assert len(child['effects']) == 1 and child['effects'][0]['status'] == 'intent'
+    with pytest.raises(DurableJobLeaseError):
+        await jobs.claim_job(binding.invocation_id, owner='replacement-worker', continue_existing_attempt=True)

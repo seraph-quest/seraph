@@ -210,6 +210,55 @@ const pause = { approval_id: "approval-one", approval_status: "approved", step_i
   workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4, workflow_revision: 9,
   original_deadline_at: new Date(Date.now() + 600000).toISOString(), can_resume: true, reason: null };
 const pausedPlan = { ...plan, accepted: true, approval_pause: pause };
+const nativeExecution = { phase: "approval_wait", plan_revision: 1, manifest_revision: 7,
+  original_deadline_at: pause.original_deadline_at, native_deadline_at: pause.original_deadline_at,
+  steps: [{ step_id: "note", status: "awaiting_approval", contact_state: "not_contacted",
+    invocation_id: "native-child-one", plan_revision: 1, artifact_refs: [] }],
+  admitted_invocation_ids: ["native-child-one"], remaining_steps: ["note"], partial_output_refs: [], no_learning: true };
+it("continues the exact native child and reads monotonic same-attempt assembly fences", async () => {
+  const changed = vi.fn();
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, native_execution: nativeExecution,
+    approval_pause: { ...pause, child_job_id: "native-child-one", expected_manifest_revision: 7 } }))
+    .mockResolvedValueOnce(response({ task: { ...pausedTask, latest_attempt: { ...pausedTask.latest_attempt, fencing_token: 7 } } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} onChanged={changed} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue approved task run" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toMatchObject({
+    workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4,
+    child_job_id: "native-child-one", expected_manifest_revision: 7 });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it.each([
+  { child_job_id: "foreign-child", expected_manifest_revision: 7 },
+  { child_job_id: "native-child-one", expected_manifest_revision: 8 },
+  {},
+])("disables a native approval whose original child or manifest differs %j", async fields => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, native_execution: nativeExecution,
+    approval_pause: { ...pause, ...fields } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
+it("pauses quiescent native work using only the exact current task revision", async () => {
+  const changed = vi.fn(), running = { ...pausedTask, status: "running" } as WorkBoardTask;
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase: "assembly", steps: [{ ...nativeExecution.steps[0], status: "verified", contact_state: "settled" }] } }))
+    .mockResolvedValueOnce(response({ task: { ...pausedTask, task_revision: 3 } }));
+  render(<GeneralTaskPanel {...owner} task={running} onChanged={changed} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pause remaining task work" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ action: "pause", expected_revision: 2 });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("keeps pause and resume disabled while the original child is active or unknown", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase: "native_wait", steps: [{ ...nativeExecution.steps[0], status: "unknown", contact_state: "unknown" }] } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Pause remaining task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Resume paused task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel native task work" })).toBeEnabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
 it("continues only by explicit action with the exact approved existing run receipt", async () => {
   const changed = vi.fn();
   vi.mocked(apiFetch).mockResolvedValueOnce(response(pausedPlan)).mockResolvedValueOnce(response({ task: { ...pausedTask, latest_attempt: { ...pausedTask.latest_attempt, fencing_token: 5 } } }));

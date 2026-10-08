@@ -5,9 +5,7 @@ an agent/model loop; proposal acceptance and durable admission are distinct.
 """
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
-from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import inspect
@@ -156,6 +154,11 @@ async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_i
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workspace import canonical_workspace_root
     from config.settings import settings
+    if authority_check is not None:
+        async with jobs._session() as db:
+            run = await jobs._fetch(db, job_id)
+            jobs._assert_lease(run, owner=owner, fencing_token=fence)
+            await authority_check(db, run)
     content = canonical({"step_id": step_id, "output": output})
     sha = hashlib.sha256(content).hexdigest()
     key = digest([job_id, plan_digest, step_id])
@@ -195,6 +198,9 @@ class GeneralTaskService:
         self.strategy_resolver = strategy_resolver
         self.planner = planner
         self.started = False
+        # Ephemeral original callback handles, never execution authority. They
+        # remain inspectable after waiter cancellation until the callback exits.
+        self._native_invocations = {}
 
     def start(self):
         self.started = True
@@ -437,7 +443,22 @@ class GeneralTaskService:
                 steps.append({"step_id": step_id, "status": receipt.status, "contact_state": receipt.contact_state,
                     "invocation_id": receipt.invocation_id, "plan_revision": receipt.plan_revision,
                     "artifact_refs": [ref.model_dump(mode="json") for ref in receipt.artifact_refs]})
-            payload["native_execution"] = {"phase": manifest.phase, "plan_revision": manifest.plan_revision,
+            display_phase = manifest.phase
+            if parent.status == "succeeded" and all(any(item["step_id"] == step.step_id
+                and item["status"] == "verified" and item["contact_state"] == "settled" for item in steps)
+                for step in plan.steps):
+                from src.workflows.job_runtime import durable_job_repository
+                projection = await durable_job_repository.get_job(parent.run_identity)
+                final_outputs, final_artifacts = self.recovered_outputs(projection,
+                    envelope.model_copy(update={"plan": plan}))
+                final_artifact = final_artifacts.get(plan.steps[-1].step_id)
+                if (len(final_outputs) == len(plan.steps) and final_artifact is not None
+                    and any(effect.get("effect_type") == "board_child_readback"
+                        and effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded"
+                        and effect.get("content_sha256") == final_artifact["content_sha256"]
+                        and effect.get("details", {}).get("verified") is True for effect in projection["effects"])):
+                    display_phase = "complete"
+            payload["native_execution"] = {"phase": display_phase, "plan_revision": manifest.plan_revision,
                 "manifest_revision": manifest.manifest_revision, "original_deadline_at": manifest.original_deadline_at.isoformat(),
                 "native_deadline_at": manifest.native_deadline_at.isoformat(), "steps": steps,
                 "admitted_invocation_ids": list(manifest.admitted_invocation_ids),
@@ -482,7 +503,7 @@ class GeneralTaskService:
 
     async def approval_pause(self, db, owner, task, envelope):
         from sqlalchemy import select
-        from src.db.models import WorkBoardAttempt, ApprovalRequest
+        from src.db.models import WorkBoardAttempt, ApprovalRequest, WorkflowRunState
         from src.workflows.job_runtime import durable_job_repository
         from src.work_board.contracts import GeneralTaskResume
         attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
@@ -492,6 +513,49 @@ class GeneralTaskService:
         projection = await durable_job_repository.get_job(attempt.workflow_run_id)
         if projection.get("status") != "paused" or projection.get("failure_reason") != "general_task_approval_required":
             return None
+        parent = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == attempt.workflow_run_id).execution_options(populate_existing=True))
+        from src.workflows.general_task_guard import read_manifest
+        manifest = read_manifest(parent) if parent else None
+        if manifest is not None:
+            if manifest.phase != "approval_wait":
+                return None
+            from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+            from src.work_board.contracts import GeneralTaskArtifactRef
+            from src.workflows.general_task_guard import verify_native_approval_transition, child_binding, _current, _assert_joint_manifest
+            awaiting = []
+            for index in range(len(manifest.step_ids)):
+                receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
+                    artifact_id=manifest.step_receipt_artifact_ids[index],
+                    digest=manifest.step_receipt_digests[index], schema_version="StepReceipt.v1"),
+                    parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)
+                if receipt.status == "awaiting_approval":
+                    awaiting.append(receipt)
+            if len(awaiting) != 1:
+                raise BoardError("general_task_resume_binding_changed", "Exact native approval wait required", status_code=409)
+            receipt = awaiting[0]
+            child = await durable_job_repository._fetch(db, receipt.child_job_id)
+            reason, status = None, "unavailable"
+            try:
+                original = child_binding(child)
+                current_parent, current_task, current_attempt, current_manifest, _ = await _current(
+                    durable_job_repository, db, parent.run_identity)
+                _assert_joint_manifest(current_parent, current_task, current_attempt, current_manifest)
+                witness, approval = await verify_native_approval_transition(db, child, current_parent)
+                status = approval.status
+                if (owner.principal_id != original.owner_principal_id or owner.session_id != original.original_root_id
+                    or witness.phase != "approval_wait" or approval.status != "approved"):
+                    reason = "general_task_approval_not_approved"
+            except Exception as exc:
+                reason = getattr(exc, "code", "general_task_resume_unavailable")
+            return {"approval_id": receipt.approval_id, "approval_status": status,
+                "step_id": receipt.step_id, "tool_id": json.loads(child.arguments_json)["tool_id"],
+                "workflow_run_id": parent.run_identity, "attempt_id": attempt.attempt_id,
+                "fencing_token": attempt.fencing_token, "workflow_revision": parent.revision,
+                "child_job_id": child.run_identity, "expected_manifest_revision": manifest.manifest_revision,
+                "expected_plan_revision": manifest.plan_revision,
+                "original_deadline_at": projection.get("deadline_at"), "can_resume": reason is None,
+                "reason": reason}
         waits = [item.get("payload") for item in projection.get("checkpoints", [])
             if isinstance(item.get("payload"), dict) and item["payload"].get("phase") == "approval_precontact"]
         if len(waits) != 1:
@@ -705,135 +769,13 @@ class GeneralTaskService:
         if evidence != envelope.evidence:
             raise BoardError("general_task_evidence_changed", "Review changed evidence", status_code=409)
 
-    async def execute(self, jobs, *, job_id, owner, fence, envelope, principal):
-        """A step intent is durable before invocation; unknown work never retries."""
+    async def execute(self, jobs, *, job_id, owner, fence, envelope, principal, resume_child=None):
+        if not self.started:
+            raise BoardError("general_task_inactive", "Task service is inactive", status_code=503)
         projection = await jobs.get_job(job_id)
-        outputs, prior_artifacts = self.recovered_outputs(projection, envelope)
-        artifact = prior_artifacts.get(envelope.plan.steps[-1].step_id)
-        by_id = {item.tool_id: item for item in envelope.descriptors}
-        remaining = [item for item in envelope.plan.steps if item.step_id not in outputs]
-        while remaining:
-            step = next(item for item in remaining if set(item.depends_on) <= outputs.keys())
-            from src.db.engine import get_session
-            async with get_session() as db:
-                await self.recheck_authority(db, WorkBoardOwner(
-                    principal_id=principal.principal_id, session_id=principal.operator_session_id), envelope)
-            inputs = resolve_input(step.input, outputs)
-            validate_data(inputs, dependencies=set())
-            descriptor = by_id[step.tool_id]
-            validate_schema(descriptor.input_schema, inputs)
-            projection = await jobs.get_job(job_id)
-            checkpoint_id = "general:step:" + step.step_id
-            previous = [item for item in projection.get("checkpoints", [])
-                        if item.get("checkpoint_id") == checkpoint_id]
-            wait = previous[0].get("payload", {}) if len(previous) == 1 else {}
-            if previous and wait.get("phase") != "approval_precontact":
-                raise BoardError("general_task_unresolved_step", "Existing step intent requires reconciliation", status_code=409)
-            deadline = projection.get("deadline_at")
-            remaining_seconds = ((datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
-                .replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds()
-                if deadline else descriptor.deadline)
-            if remaining_seconds <= 0:
-                raise BoardError("general_task_deadline", "Original task execution deadline expired", status_code=409)
-            effect_id = "general:" + step.step_id + ":" + str(fence)
-            await jobs.record_checkpoint(job_id, checkpoint_id=checkpoint_id,
-                state={"step_id": step.step_id, "descriptor_digest": digest(descriptor.model_dump(mode="json")),
-                       "input_digest": digest(inputs), "phase": "intent"},
-                owner=owner, fencing_token=fence)
-            await jobs.record_effect(job_id, effect_type="general_tool_call",
-                effect_id=effect_id, status="intent",
-                target_path="general-step:" + digest([job_id, step.step_id]),
-                details={"tool_id": descriptor.tool_id, "step_id": step.step_id,
-                         "input_digest": digest(inputs), "no_learning": True},
-                owner=owner, fencing_token=fence)
-            from src.native_tools.task_adapters import TaskToolApprovalRequired
-            try:
-                operator_result = await asyncio.wait_for(self.registry.invoke(descriptor, inputs,
-                    principal=replace(principal, job_id=job_id), job_id=job_id, fencing_token=fence),
-                    timeout=min(descriptor.deadline, remaining_seconds))
-            except TaskToolApprovalRequired as exc:
-                if (exc.binding.job_id != job_id or exc.binding.fencing_token != fence
-                    or exc.binding.descriptor_digest != digest(descriptor.model_dump(mode="json"))
-                    or exc.binding.input_digest != digest(inputs)):
-                    raise BoardError("general_task_unresolved_step", "Contact proof binding changed", status_code=409) from exc
-                metadata = self.registry.approval_context(descriptor, inputs, job_id=job_id)
-                pending = {"phase": "approval_precontact", "step_id": step.step_id,
-                    "tool_id": descriptor.tool_id, "approval_id": exc.approval_id, "job_id": job_id,
-                    "fence": fence, "descriptor_digest": exc.binding.descriptor_digest,
-                    "input_digest": exc.binding.input_digest, "fingerprint": metadata["fingerprint"],
-                    "authority_digest": projection["authority_digest"], "deadline_at": projection["deadline_at"],
-                    "plan_digest": digest(envelope.model_dump(mode="json")), "effect_id": effect_id}
-                async def verify_current(db, run):
-                    from sqlalchemy import select
-                    from src.work_board.dispatcher import _parse_typed_input, _safe_digest, WorkBoardDispatcher
-                    from src.db.models import WorkBoardAttempt
-                    current_owner = WorkBoardOwner(principal_id=principal.principal_id,
-                        session_id=principal.operator_session_id)
-                    await self.recheck_authority(db, current_owner, envelope)
-                    current_attempt = (await db.execute(select(WorkBoardAttempt).where(
-                        WorkBoardAttempt.workflow_run_id == job_id))).scalar_one_or_none()
-                    if current_attempt is None:
-                        raise BoardError("general_task_unresolved_step", "Original task attempt changed", status_code=409)
-                    current_task = await self.repository.get_task(db, current_owner,
-                        current_attempt.task_id)
-                    parsed = _parse_typed_input(current_task)
-                    expected_inputs = {"task_id": current_task.task_id,
-                        "attempt_id": current_attempt.attempt_id,
-                        "capability_id": current_task.capability_id,
-                        "typed_input_ref": current_task.typed_input_ref,
-                        "typed_input_digest": current_task.typed_input_digest, **parsed}
-                    handoffs = WorkBoardDispatcher._attempt_parent_handoffs(current_attempt)
-                    if handoffs:
-                        expected_inputs.update(parent_handoff_context=handoffs,
-                            parent_handoff_digest=current_attempt.parent_handoff_digest)
-                    if (digest(GeneralTaskEnvelope.model_validate(parsed).model_dump(mode="json")) != pending["plan_digest"]
-                        or run.input_digest != _safe_digest(expected_inputs)
-                        or run.authority_digest != _safe_digest(json.loads(run.declared_authority_json))
-                        or current_task.goal_id != run.goal_id or current_task.goal_revision != run.goal_revision
-                        or current_attempt is None or current_attempt.task_id != current_task.task_id
-                        or current_attempt.workflow_run_id != job_id or current_attempt.ended_at is not None
-                        or current_attempt.cancel_requested_at is not None):
-                        raise BoardError("general_task_unresolved_step", "Original task binding changed", status_code=409)
-                    return current_task, current_attempt
-                await jobs.pause_general_task_for_approval(service=self,
-                    proof=exc, checkpoint_id=checkpoint_id, binding=pending,
-                    owner_principal_id=principal.principal_id, operator_session_id=principal.operator_session_id,
-                    runtime_owner=owner, tool_name=metadata["tool_name"],
-                    approval_context=metadata["approval_context"],
-                    original_input_digest=projection["input_digest"], verify_current=verify_current)
-                return {"verified": False, "awaiting_approval": True, "approval_id": exc.approval_id,
-                    "reason": "awaiting_approval", "no_learning": True}
-            validate_schema(descriptor.output_schema, operator_result)
-            validate_schema(step.output_contract, operator_result)
-            canonical(operator_result)
-            document_authority = None
-            if descriptor.tool_id == "document_prepare":
-                from src.work_board.document_preparation import invocation
-                async def document_authority(db, run):
-                    await invocation(db, principal, job_id, fence)
-            artifact, verified_output = await write_step_artifact(jobs, job_id=job_id,
-                owner=owner, fence=fence, plan_digest=digest(envelope.model_dump(mode="json")),
-                step_id=step.step_id, output=operator_result, authority_check=document_authority)
-            outputs[step.step_id] = verified_output
-            await jobs.record_readback(job_id, effect_type="general_tool_call",
-                effect_id=effect_id, status="succeeded",
-                target_path="general-step:" + digest([job_id, step.step_id]),
-                content_sha256=artifact["content_sha256"],
-                readback_id="general-step-readback:" + digest([job_id, step.step_id])[:32],
-                verified_at=datetime.now(timezone.utc).isoformat(),
-                details={"step_id": step.step_id, "tool_id": descriptor.tool_id,
-                         "verified": True, "output_exists": True,
-                         "file_path": artifact["file_path"], "no_learning": True},
-                owner=owner, fencing_token=fence,
-                **({"readback_authority_check": document_authority} if document_authority is not None else {}))
-            await jobs.record_checkpoint(job_id, checkpoint_id="general:verified:" + step.step_id,
-                state=artifact, checkpoint_payload=artifact, owner=owner, fencing_token=fence)
-            remaining.remove(step)
-        final = outputs[envelope.plan.steps[-1].step_id]
-        validate_schema(envelope.task_input.requested_output, final)
-        return {"verified": True, "output_digest": digest(final), "step_count": len(outputs),
-            "learning": "no_learning", "no_learning": True,
-            "content_sha256": artifact["content_sha256"],
-            "readback_id": "general-readback:" + digest([job_id, artifact])[:32],
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-            "result_refs": [artifact], "artifact_refs": [artifact]}
+        if any(str(item.get("checkpoint_id", "")).startswith("general:step:")
+            for item in projection.get("checkpoints", [])):
+            raise BoardError("general_task_unresolved_step", "Existing root step intent requires reconciliation", status_code=409)
+        from src.work_board.general_task_native import execute_interpreter
+        return await execute_interpreter(self, jobs, job_id=job_id, owner=owner,
+            fence=fence, principal=principal, resume_child=resume_child)

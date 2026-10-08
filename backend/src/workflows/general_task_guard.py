@@ -5,14 +5,137 @@ import json
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import and_, false, func, select, update
+from sqlalchemy import and_, false, func, or_, select, update
 from sqlalchemy.orm import aliased
 
-from src.db.models import OperatorSession, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.db.models import ApprovalRequest, OperatorSession, WorkBoardAttempt, WorkBoardInputArtifact, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.work_board.contracts import (
     GENERAL_TASK_MANIFEST_KEY, GENERAL_TASK_NATIVE_CHILD_KIND,
     GeneralTaskCurrentManifestV1, GeneralTaskNativeChildBindingV1,
+    GeneralTaskApprovalTransitionV1, GeneralTaskToolClosureV1,
 )
+
+
+def approval_checkpoint_id(binding):
+    from src.work_board.general_task import digest
+    return "general:approval:" + digest(binding.invocation_id)
+
+
+def cleanup_checkpoint_id(binding, fence):
+    from src.work_board.general_task import digest
+    return "general:cleanup:" + digest([binding.invocation_id, fence])
+
+
+def _protected_payload(parent, identity, model):
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest
+    records = [record for record in _history(parent) if record.get("checkpoint_id") == identity]
+    try:
+        if len(records) != 1 or records[0].get("safe") is not True:
+            raise ValueError()
+        parsed = model.model_validate(records[0]["payload"])
+        if records[0].get("state_digest") != _digest(parsed.model_dump(mode="json")):
+            raise ValueError()
+        return parsed
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DurableJobLeaseError("native protected transition evidence changed") from exc
+
+
+@dataclass(frozen=True)
+class EffectiveChildPhase:
+    phase_revision: int
+    phase_digest: str
+    child_fence: int
+    approval_binding_digest: str | None = None
+
+
+_PHASE_SQL_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _VerifiedParentJournal:
+    child_id: str
+    child_fence: int
+    checkpoint_json: str
+    _seal: object
+
+
+def approved_receipt_digest(approval, context_digest):
+    """Immutable decision scope survives the sole approved->consumed write."""
+    from src.work_board.general_task import digest
+    # Existing single consumption also advances resolved_at. Neither status
+    # nor that mutable timestamp can be part of immutable approved scope.
+    return digest([approval.id, approval.fingerprint, str(approval.expires_at),
+        approval.owner_principal_id, approval.operator_session_id,
+        approval.session_id, approval.tool_name, approval.action, context_digest])
+
+
+async def effective_child_phase(db, child, parent=None):
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest, _as_utc, _utc_now
+    from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+    binding = child_binding(child)
+    parent = parent or await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == binding.parent_job_id))
+    manifest = read_manifest(parent) if parent is not None else None
+    if manifest is None:
+        raise DurableJobLeaseError("native original manifest is unavailable")
+    if (manifest.phase == "native_wait" and manifest.phase_revision == binding.phase_revision
+        and manifest.phase_digest == binding.phase_digest):
+        return EffectiveChildPhase(binding.phase_revision, binding.phase_digest, child.fencing_token)
+    witness, _approval = await verify_native_approval_transition(db, child, parent)
+    if witness.phase != "native_wait":
+        raise DurableJobLeaseError("native approval wait cannot authorize execution")
+    return EffectiveChildPhase(witness.phase_revision, witness.phase_digest,
+        witness.current_child_fence, _digest(witness.model_dump(mode="json")))
+
+
+async def verify_native_approval_transition(db, child, parent):
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest, _as_utc, _utc_now
+    from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+    binding = child_binding(child)
+    manifest = read_manifest(parent)
+    witness = _protected_payload(parent, approval_checkpoint_id(binding), GeneralTaskApprovalTransitionV1)
+    payload = witness.model_dump(mode="json")
+    approval = await db.get(ApprovalRequest, witness.approval_id)
+    try:
+        details = json.loads(approval.details_json) if approval is not None else None
+        if (witness.original_binding != binding
+            or witness.current_child_fence != child.fencing_token or child.attempt_count != 1
+            or any(getattr(witness, field) != getattr(manifest, field) for field in
+                ("phase", "phase_revision", "phase_digest", "task_revision", "board_fence", "job_fence"))
+            or approval is None or approval.status not in (
+                {"pending", "approved"} if witness.phase == "approval_wait" else {"approved", "consumed"})
+            or approval.owner_principal_id != binding.owner_principal_id
+            or approval.operator_session_id != binding.original_root_id
+            or approval.session_id != binding.original_root_id
+            or approval.fingerprint != witness.approval_fingerprint
+            or _as_utc(approval.expires_at) is None or _as_utc(approval.expires_at) <= _utc_now()
+            or not isinstance(details, dict) or details.get("general_task_wait_binding") != payload
+            or _digest(details.get("approval_context")) != witness.approval_context_digest
+            or details.get("approval_context", {}).get("workflow_run_identity") != child.run_identity
+            or (witness.phase == "native_wait" and approved_receipt_digest(approval,
+                witness.approval_context_digest) != witness.approved_receipt_digest)):
+            raise ValueError()
+        awaiting = read_native_artifact_reference(witness.awaiting_receipt,
+            parent_job_id=parent.run_identity, creation_digest=binding.creation_digest)
+        closure = _protected_payload(parent, cleanup_checkpoint_id(binding, witness.original_claim_fence), GeneralTaskToolClosureV1)
+        if (awaiting.status != "awaiting_approval" or awaiting.approval_id != approval.id
+            or awaiting.child_job_id != child.run_identity or awaiting.child_fence != witness.waiting_child_fence
+            or awaiting.child_attempt_count != 1 or awaiting.invocation_id != binding.invocation_id
+            or awaiting.task_id != binding.task_id or awaiting.attempt_id != binding.attempt_id
+            or awaiting.input_digest != binding.input_digest or awaiting.descriptor_digest != binding.descriptor_digest
+            or awaiting.selected_grant_digest != binding.selected_grant_digest
+            or awaiting.parent_creation_digest != binding.creation_digest
+            or awaiting.effect_receipt_digest != witness.no_contact_effect_digest
+            or awaiting.cleanup_receipt_digest != witness.cleanup_receipt_digest
+            or closure.outcome != "approval_precontact" or closure.approval_id != approval.id
+            or closure.original_binding_digest != witness.original_binding_digest
+            or closure.invocation_id != child.run_identity or closure.child_fence != witness.original_claim_fence
+            or closure.input_digest != binding.input_digest or closure.descriptor_digest != binding.descriptor_digest
+            or _digest(closure.model_dump(mode="json")) != witness.cleanup_receipt_digest):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DurableJobLeaseError("native exact approved transition is unavailable") from exc
+    return witness, approval
 
 
 def read_manifest(run):
@@ -72,11 +195,13 @@ async def verify_native_writer(jobs, db, run):
 
 
 def child_binding(run):
-    from src.workflows.job_runtime import DurableJobLeaseError
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest
     try:
         authority = json.loads(run.declared_authority_json)
         binding = GeneralTaskNativeChildBindingV1.model_validate(authority["general_task_child_binding"])
-        if (run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND or run.capability_version != "1"
+        if (authority.get("capability_id") != "agent.native-tool-step.v1"
+            or run.authority_digest != _digest(authority)
+            or run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND or run.capability_version != "1"
             or run.branch_depth != 1 or run.owner_kind != "user"
             or run.parent_job_id != binding.parent_job_id
             or run.parent_run_identity != binding.parent_job_id
@@ -105,6 +230,17 @@ def append_general_task_root_gate(conditions, run, *, now):
     if manifest is None:
         return
     task, attempt = aliased(WorkBoardTask), aliased(WorkBoardAttempt)
+    input_ref = select(WorkBoardInputArtifact.artifact_id).where(
+        WorkBoardInputArtifact.artifact_id == task.input_artifact_id,
+        WorkBoardInputArtifact.typed_input_ref == task.typed_input_ref,
+        WorkBoardInputArtifact.payload_sha256 == task.typed_input_digest,
+        WorkBoardInputArtifact.owner_principal_id == task.owner_principal_id,
+        WorkBoardInputArtifact.owner_session_id == task.owner_session_id,
+        WorkBoardInputArtifact.goal_id == task.goal_id,
+        WorkBoardInputArtifact.goal_revision == task.goal_revision,
+        WorkBoardInputArtifact.capability_id == "agent.task.v1",
+        WorkBoardInputArtifact.capability_version == "1",
+        WorkBoardInputArtifact.bound_task_id == task.task_id).exists()
     root = select(OperatorSession.id).where(
         OperatorSession.id == manifest.original_root_id,
         OperatorSession.principal_id == manifest.owner_principal_id,
@@ -125,7 +261,7 @@ def append_general_task_root_gate(conditions, run, *, now):
             attempt.attempt_id == manifest.attempt_id,
             attempt.workflow_run_id == manifest.run_id,
             attempt.fencing_token == manifest.board_fence,
-            attempt.ended_at.is_(None), attempt.cancel_requested_at.is_(None), root).exists(),
+            attempt.ended_at.is_(None), attempt.cancel_requested_at.is_(None), root, input_ref).exists(),
     ])
 
 
@@ -143,10 +279,56 @@ def append_general_task_parent_gate(conditions, run, *, now):
         conditions.append(false())
         return True
     parent, task, attempt = aliased(WorkflowRunState), aliased(WorkBoardTask), aliased(WorkBoardAttempt)
+    input_ref = select(WorkBoardInputArtifact.artifact_id).where(
+        WorkBoardInputArtifact.artifact_id == task.input_artifact_id,
+        WorkBoardInputArtifact.typed_input_ref == task.typed_input_ref,
+        WorkBoardInputArtifact.payload_sha256 == task.typed_input_digest,
+        WorkBoardInputArtifact.owner_principal_id == task.owner_principal_id,
+        WorkBoardInputArtifact.owner_session_id == task.owner_session_id,
+        WorkBoardInputArtifact.goal_id == task.goal_id,
+        WorkBoardInputArtifact.goal_revision == task.goal_revision,
+        WorkBoardInputArtifact.capability_id == "agent.task.v1",
+        WorkBoardInputArtifact.capability_version == "1",
+        WorkBoardInputArtifact.bound_task_id == task.task_id).exists()
+    verified = getattr(run, "_general_task_verified_parent_journal", None)
+    if (type(verified) is not _VerifiedParentJournal or verified._seal is not _PHASE_SQL_SEAL
+        or verified.child_id != run.run_identity or verified.child_fence != run.fencing_token):
+        conditions.append(false())
+        return True
     checkpoints = func.json_each(parent.checkpoint_receipts_json).table_valued("key", "value").alias()
     payload = lambda field: func.json_extract(checkpoints.c.value, "$.payload." + field)
     invocations = func.json_each(payload("admitted_invocation_ids")).table_valued("key", "value").alias()
     native_invocation = select(invocations.c.key).where(invocations.c.value == binding.invocation_id).exists()
+    from src.workflows.job_runtime import _canonical
+    transitions = func.json_each(parent.checkpoint_receipts_json).table_valued("key", "value").alias()
+    transition = lambda field: func.json_extract(transitions.c.value, "$.payload." + field)
+    approval = aliased(ApprovalRequest)
+    resumed_phase = select(transitions.c.key).select_from(transitions).join(approval,
+        approval.id == transition("approval_id")).where(
+        func.json_extract(transitions.c.value, "$.checkpoint_id") == approval_checkpoint_id(binding),
+        func.json_extract(transitions.c.value, "$.safe") == 1,
+        transition("schema_version") == "general_task.native_approval_transition.v1",
+        transition("original_binding") == _canonical(binding.model_dump(mode="json")),
+        transition("phase") == "native_wait", transition("positive_attempt_count") == 1,
+        transition("current_child_fence") == WorkflowRunState.fencing_token,
+        WorkflowRunState.attempt_count == 1,
+        transition("current_child_fence") > transition("waiting_child_fence"),
+        transition("waiting_child_fence") >= transition("original_claim_fence"),
+        transition("phase_revision") == payload("phase_revision"),
+        transition("phase_digest") == payload("phase_digest"),
+        transition("task_revision") == task.task_revision,
+        transition("job_fence") == parent.fencing_token,
+        transition("board_fence") == attempt.fencing_token,
+        transition("approved_receipt_digest").is_not(None),
+        approval.status.in_(("approved", "consumed")), approval.expires_at > now,
+        approval.owner_principal_id == binding.owner_principal_id,
+        approval.operator_session_id == binding.original_root_id,
+        approval.session_id == binding.original_root_id,
+        approval.fingerprint == transition("approval_fingerprint"),
+        func.json_extract(approval.details_json, "$.approval_context.workflow_run_identity") == run.run_identity,
+        func.json_extract(approval.details_json, "$.general_task_wait_binding") ==
+            func.json_extract(transitions.c.value, "$.payload"),
+    ).exists()
     manifest = select(checkpoints.c.key).where(
         func.json_extract(checkpoints.c.value, "$.checkpoint_id") == GENERAL_TASK_MANIFEST_KEY,
         func.json_extract(checkpoints.c.value, "$.safe") == 1,
@@ -163,8 +345,8 @@ def append_general_task_parent_gate(conditions, run, *, now):
         payload("job_fence") == parent.fencing_token,
         payload("board_fence") == attempt.fencing_token,
         payload("task_revision") == task.task_revision,
-        payload("phase") == "native_wait", payload("phase_revision") == binding.phase_revision,
-        payload("phase_digest") == binding.phase_digest,
+        payload("phase") == "native_wait", or_(and_(payload("phase_revision") == binding.phase_revision,
+            payload("phase_digest") == binding.phase_digest), resumed_phase),
         payload("plan_revision") == binding.plan_revision,
         payload("current_plan_digest") == binding.plan_digest,
         payload("selected_grant_digest") == binding.selected_grant_digest,
@@ -184,6 +366,7 @@ def append_general_task_parent_gate(conditions, run, *, now):
             parent.root_run_identity == run.root_run_identity,
             parent.owner_kind == "user", parent.owner_principal_id == binding.owner_principal_id,
             parent.authority_digest == binding.parent_authority_digest,
+            parent.checkpoint_receipts_json == verified.checkpoint_json,
             parent.operator_session_id == binding.original_root_id, parent.session_id == binding.original_root_id,
             parent.goal_id == binding.goal_id, parent.goal_revision == binding.goal_revision,
             parent.deadline_at == binding.native_deadline_at,
@@ -197,7 +380,7 @@ def append_general_task_parent_gate(conditions, run, *, now):
             task.status == WorkBoardStatus.blocked, task.block_reason == "general_task_native_wait",
             attempt.workflow_run_id == parent.run_identity, attempt.ended_at.is_(None),
             attempt.cancel_requested_at.is_(None), attempt.lease_owner.is_(None),
-            attempt.lease_expires_at.is_(None), original_root, manifest).exists())
+            attempt.lease_expires_at.is_(None), original_root, input_ref, manifest).exists())
     return True
 
 
@@ -208,11 +391,15 @@ async def assert_general_task_child_phase_current(db, run):
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
     if parent is None or read_manifest(parent) is None:
         raise DurableJobLeaseError("general task original manifest is unavailable")
+    effective = await effective_child_phase(db, run, parent)
+    object.__setattr__(run, "_general_task_verified_parent_journal", _VerifiedParentJournal(
+        run.run_identity, run.fencing_token, parent.checkpoint_receipts_json, _PHASE_SQL_SEAL))
     conditions = [WorkflowRunState.run_identity == run.run_identity]
     _append_goal_fence_condition(conditions, run)
     append_general_task_parent_gate(conditions, run, now=_utc_now())
     if await db.scalar(select(WorkflowRunState.id).where(*conditions)) is None:
         raise DurableJobLeaseError("general task original native phase is unavailable")
+    return effective
 
 
 def _step_receipt(manifest, step_id):
@@ -231,7 +418,7 @@ def _step_receipt(manifest, step_id):
 async def assert_general_task_child_current(db, run):
     """Contact requires the durable original positive claim, never admission0."""
     from src.workflows.job_runtime import DurableJobLeaseError, _as_utc, _utc_now
-    await assert_general_task_child_phase_current(db, run)
+    effective = await assert_general_task_child_phase_current(db, run)
     binding = child_binding(run)
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
     receipt = _step_receipt(read_manifest(parent), binding.step_id)
@@ -240,7 +427,8 @@ async def assert_general_task_child_current(db, run):
         or run.attempt_count != 1 or run.fencing_token <= 0 or receipt.child_attempt_count != run.attempt_count
         or receipt.child_fence != run.fencing_token or receipt.child_job_id != run.run_identity
         or receipt.invocation_id != binding.invocation_id or receipt.input_digest != binding.input_digest
-        or receipt.descriptor_digest != binding.descriptor_digest or receipt.phase_digest != binding.phase_digest
+        or receipt.descriptor_digest != binding.descriptor_digest or receipt.phase_digest != effective.phase_digest
+        or receipt.approval_binding_digest != effective.approval_binding_digest
         or receipt.status != "running" or receipt.contact_state not in {"not_contacted", "contact_started"}):
         raise DurableJobLeaseError("general task original positive child claim changed")
 
@@ -254,7 +442,7 @@ async def assert_general_task_child_terminal_current(jobs, db, run):
     from src.artifacts.registry import artifact_id_for
     from src.workspace import canonical_workspace_root
     from config.settings import settings
-    await assert_general_task_child_phase_current(db, run)
+    effective = await assert_general_task_child_phase_current(db, run)
     binding = child_binding(run)
     _parent, _task, _attempt, manifest, envelope = await _current(jobs, db, binding.parent_job_id)
     receipt = _step_receipt(manifest, binding.step_id)
@@ -266,7 +454,8 @@ async def assert_general_task_child_terminal_current(jobs, db, run):
         or receipt.child_job_id != run.run_identity or receipt.invocation_id != binding.invocation_id
         or receipt.input_digest != binding.input_digest or receipt.descriptor_digest != binding.descriptor_digest
         or receipt.selected_grant_digest != binding.selected_grant_digest
-        or receipt.parent_creation_digest != binding.creation_digest or receipt.phase_digest != binding.phase_digest
+        or receipt.parent_creation_digest != binding.creation_digest or receipt.phase_digest != effective.phase_digest
+        or receipt.approval_binding_digest != effective.approval_binding_digest
         or receipt.status != "verified" or receipt.contact_state != "settled"
         or receipt.effect_receipt_digest != _digest(effects)
         or not _verified_readback_exists(effects) or _job_has_unsafe_effects(effects)):
@@ -296,6 +485,10 @@ async def assert_general_task_child_terminal_current(jobs, db, run):
         raise DurableJobLeaseError("native terminal descriptor or output contract changed")
     validate_schema(descriptor.output_schema, body["output"])
     validate_schema(step.output_contract, body["output"])
+    assert_child_closed(_parent, run, receipt)
+    closure = _protected_payload(_parent, cleanup_checkpoint_id(binding, run.fencing_token), GeneralTaskToolClosureV1)
+    if closure.outcome != "returned" or closure.output_digest != digest(body["output"]):
+        raise DurableJobLeaseError("native terminal output must match original callback return")
 
 
 async def _current(jobs, db, parent_id, *, manifest=None):
@@ -434,6 +627,231 @@ def _published_values(parent, manifest, staged):
     manifest = _publish(staged_parent, manifest, staged_records=staged)
     return manifest, {"checkpoint_receipts_json": staged_parent.checkpoint_receipts_json,
         "artifact_receipts_json": staged_parent.artifact_receipts_json}
+
+
+def _published_proofs(parent, manifest, staged, proofs):
+    from types import SimpleNamespace
+    from src.workflows.job_runtime import _canonical, _digest, _utc_now
+    history = _history(parent)
+    for identity, model in proofs:
+        payload = model.model_dump(mode="json")
+        record = {"checkpoint_id": identity, "safe": True, "payload": payload,
+            "state_digest": _digest(payload), "state_keys": sorted(payload),
+            "fencing_token": manifest.job_fence, "recorded_at": _utc_now().isoformat()}
+        history = [item for item in history if item.get("checkpoint_id") != identity] + [record]
+    temporary = SimpleNamespace(run_identity=parent.run_identity, job_kind=parent.job_kind,
+        checkpoint_receipts_json=_canonical(history), artifact_receipts_json=parent.artifact_receipts_json)
+    return _published_values(temporary, manifest, staged)
+
+
+async def publish_tool_closure(jobs, child_id, *, owner, fencing_token,
+    expected_parent_revision, producer_witness):
+    """Only the actual original callback owner can publish closure evidence."""
+    from src.native_tools.task_adapters import verify_task_tool_closure
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.workflows.job_runtime import DurableJobLeaseError, _serialize
+    async with jobs._session() as db:
+        await _begin_sqlite_immediate(db)
+        child = await jobs._fetch(db, child_id)
+        jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
+        await assert_general_task_child_current(db, child)
+        binding = child_binding(child)
+        parent, task, attempt, previous, _ = await _current(jobs, db, binding.parent_job_id)
+        _assert_joint_manifest(parent, task, attempt, previous)
+        if parent.revision != expected_parent_revision:
+            raise DurableJobLeaseError("native callback closure parent revision changed")
+        closure = verify_task_tool_closure(producer_witness, binding=binding, fencing_token=fencing_token)
+        identity = cleanup_checkpoint_id(binding, fencing_token)
+        if any(item.get("checkpoint_id") == identity for item in _history(parent)):
+            if _protected_payload(parent, identity, GeneralTaskToolClosureV1) != closure:
+                raise DurableJobLeaseError("original native callback closure is immutable")
+            return {"job": _serialize(parent), "closure": closure.model_dump(mode="json")}
+        proposed = previous.model_copy(update={"manifest_revision": previous.manifest_revision + 1})
+        published, values = _published_proofs(parent, proposed, (), ((identity, closure),))
+        await _cas_parent(db, parent, values)
+        return {"job": _serialize(await jobs._fetch(db, parent.run_identity)),
+            "manifest": published.model_dump(mode="json"), "closure": closure.model_dump(mode="json")}
+
+
+def assert_child_closed(parent, child, receipt):
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest
+    binding = child_binding(child)
+    closure = _protected_payload(parent, cleanup_checkpoint_id(binding, child.fencing_token), GeneralTaskToolClosureV1)
+    if (closure.invocation_id != child.run_identity or closure.child_fence != child.fencing_token
+        or closure.original_binding_digest != _digest(binding.model_dump(mode="json"))
+        or closure.input_digest != binding.input_digest or closure.descriptor_digest != binding.descriptor_digest
+        or closure.outcome not in {"returned", "approval_precontact"}
+        or receipt.child_job_id != child.run_identity or receipt.child_fence != child.fencing_token
+        or receipt.cleanup_receipt_digest != _digest(closure.model_dump(mode="json"))):
+        raise DurableJobLeaseError("native child requires canonical original callback closure")
+
+
+async def wait_native_approval(jobs, child_id, *, owner, fencing_token,
+    expected_parent_revision, producer_witness, tool_name, approval_context):
+    """Publish only the original callback's positively proven precontact wait."""
+    from src.native_tools.task_adapters import verify_task_tool_closure
+    from src.approval.repository import approval_repository
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.work_board.general_task_runtime_artifacts import stage_task_artifact
+    from src.work_board.contracts import GeneralTaskStepReceiptV1
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest, _canonical, _serialize, _utc_now, _job_has_unsafe_effects
+    async with jobs._session() as db:
+        await _begin_sqlite_immediate(db)
+        child = await jobs._fetch(db, child_id)
+        jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
+        await assert_general_task_child_current(db, child)
+        binding = child_binding(child)
+        parent, task, attempt, previous, _ = await _current(jobs, db, binding.parent_job_id)
+        _assert_joint_manifest(parent, task, attempt, previous)
+        closure = verify_task_tool_closure(producer_witness, binding=binding, fencing_token=fencing_token)
+        if (parent.revision != expected_parent_revision or closure.outcome != "approval_precontact"
+            or closure.approval_id is None or not isinstance(approval_context, dict)
+            or approval_context.get("workflow_run_identity") != child_id):
+            raise DurableJobLeaseError("native approval requires exact original no-contact callback")
+        old_receipt = _step_receipt(previous, binding.step_id)
+        effects = json.loads(child.effect_receipts_json or "[]")
+        effect_id = "general:" + binding.step_id + ":" + str(fencing_token)
+        intents = [item for item in effects if item.get("effect_id") == effect_id]
+        if (len(intents) != 1 or intents[0].get("status") != "intent"
+            or intents[0].get("receipt_kind") != "effect"
+            or intents[0].get("effect_type") != "general_tool_call"
+            or intents[0].get("details", {}).get("input_digest") != binding.input_digest
+            or _job_has_unsafe_effects([item for item in effects if item.get("effect_id") != effect_id])):
+            raise DurableJobLeaseError("native approval cannot settle contacted or foreign effects")
+        closure_digest = _digest(closure.model_dump(mode="json"))
+        no_contact = {**intents[0], "receipt_kind": "readback", "status": "succeeded",
+            "content_sha256": closure_digest, "readback_id": "native-no-contact:" + _digest([child_id, fencing_token]),
+            "verified_at": _utc_now().isoformat(), "recorded_at": _utc_now().isoformat(),
+            "reconciled": True, "reconciliation_status": "resolved",
+            "details": {**intents[0].get("details", {}), "never_contacted": True,
+                "verified": True, "approval_precontact": True, "approval_id": closure.approval_id}}
+        effects = [no_contact if item.get("effect_id") == effect_id else item for item in effects]
+        receipt = GeneralTaskStepReceiptV1.model_validate(old_receipt.model_dump(mode="json") | {
+            "status": "awaiting_approval", "contact_state": "not_contacted", "approval_id": closure.approval_id,
+            "effect_receipt_digest": _digest(effects), "cleanup_receipt_digest": closure_digest})
+        staged = stage_task_artifact(parent_job_id=parent.run_identity,
+            creation_digest=binding.creation_digest, payload=receipt)
+        proposed = _phase_successor(previous, phase="approval_wait", task_revision=task.task_revision + 1,
+            job_fence=parent.fencing_token, board_fence=attempt.fencing_token)
+        refs = dict(zip(previous.step_ids, zip(previous.step_receipt_artifact_ids,
+            previous.step_receipt_digests, previous.step_receipt_schemas)))
+        refs[binding.step_id] = (staged.reference.artifact_id, staged.reference.digest, "StepReceipt.v1")
+        steps = sorted(refs)
+        proposed = proposed.model_copy(update={"step_ids": steps,
+            "step_receipt_artifact_ids": [refs[key][0] for key in steps],
+            "step_receipt_digests": [refs[key][1] for key in steps],
+            "step_receipt_schemas": [refs[key][2] for key in steps]})
+        approval = await db.get(ApprovalRequest, closure.approval_id)
+        if approval is None:
+            raise DurableJobLeaseError("original native approval row is unavailable")
+        witness = GeneralTaskApprovalTransitionV1(original_binding=binding,
+            original_binding_digest=_digest(binding.model_dump(mode="json")), original_claim_fence=fencing_token,
+            waiting_child_fence=fencing_token, current_child_fence=fencing_token,
+            approval_id=approval.id, approval_fingerprint=approval.fingerprint,
+            approval_context_digest=_digest(approval_context), no_contact_effect_digest=_digest(effects),
+            awaiting_receipt=staged.reference, cleanup_receipt_digest=closure_digest,
+            phase="approval_wait", phase_revision=proposed.phase_revision, phase_digest=proposed.phase_digest,
+            manifest_revision=proposed.manifest_revision, task_revision=proposed.task_revision,
+            board_fence=proposed.board_fence, job_fence=proposed.job_fence)
+        _validate_staged_refs(previous, proposed, (staged,))
+        published, values = _published_proofs(parent, proposed, (staged,), (
+            (cleanup_checkpoint_id(binding, fencing_token), closure), (approval_checkpoint_id(binding), witness)))
+        await _cas_board(db, task, attempt, status=WorkBoardStatus.blocked,
+            reason="general_task_approval_required", owner=None, expiry=None, advance_fence=False)
+        await _cas_parent(db, parent, {**values, "failure_reason": "general_task_approval_required"})
+        await _cas_parent(db, child, {"status": "paused", "failure_reason": "general_task_approval_required",
+            "lease_owner": None, "lease_expires_at": None, "effect_receipts_json": _canonical(effects)})
+        attached = await approval_repository.attach_general_task_native_child_wait_binding_in_session(db,
+            approval.id, binding=witness, tool_name=tool_name, approval_context=approval_context)
+        if attached is None:
+            raise DurableJobLeaseError("native approval scope changed before wait adoption")
+        return {"child": _serialize(await jobs._fetch(db, child_id)),
+            "job": _serialize(await jobs._fetch(db, parent.run_identity)),
+            "manifest": published.model_dump(mode="json"), "transition": witness.model_dump(mode="json"),
+            "receipt": receipt.model_dump(mode="json")}
+
+
+async def resume_native_approval(jobs, child_id, *, operator_owner,
+    expected_task_revision, expected_parent_revision, expected_manifest_revision, approval_id):
+    """The sole same-attempt reclaim is bound to the canonical approved wait."""
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.work_board.contracts import WorkBoardOwner, GeneralTaskStepReceiptV1
+    from src.work_board.general_task_runtime_artifacts import stage_task_artifact
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest, _serialize, _utc_now, _job_has_unsafe_effects
+    async with jobs._session() as db:
+        await _begin_sqlite_immediate(db)
+        child = await jobs._fetch(db, child_id)
+        binding = child_binding(child)
+        parent, task, attempt, previous, _ = await _current(jobs, db, binding.parent_job_id)
+        _assert_joint_manifest(parent, task, attempt, previous)
+        witness, approval = await verify_native_approval_transition(db, child, parent)
+        effects = json.loads(child.effect_receipts_json or "[]")
+        if (type(operator_owner) is not WorkBoardOwner
+            or operator_owner.principal_id != binding.owner_principal_id
+            or operator_owner.session_id != binding.original_root_id
+            or parent.revision != expected_parent_revision or task.task_revision != expected_task_revision
+            or previous.manifest_revision != expected_manifest_revision
+            or witness.phase != "approval_wait" or witness.approval_id != approval_id
+            or approval.status != "approved" or child.status != "paused"
+            or child.failure_reason != "general_task_approval_required"
+            or child.lease_owner or child.lease_expires_at or child.attempt_count != 1
+            or parent.status != "paused" or parent.failure_reason != "general_task_approval_required"
+            or parent.lease_owner or parent.lease_expires_at
+            or task.status != WorkBoardStatus.blocked or task.block_reason != "general_task_approval_required"
+            or attempt.lease_owner or attempt.lease_expires_at
+            or _digest(effects) != witness.no_contact_effect_digest or _job_has_unsafe_effects(effects)):
+            raise DurableJobLeaseError("native exact approved wait changed; never replay")
+        next_fence = child.fencing_token + 1
+        proposed = _phase_successor(previous, phase="native_wait", task_revision=task.task_revision + 1,
+            job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)
+        transition = GeneralTaskApprovalTransitionV1.model_validate(witness.model_dump(mode="json") | {
+            "phase": "native_wait", "phase_revision": proposed.phase_revision,
+            "phase_digest": proposed.phase_digest, "manifest_revision": proposed.manifest_revision,
+            "task_revision": proposed.task_revision, "job_fence": proposed.job_fence,
+            "board_fence": proposed.board_fence, "current_child_fence": next_fence,
+            "approved_receipt_digest": approved_receipt_digest(approval, witness.approval_context_digest)})
+        old = _step_receipt(previous, binding.step_id)
+        receipt = GeneralTaskStepReceiptV1.model_validate(old.model_dump(mode="json") | {
+            "status": "running", "contact_state": "not_contacted", "child_fence": next_fence,
+            "phase_digest": proposed.phase_digest, "approval_binding_digest": _digest(transition.model_dump(mode="json")),
+            "cleanup_receipt_digest": None})
+        staged = stage_task_artifact(parent_job_id=parent.run_identity, creation_digest=binding.creation_digest, payload=receipt)
+        refs = dict(zip(previous.step_ids, zip(previous.step_receipt_artifact_ids,
+            previous.step_receipt_digests, previous.step_receipt_schemas)))
+        refs[binding.step_id] = (staged.reference.artifact_id, staged.reference.digest, "StepReceipt.v1")
+        steps = sorted(refs)
+        proposed = proposed.model_copy(update={"step_ids": steps,
+            "step_receipt_artifact_ids": [refs[key][0] for key in steps],
+            "step_receipt_digests": [refs[key][1] for key in steps],
+            "step_receipt_schemas": [refs[key][2] for key in steps]})
+        _validate_staged_refs(previous, proposed, (staged,))
+        published, values = _published_proofs(parent, proposed, (staged,), (
+            (approval_checkpoint_id(binding), transition),))
+        details = json.loads(approval.details_json)
+        prior_details = approval.details_json
+        details["general_task_wait_binding"] = transition.model_dump(mode="json")
+        changed = await db.execute(update(ApprovalRequest).where(
+            ApprovalRequest.id == approval.id, ApprovalRequest.status == "approved",
+            ApprovalRequest.fingerprint == approval.fingerprint,
+            ApprovalRequest.resolved_at == approval.resolved_at,
+            ApprovalRequest.details_json == prior_details,
+        ).values(details_json=json.dumps(details, sort_keys=True, separators=(",", ":")))
+            .execution_options(synchronize_session=False))
+        if changed.rowcount != 1:
+            raise DurableJobLeaseError("native approval decision changed before reclaim")
+        await _cas_board(db, task, attempt, status=WorkBoardStatus.blocked,
+            reason="general_task_native_wait", owner=None, expiry=None, advance_fence=True)
+        await _cas_parent(db, parent, {**values, "failure_reason": "general_task_native_wait",
+            "fencing_token": parent.fencing_token + 1})
+        runtime_owner = "general-task-native:" + child_id
+        expiry = min(binding.native_deadline_at, _utc_now() + timedelta(seconds=30))
+        await _cas_parent(db, child, {"status": "running", "failure_reason": None,
+            "fencing_token": next_fence, "lease_owner": runtime_owner,
+            "lease_expires_at": expiry, "heartbeat_at": _utc_now()})
+        return {"child": _serialize(await jobs._fetch(db, child_id)),
+            "job": _serialize(await jobs._fetch(db, parent.run_identity)),
+            "manifest": published.model_dump(mode="json"), "transition": transition.model_dump(mode="json"),
+            "receipt": receipt.model_dump(mode="json"), "runtime_owner": runtime_owner}
 
 
 async def _cas_parent(db, parent, values):
@@ -642,7 +1060,7 @@ async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, ow
         _assert_joint_manifest(parent, task, attempt, previous)
         child = await jobs._fetch(db, child_id)
         jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
-        await assert_general_task_child_phase_current(db, child)
+        effective = await assert_general_task_child_phase_current(db, child)
         binding = child_binding(child)
         receipt, _record = verify_staged_task_artifact(staged_artifact,
             parent_job_id=parent_id, creation_digest=previous.creation_digest)
@@ -655,7 +1073,8 @@ async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, ow
             or receipt.step_id != binding.step_id or receipt.plan_revision != binding.plan_revision
             or receipt.input_digest != binding.input_digest or receipt.descriptor_digest != binding.descriptor_digest
             or receipt.selected_grant_digest != binding.selected_grant_digest
-            or receipt.phase_digest != binding.phase_digest):
+            or receipt.phase_digest != effective.phase_digest
+            or receipt.approval_binding_digest != effective.approval_binding_digest):
             raise DurableJobLeaseError("general task receipt requires the actual original positive child claim")
         effects = json.loads(child.effect_receipts_json or "[]")
         if binding.step_id not in previous.step_ids and (receipt.status != "running"
@@ -736,11 +1155,8 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
                     or receipt.child_attempt_count != child.attempt_count
                     or not _verified_readback_exists(effects)):
                     raise DurableJobLeaseError("native child closure requires original verified readback")
-            elif child.attempt_count > 0:
-                # Cancellation of an asyncio.to_thread awaiter is not closure
-                # of its original callback. Until the reviewed sealed native
-                # completion receipt is present, this remains inspect-only.
-                raise DurableJobLeaseError("claimed native cancellation requires original callback closure proof")
+            if child.attempt_count > 0:
+                assert_child_closed(parent, child, _step_receipt(previous, binding.step_id))
         proposed = _phase_successor(previous, phase="operator_paused", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)
         published, values = _published_values(parent, proposed, ())
@@ -781,6 +1197,8 @@ async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_m
                     or receipt.child_job_id != child.run_identity or receipt.child_fence != child.fencing_token
                     or receipt.child_attempt_count != child.attempt_count or not _verified_readback_exists(effects)):
                     raise DurableJobLeaseError("general task successful child lacks original verified readback")
+            if child.attempt_count > 0:
+                assert_child_closed(parent, child, _step_receipt(previous, binding.step_id))
         expiry = min(previous.original_deadline_at, _as_utc(parent.deadline_at), _utc_now() + timedelta(seconds=30))
         proposed = _phase_successor(previous, phase="assembly", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)

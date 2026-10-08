@@ -346,6 +346,33 @@ class EvolutionRuntime:
         self._write(payload)
         return proposal
 
+    def record_task_lesson(self, *, proposal_id: str, owner_id: str, source_digest: str,
+                           candidate_digest: str, result: Literal["candidate_inert", "no_change"]) -> dict[str, Any]:
+        """Mirror content-free ordinary lesson evidence, without campaign gates.
+
+        MemoryProposal owns review/adoption; this receipt cannot execute or vote.
+        The separate namespace cannot enter historical harness transitions.
+        """
+        if result not in {"candidate_inert", "no_change"}:
+            raise EvolutionRuntimeError("unsupported task lesson result")
+        receipt = {"schema_version": "task_lesson_receipt.v1",
+            "proposal_id": _bounded_id(proposal_id, "proposal_id"),
+            "owner_id": _bounded_id(owner_id, "owner_id"),
+            "source_digest": _bounded_hash(source_digest, "source_digest"),
+            "candidate_digest": _bounded_hash(candidate_digest, "candidate_digest"),
+            "result": result, "behavior_changed": False, "provider_contacts": 0,
+            "spend_microusd": 0}
+        with self._locked():
+            payload = self._read()
+            receipts = payload.setdefault("task_lesson_receipts", {})
+            existing = receipts.get(proposal_id)
+            if existing is not None and existing != receipt:
+                raise EvolutionRuntimeError("task lesson receipt binding changed")
+            if existing is None:
+                receipts[proposal_id] = receipt
+                self._write(payload)
+            return receipt
+
     def create_proposal(
         self,
         *,

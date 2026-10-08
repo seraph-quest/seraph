@@ -26,6 +26,17 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Task lesson drafts (#1000): Planned on `develop`, implemented on the C3.1
+feature branch pending independent review.** The branch provides private,
+owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
+tool steps and explicit corrections, truthful failed-task provenance,
+authoritative source discovery and separately opted-in automatic proposals
+limited to two per owner/UTC day. Unsupported corrections produce explicit
+no-change. It makes no inference call, grants no trace-egress permission and
+does not infer a positive preference from success. Strategy adoption and
+next-task reuse are absent until the separately reviewed #1001 slice. See the
+[branch-local operator contract](./12-current-app-guide.md#task-lesson-drafts-c31-1000-branch-local).
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

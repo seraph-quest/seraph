@@ -5,6 +5,7 @@ import { apiFetch } from "../../lib/api";
 import type { OpportunityPreferenceProposal, WorkBoardTask } from "../../types";
 import { actOnOpportunityPreference, inspectOpportunityPreference } from "../../lib/opportunityPreferences";
 import { createGuardianUuid } from "../../lib/guardianInbox";
+import { TaskLessonReview } from "./TaskLessonReview";
 
 type ProposalStatus =
   | "proposed"
@@ -422,6 +423,7 @@ function WorkBoardMemoryReview({
 
   return (
     <section className="rounded border border-white/10 p-3" aria-label="Verified outcome memory review">
+      <TaskLessonReview task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />
       <div className="flex items-center justify-between gap-2">
         <div className="font-semibold">Learning from this task</div>
         {ownsTask && task.capability_id !== "memory.opportunity-preference.v1" && (

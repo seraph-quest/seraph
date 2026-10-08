@@ -29,6 +29,7 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
 from src.auth.middleware import OperatorAuthMiddleware
@@ -476,13 +477,22 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     from src.browser.sessions import profiled_interaction_sessions
     await profiled_interaction_sessions.start()
+    # This reviewed optional lifecycle host has no policy/agent ownership yet.
+    # Missing Node/build or a failed child blocks only dependent Cordis work.
+    try:
+        await cordis_host.start()
+    except Exception:
+        logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
     try:
         yield
     finally:
         try:
-            await profiled_interaction_sessions.stop()
+            await cordis_host.stop()
         finally:
-            await goal_programme_service.stop()
+            try:
+                await profiled_interaction_sessions.stop()
+            finally:
+                await goal_programme_service.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
@@ -593,6 +603,7 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
+            "cordis_runtime": await cordis_host.refresh_status(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

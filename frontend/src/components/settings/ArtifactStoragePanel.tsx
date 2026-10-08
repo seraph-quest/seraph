@@ -17,6 +17,7 @@ import {
 } from "../../lib/modelFabric";
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 import { NearTextPanel } from "./NearTextPanel";
+import { CordisRuntimePanel } from "./CordisRuntimePanel";
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -612,6 +613,7 @@ export function ArtifactStoragePanel() {
   const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
   const [modelFabric, setModelFabric] = useState<ModelFabricSettingsStatus | null>(loadRetainedModelFabricSettings);
   const [modelFabricRuntime, setModelFabricRuntime] = useState<ModelFabricRuntimeStatus | null>(null);
+  const [cordisMetadata, setCordisMetadata] = useState<unknown>(null);
   const [modelFabricStale, setModelFabricStale] = useState(() => loadRetainedModelFabricSettings() !== null);
   const [modelFabricError, setModelFabricError] = useState<string | null>(null);
   const [canaryProfile, setCanaryProfile] = useState("");
@@ -679,7 +681,10 @@ export function ArtifactStoragePanel() {
     try {
       const [settingsPayload, runtimePayload] = await Promise.all([
         fetchJsonWithTimeout("/api/settings/model-fabric", 5_000),
-        fetchJsonWithTimeout("/api/runtime/status", 5_000),
+        fetchJsonWithTimeout("/api/runtime/status", 5_000).then(value => {
+          if (!isCancelled()) setCordisMetadata(value && typeof value === "object" && "cordis_runtime" in value ? value.cordis_runtime : null);
+          return value;
+        }).catch(error => { if (!isCancelled()) setCordisMetadata(null); throw error; }),
       ]);
       const nextSettings = normalizeModelFabricSettings(settingsPayload);
       const runtimeRecord = runtimePayload && typeof runtimePayload === "object" && !Array.isArray(runtimePayload)
@@ -910,6 +915,7 @@ export function ArtifactStoragePanel() {
 
   return (
     <div className="px-1">
+      <CordisRuntimePanel managed metadata={cordisMetadata} />
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
         Screenshot Folder
       </div>

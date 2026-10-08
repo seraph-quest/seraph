@@ -32,12 +32,24 @@ export interface GeneralTaskPlanRead {
   task_input: GeneralTaskInput; plan: TaskPlan | null; descriptors: GeneralToolDescriptor[]; proposal_error?: string;
   strategy: { status: string; reason: string | null }; no_learning: true;
   approval_pause?: GeneralTaskApprovalPause | null;
+  native_execution?: GeneralTaskNativeExecution;
+}
+export interface GeneralTaskNativeExecution {
+  cancellation?: { state: "pending" | "callback_closed_outcome_debt" | "fully_cancelled";
+    child_ids: string[]; callback_closed: boolean; effect_debt: boolean; reason: string };
+  phase: "native_ready" | "native_wait" | "assembly" | "operator_paused" | "approval_wait" | "cancelled" | "unknown_recovery" | "complete";
+  plan_revision: number; manifest_revision: number; original_deadline_at: string; native_deadline_at: string;
+  steps: { step_id: string; status: string; contact_state: string; invocation_id: string; plan_revision: number;
+    artifact_refs: { artifact_id: string; digest: string; schema_version: string }[] }[];
+  admitted_invocation_ids: string[]; remaining_steps: string[];
+  partial_output_refs: { artifact_id: string; digest: string; schema_version: string }[]; no_learning: true;
 }
 export interface GeneralTaskApprovalPause {
   approval_id: string; approval_status: "pending" | "approved" | "expired" | "denied" | "revoked" | "consumed" | "unavailable";
   step_id: string; tool_id: string; workflow_run_id: string; attempt_id: string;
   fencing_token: number; workflow_revision: number; original_deadline_at: string;
   can_resume: boolean; reason: string | null;
+  child_job_id?: string; expected_manifest_revision?: number;
 }
 export function canResumeGeneralTask(read: GeneralTaskPlanRead, task: WorkBoardTask): boolean {
   const pause = read.approval_pause, attempt = task.latest_attempt;
@@ -45,6 +57,12 @@ export function canResumeGeneralTask(read: GeneralTaskPlanRead, task: WorkBoardT
     && read.task_revision === task.task_revision && task.status === "blocked"
     && task.recovery_action === "approve_existing_run" && attempt && !attempt.ended_at
     && read.plan.steps.some(step => step.step_id === pause.step_id && step.tool_id === pause.tool_id)
+    && (!read.native_execution || (read.native_execution.phase === "approval_wait"
+      && pause.expected_manifest_revision === read.native_execution.manifest_revision
+      && Boolean(pause.child_job_id && read.native_execution.admitted_invocation_ids.includes(pause.child_job_id))
+      && read.native_execution.steps.some(step => step.step_id === pause.step_id
+        && step.invocation_id === pause.child_job_id && step.status === "awaiting_approval"
+        && step.contact_state === "not_contacted")))
     && pause.attempt_id === attempt.attempt_id && pause.workflow_run_id === attempt.workflow_run_id
     && pause.fencing_token === attempt.fencing_token && Date.parse(pause.original_deadline_at) > Date.now());
 }
@@ -67,6 +85,9 @@ export async function generalTaskRequest(path: string, body?: unknown, signal?: 
   return response.json();
 }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const artifactReference = (v: unknown): boolean => record(v) && typeof v.artifact_id === "string"
+  && v.artifact_id.length > 0 && v.artifact_id.length <= 128 && typeof v.digest === "string"
+  && /^[a-f0-9]{64}$/.test(v.digest) && typeof v.schema_version === "string";
 function validDocumentTaskBinding(value: unknown): value is DocumentTaskBinding {
   return record(value) && typeof value.artifact_ref === "string" && /^document-source:[0-9a-f-]{36}$/.test(value.artifact_ref)
     && typeof value.source_revision === "number" && Number.isSafeInteger(value.source_revision) && value.source_revision >= 1
@@ -88,6 +109,36 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     throw new Error("Plan readback did not match the current task revision. Refresh Work before reviewing.");
   }
   const descriptors = value.descriptors;
+  const native = value.native_execution;
+  if (native != null && (!record(native) || !["native_ready", "native_wait", "assembly", "operator_paused", "approval_wait", "cancelled", "unknown_recovery", "complete"].includes(String(native.phase))
+    || (native.cancellation != null && (!record(native.cancellation)
+      || !["pending", "callback_closed_outcome_debt", "fully_cancelled"].includes(String(native.cancellation.state))
+      || (native.cancellation.state === "fully_cancelled" ? native.phase !== "cancelled" : native.phase !== "unknown_recovery")
+      || !Array.isArray(native.cancellation.child_ids) || native.cancellation.child_ids.length > 16
+      || !native.cancellation.child_ids.every(id => typeof id === "string" && id.length > 0 && id.length <= 256)
+      || typeof native.cancellation.callback_closed !== "boolean" || typeof native.cancellation.effect_debt !== "boolean"
+      || typeof native.cancellation.reason !== "string" || native.cancellation.reason.length > 500
+      || (native.cancellation.state === "pending" ? native.cancellation.callback_closed
+        : !native.cancellation.callback_closed)
+      || (native.cancellation.state === "fully_cancelled" && native.cancellation.effect_debt)
+      || (native.cancellation.state === "callback_closed_outcome_debt" && !native.cancellation.effect_debt)))
+    || !Number.isSafeInteger(native.plan_revision) || Number(native.plan_revision) < 1 || Number(native.plan_revision) > 16
+    || !Number.isSafeInteger(native.manifest_revision) || Number(native.manifest_revision) < 1
+    || native.no_learning !== true || typeof native.original_deadline_at !== "string" || typeof native.native_deadline_at !== "string"
+    || !Number.isFinite(Date.parse(native.original_deadline_at)) || !Number.isFinite(Date.parse(native.native_deadline_at))
+    || Date.parse(native.native_deadline_at) > Date.parse(native.original_deadline_at)
+    || !Array.isArray(native.steps) || native.steps.length > 16
+    || native.steps.some(step => !record(step) || typeof step.step_id !== "string" || typeof step.invocation_id !== "string"
+      || !["admitted", "running", "awaiting_approval", "verified", "failed", "blocked", "cancelled", "unknown"].includes(String(step.status))
+      || !["not_contacted", "contact_started", "contact_denied", "unknown", "settled"].includes(String(step.contact_state))
+      || !Number.isSafeInteger(step.plan_revision) || Number(step.plan_revision) < 1 || Number(step.plan_revision) > 16
+      || !Array.isArray(step.artifact_refs) || step.artifact_refs.length > 16 || !step.artifact_refs.every(artifactReference))
+    || !Array.isArray(native.admitted_invocation_ids) || native.admitted_invocation_ids.length > 16
+    || !native.admitted_invocation_ids.every(id => typeof id === "string")
+    || !Array.isArray(native.remaining_steps) || native.remaining_steps.length > 16 || !native.remaining_steps.every(id => typeof id === "string")
+    || !Array.isArray(native.partial_output_refs) || native.partial_output_refs.length > 16 || !native.partial_output_refs.every(artifactReference))) {
+    throw new Error("Native task receipts are incomplete. Refresh Work before continuing.");
+  }
   const pause = value.approval_pause;
   if (pause != null && (!record(pause) || !["pending", "approved", "expired", "denied", "revoked", "consumed", "unavailable"].includes(String(pause.approval_status))
     || ["approval_id", "step_id", "tool_id", "workflow_run_id", "attempt_id"].some(k => typeof pause[k] !== "string" || !pause[k])
@@ -96,6 +147,12 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || typeof pause.original_deadline_at !== "string" || !Number.isFinite(Date.parse(pause.original_deadline_at))
     || typeof pause.can_resume !== "boolean" || !(pause.reason === null || typeof pause.reason === "string"))) {
     throw new Error("Approval pause receipt is incomplete. Refresh Work before continuing.");
+  }
+  if (record(pause) && ((pause.child_job_id !== undefined) !== (pause.expected_manifest_revision !== undefined)
+    || (pause.child_job_id !== undefined && (typeof pause.child_job_id !== "string" || !pause.child_job_id
+      || pause.child_job_id.length > 256 || !Number.isSafeInteger(pause.expected_manifest_revision)
+      || Number(pause.expected_manifest_revision) < 1)))) {
+    throw new Error("Native approval binding is incomplete. Refresh Work before continuing.");
   }
   if (descriptors.some(d => !record(d) || typeof d.tool_id !== "string" || typeof d.version !== "string"
     || !record(d.input_schema) || !record(d.output_schema) || !Array.isArray(d.effects) || !Array.isArray(d.permissions)

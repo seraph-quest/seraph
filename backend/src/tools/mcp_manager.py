@@ -569,6 +569,54 @@ class MCPManager:
             )
 
     @staticmethod
+    def _retain_advertised_task_schemas(client, tools, *, guarded_session):
+        """Retain this stock client's exact discovery metadata, without rediscovery."""
+        from mcp.types import Tool as AdvertisedTool
+        from src.work_board.general_task import validate_schema
+        from jsonschema.exceptions import SchemaError
+        try:
+            adapter = vars(client).get("_adapter")
+            sessions = vars(adapter).get("sessions")
+            cached = vars(adapter).get("mcp_tools")
+        except TypeError:
+            sessions, cached = None, None
+        valid_cache = (guarded_session and isinstance(sessions, list) and len(sessions) == 1
+            and isinstance(cached, list) and len(cached) == 1 and isinstance(cached[0], list)
+            and all(type(item) is AdvertisedTool for item in cached[0])
+            and len(cached[0]) == len(tools))
+        advertised = cached[0] if valid_cache else []
+        names = [item.name for item in advertised]
+        adapted_names = [getattr(tool, "name", None) for tool in tools]
+        for tool in tools:
+            reason, schema, input_schema = "mcp_task_advertised_schema_unavailable", None, None
+            name = getattr(tool, "name", None)
+            if valid_cache and isinstance(name, str) and names.count(name) == adapted_names.count(name) == 1:
+                original = next(item for item in advertised if item.name == name)
+                try:
+                    if not isinstance(original.outputSchema, dict):
+                        raise ValueError("advertised typed output required")
+                    if not isinstance(original.inputSchema, dict) or original.inputSchema.get("type") != "object":
+                        raise ValueError("advertised typed input required")
+                    check_task_output(original.inputSchema)
+                    _check_closed_task_schema(original.inputSchema)
+                    validate_schema(original.inputSchema, check_value=False)
+                    check_task_output(original.outputSchema)
+                    _check_closed_task_schema(original.outputSchema)
+                    validate_schema(original.outputSchema, check_value=False)
+                    schema = json.loads(json.dumps(original.outputSchema, allow_nan=False))
+                    input_schema = json.loads(json.dumps(original.inputSchema, allow_nan=False))
+                    reason = None
+                except (ValueError, TypeError, SchemaError):
+                    reason = "mcp_task_advertised_schema_invalid"
+            elif valid_cache:
+                reason = "mcp_task_advertised_identity_ambiguous"
+            # Keep structured_output=False and the original string-returning
+            # callback. This metadata grants no effect or permission.
+            tool.output_schema = schema
+            tool.seraph_advertised_input_schema = input_schema
+            tool.seraph_task_schema_block_reason = reason
+
+    @staticmethod
     def _secret_ref_fields_for_tool(tool: object) -> list[str]:
         inputs = getattr(tool, "inputs", None)
         if not isinstance(inputs, dict):
@@ -805,6 +853,8 @@ class MCPManager:
                 self._instrument_mcp_tool(tool, source_context)
                 for tool in client.get_tools()
             ]
+            self._retain_advertised_task_schemas(client, tools,
+                guarded_session=name in self._task_output_guards)
             self._clients[name] = client
             self._tools[name] = tools
             self._status[name] = {"status": "connected", "error": None}
@@ -945,11 +995,8 @@ class MCPManager:
                         # output_type="string" alone is never a typed result.
                         if getattr(tool, "output_schema", None) != output_schema:
                             continue
-                        advertised = getattr(tool, "inputs", {})
-                        if set(advertised) != set(input_schema["properties"]):
-                            continue
-                        if any(advertised[key].get("type") != value.get("type")
-                               for key, value in input_schema["properties"].items()):
+                        advertised = getattr(tool, "seraph_advertised_input_schema", None)
+                        if advertised != input_schema:
                             continue
                         source = get_tool_source_context(tool)
                         if (not source or source.get("server_name") != server_id

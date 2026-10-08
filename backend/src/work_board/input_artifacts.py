@@ -118,6 +118,7 @@ async def recheck_staged_input(db, owner, request, *, witness: InputArtifactWitn
         or hashlib.sha256(witness.payload).hexdigest() != row.payload_sha256):
         raise BoardError("pipeline_input_changed", "The staged private input changed", status_code=409)
     staged_input = _decode_and_validate_payload(row, witness.payload)
+    await _verify_general_proposal(db, row, staged_input)
     if _canonical_json(staged_input) != witness.input_bytes:
         raise BoardError("pipeline_input_changed", "The staged input envelope changed", status_code=409)
     return ResolvedInputArtifact(row, staged_input, witness.payload)
@@ -491,7 +492,14 @@ async def _validate_request(
     *,
     allow_scheduler: bool = False,
     publication_population=None,
+    general_task_publication=None,
 ) -> tuple[dict[str, Any], str, str]:
+    if general_task_publication is not None:
+        from src.work_board.general_task_proposal import recheck_proposal_publication
+        envelope = await recheck_proposal_publication(db, owner, general_task_publication)
+        if (request.capability_id != "agent.task.v1" or request.goal_id != envelope.task_input.goal_ref
+            or request.goal_revision != general_task_publication.goal_revision):
+            raise BoardError("general_task_publication_binding_changed", "Exact native task publication required", status_code=409)
     if request.capability_id == "memory.opportunity-preference.v1":
         from src.guardian.opportunity_preferences import PopulationWitness, recheck_population
         if (not isinstance(publication_population, PopulationWitness)
@@ -507,6 +515,7 @@ async def _validate_request(
             request.capability_id,
             request.input,
             allow_scheduler=allow_scheduler,
+            general_task_publication=general_task_publication,
         )
     except TypedInputError as exc:
         raise _raise_input_error(exc) from exc
@@ -556,6 +565,12 @@ def _decode_and_validate_payload(
     raw_input = envelope.get("input")
     if not isinstance(raw_input, Mapping):
         raise BoardError("input_artifact_input_invalid", "The input artifact input is invalid", status_code=409)
+    if row.capability_id == "agent.task.v1":
+        from src.work_board.general_task_proposal import stored_scan_input
+        from src.work_board.contracts import GeneralTaskEnvelope
+        scan = stored_scan_input(row, raw_input)
+        validate_capability_input(row.capability_id, scan, allow_scheduler=allow_scheduler)
+        return GeneralTaskEnvelope.model_validate(raw_input).model_dump(mode="json", exclude_none=True)
     try:
         return validate_capability_input(
             row.capability_id,
@@ -564,6 +579,15 @@ def _decode_and_validate_payload(
         )
     except TypedInputError as exc:
         raise _raise_input_error(exc) from exc
+
+
+async def _verify_general_proposal(db, row, parsed):
+    if row.capability_id != "agent.task.v1" or parsed.get("proposal_group") is None:
+        return
+    from src.work_board.contracts import GeneralTaskEnvelope
+    from src.work_board.general_task_proposal import seal_proposal_publication
+    await seal_proposal_publication(db, WorkBoardOwner(principal_id=row.owner_principal_id,
+        session_id=row.owner_session_id), GeneralTaskEnvelope.model_validate(parsed), goal_revision=row.goal_revision)
 
 
 async def _finalize_pending(
@@ -583,6 +607,7 @@ async def _finalize_pending(
     )
     if inputs is not None and parsed != dict(inputs):
         raise BoardError("input_artifact_digest_mismatch", "The input artifact input changed", status_code=409)
+    await _verify_general_proposal(db, row, parsed)
     row.revision = max(int(row.revision), 1) + 1
     row.metadata_digest = _metadata_digest(row)
     await db.execute(
@@ -804,6 +829,7 @@ async def prepare_input_artifact(
     allow_scheduler: bool = False,
     retention_deadline: datetime | None = None,
     publication_population=None,
+    general_task_publication=None,
 ) -> InputArtifactMetadata:
     """Reserve, write, reread, and verify one deterministic input artifact.
 
@@ -825,6 +851,7 @@ async def prepare_input_artifact(
         request,
         allow_scheduler=allow_scheduler,
         publication_population=publication_population,
+        general_task_publication=general_task_publication,
     )
     if retention_deadline is not None:
         schedule_invocation = inputs.get("invocation_uuid") if isinstance(inputs, Mapping) else None
@@ -876,6 +903,9 @@ async def prepare_input_artifact(
             authored_replay=(tuple(str(getattr(staged_row,column.name)) for column in staged_row.__table__.columns),parsed)
 
     await _begin_immediate(db)
+    if general_task_publication is not None:
+        from src.work_board.general_task_proposal import recheck_proposal_publication
+        await recheck_proposal_publication(db, owner, general_task_publication)
     existing = (
         await db.execute(
             select(WorkBoardInputArtifact).where(
@@ -1031,6 +1061,7 @@ async def resolve_input_artifact_for_task(
         raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
     payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
     parsed = _decode_and_validate_payload(row, payload)
+    await _verify_general_proposal(db, row, parsed)
     return ResolvedInputArtifact(row=row, input=parsed, payload=payload)
 
 

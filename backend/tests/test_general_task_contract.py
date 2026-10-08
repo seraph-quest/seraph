@@ -51,6 +51,20 @@ class Registry:
         self.calls.append((descriptor, inputs, kwargs))
         return dict(inputs)
 
+    def _invoke_sync(self, descriptor, inputs, principal, job_id, fencing_token):
+        self.calls.append((descriptor, inputs, {"principal": principal,
+            "job_id": job_id, "fencing_token": fencing_token}))
+        return dict(inputs)
+
+    def begin_invocation(self, descriptor, inputs, *, principal, job_id, fencing_token):
+        # Literal owned callback fixture uses the real original-thread closure
+        # producer; it does not manufacture a successful closure receipt.
+        import asyncio
+        from src.native_tools.task_adapters import ToolRegistry, TaskToolInvocation
+        return TaskToolInvocation(asyncio.create_task(asyncio.to_thread(
+            ToolRegistry._invoke_with_closure, self, descriptor, inputs,
+            principal, job_id, fencing_token)))
+
 
 def request(registry=None, *, steps=None):
     registry = registry or Registry()
@@ -70,6 +84,49 @@ def test_closed_roundtrip_and_utf8_bounds():
         GeneralTaskInput.model_validate({**model.input.model_dump(), "intent": "😀" * 3000})
     with pytest.raises(ValidationError):
         GeneralTaskCreate.model_validate({**model.model_dump(), "owner": "forged"})
+
+
+def test_native_resume_requires_exact_paired_child_and_manifest_scope():
+    from src.work_board.contracts import GeneralTaskResume
+    root = dict(expected_revision=1, expected_plan_revision=1, workflow_run_id='original-parent',
+        attempt_id='original-attempt', fencing_token=1, workflow_revision=1, approval_id='original-approval')
+    legacy = GeneralTaskResume.model_validate(root)
+    assert legacy.child_job_id is legacy.expected_manifest_revision is None
+    native = GeneralTaskResume.model_validate({**root, 'child_job_id': 'original-child',
+        'expected_manifest_revision': 2})
+    assert native.workflow_run_id == legacy.workflow_run_id and native.attempt_id == legacy.attempt_id
+    assert GeneralTaskResume.model_validate_json(native.model_dump_json()) == native
+    for changed in ({'child_job_id': 'original-child'}, {'expected_manifest_revision': 2},
+        {'child_job_id': '', 'expected_manifest_revision': 2},
+        {'child_job_id': 'original-child', 'expected_manifest_revision': 0},
+        {'child_job_id': 'original-child', 'expected_manifest_revision': 2, 'runtime_owner': 'forged'}):
+        with pytest.raises(ValidationError):
+            GeneralTaskResume.model_validate({**root, **changed})
+
+
+def test_native_operator_action_values_remain_closed():
+    from src.work_board.contracts import WorkBoardAction
+    assert WorkBoardAction('pause') is WorkBoardAction.pause
+    assert WorkBoardAction('resume') is WorkBoardAction.resume
+    for value in ('paused', 'resume_child', 'force_resume'):
+        with pytest.raises(ValueError):
+            WorkBoardAction(value)
+
+
+def test_precontact_closure_requires_original_callback_fingerprint_only():
+    from src.work_board.contracts import GeneralTaskToolClosureV1
+    base = dict(original_binding_digest='a' * 64, invocation_id='original-child', child_fence=1,
+        descriptor_digest='b' * 64, input_digest='c' * 64, outcome='approval_precontact', approval_id='approval')
+    with pytest.raises(ValidationError):
+        GeneralTaskToolClosureV1.model_validate(base)
+    closure = GeneralTaskToolClosureV1.model_validate({**base, 'approval_fingerprint': 'd' * 64})
+    assert closure.approval_fingerprint == 'd' * 64
+    for outcome in ('returned', 'unknown'):
+        changed = {**base, 'outcome': outcome, 'approval_id': None, 'approval_fingerprint': 'd' * 64}
+        if outcome == 'returned':
+            changed['output_digest'] = 'e' * 64
+        with pytest.raises(ValidationError):
+            GeneralTaskToolClosureV1.model_validate(changed)
 
 
 def test_lifecycle_cleans_up_when_startup_fails_before_readiness():

@@ -9,6 +9,59 @@ from src.audit.repository import audit_repository
 from src.tools.mcp_manager import MCPManager
 
 
+@pytest.mark.parametrize("case", ["valid", "missing", "malformed", "duplicate", "sanitized_collision", "sanitized_name", "cross_session", "unguarded", "unsafe_schema", "oversized_schema", "missing_output_schema", "open_input", "unbounded_input", "reference_input"])
+def test_stock_discovery_output_schema_is_exact_closed_and_detached(case):
+    from types import SimpleNamespace
+    from mcp.types import Tool
+    schema = {"type": "object", "properties": {"value": {"type": "string", "maxLength": 128}},
+        "required": ["value"], "additionalProperties": False}
+    input_schema = {"type": "object", "properties": {"query": {"type": "string", "maxLength": 128}},
+        "required": ["query"], "additionalProperties": False}
+    original = Tool(name="repo_read", inputSchema=input_schema, outputSchema=schema)
+    adapted = SimpleNamespace(name="repo_read", output_type="string", forward=lambda: '{"value":"literal"}')
+    cache = [[original]]
+    tools, sessions = [adapted], [object()]
+    if case == "missing":
+        cache = None
+    elif case == "malformed":
+        cache = [[{"name": "repo_read", "outputSchema": schema}]]
+    elif case == "duplicate":
+        cache[0].append(original.model_copy())
+        tools.append(SimpleNamespace(name="repo_read", output_type="string"))
+    elif case == "sanitized_collision":
+        cache[0].append(original.model_copy(update={"name": "repo-read"}))
+        tools.append(SimpleNamespace(name="repo_read", output_type="string"))
+    elif case == "sanitized_name":
+        original.name = "repo-read"
+    elif case == "cross_session":
+        sessions.append(object())
+        cache.append([original])
+    elif case == "unsafe_schema":
+        original.outputSchema = {"type": "object", "$ref": "https://unowned.invalid/schema"}
+    elif case == "oversized_schema":
+        original.outputSchema["properties"]["value"]["maxLength"] = 1000000
+    elif case == "missing_output_schema":
+        original.outputSchema = None
+    elif case == "open_input":
+        original.inputSchema["additionalProperties"] = True
+    elif case == "unbounded_input":
+        original.inputSchema["properties"]["query"].pop("maxLength")
+    elif case == "reference_input":
+        original.inputSchema = {"$ref": "https://unowned.invalid/schema"}
+    client = SimpleNamespace(_adapter=SimpleNamespace(sessions=sessions, mcp_tools=cache))
+    MCPManager._retain_advertised_task_schemas(client, tools, guarded_session=case != "unguarded")
+    assert adapted.output_type == "string" and adapted.forward() == '{"value":"literal"}'
+    if case == "valid":
+        assert adapted.output_schema == schema and adapted.seraph_task_schema_block_reason is None
+        assert adapted.seraph_advertised_input_schema == input_schema
+        original.inputSchema["properties"]["query"]["maxLength"] = 1
+        assert adapted.seraph_advertised_input_schema["properties"]["query"]["maxLength"] == 128
+        original.outputSchema["properties"]["value"]["maxLength"] = 1
+        assert adapted.output_schema["properties"]["value"]["maxLength"] == 128
+    else:
+        assert adapted.output_schema is None and adapted.seraph_task_schema_block_reason.startswith("mcp_task_advertised_")
+
+
 class TestMCPManager:
     def test_empty_init(self):
         mgr = MCPManager()

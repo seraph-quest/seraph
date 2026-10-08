@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.ownership import _current_root
@@ -113,13 +113,34 @@ class TaskContinuityService:
             if type(metadata.get("task_revision")) is int:
                 item["revision"] = metadata["task_revision"]
             timeline.append(item)
-        comments = list((await db.execute(select(WorkBoardComment).where(
+        comment_rows = list((await db.execute(select(WorkBoardComment, WorkBoardEvent.metadata_json).join(
+            WorkBoardEvent,
+            func.json_extract(WorkBoardEvent.metadata_json, "$.comment_id") == WorkBoardComment.comment_id,
+        ).where(
             WorkBoardComment.task_id == task_id,
             WorkBoardComment.owner_principal_id == read_owner.principal_id,
             WorkBoardComment.owner_session_id == read_owner.session_id,
             WorkBoardComment.author_principal_id == read_owner.principal_id,
             WorkBoardComment.author_session_id == read_owner.session_id,
-        ).order_by(WorkBoardComment.created_at.desc(), WorkBoardComment.comment_id).limit(5))).scalars())
+            WorkBoardEvent.task_id == task_id,
+            WorkBoardEvent.owner_principal_id == read_owner.principal_id,
+            WorkBoardEvent.owner_session_id == read_owner.session_id,
+            WorkBoardEvent.actor_principal_id == read_owner.principal_id,
+            WorkBoardEvent.actor_session_id == read_owner.session_id,
+            WorkBoardEvent.kind == "comment.created",
+            func.json_extract(WorkBoardEvent.metadata_json, "$.provenance") == "operator",
+        ).order_by(WorkBoardComment.created_at.desc(), WorkBoardComment.comment_id).limit(5))).all())
+        comments = []
+        seen_comments = set()
+        for comment, raw_metadata in comment_rows:
+            metadata = _load(raw_metadata, {})
+            digest = hashlib.sha256(comment.body.encode()).hexdigest()
+            if (isinstance(metadata, dict) and metadata.get("body_digest") == digest
+                and comment.comment_id not in seen_comments):
+                comments.append(comment)
+                seen_comments.add(comment.comment_id)
+        # Integrity hashes stay in the private local readback packet. They are
+        # content-derived and confer no model-egress permission.
         corrections = [{"ref": f"task-comment:{comment.comment_id}",
             "digest": hashlib.sha256(comment.body.encode()).hexdigest(),
             "at": comment.created_at.isoformat(), "body": comment.body[:500],
@@ -211,7 +232,7 @@ class TaskContinuityService:
             source_egress=source_egress,
             assistant_context_state="current_scope_review_required" if recovered else (
                 "ready_reference_only" if AuthorityGrant.MODEL_INFERENCE in operator.principal.grants else "current_model_grant_required"),
-            truncated=len(comments) > 4 or len(task.body) > 1500 or len(task.block_reason or "") > 500 or any(len(c.body) > 500 for c in comments[:4]) or len(events) > MAX_TIMELINE or len(conversations) > MAX_CONTEXT_REFS or len(verified) > MAX_CONTEXT_REFS,
+            truncated=len(comment_rows) > 4 or len(task.body) > 1500 or len(task.block_reason or "") > 500 or any(len(c.body) > 500 for c in comments[:4]) or len(events) > MAX_TIMELINE or len(conversations) > MAX_CONTEXT_REFS or len(verified) > MAX_CONTEXT_REFS,
         )
 
     async def for_chat(self, db: AsyncSession, conversation_id: str, principal: TrustPrincipal | None) -> str:
@@ -246,7 +267,7 @@ class TaskContinuityService:
         projection = {"task_id": packet.task_id, "goal_id": packet.goal_id, "revision": packet.revision,
             "status": packet.status, "task_title": packet.task_title,
             "remaining_work": packet.remaining_work, "blocker_text": packet.blocker_text,
-            "operator_corrections": [{key: correction[key] for key in ("ref", "digest", "at", "classification", "model_context_allowed")} for correction in packet.corrections],
+            "operator_corrections": [{key: correction[key] for key in ("ref", "at", "classification", "model_context_allowed")} for correction in packet.corrections],
             "verified_artifact_refs": packet.verified_artifact_refs,
             "selected_source_refs": allowed_refs, "open_questions": packet.open_questions,
             "next_actions": packet.next_actions, "unresolved_effect": packet.unresolved_effect}

@@ -2870,7 +2870,7 @@ async def add_work_board_comment(request: Request, task_id: str, body: WorkBoard
     operator = _operator(request)
     try:
         async with get_session() as db:
-            comment, event = await repository.add_comment(db, _owner(operator), task_id, body)
+            comment, event = await repository.add_comment(db, _owner(operator), task_id, body, provenance="operator")
             payload = {"comment": await _safe_comment_payload(comment, db=db)}
         return payload
     except BoardError as exc:

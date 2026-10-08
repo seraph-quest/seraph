@@ -46,6 +46,14 @@ async def task(client):
     return g, response.json()["task"]
 
 
+async def operator_comment(client, t, body):
+    response = await client.post(f"/api/work-board/tasks/{t['task_id']}/comments", headers=HEADERS,
+        json={"expected_revision": t["task_revision"], "body": body})
+    assert response.status_code == 200, response.text
+    t["task_revision"] += 1
+    return response.json()["comment"]["comment_id"]
+
+
 async def read(client, t):
     return await client.get(f"/api/sessions/task-context/{t['task_id']}")
 
@@ -169,10 +177,6 @@ async def test_questions_unknown_and_corrections_are_separate_bounded_metadata(c
         row.block_kind = "needs_input"
         row.block_reason = "Supply the reviewed recipient"
         row.body = "Remaining: verify the recipient before scheduling"
-        db.add(WorkBoardComment(comment_id="owned-correction", task_id=row.task_id,
-            owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
-            author_principal_id=row.owner_principal_id, author_session_id=row.owner_session_id,
-            body="PRIVATE CORRECTION: change the recipient to Alice"))
         db.add(WorkBoardComment(comment_id="foreign-correction", task_id=row.task_id,
             owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
             author_principal_id="foreign-owner", author_session_id=row.owner_session_id,
@@ -182,13 +186,14 @@ async def test_questions_unknown_and_corrections_are_separate_bounded_metadata(c
                 owner_session_id=row.owner_session_id, actor_principal_id=row.owner_principal_id,
                 kind="comment.created", metadata_json=json.dumps({"body": "PRIVATE", "task_revision": row.task_revision})))
         db.add(WorkBoardAttempt(task_id=row.task_id, outcome="unknown_external_effect"))
+    correction_id = await operator_comment(client, t, "PRIVATE CORRECTION: change the recipient to Alice")
     response = await read(client, t)
     assert response.status_code == 200, response.text
     packet = response.json()
     assert packet["open_questions"] and packet["next_actions"]
     assert packet["unresolved_effect"] == "unknown_external_effect"
     assert packet["truncated"] and len(packet["timeline"]) == 16
-    assert packet["correction_refs"] == ["task-comment:owned-correction"]
+    assert packet["correction_refs"] == [f"task-comment:{correction_id}"]
     assert packet["corrections"][0]["body"] == "PRIVATE CORRECTION: change the recipient to Alice"
     assert packet["corrections"][0]["model_context_allowed"] is False
     assert packet["remaining_work"] == ["Remaining: verify the recipient before scheduling"]
@@ -198,8 +203,9 @@ async def test_questions_unknown_and_corrections_are_separate_bounded_metadata(c
     prompt = await session_manager.get_task_continuity_context("new-chat", trust_principal=bind_operator_principal(operator, "new-chat"))
     assert "Remaining: verify the recipient before scheduling" in prompt
     assert "Supply the reviewed recipient" in prompt
-    assert "task-comment:owned-correction" in prompt and "Review operator corrections locally" in prompt
+    assert f"task-comment:{correction_id}" in prompt and "Review operator corrections locally" in prompt
     assert "PRIVATE CORRECTION" not in prompt and "FOREIGN_CORRECTION" not in prompt
+    assert packet["corrections"][0]["digest"] not in prompt and '"digest"' not in prompt
     assert len(response.content) < 16_384
 
 
@@ -357,10 +363,7 @@ async def test_actual_rest_and_ws_pre_run_guardian_receive_narrowed_principal(cl
         row = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == t["task_id"]))).scalar_one()
         row.body = "TASK_REMAINING_SENTINEL verify recipient before scheduling"
         row.block_reason = "TASK_BLOCKER_SENTINEL supply recipient"
-        db.add(WorkBoardComment(comment_id="transport-correction", task_id=row.task_id,
-            owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
-            author_principal_id=row.owner_principal_id, author_session_id=row.owner_session_id,
-            body="PRIVATE_CORRECTION_SENTINEL change recipient"))
+    correction_id = await operator_comment(client, t, "PRIVATE_CORRECTION_SENTINEL change recipient")
     if recovered:
         await enroll(client)
         await client.post("/api/auth/logout", headers=HEADERS)
@@ -425,8 +428,9 @@ async def test_actual_rest_and_ws_pre_run_guardian_receive_narrowed_principal(cl
             assert "CANONICAL TASK CONTINUITY" in history and t["task_id"] in history
             assert "no execution authority" in history
             assert "TASK_REMAINING_SENTINEL verify recipient before scheduling" in history
-            assert "task-comment:transport-correction" in history
+            assert f"task-comment:{correction_id}" in history
         assert "PRIVATE SOURCE TEXT" not in history and "PRIVATE_CORRECTION_SENTINEL" not in history
+        assert hashlib.sha256(b"PRIVATE_CORRECTION_SENTINEL change recipient").hexdigest() not in history
 
 
 @pytest.mark.parametrize("linked", [False, True])
@@ -474,6 +478,57 @@ async def test_actual_guardian_prompt_denies_current_and_recent_history_without_
         trust_principal=principal)
     assert "DENIED_TRANSCRIPT_SENTINEL" not in state.to_prompt_block()
     assert state.recent_sessions_summary == "" and state.current_session_history == ""
+
+
+async def test_correction_provenance_is_server_owned_and_worker_flood_cannot_hide_operator_input(client, async_db, monkeypatch):
+    from src.work_board.contracts import WorkBoardCommentCreate, WorkBoardOwner
+    from src.work_board.tools import WorkBoardWorkerTools, WorkBoardWorkerComment
+    _, t = await task(client)
+    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    refs = []
+    for index in range(4):
+        refs.append("task-comment:" + await operator_comment(client, t, f"Explicit operator correction {index}"))
+    spoof = await client.post(f"/api/work-board/tasks/{t['task_id']}/comments", headers=HEADERS,
+        json={"expected_revision": t["task_revision"], "body": "client spoof", "provenance": "operator"})
+    assert spoof.status_code == 422
+    worker = WorkBoardWorkerTools(session_provider=async_db)
+    # Admission is isolated; the actual tool/repository/event writer remains real.
+    monkeypatch.setattr(worker, "_bound", AsyncMock(return_value=(owner, None, None, None)))
+    for index in range(12):
+        result = await worker.comment(WorkBoardWorkerComment(task_id=t["task_id"], attempt_id="literal-attempt",
+            expected_task_revision=t["task_revision"], board_fencing_token=1,
+            workflow_run_id="literal-workflow", workflow_fencing_token=1, body=f"WORKER_NOTE_SENTINEL {index}"))
+        t["task_revision"] = result["task_revision"]
+    async with async_db() as db:
+        unknown, event = await WorkBoardRepository().add_comment(db, owner, t["task_id"],
+            WorkBoardCommentCreate(expected_revision=t["task_revision"], body="UNKNOWN_NOTE_SENTINEL"))
+        assert json.loads(event.metadata_json)["provenance"] == "unknown"
+        t["task_revision"] += 1
+        # Existing review writer uses this canonical owner-attributed shape,
+        # without an authenticated operator comment.created provenance event.
+        db.add(WorkBoardComment(task_id=t["task_id"], owner_principal_id=owner.principal_id,
+            owner_session_id=owner.session_id, author_principal_id=owner.principal_id,
+            author_session_id=owner.session_id, body="Changes requested: REVIEW_NOTE_SENTINEL"))
+        worker_events = list((await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.task_id == t["task_id"],
+            WorkBoardEvent.kind == "comment.created"))).scalars())
+        assert sum(json.loads(event.metadata_json).get("provenance") == "worker" for event in worker_events) == 12
+    packet = (await read(client, t)).json()
+    assert set(packet["correction_refs"]) == set(refs)
+    assert len(packet["corrections"]) == 4
+    assert all("Explicit operator correction" in c["body"] for c in packet["corrections"])
+    assert "NOTE_SENTINEL" not in json.dumps(packet)
+    await continue_chat(client, t)
+    prompt = await session_manager.get_task_continuity_context("new-chat", trust_principal=bind_operator_principal(operator, "new-chat"))
+    assert all(ref in prompt for ref in refs)
+    assert "NOTE_SENTINEL" not in prompt and "Explicit operator correction" not in prompt
+    assert all(c["digest"] not in prompt for c in packet["corrections"])
+    # A body correction without an exact replacement provenance event invalidates
+    # the old correction identity instead of sending transformed private content.
+    async with async_db() as db:
+        row = await db.get(WorkBoardComment, refs[0].split(":", 1)[1])
+        row.body = "CHANGED_BODY_SENTINEL"
+    assert refs[0] not in (await read(client, t)).json()["correction_refs"]
 
 
 async def test_additive_migration_is_rerunnable_and_keeps_old_session(tmp_path):

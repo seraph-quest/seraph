@@ -110,9 +110,10 @@ export function SessionList() {
         <p>{packet.summary}</p>
         <p>Remaining work: {packet.remaining_work?.join(" ") || "None recorded"}</p>
         <p>Current blocker: {packet.blocker_text || "None recorded"}</p>
-        {packet.corrections?.map((correction) => <div key={correction.ref}>
+        <p>Only authenticated operator comments appear as corrections. Worker, review and older unclassified notes remain in Work.</p>
+        {packet.corrections?.filter((correction) => correction.classification === "local_only_operator_correction").map((correction) => <div key={correction.ref}>
           <p>Operator correction: {correction.body}</p>
-          <p>{correction.ref} · {correction.at} · Local review required; body excluded from assistant context.</p>
+          <p>{correction.ref} · {correction.at} · Local review required; body and integrity hash excluded from assistant context.</p>
         </div>)}
         {packet.ownership_access === "recovered_read_only" && <p>Recovered history is read-only. Current scope review is required for execution.</p>}
         <p>Verified outputs: {packet.verified_artifact_refs.length}</p>

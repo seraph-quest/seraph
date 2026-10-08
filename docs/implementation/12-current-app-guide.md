@@ -38,10 +38,13 @@ Root's owned task facts and permitted opaque references enter the next prompt.
 Selecting history grants no assistant access to its facts or sources. A selected
 source reference requires current packet adoption and current per-source model
 permission; private-source classification is independent from model permission.
-Up to four corrections authored by the original task owner and Root are readable
-locally with their canonical references. Correction bodies remain local-only;
-the assistant receives their IDs, digests and timestamps plus an explicit local
-review requirement. No correction body, source body or historical transcript is
+Up to four corrections recorded through the authenticated operator comment
+endpoint are readable locally with their canonical references. The packet checks
+original task owner/Root authorship and the matching canonical provenance event
+and current body integrity. Worker, review and older unclassified comments remain
+neutral task notes in Work. Correction bodies and integrity hashes remain
+local-only; the assistant receives their opaque IDs and timestamps plus an
+explicit local review requirement. No correction body, source body or historical transcript is
 copied into the task handoff. Ordinary current and recent chat transcript context
 also requires the live current narrowed chat principal, current owned
 conversation and model grant. Unscoped service/report calls receive no transcript

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Literal
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -2311,7 +2311,12 @@ class WorkBoardRepository:
         owner: WorkBoardOwner,
         task_id: str,
         request: WorkBoardCommentCreate,
+        *,
+        provenance: Literal["operator", "worker", "system"] | None = None,
     ) -> tuple[WorkBoardComment, WorkBoardEvent]:
+        # Server-owned provenance; never accepted from a comment request body.
+        if provenance not in {None, "operator", "worker", "system"}:
+            raise ValueError("invalid comment provenance")
         task = await self._owned_task(db, owner, task_id)
         expected = request.expected_revision
         if task.task_revision != expected:
@@ -2339,7 +2344,8 @@ class WorkBoardRepository:
             task,
             owner,
             kind="comment.created",
-            metadata={"comment_id": comment.comment_id, "body_digest": _text_digest(safe_body)},
+            metadata={"comment_id": comment.comment_id, "body_digest": _text_digest(safe_body),
+                "provenance": provenance or "unknown"},
         )
         return comment, event
 

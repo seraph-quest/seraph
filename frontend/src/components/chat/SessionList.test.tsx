@@ -38,14 +38,21 @@ async function chooseTask() {
 
 describe("task conversation continuity", () => {
   it("shows recovered read-only context, unanswered input, permitted action and Unknown separately", async () => {
+    mocks.read.mockResolvedValue({ ...packet, corrections: [...packet.corrections,
+      { ...packet.corrections[0], ref: "worker-note", classification: "worker_note", body: "WORKER_NOTE_SENTINEL" },
+      { ...packet.corrections[0], ref: "review-note", classification: "review_note", body: "REVIEW_NOTE_SENTINEL" },
+    ] });
     await chooseTask();
     expect(screen.getByText(/Remaining work: Verify the recipient before scheduling/)).toBeInTheDocument();
     expect(screen.getByText(/Operator correction: Change the recipient to Alice/)).toBeInTheDocument();
-    expect(screen.getByText(/Local review required; body excluded from assistant context/)).toBeInTheDocument();
+    expect(screen.getByText(/Local review required; body and integrity hash excluded from assistant context/)).toBeInTheDocument();
     expect(screen.getByText(/Recovered history is read-only/)).toBeInTheDocument();
     expect(screen.getByText(/Unanswered questions: What input remains/)).toBeInTheDocument();
     expect(screen.getByText(/Next permitted action: Review current scope/)).toBeInTheDocument();
     expect(screen.getByText(/Unresolved effect: Unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/Only authenticated operator comments appear as corrections/)).toBeInTheDocument();
+    expect(screen.queryByText(/WORKER_NOTE_SENTINEL|REVIEW_NOTE_SENTINEL/)).not.toBeInTheDocument();
+    expect(screen.queryByText("digest")).not.toBeInTheDocument();
     expect(screen.queryByText("opaque-private-source")).not.toBeInTheDocument();
   });
 

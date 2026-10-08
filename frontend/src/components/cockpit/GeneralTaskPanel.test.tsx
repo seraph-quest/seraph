@@ -123,3 +123,63 @@ it("retains a blocked proposal on the same card and saves its first valid inert 
   const body = JSON.parse(String(vi.mocked(apiFetch).mock.calls[2][1]?.body));
   expect(body.expected_plan_revision).toBe(0); expect(body.plan.revision).toBe(1);
 });
+
+const pausedTask = { ...task, status: "blocked", recovery_action: "approve_existing_run", latest_attempt: {
+  attempt_id: "attempt-one", workflow_run_id: "run-one", fencing_token: 4, ended_at: null,
+} } as WorkBoardTask;
+const pause = { approval_id: "approval-one", approval_status: "approved", step_id: "note", tool_id: "local.note",
+  workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4, workflow_revision: 9,
+  original_deadline_at: new Date(Date.now() + 600000).toISOString(), can_resume: true, reason: null };
+const pausedPlan = { ...plan, accepted: true, approval_pause: pause };
+it("continues only by explicit action with the exact approved existing run receipt", async () => {
+  const changed = vi.fn();
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(pausedPlan)).mockResolvedValueOnce(response({ task: { ...pausedTask, latest_attempt: { ...pausedTask.latest_attempt, fencing_token: 5 } } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} onChanged={changed} />);
+  const button = await screen.findByRole("button", { name: "Continue approved task run" });
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+  fireEvent.click(button);
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/tasks/task-one/plan/resume");
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ expected_revision: 2,
+    expected_plan_revision: 1, workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4,
+    workflow_revision: 9, approval_id: "approval-one" });
+});
+it.each(["pending", "denied", "expired", "revoked", "consumed", "unavailable"])("never continues a %s approval after reload", async approval_status => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, approval_pause: { ...pause, approval_status } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
+it.each([
+  { original_deadline_at: "2000-01-01T00:00:00Z" }, { attempt_id: "another-attempt" },
+  { workflow_run_id: "another-run" }, { fencing_token: 5 }, { can_resume: false },
+  { step_id: "another-step" },
+])("blocks stale or unbound approval readback %j", async change => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, approval_pause: { ...pause, ...change } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+});
+it("clears continuation after conflict or uncertain response and never replays it", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(pausedPlan)).mockRejectedValueOnce(Error("Connection lost"))
+    .mockResolvedValueOnce(response({ ...pausedPlan, approval_pause: { ...pause, approval_status: "consumed", can_resume: false } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue approved task run" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("never automatically replayed");
+  expect(screen.queryByRole("button", { name: "Continue approved task run" })).toBeNull();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh current task plan" }));
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+  expect(vi.mocked(apiFetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+it("requires fresh review after a revoked grant response", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(pausedPlan)).mockResolvedValueOnce(response({}, 409));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue approved task run" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("review again");
+  expect(screen.queryByRole("button", { name: "Continue approved task run" })).toBeNull();
+});
+it("does not expose continuation for an unknown-effect task even with an inconsistent approved pause", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response(pausedPlan));
+  render(<GeneralTaskPanel {...owner} task={{ ...pausedTask, recovery_action: "reconcile_external_effect" }} />);
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+});

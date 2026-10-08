@@ -211,6 +211,16 @@ class GeneralTaskPlanUpdate(ClosedTaskModel):
         return self
 
 
+class GeneralTaskResume(ClosedTaskModel):
+    expected_revision: int = Field(ge=1)
+    expected_plan_revision: int = Field(ge=1)
+    workflow_run_id: str = Field(min_length=1, max_length=256)
+    attempt_id: str = Field(min_length=1, max_length=128)
+    fencing_token: int = Field(ge=1)
+    workflow_revision: int = Field(ge=1)
+    approval_id: str = Field(min_length=1, max_length=128)
+
+
 class WorkBoardAction(str, Enum):
     promote = "promote"
     block = "block"

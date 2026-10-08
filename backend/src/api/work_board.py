@@ -2306,7 +2306,7 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
         ) from exc
 
 
-from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate
+from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
 
 
 @router.get("/general-tasks/tools")
@@ -2364,6 +2364,20 @@ async def update_general_task_plan(request: Request, task_id: str, body: General
             return {"task": await _safe_task_payload(task, db=db)}
     except BoardError as exc:
         _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/plan/resume")
+async def resume_general_task_plan(request: Request, task_id: str, body: GeneralTaskResume):
+    owner = _owner(_operator(request))
+    try:
+        task = await dispatcher.resume_general_task(owner, task_id, body)
+        async with get_session() as db:
+            return {"task": await _safe_task_payload(task, db=db)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail={"code": "general_task_resume_binding_changed",
+            "message": "Refresh the exact original task and approval state"}) from exc
 
 
 @router.get("/tasks/{task_id}")

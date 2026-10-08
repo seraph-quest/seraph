@@ -424,6 +424,16 @@ def _revision(run: WorkflowRunState) -> int:
     return max(int(getattr(run, "revision", 0) or 0), 0)
 
 
+def _general_task_approval_wait(run) -> bool:
+    if run.job_kind != "agent.task.v1":
+        return False
+    checkpoints = _json_load(run.checkpoint_receipts_json, [])
+    return run.failure_reason == "general_task_approval_required" or any(
+        isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        and item["payload"].get("phase") == "approval_precontact"
+        for item in checkpoints if isinstance(checkpoints, list))
+
+
 def _job_has_unsafe_effects(effects: Any) -> bool:
     """Return true when an effect ledger still needs external reconciliation."""
     for item in effects if isinstance(effects, list) else []:
@@ -510,6 +520,8 @@ def _verified_readback_exists(effects: Any) -> bool:
         if not _text(item.get("target_path")):
             continue
         details = item.get("details")
+        if isinstance(details, dict) and details.get("never_contacted") is True:
+            continue
         details_verified = isinstance(details, dict) and details.get("verified") is True
         goal_verified = isinstance(details, dict) and all(
             details.get(field_name) is True
@@ -3114,6 +3126,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         opportunity_preference_witness=None,
         near_text_witness=None,
         near_text_policy_scope=None,
+        _general_task_resume_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3125,6 +3138,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            general_resume_guard = (
+                to_status == "queued" and _general_task_approval_wait(preflight_run)
+            )
             near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
             if near_queue_guard or near_text_policy_scope is not None:
                 if to_status != "queued":
@@ -3155,13 +3171,29 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
             near_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard:
+            general_writer_started = False
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
                     near_writer_started = near_queue_guard
+                    general_writer_started = general_resume_guard
             run = await self._fetch(db, job_id)
+            if to_status == "queued" and _general_task_approval_wait(run):
+                if not general_writer_started or _general_task_resume_witness is None:
+                    raise DurableJobTransitionError(
+                        "general task approval resume requires current validated authority"
+                    )
+                try:
+                    from src.work_board.general_task_approval import recheck_resume_witness
+                    await recheck_resume_witness(db, run, _general_task_resume_witness)
+                except Exception as exc:
+                    raise DurableJobTransitionError(
+                        "general task approval resume requires current validated authority"
+                    ) from exc
+            elif _general_task_resume_witness is not None:
+                raise DurableJobTransitionError("general task approval witness does not match the paused root")
             if near_queue_guard:
                 if not near_writer_started:
                     raise DurableJobTransitionError("near_policy_writer_required")
@@ -3424,6 +3456,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 } else None,
                 "finished_at": now if to_status in DURABLE_JOB_TERMINAL_STATUSES or to_status == "failed" else None,
             }
+            if (to_status == "paused" and run.job_kind == "agent.task.v1"
+                and reason == "general_task_approval_required"):
+                # This precontact wait is not an ordinary operator pause.
+                # Retain its reason so generic resume cannot erase approval.
+                values["failure_reason"] = reason
             if to_status == "paused" and run.job_kind in {"research_dossier", "readonly_research_child"}:
                 from src.work_board.research_contracts import WAIT_SOURCES, WAIT_CHILDREN, PROMPT_READY
                 permitted = {WAIT_SOURCES, WAIT_CHILDREN} if run.job_kind == "research_dossier" else {PROMPT_READY}
@@ -6524,7 +6561,20 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         safe_details = {**dict(prior_details), **safe_details}
                         receipt["details"] = safe_details
             if receipt_kind == "readback" and status == "succeeded":
-                if not _verified_readback_exists([receipt]):
+                precontact_absence = (
+                    run.job_kind == "agent.task.v1" and effect_type == "general_tool_call"
+                    and isinstance(safe_details, dict)
+                    and safe_details.get("verified") is True
+                    and safe_details.get("never_contacted") is True
+                    and safe_details.get("approval_precontact") is True
+                    and any(isinstance(item.get("payload"), dict)
+                        and item["payload"].get("phase") == "approval_precontact"
+                        and item["payload"].get("effect_id") == effect_id
+                        and item["payload"].get("fence") == fencing_token
+                        and _digest(item["payload"]) == content_sha256
+                        for item in _json_load(run.checkpoint_receipts_json, []))
+                )
+                if not _verified_readback_exists([receipt]) and not precontact_absence:
                     raise DurableJobTransitionError(
                         "successful readback requires verified capability evidence"
                     )

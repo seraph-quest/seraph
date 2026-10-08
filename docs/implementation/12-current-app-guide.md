@@ -573,6 +573,10 @@ action accepts only the reviewed current revision. The inspector keeps
 acceptance unavailable while edits are unsaved. Plans contain at most sixteen
 closed typed steps, literal inputs and declared dependency pointers; they carry
 no executable expressions or permission grants.
+Admission also proves that each registered output satisfies its step contract
+and that the final step satisfies the requested output contract. Exact schemas
+and a conservative supported subset are accepted; incompatible or unsupported
+nonidentical contracts remain editable proposal errors before execution effects.
 
 Accepted work uses the existing dispatcher, `WorkflowRunState`, leases, fences,
 effect journal and verified readback. Current owner, Goal, evidence, strategy
@@ -585,8 +589,22 @@ is a bounded private artifact with physical hash readback, and the card enters
 Review. Completion records an explicit no-learning result; task success alone
 does not update canonical memory.
 
+A mediated tool approval pauses the same durable Root only after the existing
+approval wrapper proves it has not contacted the tool. The card shows its exact
+pending approval and original deadline. Approval alone does not queue work:
+the owner explicitly continues the current task and plan revisions, original
+attempt, approval, workflow revision and fence. Generic paused-job resume cannot
+cross this wait. The canonical writer checks the current approval, policy,
+inputs, descriptor and already verified physical outputs, then reacquires the
+same attempt with a new lease fence. The tool wrapper consumes the approval
+once immediately before contact. Expired, denied, revoked, stale or uncertain
+bindings retain a visible recovery block.
+
 Isolated API-to-dispatcher receipts exercise genuine current native file reads,
 durable accounting, acceptance, physical artifact readback and restart replay.
+Actual local MCP fixtures also exercise the current approval wrapper and
+same-attempt continuation, including consecutive approvals and rejected stale,
+revoked, uncertain or physically changed output bindings.
 The planner HTTP response is intercepted inside the test: these receipts make no
 external provider call or spend and make no usefulness or quality claim.
 

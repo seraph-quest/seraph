@@ -8,6 +8,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import dataclass
+
+from smolagents import Tool
+from src.approval.exceptions import ApprovalRequired
 
 from src.work_board.contracts import ToolDescriptor
 
@@ -15,6 +19,70 @@ from src.work_board.contracts import ToolDescriptor
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class TaskToolApprovalBinding:
+    descriptor_digest: str
+    input_digest: str
+    job_id: str
+    fencing_token: int
+
+
+_APPROVAL_FIELDS = (
+    "approval_id", "session_id", "tool_name", "risk_level", "summary",
+    "required_permissions", "local_host_execution_required", "executor_kind",
+    "executor_profile", "executor_posture_digest", "preparation_ready",
+    "execution_ready", "operator_visible", "expires_at",
+)
+
+
+class TaskToolApprovalRequired(ApprovalRequired):
+    """Existing wrapper approval with adapter-proven absence of tool contact."""
+
+    def __init__(self, approval: ApprovalRequired, *, binding: TaskToolApprovalBinding):
+        super().__init__(**{name: getattr(approval, name) for name in _APPROVAL_FIELDS})
+        self._binding = binding
+
+    @property
+    def binding(self):
+        return self._binding
+
+    @property
+    def precontact(self):
+        return True
+
+
+class _InvocationMarker(Tool):
+    """One finite invocation-local proxy below the existing approval wrapper.
+
+    Crossing this marker counts conservatively as contact, including entry
+    into the existing audit/secret wrappers. Metadata hooks retain their exact
+    existing payloads so approval fingerprints remain unchanged.
+    """
+    skip_forward_signature_validation = True
+
+    def __init__(self, wrapped_tool):
+        super().__init__()
+        self.wrapped_tool = wrapped_tool
+        self.name = wrapped_tool.name
+        self.description = wrapped_tool.description
+        self.inputs = wrapped_tool.inputs
+        self.output_type = wrapped_tool.output_type
+        self.output_schema = getattr(wrapped_tool, "output_schema", None)
+        self.is_initialized = True
+        self.contacted = False
+
+    def __call__(self, *args, **kwargs):
+        self.contacted = True
+        return self.wrapped_tool(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
+
+    def get_approval_context(self, arguments):
+        hook = getattr(self.wrapped_tool, "get_approval_context", None)
+        return hook(arguments) if callable(hook) else None
 
 
 def _object(properties, required=None):
@@ -105,6 +173,40 @@ class ToolRegistry:
                         "reason": "trusted_typed_contract_or_policy_unavailable"})
         return sorted(blocked, key=lambda item: item["tool_id"])
 
+    def approval_context(self, descriptor, inputs, *, job_id):
+        """Read the exact current wrapper fingerprint without consuming it.
+
+        This invokes only the existing metadata hook, never the tool's
+        execution entry point or the approval repository. Continuation still
+        needs the authoritative owner/job/attempt checks and final wrapper.
+        """
+        from src.tools.approval import _tool_approval_context
+        from src.approval.repository import fingerprint_tool_call
+        from src.work_board.general_task import canonical, validate_data, validate_schema
+
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("approval context requires a durable job identity")
+        encoded_inputs = canonical(inputs)
+        validate_data(inputs, dependencies=set())
+        current = self._entries().get(descriptor.tool_id)
+        if current is None or current[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+            raise PermissionError("task tool contract changed or unavailable")
+        validate_schema(descriptor.input_schema, inputs)
+        _, tool, _ = current
+        arguments = json.loads(encoded_inputs)
+        context = _tool_approval_context(tool, arguments)
+        if canonical(arguments) != encoded_inputs:
+            raise ValueError("approval metadata changed the step input")
+        context = dict(context or {})
+        # Match ApprovalTool's exact job-bound approval context convention.
+        context.setdefault("workflow_run_identity", job_id.strip())
+        context = json.loads(canonical(context))
+        after = self._entries().get(descriptor.tool_id)
+        if after is None or after[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+            raise PermissionError("task tool contract changed during approval metadata read")
+        return {"tool_name": tool.name, "approval_context": context,
+                "fingerprint": fingerprint_tool_call(tool.name, inputs, approval_context=context)}
+
     async def invoke(self, descriptor, inputs, *, principal, job_id, fencing_token):
         if not principal or not principal.authenticated or principal.revoked or not principal.session_id:
             raise PermissionError("authenticated task principal is required")
@@ -127,7 +229,8 @@ class ToolRegistry:
     def _invoke_sync(self, descriptor, inputs, principal, job_id, fencing_token):
         from src.approval.runtime import (set_runtime_context, reset_runtime_context,
             set_runtime_fencing_token, reset_runtime_fencing_token)
-        from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+        from src.tools.approval import ApprovalTool, wrap_tools_for_approval, wrap_tools_with_forced_approval
+        from src.extensions.capability_execution import _ADOPTED_CAPABILITIES
         from src.tools.audit import wrap_tools_for_audit
         from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
         from src.tools.policy import get_current_mcp_policy_mode
@@ -137,12 +240,35 @@ class ToolRegistry:
             raise PermissionError("task tool contract changed before execution")
         _, tool, is_mcp = current
         tools = wrap_tools_for_audit(wrap_tools_for_secret_refs([tool]), treat_all_as_mcp=is_mcp)
+        marker = _InvocationMarker(tools[0])
+        tools = [marker]
         wrapper = (wrap_tools_with_forced_approval if is_mcp and get_current_mcp_policy_mode() == "approval"
                    else wrap_tools_for_approval)(tools, treat_all_as_mcp=is_mcp)[0]
         tokens = set_runtime_context(principal.session_id, "high_risk", trust_principal=principal)
         fence = set_runtime_fencing_token(str(fencing_token))
         try:
-            raw = wrapper(**inputs)
+            try:
+                raw = wrapper(**inputs)
+            except ApprovalRequired as approval:
+                # Adopted native effects dispatch through the durable host,
+                # which intentionally bypasses the inner Tool chain. Without
+                # a host contact receipt they cannot receive this proof type.
+                origin = approval.__traceback__
+                while origin is not None and origin.tb_next is not None:
+                    origin = origin.tb_next
+                wrapper_origin = (origin is not None
+                    and origin.tb_frame.f_code is ApprovalTool.__call__.__code__
+                    and origin.tb_frame.f_locals.get("self") is wrapper)
+                if (isinstance(wrapper, ApprovalTool) and wrapper_origin and not marker.contacted
+                    and tool.name not in _ADOPTED_CAPABILITIES):
+                    raise TaskToolApprovalRequired(approval, binding=TaskToolApprovalBinding(
+                        descriptor_digest=_digest(descriptor.model_dump(mode="json")),
+                        input_digest=_digest(inputs), job_id=job_id,
+                        fencing_token=fencing_token)) from approval
+                if isinstance(approval, TaskToolApprovalRequired):
+                    raise ApprovalRequired(**{name: getattr(approval, name)
+                        for name in _APPROVAL_FIELDS}) from approval
+                raise
             if is_mcp:
                 result = json.loads(raw) if isinstance(raw, str) else raw
             else:

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { GoalInfo, WorkBoardTask } from "../../types";
-import { createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan } from "../../lib/generalTask";
+import { canResumeGeneralTask, createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan } from "../../lib/generalTask";
 import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan } from "../../lib/generalTask";
 
 interface Props {
@@ -84,6 +84,29 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } catch (e) { if (version === generation.current) { setRead(null); setError((e as Error).message); } }
     finally { if (version === generation.current) setBusy(false); }
   }
+  async function resume() {
+    if (!task || !read || !owned || busy || !canResumeGeneralTask(read, task)) return;
+    const pause = read.approval_pause!, version = generation.current;
+    setBusy(true); setRead(null); setError(null);
+    try {
+      const result = await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/plan/resume`, {
+        expected_revision: read.task_revision, expected_plan_revision: read.plan!.revision,
+        workflow_run_id: pause.workflow_run_id, attempt_id: pause.attempt_id, fencing_token: pause.fencing_token,
+        workflow_revision: pause.workflow_revision, approval_id: pause.approval_id,
+      });
+      if (version !== generation.current) return;
+      const receipt = result && typeof result === "object" && "task" in result ? result.task as WorkBoardTask : null;
+      if (!receipt || receipt.task_id !== task.task_id || receipt.owner_principal_id !== ownerPrincipalId
+        || receipt.owner_session_id !== ownerSessionId || receipt.latest_attempt?.attempt_id !== pause.attempt_id
+        || receipt.latest_attempt.workflow_run_id !== pause.workflow_run_id || receipt.latest_attempt.fencing_token !== pause.fencing_token + 1) {
+        throw Error("Continuation receipt is unconfirmed. Refresh Work and the current plan before any further action.");
+      }
+      await onChanged?.();
+    } catch (e) { if (version === generation.current) {
+      setError(`${(e as Error).message} Refresh Work and the current plan to inspect the same run; continuation is never automatically replayed.`);
+      await onChanged?.();
+    } } finally { if (version === generation.current) setBusy(false); }
+  }
   async function savePlan() {
     if (!task || !read || read.accepted || !owned || busy) return;
     const version = generation.current;
@@ -130,6 +153,12 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
       <button type="button" disabled={busy || !owned || Boolean(pendingEdit)} onClick={() => void refresh()}>Refresh current task plan</button>
       {read && <>
         <p className="text-xs">Task revision {read.task_revision} · plan revision {read.plan?.revision ?? "not yet valid"} · no_learning. Acceptance grants no new permission; the dispatcher owns admission and each effect still requires its current approval.</p>
+        {read.approval_pause && <section aria-label="Paused task approval" className="mt-3 rounded border border-white/10 p-2">
+          <p role="status">Approval {read.approval_pause.approval_status} · {read.approval_pause.step_id} · {read.approval_pause.tool_id}{read.approval_pause.reason ? ` · ${read.approval_pause.reason}` : ""}</p>
+          <p>Existing run {read.approval_pause.workflow_run_id} · attempt {read.approval_pause.attempt_id} · original deadline {read.approval_pause.original_deadline_at}</p>
+          <p>Review the existing approval on this Work card, then refresh the current task plan. Continuing retains this run and deadline.</p>
+          <button type="button" disabled={busy || !owned || !canResumeGeneralTask(read, task)} onClick={() => void resume()}>Continue approved task run</button>
+        </section>}
         {!read.plan && <p role="status">Proposal blocked: {read.proposal_error}. The intent is retained on this Triage card. Edit a typed plan with registered tools, save a valid revision, then review again.</p>}
         {!read.plan && <details><summary>Current registered tools for plan recovery</summary><pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(read.descriptors.map(d => ({ tool_id: d.tool_id, version: d.version, input_schema: d.input_schema, output_schema: d.output_schema, effects: d.effects, permissions: d.permissions, deadline: d.deadline, verifier: d.verifier })), null, 2)}</pre></details>}
         <p className="whitespace-pre-wrap">{read.task_input.intent}</p>

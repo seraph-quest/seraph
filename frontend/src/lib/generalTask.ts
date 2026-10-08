@@ -26,6 +26,22 @@ export interface GeneralTaskPlanRead {
   task_id: string; task_revision: number; accepted: boolean;
   task_input: GeneralTaskInput; plan: TaskPlan | null; descriptors: GeneralToolDescriptor[]; proposal_error?: string;
   strategy: { status: string; reason: string | null }; no_learning: true;
+  approval_pause?: GeneralTaskApprovalPause | null;
+}
+export interface GeneralTaskApprovalPause {
+  approval_id: string; approval_status: "pending" | "approved" | "expired" | "denied" | "revoked" | "consumed" | "unavailable";
+  step_id: string; tool_id: string; workflow_run_id: string; attempt_id: string;
+  fencing_token: number; workflow_revision: number; original_deadline_at: string;
+  can_resume: boolean; reason: string | null;
+}
+export function canResumeGeneralTask(read: GeneralTaskPlanRead, task: WorkBoardTask): boolean {
+  const pause = read.approval_pause, attempt = task.latest_attempt;
+  return Boolean(read.accepted && read.plan && pause?.can_resume && pause.approval_status === "approved"
+    && read.task_revision === task.task_revision && task.status === "blocked"
+    && task.recovery_action === "approve_existing_run" && attempt && !attempt.ended_at
+    && read.plan.steps.some(step => step.step_id === pause.step_id && step.tool_id === pause.tool_id)
+    && pause.attempt_id === attempt.attempt_id && pause.workflow_run_id === attempt.workflow_run_id
+    && pause.fencing_token === attempt.fencing_token && Date.parse(pause.original_deadline_at) > Date.now());
 }
 export interface GeneralTaskCreateRequest {
   goal_revision: number; idempotency_key: string; input: GeneralTaskInput;
@@ -56,6 +72,15 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     throw new Error("Plan readback did not match the current task revision. Refresh Work before reviewing.");
   }
   const descriptors = value.descriptors;
+  const pause = value.approval_pause;
+  if (pause != null && (!record(pause) || !["pending", "approved", "expired", "denied", "revoked", "consumed", "unavailable"].includes(String(pause.approval_status))
+    || ["approval_id", "step_id", "tool_id", "workflow_run_id", "attempt_id"].some(k => typeof pause[k] !== "string" || !pause[k])
+    || !Number.isSafeInteger(pause.fencing_token) || Number(pause.fencing_token) < 1
+    || !Number.isSafeInteger(pause.workflow_revision) || Number(pause.workflow_revision) < 1
+    || typeof pause.original_deadline_at !== "string" || !Number.isFinite(Date.parse(pause.original_deadline_at))
+    || typeof pause.can_resume !== "boolean" || !(pause.reason === null || typeof pause.reason === "string"))) {
+    throw new Error("Approval pause receipt is incomplete. Refresh Work before continuing.");
+  }
   if (descriptors.some(d => !record(d) || typeof d.tool_id !== "string" || typeof d.version !== "string"
     || !record(d.input_schema) || !record(d.output_schema) || !Array.isArray(d.effects) || !Array.isArray(d.permissions)
     || !d.effects.every(x => typeof x === "string") || !d.permissions.every(x => typeof x === "string")

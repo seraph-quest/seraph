@@ -4939,6 +4939,11 @@ class WorkBoardDispatcher:
                 parent_fence=parent_fence,
                 runtime_seconds=runtime_seconds,
             )
+            if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
+                projection = await self.jobs.get_job(job_id)
+                await self._pause_general_task(task, attempt, projection)
+                result["blocked"] = True
+                return result
             await self._settle_parent(
                 job_id,
                 parent_runtime_owner,
@@ -10246,6 +10251,63 @@ class WorkBoardDispatcher:
             await self._advance_linked_pipeline(projected.task)
         return projected
 
+    async def _pause_general_task(self, task, attempt, projection):
+        if projection.get("status") != "paused" or projection.get("failure_reason") != "general_task_approval_required":
+            raise BoardError("general_task_resume_binding_changed", "Exact native approval pause is required", status_code=409)
+        async with self.session_provider() as db:
+            return await self.repository.pause_routine_attempt_for_operator(db,
+                task.task_id, attempt.attempt_id, expected_revision=task.task_revision,
+                board_fence=attempt.fencing_token, lease_owner=attempt.lease_owner,
+                workflow_run_id=attempt.workflow_run_id,
+                durable_fence=int((projection.get("lease") or {}).get("fencing_token") or 0),
+                reason="awaiting_approval", actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session, capability_id="agent.task.v1")
+
+    async def resume_general_task(self, owner, task_id, request):
+        from src.work_board.general_task_approval import prepare_resume_witness
+        if self.general_tasks is None:
+            raise BoardError("general_task_inactive", "Restore the task service", status_code=503)
+        projection = await self.jobs.get_job(request.workflow_run_id)
+        async with self.session_provider() as db:
+            witness = await prepare_resume_witness(self.general_tasks, db, owner, task_id,
+                request, projection, runner_id=self.runner_id)
+        # This owner CAS also reacquires the same board attempt inside one
+        # serialized transaction, without consuming the tool's approval row.
+        queued = await self.jobs.transition_job(request.workflow_run_id, "queued",
+            expected_state="paused", expected_revision=request.workflow_revision,
+            expected_fencing_token=request.fencing_token,
+            reason="general_task_operator_resumed", _general_task_resume_witness=witness)
+        async with self.session_provider() as db:
+            task = await self.repository.get_task(db, owner, task_id)
+            attempt = await db.get(WorkBoardAttempt, request.attempt_id)
+        claimed = await self.jobs.claim_job(request.workflow_run_id,
+            owner=f"{self.runner_id}:{attempt.attempt_id}",
+            lease_seconds=await self._effective_runtime(task), expected_state="queued",
+            expected_revision=queued["revision"], expected_fencing_token=request.fencing_token,
+            continue_existing_attempt=True)
+        parent_owner, parent_fence = _lease(claimed)
+        if parent_fence != attempt.fencing_token:
+            raise BoardError("stale_fence", "Original native attempt fence changed", status_code=409)
+        claim = BoardDispatchClaim(task, attempt, None)
+        try:
+            outcome = await self._execute_registered(task, attempt, _parse_typed_input(task),
+                job_id=request.workflow_run_id, parent_runtime_owner=parent_owner,
+                parent_fence=parent_fence, runtime_seconds=await self._effective_runtime(task))
+            projection = await self.jobs.get_job(request.workflow_run_id)
+            if outcome.get("awaiting_approval"):
+                return (await self._pause_general_task(task, attempt, projection)).task
+            await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
+            projection = await self.jobs.get_job(request.workflow_run_id)
+            proof = self._workflow_readback(projection, request.workflow_run_id)
+            if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:
+                raise DurableJobError("general_task_readback_missing")
+            return (await self._project(task, attempt, board_revision=task.task_revision,
+                status=WorkBoardStatus.review, outcome="verified", proof=proof,
+                result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))).task
+        except Exception:
+            await self._reconcile_linked_failure(claim, request.workflow_run_id)
+            raise BoardError("general_task_continuation_blocked", "Read the exact original task recovery state", status_code=409)
+
     async def _pause_routine_for_operator(
         self,
         task: WorkBoardTask,
@@ -10826,6 +10888,12 @@ class WorkBoardDispatcher:
                 status = _status(projection)
                 effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
                 accounting_resume = False
+                if (task.capability_id == "agent.task.v1" and status == "paused"
+                    and projection.get("failure_reason") == "general_task_approval_required"):
+                    if task.status is WorkBoardStatus.running:
+                        await self._pause_general_task(task, attempt, projection)
+                    recovered.append(job_id)
+                    continue
                 if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
                     resume_check = getattr(self.jobs, "inference_precontact_resume_allowed", None)
                     accounting_resume = bool(resume_check is not None and await resume_check(job_id))
@@ -10921,13 +10989,15 @@ class WorkBoardDispatcher:
                     and status == "queued"
                     and _repair_approval_resume_recovery_ready(projection)
                 )
-                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume):
+                native_continuation = (task.capability_id == "agent.task.v1" and status == "queued"
+                    and attempt.outcome == "operator_recovery_running")
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume or native_continuation):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
                     # other services own their existing approval/recovery
                     # routes and are invoked only through the exact binding.
-                    if _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
+                    if _text(task.capability_id) in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
                         if status == "accepted":
                             projection = await self.jobs.queue_job(
                                 job_id,
@@ -10941,9 +11011,12 @@ class WorkBoardDispatcher:
                                 expected_state="queued",
                                 expected_revision=projection.get("revision"),
                                 expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"),
+                                continue_existing_attempt=native_continuation,
                             )
                         parent_owner, parent_fence = _lease(projection)
                         if parent_owner is None or parent_fence is None:
+                            raise DurableJobError("stale_workflow_fence")
+                        if task.capability_id == "agent.task.v1" and parent_fence != attempt.fencing_token:
                             raise DurableJobError("stale_workflow_fence")
                         outcome = await self._execute_registered(
                             task,
@@ -10954,6 +11027,10 @@ class WorkBoardDispatcher:
                             parent_fence=parent_fence,
                             runtime_seconds=await self._effective_runtime(task),
                         )
+                        if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
+                            await self._pause_general_task(task, attempt, await self.jobs.get_job(job_id))
+                            recovered.append(job_id)
+                            continue
                         await self._settle_parent(job_id, parent_owner, parent_fence, outcome)
                         projection = await self.jobs.get_job(job_id) or projection
                     elif _text(task.capability_id) == "engineering.repo-repair.v1":
@@ -11370,6 +11447,10 @@ class WorkBoardDispatcher:
             if _text(effect.get("effect_type")) == "workflow_output":
                 continue
             details = effect.get("details") if isinstance(effect.get("details"), Mapping) else {}
+            if details.get("never_contacted") is True:
+                # Positive absence closes its call intent; it cannot prove
+                # the task's intended output or authorize Review/Done.
+                continue
             # Fixed GitHub recovery also appends observation-only receipts.
             # Their private artifact digest is not the canonical semantic
             # effect proof used by the protected adoption receipt. Select the

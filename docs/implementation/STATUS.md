@@ -40,8 +40,11 @@ One `WorkBoardTask` and existing `WorkflowRunState` remain the canonical task
 and execution owners. Planning uses the governed interactive text consumer
 `general_task_planner`, explicit egress acknowledgment and cost limits; execution
 retains current tool permissions, approvals, descriptor revisions, durable
-effects and private artifact readback. Provider-free isolated integration
-receipts prove the current native file-read journey and replay boundaries, not
+effects and private artifact readback. Output contracts are checked before
+effects; mediated approval waits require explicit exact continuation of the
+same attempt and original deadline, with generic resume blocked. Provider-free
+isolated integration receipts prove the current native file-read journey,
+mediated MCP approval continuation and replay boundaries, not
 model quality or improved outcomes. Tasks explicitly record no learning.
 The fuller interpreter and specialist delegation in
 [#998](https://github.com/seraph-quest/seraph/issues/998) and

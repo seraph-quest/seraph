@@ -93,8 +93,11 @@ class LocalMCPTool(Tool):
         self.is_initialized = True
         self.calls = 0
         self.result = '{"value":"local repository readback"}'
+        self.failure = None
     def forward(self, query: str) -> str:
         self.calls += 1
+        if self.failure is not None:
+            raise self.failure
         return self.result
 
 
@@ -131,11 +134,33 @@ async def test_mcp_current_guarded_wrapper_schema_and_connection_revision(mcp_re
     registry, manager, tool, _, _ = mcp_registry
     selected = descriptor(registry, "mcp:local:repo_read")
     from src.approval.exceptions import ApprovalRequired
+    from src.native_tools.task_adapters import TaskToolApprovalRequired
     from src.approval.repository import approval_repository
-    with pytest.raises(ApprovalRequired) as approval:
+    with pytest.raises(TaskToolApprovalRequired) as approval:
         await registry.invoke(selected, {"query": "read"}, principal=principal,
             job_id="test-job", fencing_token=1)
     assert tool.calls == 0
+    snapshot = registry.approval_context(selected, {"query": "read"}, job_id="test-job")
+    from src.approval.repository import fingerprint_tool_call
+    expected_context = dict(tool.get_approval_context({"query": "read"}))
+    expected_context["workflow_run_identity"] = "test-job"
+    assert snapshot == {"tool_name": tool.name, "approval_context": expected_context,
+        "fingerprint": fingerprint_tool_call(tool.name, {"query": "read"},
+            approval_context=expected_context)}
+    pending_row = await approval_repository.get(approval.value.approval_id)
+    assert pending_row.status == "pending"
+    assert pending_row.fingerprint == snapshot["fingerprint"]
+    assert json.loads(pending_row.details_json)["approval_context"] == snapshot["approval_context"]
+    assert tool.calls == 0
+    assert approval.value.precontact is True
+    assert approval.value.binding.job_id == "test-job"
+    assert approval.value.binding.fencing_token == 1
+    from src.work_board.general_task import digest
+    assert approval.value.binding.input_digest == digest({"query": "read"})
+    assert approval.value.binding.descriptor_digest == digest(selected.model_dump(mode="json"))
+    from dataclasses import FrozenInstanceError
+    with pytest.raises(FrozenInstanceError):
+        approval.value.binding.job_id = "other-job"
     assert await approval_repository.resolve(approval.value.approval_id, "approved")
     result = await registry.invoke(selected, {"query": "read"}, principal=principal,
         job_id="test-job", fencing_token=1)
@@ -151,9 +176,47 @@ async def test_mcp_current_guarded_wrapper_schema_and_connection_revision(mcp_re
             job_id="test-job", fencing_token=1)
     manager._connection_revisions["local"] += 1
     with pytest.raises(PermissionError):
+        registry.approval_context(selected, {"query": "read"}, job_id="test-job")
+    with pytest.raises(PermissionError):
         await registry.invoke(selected, {"query": "read"}, principal=principal,
             job_id="test-job", fencing_token=1)
     assert tool.calls == 2
+
+
+async def test_tool_approval_exception_after_contact_is_not_precontact_proof(mcp_registry, principal):
+    from src.approval.exceptions import ApprovalRequired
+    from src.approval.repository import approval_repository
+    from src.native_tools.task_adapters import TaskToolApprovalRequired
+    registry, _, tool, _, _ = mcp_registry
+    selected = descriptor(registry, "mcp:local:repo_read")
+    with pytest.raises(TaskToolApprovalRequired) as pending:
+        await registry.invoke(selected, {"query": "effect"}, principal=principal,
+            job_id="test-job", fencing_token=1)
+    assert tool.calls == 0
+    assert await approval_repository.resolve(pending.value.approval_id, "approved")
+    tool.failure = ApprovalRequired(approval_id="untrusted-after-contact",
+        session_id=principal.session_id, tool_name=tool.name,
+        risk_level="high", summary="Tool reports approval after contacting its target")
+    with pytest.raises(ApprovalRequired) as contacted:
+        await registry.invoke(selected, {"query": "effect"}, principal=principal,
+            job_id="test-job", fencing_token=1)
+    assert type(contacted.value) is ApprovalRequired
+    assert tool.calls == 1
+
+
+async def test_metadata_hook_cannot_forge_wrapper_precontact_proof(mcp_registry, principal):
+    from src.approval.exceptions import ApprovalRequired
+    registry, _, tool, _, _ = mcp_registry
+    selected = descriptor(registry, "mcp:local:repo_read")
+    def untrusted_hook(arguments):
+        raise ApprovalRequired(approval_id="untrusted-hook", session_id=principal.session_id,
+            tool_name=tool.name, risk_level="high", summary="Untrusted hook approval")
+    tool.get_approval_context = untrusted_hook
+    with pytest.raises(ApprovalRequired) as failure:
+        await registry.invoke(selected, {"query": "effect"}, principal=principal,
+            job_id="test-job", fencing_token=1)
+    assert type(failure.value) is ApprovalRequired
+    assert tool.calls == 0
 
 
 def test_mcp_unknown_missing_changed_contracts_are_excluded(mcp_registry):

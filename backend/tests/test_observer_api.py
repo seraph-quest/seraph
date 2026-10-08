@@ -21,6 +21,80 @@ from src.db.models import OperatorSession, Session
 _DAEMON_HEADERS = {"X-Seraph-Daemon-Id": "test-daemon"}
 
 
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("foreign_scope", ["owner", "root", "unbound"])
+async def test_continuity_opportunity_requires_current_authenticated_owner_root(
+    async_db, client, monkeypatch, foreign_scope,
+):
+    from config.settings import settings
+    from src.auth.service import create_session
+    import asyncio
+
+    # Sibling projections acquire this singleton concurrently. Each parametrized
+    # case has its own loop and database, so keep its lock in the same scope.
+    monkeypatch.setattr(native_notification_queue, "_lock", asyncio.Lock())
+
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "continuity-privacy-test")
+    own_token, own_operator = await create_session()
+    foreign_token, foreign_operator = await create_session()
+    owner = own_operator.principal.principal_id
+    root = own_operator.session_id
+
+    # Metadata-only privacy fixtures match the native proposed intervention's
+    # lineage. They do not claim provider contact or verified model outcomes.
+    async def opportunity(content, binding_owner, binding_root):
+        row = await guardian_feedback_repository.create_intervention(
+            session_id=None, message_type="proactive", intervention_type="opportunity",
+            urgency=3, content=content, reasoning="Private Goal-derived judgment",
+            is_scheduled=False, guardian_confidence="medium", data_quality=None,
+            user_state=None, interruption_mode=None, policy_action="act", policy_reason="",
+            delivery_decision=None, latest_outcome="created", transport="guardian_inbox",
+        )
+        async with async_db() as db:
+            from src.db.models import GuardianIntervention
+            stored = await db.get(GuardianIntervention, row.id)
+            stored.owner_principal_id = binding_owner
+            stored.original_root_id = binding_root
+            stored.goal_id = "privacy-fixture-goal"
+            stored.goal_revision = 1
+            stored.opportunity_id = f"privacy-fixture:{row.id}"
+            stored.delivery_status = "not_requested"
+            db.add(stored)
+        return row
+
+    own = await opportunity("OWN_PRIVATE_GOAL_JUDGMENT", owner, root)
+    if foreign_scope == "owner":
+        foreign = await opportunity("FOREIGN_PRIVATE_GOAL_JUDGMENT",
+            foreign_operator.principal.principal_id, foreign_operator.session_id)
+    elif foreign_scope == "root":
+        foreign = await opportunity("FOREIGN_PRIVATE_GOAL_JUDGMENT", owner, foreign_operator.session_id)
+    else:
+        foreign = await opportunity("FOREIGN_PRIVATE_GOAL_JUDGMENT", None, None)
+
+    client.cookies.set(settings.operator_auth_cookie_name, own_token)
+    own_response = await client.get("/api/observer/continuity")
+    assert own_response.status_code == 200
+    own_payload = own_response.json()
+    assert own.id in {item["id"] for item in own_payload["recent_interventions"]}
+    assert foreign.id not in {item["id"] for item in own_payload["recent_interventions"]}
+    assert "FOREIGN_PRIVATE_GOAL_JUDGMENT" not in own_response.text
+
+    client.cookies.set(settings.operator_auth_cookie_name, foreign_token)
+    foreign_response = await client.get("/api/observer/continuity")
+    assert foreign_response.status_code == 200
+    assert own.id not in {item["id"] for item in foreign_response.json()["recent_interventions"]}
+    assert "OWN_PRIVATE_GOAL_JUDGMENT" not in foreign_response.text
+    if foreign_scope == "owner":
+        assert foreign.id in {item["id"] for item in foreign_response.json()["recent_interventions"]}
+    # Existing generic projections do not bind this new private population.
+    for surface in ("/api/activity/ledger", "/api/operator/timeline", "/api/operator/continuity-graph"):
+        response = await client.get(surface)
+        assert response.status_code == 200
+        assert "OWN_PRIVATE_GOAL_JUDGMENT" not in response.text
+        assert "FOREIGN_PRIVATE_GOAL_JUDGMENT" not in response.text
+
+
 class TestObserverAPI:
     @pytest.mark.asyncio
     async def test_get_state(self, client):

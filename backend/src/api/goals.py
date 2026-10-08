@@ -43,6 +43,9 @@ from src.guardian.goal_conditioned_loop import (
     propose_goal_candidate_set,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.guardian.opportunity_contracts import (GuardianPolicySave, OpportunityCancel, OpportunityPlanRequest,
+    OpportunityFeedbackRequest, OpportunityFeedbackReceipt, OpportunityRecommendationRequest, OpportunityRecommendationReceipt)
+from src.guardian.opportunities import OpportunityError, policy_projection, save_policy
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +397,7 @@ async def _record_proactive_permission(
 def _goal_payload(goal) -> dict:
     criterion = deserialize_success_criterion(goal)
     return {
+        **policy_projection(goal),
         "id": goal.id,
         "parent_id": goal.parent_id,
         "title": goal.title,
@@ -415,6 +419,17 @@ def _goal_payload(goal) -> dict:
     }
 
 
+@router.put("/goals/{goal_id}/guardian-policy")
+async def put_guardian_policy(goal_id: str, body: GuardianPolicySave, request: Request):
+    operator = _require_authenticated_operator(request)
+    try:
+        return await save_policy(operator=operator, goal_id=goal_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "guardian_store_unavailable"}) from exc
+
+
 @router.get("/goals")
 async def list_goals(
     request: Request,
@@ -424,23 +439,109 @@ async def list_goals(
 ):
     """List the authenticated operator's goals, optionally filtered."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "goal")
     goals = await goal_repository.list_goals(
         level=level,
         domain=domain,
         status=status,
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=recovered,
     )
-    return [_goal_payload(goal) for goal in goals]
+    result = []
+    for goal in goals:
+        payload = _goal_payload(goal)
+        if goal.id in recovered:
+            payload.update(RECOVERED_FIELDS)
+            payload.update(proactive_enabled=False, admission_budget=None)
+            payload["guardian_assessment_state"] = "goal_review_required"
+        result.append(payload)
+    return result
+
+
+@router.get("/guardian/opportunities")
+async def get_guardian_opportunities(request: Request, goal_id: str | None = None, limit: int = 20, cursor: str | None = None):
+    from src.guardian.opportunities import list_history
+    operator = _require_authenticated_operator(request)
+    try:
+        return await list_history(owner=operator.principal.principal_id, root_id=operator.session_id,
+            goal_id=goal_id, limit=limit, cursor=cursor, operator=operator)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/cancel")
+async def cancel_guardian_opportunity(opportunity_id: str, body: OpportunityCancel, request: Request):
+    from src.guardian.opportunities import cancel_opportunity
+    operator = _require_authenticated_operator(request)
+    try:
+        return await cancel_opportunity(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/plan")
+async def generate_guardian_opportunity_plan(opportunity_id: str, body: OpportunityPlanRequest, request: Request):
+    from src.guardian.opportunity_plans import generate_plan
+    operator = _require_authenticated_operator(request)
+    try:
+        return await generate_plan(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/feedback", response_model=OpportunityFeedbackReceipt)
+async def record_guardian_opportunity_feedback(opportunity_id: str, body: OpportunityFeedbackRequest, request: Request):
+    from src.guardian.feedback import record_opportunity_feedback
+    operator = _require_authenticated_operator(request)
+    try:
+        return await record_opportunity_feedback(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
+async def request_guardian_opportunity_recommendation(opportunity_id: str, body: OpportunityRecommendationRequest, request: Request):
+    from src.work_board.opportunity_preference_native import request_opportunity_recommendation
+    from src.work_board.repository import BoardError
+    operator = _require_authenticated_operator(request)
+    try:
+        return await request_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request=body)
+    except (OpportunityError, BoardError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+
+
+@router.get("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
+async def inspect_guardian_opportunity_recommendation(opportunity_id: str, idempotency_key: str, request: Request):
+    from src.work_board.opportunity_preference_native import inspect_opportunity_recommendation
+    from src.work_board.repository import BoardError
+    from uuid import UUID
+    operator = _require_authenticated_operator(request)
+    try:
+        if str(UUID(idempotency_key)) != idempotency_key:
+            raise ValueError("Exact canonical UUID required")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code":"invalid_idempotency_key"}) from exc
+    try:
+        return await inspect_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request_uuid=idempotency_key)
+    except (OpportunityError, BoardError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
 
 
 @router.get("/goals/tree")
 async def get_goal_tree(request: Request):
     """Get the authenticated operator's goal tree as nested structure."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes
     return await goal_repository.get_tree(
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=await selected_read_scopes(operator, "goal"),
     )
 
 
@@ -448,9 +549,11 @@ async def get_goal_tree(request: Request):
 async def get_goal_dashboard(request: Request):
     """Get summary stats for the authenticated operator's goals."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes
     return await goal_repository.get_dashboard(
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=await selected_read_scopes(operator, "goal"),
     )
 
 

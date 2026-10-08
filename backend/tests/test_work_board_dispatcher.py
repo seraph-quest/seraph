@@ -25,6 +25,7 @@ from src.db.models import (
     Session,
     WorkBoardAttempt,
     WorkBoardEvent,
+    WorkBoardEvidenceDependency,
     WorkBoardLink,
     WorkBoardProposal,
     WorkBoardReviewIntent,
@@ -39,16 +40,120 @@ from src.work_board.dispatcher import (
     GOAL_SNAPSHOT_CAPABILITY,
     WorkBoardDispatcher,
     _preflight_recovery_action,
+    _repair_approval_resume_recovery_ready,
     _stable_reason_code,
     registered_executor_id,
 )
 import src.work_board.dispatcher as dispatcher_module
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
 from src.work_board import review as review_service
-from src.workflows.job_runtime import DurableJobError, DurableJobRepository
+from src.workflows.job_runtime import DurableJobError, DurableJobLeaseError, DurableJobRepository
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
+
+
+def _repair_approval_recovery_projection() -> dict[str, Any]:
+    job_id = "repair-recovery-job"
+    owner_id = "operator:repair"
+    operation_id = "remote-operation-1"
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
+    return {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "status": "queued",
+        "owner": {"kind": "user", "principal_id": owner_id, "service_id": None},
+        "session_id": "session:repair",
+        "operator_session_id": "session:repair",
+        "goal_id": "goal:repair",
+        "goal_revision": 2,
+        "plan_revision": 1,
+        "authority_digest": "authority-repair",
+        "budget_digest": "budget-repair",
+        "capability_version": "1",
+        "declared_authority": {
+            "capability_id": "engineering.repo-repair.v1",
+            "approval_id": "approval-repair",
+        },
+        "effects": [
+            {
+                "effect_id": f"remote_inference:{operation_id}",
+                "receipt_kind": "effect",
+                "effect_type": "remote_inference_admission",
+                "target_digest": operation_id,
+                "status": "succeeded",
+                "details": {
+                    "admission_status": "settled",
+                    "receipt": {
+                        "status": "settled",
+                        "operation_id": operation_id,
+                        "job_id": job_id,
+                        "owner_id": owner_id,
+                    },
+                },
+            },
+            {
+                "kind": "approval_resume",
+                "status": "approved",
+                "approval_request_status": "consumed",
+                "approval_id": "approval-repair",
+                "operator_principal_id": owner_id,
+                "operator_session_id": "session:repair",
+                "owner_kind": "user",
+                "owner_principal_id": owner_id,
+                "service_id": None,
+                "authority_digest": "authority-repair",
+                "goal_id": "goal:repair",
+                "goal_revision": 2,
+                "plan_revision": 1,
+                "capability_version": "1",
+                "budget_digest": "budget-repair",
+                "expires_at": expiry,
+            },
+        ],
+    }
+
+
+def test_repair_approval_recovery_accepts_settled_admission_and_consumed_resume():
+    assert _repair_approval_resume_recovery_ready(_repair_approval_recovery_projection()) is True
+
+
+def test_repair_approval_recovery_rejects_unknown_effect_kind():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(
+        {
+            "effect_type": "unregistered_effect",
+            "receipt_kind": "effect",
+            "status": "succeeded",
+        }
+    )
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_duplicate_resume_receipt():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(dict(projection["effects"][1]))
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_foreign_admission_and_authority_mismatch():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["details"]["receipt"]["job_id"] = "foreign-job"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+    projection = _repair_approval_recovery_projection()
+    projection["effects"][1]["authority_digest"] = "foreign-authority"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_unresolved_admission():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["status"] = "intent"
+    remote["details"]["admission_status"] = "intent"
+    remote["details"]["receipt"]["status"] = "intent"
+    assert _repair_approval_resume_recovery_ready(projection) is False
 
 
 @pytest.mark.parametrize(
@@ -68,49 +173,97 @@ def test_other_readiness_failure_keeps_generic_prerequisite_recovery():
 
 
 @pytest.mark.asyncio
+async def test_goal_snapshot_settlement_persists_explicit_no_learning_result():
+    class _Jobs:
+        def __init__(self):
+            self.effect: dict[str, Any] | None = None
+            self.transition: dict[str, Any] | None = None
+
+        async def get_job(self, _job_id: str):
+            return {"status": "running", "revision": 11}
+
+        async def record_effect(self, _job_id: str, **kwargs: Any):
+            self.effect = kwargs
+            return {"revision": 12}
+
+        async def transition_job(self, _job_id: str, _status: str, **kwargs: Any):
+            self.transition = kwargs
+            return {"status": "succeeded", "revision": 13}
+
+    jobs = _Jobs()
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    await dispatcher._settle_parent(
+        "parent-job",
+        "service:work-board:attempt",
+        4,
+        {
+            "verified": True,
+            "content_sha256": "a" * 64,
+            "child_job_id": "goal-snapshot-child",
+            "learning": "no_learning",
+            "readback_id": "readback-1",
+            "verified_at": "2026-09-30T12:00:00+00:00",
+            "result_refs": [
+                {
+                    "artifact_id": "art_snapshot",
+                    "file_path": "artifacts/snapshot.md",
+                }
+            ],
+        },
+    )
+
+    assert jobs.effect is not None
+    assert jobs.effect["details"]["learning"] == "no_learning"
+    assert jobs.transition is not None
+    assert jobs.transition["result"]["learning"] == "no_learning"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("connection", "grants", "repository", "expected"),
     [
-        ({"mode": "active", "credential_configured": True, "repository": "seraph/repo"}, (), "seraph/repo", "external_mutation_grant_required"),
+        ({"mode": "active", "credential_configured": True, "repository": "seraph/repo"}, (), "seraph/repo", "github_connection_needs_consent"),
         ({"mode": "active", "credential_configured": False, "repository": "seraph/repo"}, ("external_mutation",), "seraph/repo", "credential_not_configured"),
         ({"mode": "active", "credential_configured": True, "repository": "seraph/other"}, ("external_mutation",), "seraph/repo", "github_repository_changed"),
     ],
 )
 async def test_routine_preflight_blocks_missing_current_github_authority(
+    client,
+    async_db,
     monkeypatch,
     connection,
     grants,
     repository,
     expected,
 ):
-    class FakeGitHubService:
-        async def get_connection(self, _owner):
-            return connection
+    from src.extensions.github_followthrough import GitHubFollowthroughService
+    from tests.test_github_connection_consent import login
 
-    async def authenticate(_session_id, *, touch):
-        assert touch is False
-        return SimpleNamespace(
-            session_id="session-one",
-            principal=SimpleNamespace(
-                principal_id="operator:one",
-                grants=grants,
-            ),
-        )
+    owner = await login(client, monkeypatch)
+
+    class FakeGitHubService(GitHubFollowthroughService):
+        async def get_connection(self, _owner):
+            return {**connection, "revision": 1}
 
     monkeypatch.setattr(
         "src.extensions.github_followthrough.GitHubFollowthroughService",
         FakeGitHubService,
     )
-    monkeypatch.setattr(dispatcher_module, "authenticate_session", authenticate)
+    task = _task("guardian-routine.v1", owner=owner["principal_id"])
+    task.owner_session_id = owner["session_id"]
     code, _reason = await WorkBoardDispatcher()._routine_external_preflight(
-        _task("guardian-routine.v1"),
-        {"source_repository": repository},
+        task,
+        {"source_repository": repository, "source_action": "create_issue"},
     )
     assert code == expected
 
 
 @pytest.mark.asyncio
-async def test_routine_preflight_blocks_inactive_source_watch_before_admission(monkeypatch):
+async def test_routine_preflight_blocks_inactive_source_watch_before_admission(client, async_db, monkeypatch):
+    from tests.test_github_connection_consent import active_connection
+
+    owner, connection, _binding, _request = await active_connection(client, monkeypatch)
+
     class FakeRoutineService:
         async def read(self, *_args, **_kwargs):
             return {
@@ -120,43 +273,23 @@ async def test_routine_preflight_blocks_inactive_source_watch_before_admission(m
                     {
                         "version": 1,
                         "installed_package_digest": "a" * 64,
-                        "source_repository": "seraph/repo",
+                        "source_repository": connection.repository,
+                        "source_action": "create_issue",
                     }
                 ],
                 "package": {"status": "active", "digest": "a" * 64},
             }
 
-    class FakeGitHubService:
-        async def get_connection(self, _owner):
-            return {
-                "mode": "active",
-                "credential_configured": True,
-                "repository": "seraph/repo",
-            }
-
-    async def authenticate(_session_id, *, touch):
-        assert touch is False
-        return SimpleNamespace(
-            session_id="session-one",
-            principal=SimpleNamespace(
-                principal_id="operator:one",
-                grants=("external_mutation",),
-            ),
-        )
-
     async def get_paused_watch(*_args, **_kwargs):
         return {"state": "paused", "plan_revision": 9}
 
     monkeypatch.setattr("src.workflows.routines.routine_service", FakeRoutineService())
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.GitHubFollowthroughService",
-        FakeGitHubService,
-    )
-    monkeypatch.setattr(dispatcher_module, "authenticate_session", authenticate)
     monkeypatch.setattr("src.guardian.source_watch.source_watch_service.get_watch", get_paused_watch)
     dispatcher = WorkBoardDispatcher()
+    task = _task("guardian-routine.v1", owner=owner["principal_id"])
+    task.owner_session_id = owner["session_id"]
     code, reason = await dispatcher._capability_preflight(
-        _task("guardian-routine.v1"),
+        task,
         SimpleNamespace(),
         {
             "routine_id": "routine-1",
@@ -531,6 +664,32 @@ def _github_board_task():
     )
 
 
+async def _github_board_task_with_consent(client, monkeypatch, tmp_path):
+    from src.extensions.github_consent import require_followthrough_consent
+    from tests.test_github_finite_consent_vertical import actual_source_dossier
+
+    owner, consent, goal, dossier_id, dossier_sha, _producer = await actual_source_dossier(
+        client, monkeypatch, tmp_path,
+    )
+    task = _github_board_task()
+    task.owner_principal_id = owner["principal_id"]
+    task.owner_session_id = owner["session_id"]
+    task.goal_id, task.goal_revision = goal.id, goal.revision
+    inputs = {"dossier_artifact_id": dossier_id, "dossier_sha256": dossier_sha,
+        "connection_revision": consent["revision"], "action": "create_issue",
+        "title": "Dispatcher recovery", "body": "Exact verified source update"}
+    raw = json.dumps({"schema_version": 1, "capability_id": task.capability_id, "input": inputs},
+        sort_keys=True, separators=(",", ":")).encode()
+    path = Path(settings.workspace_dir) / "inputs" / "github-recovery.json"
+    path.parent.mkdir(mode=0o700)
+    path.write_bytes(raw)
+    task.typed_input_ref = "workspace-json:inputs/github-recovery.json"
+    task.typed_input_digest = hashlib.sha256(raw).hexdigest()
+    binding = await require_followthrough_consent(principal=task.owner_principal_id,
+        root=task.owner_session_id, action=inputs["action"], revision=inputs["connection_revision"])
+    return task, binding
+
+
 def _github_board_attempt(job_id: str):
     return SimpleNamespace(
         attempt_id="attempt-github-approval",
@@ -541,8 +700,8 @@ def _github_board_attempt(job_id: str):
     )
 
 
-def _github_pending_projection(job_id: str):
-    return {
+def _github_pending_projection(job_id: str, *, task=None, binding=None):
+    projection = {
         "job_id": job_id,
         "run_identity": job_id,
         "status": "awaiting_approval",
@@ -566,10 +725,17 @@ def _github_pending_projection(job_id: str):
         },
         "effects": [],
     }
+    if task is not None:
+        projection.update(owner={"kind": "user", "principal_id": task.owner_principal_id},
+            session_id=task.owner_session_id, operator_session_id=task.owner_session_id,
+            goal_id=task.goal_id, goal_revision=task.goal_revision)
+        projection["declared_authority"].update(action="create_issue", repository=binding["repository"],
+            connection_revision=binding["connection_revision"], github_consent=binding)
+    return projection
 
 
-def _github_consumed_projection(job_id: str):
-    projection = _github_pending_projection(job_id)
+def _github_consumed_projection(job_id: str, *, task=None, binding=None):
+    projection = _github_pending_projection(job_id, task=task, binding=binding)
     projection["status"] = "queued"
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
     projection["effects"] = [
@@ -612,6 +778,16 @@ def _github_consumed_projection(job_id: str):
         operator_session_id="session:github",
         details_json=json.dumps(details),
     )
+    if task is not None:
+        projection["effects"][0].update(operator_principal_id=task.owner_principal_id,
+            operator_session_id=task.owner_session_id, owner_principal_id=task.owner_principal_id,
+            goal_id=task.goal_id, goal_revision=task.goal_revision)
+        details.update(durable_owner_principal_id=task.owner_principal_id,
+            durable_goal_id=task.goal_id, durable_goal_revision=task.goal_revision,
+            operator_session_id=task.owner_session_id)
+        approval.owner_principal_id = task.owner_principal_id
+        approval.operator_session_id = task.owner_session_id
+        approval.details_json = json.dumps(details)
     return projection, approval
 
 
@@ -720,91 +896,75 @@ async def test_github_board_admission_keeps_same_fenced_attempt_pending(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_github_linked_attempt_executes_same_approved_job_and_projects_readback(monkeypatch):
-    job_id = "ghfollow_approved"
-    task = _github_board_task()
-    attempt = _github_board_attempt(job_id)
-    projection = _github_pending_projection(job_id)
-    approval = SimpleNamespace(
-        status="approved",
-        owner_principal_id=task.owner_principal_id,
-        operator_session_id=task.owner_session_id,
-        details_json=json.dumps({"durable_job_id": job_id}),
-    )
+async def test_github_linked_attempt_executes_same_approved_job_and_projects_readback(client, async_db, monkeypatch, tmp_path):
+    import httpx
+    from src.extensions.github_followthrough import GitHubFollowthroughService, PrepareRequest
+    from src.workflows.job_runtime import durable_job_repository
+    from tests.test_github_connection_consent import ORIGIN
 
-    class Jobs:
-        async def get_job(self, requested_job_id):
-            assert requested_job_id == job_id
-            return dict(projection)
+    task, _binding = await _github_board_task_with_consent(client, monkeypatch, tmp_path)
+    inputs = dispatcher_module._parse_typed_input(task)
+    calls, remote = [], {}
+
+    async def resolver(*_args):
+        return ["93.184.216.34"]
+
+    def transport(request):
+        calls.append(request.method)
+        assert request.headers["authorization"] == "Bearer fixture-token"
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            assert payload == {"title": prepared.title, "body": prepared.body}
+            remote.update(payload, number=42)
+            return httpx.Response(201, json=remote)
+        assert request.method == "GET"
+        return httpx.Response(200, json=remote)
+
+    service = GitHubFollowthroughService(resolver=resolver, transport=httpx.MockTransport(transport))
+    attempt = _github_board_attempt("")
+    view = await service.prepare(owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        work_board_idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+        request=PrepareRequest(conversation_id=task.owner_session_id, goal_id=task.goal_id,
+            goal_revision=task.goal_revision, idempotency_key=str(uuid.uuid4()), **inputs))
+    job_id = view["job_id"]
+    attempt.workflow_run_id = job_id
+    prepared = await service._read_prepared(await durable_job_repository.get_job(job_id))
+    approved = await client.post(f"/api/approvals/{view['approval_id']}/approve", headers=ORIGIN)
+    assert approved.status_code == 200, approved.text
 
     class Repository:
         async def list_linked_active_attempts(self, _db, *, limit):
             assert limit > 0
             return [(task, attempt)]
 
-    @asynccontextmanager
-    async def session_provider():
-        yield _Session()
-
-    execute = AsyncMock()
+    execute = AsyncMock(wraps=service.execute)
     prepare = AsyncMock(side_effect=AssertionError("approved recovery must not prepare a second job"))
-
-    async def execute_same_job(**kwargs):
-        assert kwargs["job_id"] == job_id
-        assert kwargs["owner_principal_id"] == task.owner_principal_id
-        assert kwargs["owner_session_id"] == task.owner_session_id
-        projection.update(
-            {
-                "status": "succeeded",
-                "effects": [
-                    {
-                        "receipt_kind": "readback",
-                        "status": "succeeded",
-                        "reconciled": True,
-                        "workflow_run_id": job_id,
-                        "content_sha256": "e" * 64,
-                        "readback_id": "github-readback",
-                        "verified_at": "2026-09-25T00:00:00+00:00",
-                    }
-                ],
-            }
-        )
-        return {"status": "succeeded", "job_id": job_id}
-
-    execute.side_effect = execute_same_job
-    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.GitHubFollowthroughService.execute",
-        execute,
-    )
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.GitHubFollowthroughService.prepare",
-        prepare,
-    )
-    dispatcher = WorkBoardDispatcher(
-        repository=Repository(),
-        jobs=Jobs(),
-        session_provider=session_provider,
-    )
-    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+    monkeypatch.setattr(GitHubFollowthroughService, "execute", execute)
+    monkeypatch.setattr(GitHubFollowthroughService, "prepare", prepare)
+    dispatcher = WorkBoardDispatcher(repository=Repository(), jobs=durable_job_repository,
+        session_provider=async_db)
     dispatcher._lookup_linked_binding = AsyncMock(return_value=job_id)
-    monkeypatch.setattr("src.work_board.dispatcher._parse_typed_input", lambda _task: {})
     projected: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     async def project(*args, **kwargs):
         projected.append((args, kwargs))
 
     dispatcher._project = project
-
     recovered = await dispatcher.reconcile_linked_attempts()
+    current = await durable_job_repository.get_job(job_id)
+    actual_readback = next(effect for effect in current["effects"]
+        if effect.get("receipt_kind") == "readback" and effect.get("effect_type") == "github_publication")
 
     assert recovered == [job_id]
-    execute.assert_awaited_once()
+    execute.assert_awaited_once_with(owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id, job_id=job_id, external_mutation_granted=True)
     prepare.assert_not_awaited()
+    assert current["status"] == "succeeded" and calls == ["POST", "GET"]
     assert projected[-1][0][0] is task
     assert projected[-1][0][1] is attempt
     assert projected[-1][1]["status"] is WorkBoardStatus.done
-    assert projected[-1][1]["proof"]["readback_id"] == "github-readback"
+    assert projected[-1][1]["proof"]["readback_id"] == actual_readback["readback_id"]
 
 
 @pytest.mark.asyncio
@@ -834,11 +994,11 @@ async def test_github_linked_attempt_fails_closed_on_approval_binding_mismatch(m
 
 
 @pytest.mark.asyncio
-async def test_github_linked_attempt_resumes_consumed_approval_from_exact_durable_receipt(monkeypatch):
+async def test_github_linked_attempt_resumes_consumed_approval_from_exact_durable_receipt(client, async_db, monkeypatch, tmp_path):
     job_id = "ghfollow_consumed_approval"
-    task = _github_board_task()
+    task, binding = await _github_board_task_with_consent(client, monkeypatch, tmp_path)
     attempt = _github_board_attempt(job_id)
-    projection, approval = _github_consumed_projection(job_id)
+    projection, approval = _github_consumed_projection(job_id, task=task, binding=binding)
     latest = {**projection, "status": "succeeded", "effects": []}
     jobs = SimpleNamespace(get_job=AsyncMock(return_value=latest))
     execute = AsyncMock()
@@ -896,11 +1056,13 @@ async def test_github_linked_attempt_rejects_unbound_consumed_approval(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_github_linked_attempt_blocks_revoked_grant_without_execution(monkeypatch):
+async def test_github_linked_attempt_blocks_revoked_grant_without_execution(client, async_db, monkeypatch, tmp_path):
+    from tests.test_github_connection_consent import ORIGIN
+
     job_id = "ghfollow_revoked_grant"
-    task = _github_board_task()
+    task, binding = await _github_board_task_with_consent(client, monkeypatch, tmp_path)
     attempt = _github_board_attempt(job_id)
-    projection = _github_pending_projection(job_id)
+    projection = _github_pending_projection(job_id, task=task, binding=binding)
     approval = SimpleNamespace(
         status="approved",
         owner_principal_id=task.owner_principal_id,
@@ -910,8 +1072,10 @@ async def test_github_linked_attempt_blocks_revoked_grant_without_execution(monk
     execute = AsyncMock(side_effect=AssertionError("revoked grant must not execute"))
     monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
     monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    revoked = await client.post("/api/capabilities/github/connection/revoke",
+        json={"expected_revision": binding["connection_revision"]}, headers=ORIGIN)
+    assert revoked.status_code == 200, revoked.text
     dispatcher = WorkBoardDispatcher()
-    dispatcher._current_external_mutation_grant = AsyncMock(return_value=False)
 
     latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
 
@@ -1007,11 +1171,11 @@ def test_github_approval_block_projection_preserves_raw_recovery_category():
 
 
 @pytest.mark.asyncio
-async def test_github_linked_attempt_preserves_unknown_effect_recovery(monkeypatch):
+async def test_github_linked_attempt_preserves_unknown_effect_recovery(client, async_db, monkeypatch, tmp_path):
     job_id = "ghfollow_unknown"
-    task = _github_board_task()
+    task, binding = await _github_board_task_with_consent(client, monkeypatch, tmp_path)
     attempt = _github_board_attempt(job_id)
-    projection = _github_pending_projection(job_id)
+    projection = _github_pending_projection(job_id, task=task, binding=binding)
     approval = SimpleNamespace(
         status="approved",
         owner_principal_id=task.owner_principal_id,
@@ -1835,6 +1999,91 @@ async def test_linked_running_missing_lease_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_linked_same_owner_stale_lease_error_is_not_silently_stranded(monkeypatch):
+    """An unchanged same-owner lease error still reaches fail-closed projection."""
+
+    task = SimpleNamespace(
+        task_id="task-same-owner-stale",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id="guardian.research-watch.v1",
+        status=WorkBoardStatus.running,
+        task_revision=4,
+        requires_review=False,
+    )
+    attempt = SimpleNamespace(
+        task_id=task.task_id,
+        attempt_id="attempt-same-owner-stale",
+        workflow_run_id="source-watch:watch-1:attempt-same-owner-stale",
+        ended_at=None,
+        cancel_requested_at=None,
+        lease_owner="service:work-board",
+        fencing_token=2,
+    )
+    projection = {
+        "job_id": attempt.workflow_run_id,
+        "run_identity": attempt.workflow_run_id,
+        "status": "running",
+        "revision": 11,
+        "effects": [],
+        "lease": {
+            "owner": attempt.lease_owner,
+            "fencing_token": attempt.fencing_token,
+            "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        },
+    }
+
+    class Jobs:
+        async def get_job(self, _job_id):
+            return dict(projection)
+
+    class Repository:
+        async def list_linked_active_attempts(self, _db, *, limit):
+            assert limit > 0
+            return [(task, attempt)]
+
+    class Result:
+        def first(self):
+            return task, attempt
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return Result()
+
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=lambda: Session(),
+    )
+
+    async def stale_binding(*_args, **_kwargs):
+        raise DurableJobLeaseError("same-owner lease expired")
+
+    dispatcher._lookup_linked_binding = stale_binding
+    projected: list[dict[str, Any]] = []
+
+    async def project(*_args, **kwargs):
+        projected.append(kwargs)
+
+    dispatcher._project = project
+
+    recovered = await dispatcher.reconcile_linked_attempts()
+
+    assert recovered == [attempt.workflow_run_id]
+    assert projected
+    assert projected[0]["status"] is WorkBoardStatus.blocked
+    assert projected[0]["block_reason"] == "reconcile_admission_binding"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_pass_admits_at_most_two_in_priority_fifo_order():
     first = _dispatch_task("high-old", status=WorkBoardStatus.ready, priority=90, sequence=1)
     second = _dispatch_task("high-new", status=WorkBoardStatus.ready, priority=90, sequence=2)
@@ -1859,6 +2108,7 @@ async def test_dispatch_pass_admits_at_most_two_in_priority_fifo_order():
             return BoardDispatchClaim(task, attempt, SimpleNamespace(event_id=1))
 
     dispatcher = WorkBoardDispatcher(repository=Repository(), session_provider=lambda: _Session())
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
     dispatcher._readiness = lambda _task: _ready()
@@ -1912,6 +2162,7 @@ async def test_post_claim_authority_race_closes_pending_attempt_before_admission
         return 0
 
     dispatcher._expire_review_windows = no_expired_reviews
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
     dispatcher._effective_runtime = _runtime
@@ -2124,6 +2375,7 @@ async def test_two_racing_dispatch_passes_can_create_only_one_claim():
 
     def make_dispatcher():
         dispatcher = WorkBoardDispatcher(repository=Repository(), session_provider=lambda: _Session())
+        dispatcher.recover_expired_near_finance = _empty_reconcile
         dispatcher.reconcile_pending_attempts = _empty_reconcile
         dispatcher.reconcile_linked_attempts = _empty_reconcile
         dispatcher._readiness = lambda _task: _ready()
@@ -2140,9 +2392,11 @@ async def _admitted(*_args, **_kwargs):
     return {"admitted": True, "completed": False, "blocked": False}
 
 
-def _goal_snapshot_readiness_task() -> SimpleNamespace:
-    return SimpleNamespace(
+def _goal_snapshot_readiness_task() -> WorkBoardTask:
+    return WorkBoardTask(
         task_id="task-goal-snapshot-readiness",
+        idempotency_key="task-goal-snapshot-readiness",
+        title="GoalSnapshot readiness",
         task_revision=1,
         status=WorkBoardStatus.todo,
         owner_principal_id="operator:goal-snapshot",
@@ -2150,7 +2404,7 @@ def _goal_snapshot_readiness_task() -> SimpleNamespace:
         goal_id="goal-goal-snapshot-readiness",
         goal_revision=7,
         capability_id=GOAL_SNAPSHOT_CAPABILITY,
-        executor_id="executor.goal-snapshot",
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
         typed_input_ref="workspace-json:inputs/goal-snapshot.json",
         typed_input_digest="a" * 64,
         scheduled_at=None,
@@ -2168,6 +2422,27 @@ def _goal_snapshot_goal(*, criterion: GoalSuccessCriterion | None) -> Goal:
         owner_session_id="goal-snapshot-session",
         success_criterion_json=criterion.model_dump_json() if criterion is not None else None,
     )
+
+
+async def _goal_snapshot_readiness_case(client, async_db, monkeypatch, tmp_path, *, criterion):
+    from tests.test_github_connection_consent import login
+
+    owner = await login(client, monkeypatch)
+    workspace = tmp_path / "workspace"
+    (workspace / "inputs").mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    task = _goal_snapshot_readiness_task()
+    goal = _goal_snapshot_goal(criterion=criterion)
+    task.owner_principal_id = goal.owner_principal_id = owner["principal_id"]
+    task.owner_session_id = goal.owner_session_id = owner["session_id"]
+    raw = json.dumps({"schema_version": 1, "capability_id": task.capability_id,
+        "input": {"file_path": "artifacts/goal-snapshot.md"}}, sort_keys=True, separators=(",", ":")).encode()
+    (workspace / "inputs" / "goal-snapshot.json").write_bytes(raw)
+    task.typed_input_digest = hashlib.sha256(raw).hexdigest()
+    async with async_db() as db:
+        db.add(goal)
+        db.add(task)
+    return task, goal
 
 
 class _ReadinessResult:
@@ -2255,35 +2530,24 @@ class _ReadinessJobs:
     ],
 )
 async def test_goal_snapshot_missing_success_contract_blocks_before_claim_or_admission(
+    client,
+    async_db,
     monkeypatch,
+    tmp_path,
     criterion: GoalSuccessCriterion | None,
     expected_error: str,
 ):
-    task = _goal_snapshot_readiness_task()
-    goal = _goal_snapshot_goal(criterion=criterion)
+    task, goal = await _goal_snapshot_readiness_case(client, async_db, monkeypatch, tmp_path, criterion=criterion)
     repository = _ReadinessRepository(task)
     jobs = _ReadinessJobs()
     dispatcher = WorkBoardDispatcher(
         repository=repository,
         jobs=jobs,
-        session_provider=lambda: _ReadinessSession(goal),
+        session_provider=async_db,
     )
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
-    async def authenticated(*_args, **_kwargs):
-        return SimpleNamespace(
-            principal=SimpleNamespace(principal_id=task.owner_principal_id),
-        )
-
-    monkeypatch.setattr(
-        "src.work_board.dispatcher.authenticate_session",
-        authenticated,
-    )
-    monkeypatch.setattr(
-        "src.work_board.dispatcher._parse_typed_input",
-        lambda _task: {"file_path": "artifacts/goal-snapshot.md"},
-    )
-
     receipt = await dispatcher.run_pass()
 
     assert receipt["claimed"] == 0
@@ -2296,29 +2560,15 @@ async def test_goal_snapshot_missing_success_contract_blocks_before_claim_or_adm
 
 
 @pytest.mark.asyncio
-async def test_goal_snapshot_artifact_readback_success_contract_passes_readiness(monkeypatch):
-    task = _goal_snapshot_readiness_task()
-    goal = _goal_snapshot_goal(
+async def test_goal_snapshot_artifact_readback_success_contract_passes_readiness(client, async_db, monkeypatch, tmp_path):
+    task, goal = await _goal_snapshot_readiness_case(client, async_db, monkeypatch, tmp_path,
         criterion=GoalSuccessCriterion(
             description="Write the goal snapshot and verify its artifact",
             verifier_kind=CriterionVerifierKind.artifact_readback,
             evidence_refs=["operator:goal-snapshot-proof"],
         )
     )
-    dispatcher = WorkBoardDispatcher(session_provider=lambda: _ReadinessSession(goal))
-    async def authenticated(*_args, **_kwargs):
-        return SimpleNamespace(
-            principal=SimpleNamespace(principal_id=task.owner_principal_id),
-        )
-
-    monkeypatch.setattr(
-        "src.work_board.dispatcher.authenticate_session",
-        authenticated,
-    )
-    monkeypatch.setattr(
-        "src.work_board.dispatcher._parse_typed_input",
-        lambda _task: {"file_path": "artifacts/goal-snapshot.md"},
-    )
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
 
     async def capability_preflight(_task, _goal, _inputs):
         return None, None
@@ -2566,6 +2816,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
         WorkBoardEvent.__table__,
         WorkBoardLink.__table__,
         WorkBoardProposal.__table__,
+        WorkBoardEvidenceDependency.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -2629,6 +2880,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
         for _ in range(2)
     ]
     for dispatcher in dispatchers:
+        dispatcher.recover_expired_near_finance = empty_reconcile
         dispatcher.reconcile_pending_attempts = empty_reconcile
         dispatcher.reconcile_linked_attempts = empty_reconcile
         dispatcher._readiness = ready
@@ -2679,6 +2931,8 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
         WorkBoardLink.__table__,
         WorkflowRunState.__table__,
         Secret.__table__,
+        WorkBoardProposal.__table__,
+        WorkBoardEvidenceDependency.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(

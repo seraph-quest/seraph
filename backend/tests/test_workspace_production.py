@@ -31,6 +31,85 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "backend" / "workspace_cli.py"
 
 
+def test_accounting_maintenance_imports_without_runtime_dependencies():
+    completed = subprocess.run([sys.executable, "-S", "-c", "import src.workspace.accounting_continuity"],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "backend")}, cwd=ROOT,
+        capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_lifecycle_directory_migration_crash_and_idempotency(tmp_path, monkeypatch):
+    from src.workspace import production
+    root = tmp_path / "managed-data"
+    root.mkdir()
+    workspace = ProductionWorkspace(host_root=root)
+    legacy = root.parent / f".{root.name}.workspace-lifecycle.json"
+    receipt = {"status": "ready", "operation": "backup", "secret_values_included": False}
+    legacy.write_text(json.dumps(receipt))
+    original_write = production.write_lifecycle_receipt
+    def crash_after_atomic_write(*args, **kwargs):
+        original_write(*args, **kwargs)
+        raise RuntimeError("injected migration crash")
+    monkeypatch.setattr(production, "write_lifecycle_receipt", crash_after_atomic_write)
+    with pytest.raises(RuntimeError, match="migration crash"):
+        production.prepare_lifecycle_directory(workspace)
+    assert legacy.exists()
+    assert read_lifecycle_receipt(workspace) == receipt
+    monkeypatch.setattr(production, "write_lifecycle_receipt", original_write)
+    assert production.prepare_lifecycle_directory(workspace) == workspace.lifecycle_directory
+    assert not legacy.exists()
+    assert production.prepare_lifecycle_directory(workspace) == workspace.lifecycle_directory
+    assert all(read_lifecycle_receipt(workspace)[key] == value for key, value in receipt.items())
+    assert read_lifecycle_receipt(workspace)["deployment_binding"]["root_path_digest"] == workspace.identity_digest
+
+
+def test_lifecycle_witness_regression_and_legacy_mismatch_fail_closed(tmp_path):
+    from src.workspace.production import prepare_lifecycle_directory, write_lifecycle_receipt
+    root = tmp_path / "managed-data"
+    root.mkdir()
+    workspace = ProductionWorkspace(host_root=root)
+    witness = {"deployment_id": "deployment-fixed", "revision": 4, "ledger_digest": "a" * 64}
+    latest = {"secret_values_included": False, "inference_accounting": witness}
+    write_lifecycle_receipt(workspace, latest)
+    with pytest.raises(ProductionWorkspaceError, match="cannot regress"):
+        write_lifecycle_receipt(workspace, {"secret_values_included": False, "inference_accounting": {**witness, "revision": 3}})
+    assert read_lifecycle_receipt(workspace) == latest
+    legacy = root.parent / f".{root.name}.workspace-lifecycle.json"
+    legacy.write_text(json.dumps({"secret_values_included": False, "status": "old"}))
+    with pytest.raises(ProductionWorkspaceError, match="requires reconciliation"):
+        prepare_lifecycle_directory(workspace)
+    assert legacy.exists() and read_lifecycle_receipt(workspace) == latest
+
+
+def test_managed_descriptor_directory_migration_is_exact_after_crash(tmp_path, monkeypatch):
+    from src.workspace import production
+    root = tmp_path / "prior-root"
+    root.mkdir()
+    legacy = ProductionWorkspace(host_root=root, lifecycle_path=root.parent / f"{root.name}.lifecycle")
+    prior = {"status": "ready", "operation": "backup", "secret_values_included": False}
+    production.write_lifecycle_receipt(legacy, prior)
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "managed-profile" / "workspace-lifecycle"))
+    managed = ProductionWorkspace(host_root=root)
+    write = production.write_lifecycle_receipt
+    def injected_gap(*args, **kwargs):
+        write(*args, **kwargs)
+        raise RuntimeError("injected descriptor relocation gap")
+    monkeypatch.setattr(production, "write_lifecycle_receipt", injected_gap)
+    with pytest.raises(RuntimeError, match="relocation gap"):
+        production.prepare_lifecycle_directory(managed)
+    assert read_lifecycle_receipt(legacy) == prior and read_lifecycle_receipt(managed) == prior
+    monkeypatch.setattr(production, "write_lifecycle_receipt", write)
+    production.prepare_lifecycle_directory(managed)
+    ready = read_lifecycle_receipt(managed)
+    assert ready["deployment_binding"]["root_path_digest"] == managed.identity_digest
+    assert ready["legacy_lifecycle_migration"]["source_receipt_digest"]
+    production.prepare_lifecycle_directory(managed)
+    assert read_lifecycle_receipt(managed) == ready
+    production.write_lifecycle_receipt(legacy, {**prior, "operation": "newer-unretained"})
+    with pytest.raises(ProductionWorkspaceError, match="generations differ"):
+        production.prepare_lifecycle_directory(managed)
+
+
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "production-data"
     (root / "artifacts").mkdir(parents=True)
@@ -384,8 +463,12 @@ def test_managed_backup_rejects_missing_required_canonical_path(tmp_path):
     assert not workspace_backup_dir_for(root).exists()
 
 
-def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
+def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path, monkeypatch):
+    from src.workspace.production import prepare_lifecycle_directory
+
     root = _workspace(tmp_path)
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
     target = tmp_path / "rollback-target"
     target.mkdir()
     with sqlite3.connect(root / "seraph.db") as database:
@@ -404,7 +487,11 @@ def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
             """
         )
     registry = canonical_workspace_registry(root)
-    workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
+    workspace = resolve_production_workspace(
+        {**_env(root), "SERAPH_WORKSPACE_LIFECYCLE_PATH": str(tmp_path / "deployment-lifecycle")},
+        base_dir=tmp_path,
+    )
+    assert read_lifecycle_receipt(workspace)["deployment_binding"]["root_path_digest"] == workspace.identity_digest
     with maintenance_fence(workspace):
         receipt = reconcile_production_rollback(
             active=root,

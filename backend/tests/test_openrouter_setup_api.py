@@ -18,6 +18,9 @@ from src.vault.repository import vault_repository
 @pytest.fixture
 def model_fabric_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / f"{tmp_path.name}-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
     monkeypatch.setattr(settings, "openrouter_provider_only", True)
     monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
     monkeypatch.setattr(settings, "openrouter_allow_fallbacks", False)
@@ -51,6 +54,834 @@ def _setup_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _v2_setup_payload(**overrides):
+    # Synthetic identities are used only behind intercepted provider boundaries.
+    def route(slot):
+        return {"model_id": f"fixture/{slot}", "enabled": True,
+            "capabilities": {"text": ["text"], "vision": ["text", "vision", "structured_output"], "embedding": ["embedding"]}[slot],
+            "allowed_upstreams": ["fixture"], "temperature": 0.4,
+            "max_output_tokens": 2048, "timeout_seconds": 45,
+            "zero_data_retention": slot != "text", "request_cost_bound_microusd": 100}
+    payload = {"schema_version": "seraph.openrouter.setup.v2",
+        "routes": {slot: route(slot) for slot in ("text", "vision", "embedding")},
+        "data_collection": "deny", "data_retention_policy": "deny",
+        "egress_class": "cloud_allowed_full", "cloud_egress_acknowledged": True,
+        "vision_egress_acknowledged": True, "embedding_egress_acknowledged": True,
+        "spend_ceiling_microusd": 25_000, "max_queued": 8, "max_inflight": 1,
+        "max_outstanding_per_owner": 4, "max_retries": 1}
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("malformed", (["vision"], [], "vision", "", 1, 0, True, {"vision": True}, {"vision": "3"}, {"text": 3}))
+async def test_v2_malformed_persisted_purpose_consents_degrade_metadata_without_contact(client, model_fabric_workspace, keyless_openrouter, malformed):
+    import json
+    from dataclasses import replace
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import _configuration_payload, read_model_fabric_configuration, validate_openrouter_setup
+    body = api.OpenRouterSetupInput.model_validate(_v2_setup_payload())
+    valid = api._openrouter_setup_from_input(body, existing=None)
+    with pytest.raises(ValueError, match="invalid OpenRouter purpose consent"):
+        validate_openrouter_setup(replace(valid, purpose_consents=malformed))
+    payload = _configuration_payload(api._setup_configuration(valid, profiles=(), policies=()))
+    payload["openrouter_setup"]["purpose_consents"] = malformed
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    original = json.dumps(payload).encode()
+    path.write_bytes(original)
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("provider contact forbidden")) as contact:
+        persisted = read_model_fabric_configuration()
+        assert persisted.status == "degraded" and persisted.error_code == "configuration_unreadable"
+        status = await client.get("/api/settings/model-fabric")
+        assert status.status_code == 200, status.text
+        assert status.json()["configuration_status"] == "degraded"
+        assert status.json()["error_code"] == "configuration_unreadable"
+        assert status.json()["openrouter_setup"] is None
+        runtime = await client.get("/api/runtime/status")
+        assert runtime.status_code == 200, runtime.text
+        assert runtime.json()["model_fabric"]["configuration_status"] == "degraded"
+        assert runtime.json()["model_fabric"]["configuration_error"] == "configuration_unreadable"
+    contact.assert_not_called()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("field,malformed", (
+    ("schema_version", {}), ("schema_version", []),
+    ("temperature", {}), ("temperature", 10**1000), ("timeout_seconds", None),
+    ("max_output_tokens", []), ("max_queued", "8"), ("max_outstanding_per_owner", {}),
+    ("max_retries", 1.5), ("max_inflight", True), ("cloud_egress_acknowledged", []),
+    ("zero_data_retention", 1), ("credential_ref", []), ("credential_fingerprint", 7),
+    ("routes", []), ("routes.text", "fixture/text"),
+    ("routes.text.capabilities", "text"), ("routes.text.allowed_upstreams", 1),
+    ("routes.text.temperature", 10**1000),
+))
+async def test_v2_malformed_persisted_shared_and_route_shapes_are_unreadable(client, model_fabric_workspace, keyless_openrouter, field, malformed):
+    import json
+    from dataclasses import replace
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import _configuration_payload, _openrouter_setup_from_payload, read_model_fabric_configuration, validate_openrouter_setup
+    valid = api._openrouter_setup_from_input(api.OpenRouterSetupInput.model_validate(_v2_setup_payload()), existing=None)
+    payload = _configuration_payload(api._setup_configuration(valid, profiles=(), policies=()))
+    cursor = payload["openrouter_setup"]
+    parts = field.split(".")
+    for part in parts[:-1]:
+        cursor = cursor[part]
+    cursor[parts[-1]] = malformed
+    if not field.startswith("routes."):
+        with pytest.raises(ValueError):
+            validate_openrouter_setup(replace(valid, **{field: malformed}))
+    with pytest.raises(ValueError):
+        _openrouter_setup_from_payload(payload["openrouter_setup"])
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    original = json.dumps(payload).encode()
+    path.write_bytes(original)
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("provider contact forbidden")) as contact:
+        current = read_model_fabric_configuration()
+        assert current.status == "degraded" and current.error_code == "configuration_unreadable"
+        result = await client.get("/api/settings/model-fabric")
+        assert result.status_code == 200, result.text
+        assert result.json()["configuration_status"] == "degraded"
+        assert result.json()["error_code"] == "configuration_unreadable"
+        assert result.json()["openrouter_setup"] is None
+    contact.assert_not_called()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_slots_save_readback_restart_and_legacy_write_rejection(client, model_fabric_workspace, keyless_openrouter):
+    from src.model_fabric.configuration import read_model_fabric_configuration, effective_workload_policy
+    from src.llm_runtime import resolve_runtime_profile
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("provider contact forbidden")):
+        response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload()})
+        assert response.status_code == 200, response.text
+        assert response.json()["egress_revision"] == 3
+        saved = read_model_fabric_configuration()
+        assert saved.egress_revoked is False
+        assert saved.openrouter_setup.purpose_consents == {"vision": 3, "embedding": 3}
+        assert set(profile.id for profile in saved.profiles) == {"openrouter.text", "openrouter.vision", "openrouter.embedding"}
+        for runtime, slot in (("chat_agent", "text"), ("screenshot_image_analysis", "vision"), ("memory_embedding", "embedding")):
+            assert resolve_runtime_profile(runtime_path=runtime) == f"openrouter.{slot}"
+            assert effective_workload_policy(runtime).allowed_profile_ids == (f"openrouter.{slot}",)
+        # Independent reopening/hydration has no authority to change the file.
+        before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+        settings.openrouter_api_key = ""
+        restarted = await client.get("/api/settings/model-fabric")
+        assert restarted.status_code == 200
+        assert restarted.json()["openrouter_setup"]["schema_version"] == "seraph.openrouter.setup.v2"
+        assert all(state["status"] == "configuration_required" for state in restarted.json()["openrouter_setup"]["slot_statuses"].values())
+        assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
+        legacy = await client.put("/api/settings/model-fabric", json={"openrouter": _setup_payload()})
+        assert legacy.status_code == 409
+        assert legacy.json()["detail"] == "setup_schema_upgrade_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_save_race_has_exactly_one_success(client, model_fabric_workspace, keyless_openrouter):
+    import asyncio
+    body = {"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload()}
+    replies = await asyncio.gather(*(client.put("/api/settings/model-fabric", json=body) for _ in range(2)))
+    assert sorted(reply.status_code for reply in replies) == [200, 409]
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["egress_revision"] == 3
+    assert status["inference_accounting"]["ceiling_microusd"] == 25_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_requires_explicit_purpose_consent_before_credential_mutation(client, model_fabric_workspace, keyless_openrouter):
+    body = _v2_setup_payload(vision_egress_acknowledged=False, api_key="sk-forbidden-test")
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": body})
+    assert response.status_code == 403
+    assert await vault_repository.get("openrouter_api_key") is None
+    assert not (model_fabric_workspace / "model-fabric-settings.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_interrupted_accounting_leaves_revoked_and_compensates_only_key(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    async def broken_accounting(*args, **kwargs):
+        assert read_model_fabric_configuration().egress_revoked is True
+        raise RuntimeError("injected accounting failure")
+    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", broken_accounting)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-new-fixture")})
+    assert response.status_code == 503
+    saved = read_model_fabric_configuration()
+    assert saved.egress_revision == 2
+    assert saved.egress_revoked is True
+    assert saved.openrouter_setup.schema_version == "seraph.openrouter.setup.v2"
+    assert settings.openrouter_api_key == ""
+    assert await vault_repository.get("openrouter_api_key") is None
+    assert (await client.get("/api/settings/model-fabric")).json()["egress_revoked"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_uncertain_final_publication_preserves_active_target_key(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    write = api.write_model_fabric_configuration
+    def write_then_fail(configuration, **kwargs):
+        write(configuration, **kwargs)
+        if not configuration.egress_revoked:
+            raise OSError("uncertain active publication")
+    monkeypatch.setattr(api, "write_model_fabric_configuration", write_then_fail)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-active-fixture")})
+    assert response.status_code == 503
+    assert read_model_fabric_configuration().egress_revision == 3
+    assert read_model_fabric_configuration().egress_revoked is False
+    assert settings.openrouter_api_key == "sk-active-fixture"
+    assert await vault_repository.get("openrouter_api_key") == "sk-active-fixture"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_lost_initial_cas_never_mutates_or_compensates_staged_key(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.api import model_fabric_settings as api
+    from src.workspace.accounting_witness import PolicyRevisionConflict
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-prior-fixture")})
+    assert saved.status_code == 200
+    before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+    store = AsyncMock(side_effect=AssertionError("CAS loser must not install staged key"))
+    restore = AsyncMock(side_effect=AssertionError("unmutated key must not compensate"))
+    def lose_cas(*args, **kwargs):
+        raise PolicyRevisionConflict("provider_policy_revision_changed")
+    monkeypatch.setattr(api, "write_model_fabric_configuration", lose_cas)
+    monkeypatch.setattr(api, "_store_setup_credential", store)
+    monkeypatch.setattr(api, "_restore_setup_credential", restore)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": _v2_setup_payload(api_key="sk-losing-fixture")})
+    assert response.status_code == 409
+    store.assert_not_awaited()
+    restore.assert_not_awaited()
+    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
+    assert read_model_fabric_configuration().egress_revision == 3
+    assert settings.openrouter_api_key == "sk-prior-fixture"
+    assert await vault_repository.get("openrouter_api_key") == "sk-prior-fixture"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_key_commit_then_raise_compensates_with_revoked_readback(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    store = api._store_setup_credential
+    async def commit_then_fail(*args, **kwargs):
+        await store(*args, **kwargs)
+        raise RuntimeError("injected key writer uncertainty")
+    monkeypatch.setattr(api, "_store_setup_credential", commit_then_fail)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-uncertain-key-fixture")})
+    assert response.status_code == 503
+    assert read_model_fabric_configuration().egress_revoked is True
+    assert read_model_fabric_configuration().egress_revision == 2
+    assert settings.openrouter_api_key == ""
+    assert await vault_repository.get("openrouter_api_key") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("fault", ("missing_review", "wrong_bound", "old_settings_revision", "wrong_accounting_revision", "wrong_ledger_digest"))
+async def test_v2_activation_requires_exact_accounting_and_reserve_readback(client, model_fabric_workspace, keyless_openrouter, monkeypatch, fault):
+    from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    snapshot = durable_job_repository.inference_accounting_snapshot
+    async def altered_snapshot(**kwargs):
+        result = await snapshot(**kwargs)
+        if not kwargs.get("continuity_workspace"):
+            return result
+        assert result["request_reserve_review"]["bound_microusd"] == 100
+        if fault == "missing_review":
+            result["request_reserve_review"] = None
+        elif fault == "wrong_bound":
+            result["request_reserve_review"]["bound_microusd"] = 99
+        elif fault == "old_settings_revision":
+            result["request_reserve_review"]["settings_revision"] -= 1
+        elif fault == "wrong_accounting_revision":
+            result["request_reserve_review"]["accounting_revision"] += 1
+        else:
+            result["ledger_digest"] = "0" * 64
+        return result
+    monkeypatch.setattr(durable_job_repository, "inference_accounting_snapshot", altered_snapshot)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
+        "openrouter_setup": _v2_setup_payload(api_key="sk-readback-fixture")})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "accounting_settings_revision_unavailable"
+    current = read_model_fabric_configuration()
+    assert current.egress_revision == 2 and current.egress_revoked
+    assert settings.openrouter_api_key == ""
+    assert await vault_repository.get("openrouter_api_key") is None
+    ledger = await snapshot()
+    assert ledger["operation_count"] == 0 and ledger["committed_microusd"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("mutation", (
+    "legacy_model", "legacy_capabilities", "unknown_slot", "string_enabled",
+    "boolean_bound", "missing_upstream", "mixed_embedding", "vision_without_text",
+    "wrong_endpoint", "unsafe_key",
+))
+async def test_v2_closed_input_rejects_before_secret_or_policy_mutation(client, model_fabric_workspace, keyless_openrouter, mutation):
+    body = _v2_setup_payload(api_key="sk-rejected-fixture")
+    if mutation == "legacy_model":
+        body["model"] = "fixture/ignored"
+    elif mutation == "legacy_capabilities":
+        body["capabilities"] = ["text"]
+    elif mutation == "unknown_slot":
+        body["routes"]["audio"] = None
+    elif mutation == "string_enabled":
+        body["routes"]["text"]["enabled"] = "true"
+    elif mutation == "boolean_bound":
+        body["routes"]["text"]["request_cost_bound_microusd"] = True
+    elif mutation == "missing_upstream":
+        body["routes"]["text"]["allowed_upstreams"] = []
+    elif mutation == "mixed_embedding":
+        body["routes"]["embedding"]["capabilities"] = ["embedding", "text"]
+    elif mutation == "vision_without_text":
+        body["routes"]["vision"]["capabilities"] = ["vision"]
+    elif mutation == "wrong_endpoint":
+        body["api_base"] = "https://provider.invalid/v1"
+    elif mutation == "unsafe_key":
+        body["api_key"] = "sk-unsafe\nfixture"
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": body})
+    assert response.status_code == 422, response.text
+    assert await vault_repository.get("openrouter_api_key") is None
+    assert not (model_fabric_workspace / "model-fabric-settings.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_all_null_slots_save_without_inventing_selection(client, model_fabric_workspace, keyless_openrouter):
+    from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration
+    from src.security.trust_contract import EgressClass
+    body = _v2_setup_payload(routes={"text": None, "vision": None, "embedding": None})
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": body})
+    assert response.status_code == 200, response.text
+    assert read_model_fabric_configuration().profiles == ()
+    assert all(route is None for route in response.json()["openrouter_setup"]["routes"].values())
+    assert all(state["status"] == "configuration_required" for state in response.json()["openrouter_setup"]["slot_statuses"].values())
+    assert effective_workload_policy("chat_agent").egress_class is EgressClass.LOCAL_ONLY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("capabilities, expected_slots", (
+    (["text", "structured_output"], {"text"}),
+    (["text", "vision", "structured_output"], {"text", "vision"}),
+    (["embedding"], {"embedding"}),
+))
+async def test_v1_projection_is_pure_and_explicit_v2_save_preserves_existing_consent(client, model_fabric_workspace, keyless_openrouter, capabilities, expected_slots):
+    from dataclasses import asdict
+    from src.model_fabric.configuration import migrate_openrouter_setup_v1_to_v2, read_model_fabric_configuration
+    saved = await client.put("/api/settings/model-fabric", json={"openrouter_setup": _setup_payload(capabilities=capabilities, zero_data_retention=True, api_key="sk-migration-fixture")})
+    assert saved.status_code == 200, saved.text
+    original = read_model_fabric_configuration()
+    before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("migration provider contact forbidden")):
+        projected = (await client.get("/api/settings/model-fabric")).json()["openrouter_setup"]
+    assert projected["schema_version"] == "seraph.openrouter.setup.v2"
+    assert {slot for slot, route in projected["routes"].items() if route is not None} == expected_slots
+    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
+    assert read_model_fabric_configuration().openrouter_setup.schema_version == "seraph.openrouter.setup.v1"
+    migration = migrate_openrouter_setup_v1_to_v2(original.openrouter_setup, egress_revision=original.egress_revision)
+    assert migration.purpose_consents == {slot: original.egress_revision for slot in expected_slots - {"text"}}
+    body = _v2_setup_payload(routes={slot: asdict(route) if route is not None else None for slot, route in migration.routes.items()},
+        vision_egress_acknowledged=False, embedding_egress_acknowledged=False)
+    if "vision" in capabilities:
+        assert projected["slot_statuses"]["text"]["error_code"] == "legacy_route_capabilities_require_review"
+        assert body["routes"]["text"]["capabilities"] == tuple(capabilities)
+        # The explicit reviewed save owns choosing the valid text slot.
+        body["routes"]["text"]["capabilities"] = [item for item in capabilities if item != "vision"]
+    # Keep original values exactly; migration cannot silently raise cost/limits.
+    body["spend_ceiling_microusd"] = original.openrouter_setup.spend_ceiling_microusd
+    body["max_retries"] = original.openrouter_setup.max_retries
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": original.egress_revision, "openrouter_setup": body})
+    assert response.status_code == 200, response.text
+    current = read_model_fabric_configuration()
+    assert current.v1_rollback_snapshot["openrouter_setup"]["schema_version"] == "seraph.openrouter.setup.v1"
+    assert "sk-migration-fixture" not in (model_fabric_workspace / "model-fabric-settings.json").read_text()
+    assert await vault_repository.get("openrouter_api_key") == "sk-migration-fixture"
+    assert current.openrouter_setup.purpose_consents == {slot: current.egress_revision for slot in expected_slots - {"text"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("capabilities", (["vision"], ["structured_output"]))
+async def test_v1_incompatible_projection_keeps_exact_capabilities_blocked_without_write(client, model_fabric_workspace, keyless_openrouter, capabilities):
+    from src.model_fabric.configuration import migrate_openrouter_setup_v1_to_v2, read_model_fabric_configuration
+    response = await client.put("/api/settings/model-fabric", json={"openrouter_setup": _setup_payload(capabilities=capabilities, zero_data_retention=True)})
+    assert response.status_code == 200, response.text
+    original = read_model_fabric_configuration()
+    before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+    migration = migrate_openrouter_setup_v1_to_v2(original.openrouter_setup, egress_revision=original.egress_revision)
+    assert migration.routes["text"].capabilities == tuple(capabilities)
+    status = (await client.get("/api/settings/model-fabric")).json()["openrouter_setup"]
+    for slot, route in status["routes"].items():
+        if route is not None:
+            assert route["capabilities"] == capabilities
+            assert route["status"] == "blocked"
+            assert route["error_code"] == "legacy_route_capabilities_require_review"
+    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_saved_routes_own_runtime_and_screen_status_without_legacy_fallback(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.observer.screen_analysis_settings import read_screen_analysis_settings, write_screen_analysis_settings
+    monkeypatch.setattr(settings, "screen_analysis_provider", "legacy")
+    monkeypatch.setattr(settings, "screen_analysis_model", "openrouter/fixture/obsolete")
+    write_screen_analysis_settings({"enabled": True, "provider": "legacy", "model": "openrouter/fixture/obsolete"})
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload()})
+    assert saved.status_code == 200
+    runtime = (await client.get("/api/runtime/status")).json()
+    assert runtime["effective_runtime"]["model"] == "fixture/text"
+    assert "openrouter_upstream_allowlist_missing" not in runtime["effective_runtime"]["inference_readiness"]["reasons"]
+    screen = read_screen_analysis_settings()
+    assert screen["enabled"] is True
+    assert screen["model"] == "openrouter/fixture/vision"
+    assert screen["provider"] == "openrouter"
+    body = _v2_setup_payload()
+    body["routes"]["vision"] = None
+    assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": body})).status_code == 200
+    screen = read_screen_analysis_settings()
+    assert screen["enabled"] is True
+    assert screen["model"] == "" and screen["provider"] == ""
+    assert (await client.get("/api/runtime/status")).json()["effective_runtime"]["model"] == "fixture/text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_interrupted_active_witness_requires_revoked_reconciliation(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.workspace import accounting_witness, maintenance_fence
+    from src.workspace.production import ProductionWorkspace
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    writer = accounting_witness._write_configuration_file
+    def fail_active_file(path, payload):
+        if not payload["egress_revoked"]:
+            raise OSError("injected witness-to-file crash")
+        return writer(path, payload)
+    monkeypatch.setattr(accounting_witness, "_write_configuration_file", fail_active_file)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-gap-fixture")})
+    assert response.status_code == 503
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["egress_revoked"] is True
+    assert status["error_code"] == "provider_policy_continuity_unavailable"
+    # Contradictory active witness cannot justify guessing a key compensation.
+    assert await vault_repository.get("openrouter_api_key") == "sk-gap-fixture"
+    monkeypatch.setattr(accounting_witness, "_write_configuration_file", writer)
+    with maintenance_fence(ProductionWorkspace(host_root=model_fabric_workspace)):
+        recovery = accounting_witness.reconcile_policy_checkpoint(model_fabric_workspace)
+    assert recovery["status"] == "reconciled_revoked"
+    assert recovery["revision"] == 4
+    settings.openrouter_api_key = ""
+    restarted = await client.get("/api/settings/model-fabric")
+    assert restarted.json()["egress_revoked"] is True
+    assert read_model_fabric_configuration().egress_revision == 4
+    assert all(state["status"] != "ready" for state in restarted.json()["openrouter_setup"]["slot_statuses"].values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_cross_process_writer_cannot_activate_during_key_mutation_or_restore_old_policy(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    import asyncio
+    import json
+    import sys
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    store = api._store_setup_credential
+    observations = []
+    # This subprocess runs the actual retained flock and exact-CAS publication
+    # seam against the same file, with no database/provider or credential access.
+    script = """
+import json, sys
+from dataclasses import replace
+from config.settings import settings
+from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
+settings.workspace_dir = sys.argv[1]
+current = read_model_fabric_configuration()
+try:
+    write_model_fabric_configuration(replace(current, egress_revoked=False, egress_revision=3), expected_revision=2)
+except Exception as error:
+    print(json.dumps({"error": type(error).__name__, "reason": str(error), "revision": current.egress_revision, "revoked": current.egress_revoked}))
+else:
+    print(json.dumps({"unexpected_success": True}))
+"""
+    async def contender():
+        process = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(model_fabric_workspace),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        output, error = await asyncio.wait_for(process.communicate(), 10)
+        assert process.returncode == 0, error.decode()
+        return json.loads(output)
+    async def checked_store(*args, **kwargs):
+        assert read_model_fabric_configuration().egress_revoked
+        result = await store(*args, **kwargs)
+        observations.append(await contender())
+        assert read_model_fabric_configuration().egress_revision == 2
+        assert read_model_fabric_configuration().egress_revoked
+        return result
+    monkeypatch.setattr(api, "_store_setup_credential", checked_store)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-cross-process-fixture")})
+    assert response.status_code == 200, response.text
+    assert observations[0]["error"] == "ProductionWorkspaceReconciliationError"
+    assert "busy" in observations[0]["reason"]
+    assert observations[0]["revision"] == 2 and observations[0]["revoked"] is True
+    after = await contender()
+    assert after["error"] == "PolicyRevisionConflict"
+    assert read_model_fabric_configuration().egress_revision == 3
+    assert read_model_fabric_configuration().egress_revoked is False
+    assert await vault_repository.get("openrouter_api_key") == "sk-cross-process-fixture"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_vision_edit_preserves_exact_text_proof_but_denies_old_queued_epoch(client, model_fabric_workspace, keyless_openrouter):
+    import asyncio
+    import time
+    from dataclasses import replace
+    from src.model_fabric import candidate_from_profile
+    from src.model_fabric.accounting import bind_accounting_profile
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    from src.model_fabric.proofs import build_model_route_proof, proof_is_fresh
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.workflows.job_runtime import durable_job_repository
+    from tests.test_inference_accounting import request
+    from tests.test_model_fabric_proofs_receipts import _receipt
+
+    first_save = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-proof-fixture")})
+    assert first_save.status_code == 200
+    before = next(profile for profile in read_model_fabric_configuration().profiles if profile.id == "openrouter.text")
+    candidate = candidate_from_profile(before)
+    # Synthetic proof fixture checks exact hash/storage semantics only. It does
+    # not substitute for the milestone's intercepted manual canary journey.
+    now = time.time()
+    receipt = _receipt(receipt_id="fixture-text-probe", workload="capability_probe")
+    receipt = replace(receipt, actual_profile_id=before.id, actual_model=before.model,
+        actual_adapter=before.transport_adapter,
+        attempts=tuple(replace(attempt, profile_id=before.id, model=before.model,
+            endpoint=candidate.endpoint, adapter=before.transport_adapter) for attempt in receipt.attempts))
+    assert (await model_fabric_repository.persist_route_receipt(receipt)).persisted
+    proof = build_model_route_proof(profile=before, endpoint_class=candidate.endpoint_class,
+        adapter=before.transport_adapter, capability="text", canary_version="fixture-v1",
+        outcome="passed", checked_at=now, expires_at=now + 600,
+        probe_receipt_id=receipt.receipt_id, probe_receipt_hash=receipt.receipt_hash)
+    assert (await model_fabric_repository.persist_capability_proof(proof)).persisted
+    for capability, value in (("health", "healthy"), ("latency_ms", 1)):
+        additional = build_model_route_proof(profile=before, endpoint_class=candidate.endpoint_class,
+            adapter=before.transport_adapter, capability=capability, canary_version="fixture-v1",
+            outcome="passed", checked_at=now, expires_at=now + 600,
+            probe_receipt_id=receipt.receipt_id, probe_receipt_hash=receipt.receipt_hash, proven_value=value)
+        assert (await model_fabric_repository.persist_capability_proof(additional)).persisted
+    from datetime import datetime, timezone
+    ready = (await client.get("/api/settings/model-fabric")).json()["openrouter_setup"]["slot_statuses"]["text"]
+    assert ready["status"] == "ready"
+    assert ready["proof_expires_at"] == datetime.fromtimestamp(now + 600, timezone.utc).isoformat()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    started, release = asyncio.Event(), asyncio.Event()
+    callbacks = []
+    async def active():
+        callbacks.append("active")
+        started.set()
+        await release.wait()
+        return {"usage": {"cost": "0.000001"}}
+    async def forbidden():
+        callbacks.append("stale-queued")
+        return {"usage": {"cost": "0.000001"}}
+    bind_accounting_profile("active-text", before.id)
+    bind_accounting_profile("queued-text", before.id)
+    active_task = asyncio.create_task(broker.execute(replace(request("active-text"), owner_budget_microusd=25_000), active))
+    queued_task = None
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        queued_task = asyncio.create_task(broker.execute(replace(request("queued-text"), owner_budget_microusd=25_000), forbidden))
+        for _ in range(100):
+            operations = (await durable_job_repository.inference_accounting_snapshot()).get("operations", [])
+            if len(operations) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(operations) == 2
+        changed = _v2_setup_payload()
+        changed["routes"]["vision"]["model_id"] = "fixture/new-vision"
+        second_save = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": changed})
+        assert second_save.status_code == 200, second_save.text
+        after = next(profile for profile in read_model_fabric_configuration().profiles if profile.id == before.id)
+        assert after.contract_hash == before.contract_hash
+        found = await model_fabric_repository.latest_capability_proof(profile_schema_version=after.schema_version,
+            profile_contract_hash=after.contract_hash, profile_id=after.id, model=after.model,
+            endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class,
+            adapter=after.transport_adapter, capability="text")
+        assert found is not None and found.proof_hash == proof.proof_hash and proof_is_fresh(found)
+    finally:
+        release.set()
+        tasks = [task for task in (active_task, queued_task) if task is not None]
+        outcomes = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+    assert all(isinstance(outcome, Exception) for outcome in outcomes)
+    assert callbacks == ["active"]
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    assert snapshot["committed_microusd"] == 1
+    assert snapshot["unknown_microusd"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_measured_embedding_dimension(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    import httpx
+    from src.api import model_fabric_settings as api
+    from src.workflows.job_runtime import durable_job_repository
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "fixture-auth-password")
+    client.headers["origin"] = "http://localhost:3001"
+    login = await client.post("/api/auth/login", json={"password": "fixture-auth-password"})
+    assert login.status_code == 200, login.text
+    calls = []
+    import threading
+    contact_lock = threading.Lock()
+    contact_state = {"active": 0, "peak": 0}
+    ordinary_order = []
+    hold_embedding = [False]
+    embedding_started, release_embedding = threading.Event(), threading.Event()
+    dimension_override = [None]
+    failures = []
+    execute = api.remote_inference_admission_broker.execute
+    async def checked_execute(*args, **kwargs):
+        try:
+            return await execute(*args, **kwargs)
+        except Exception as error:
+            failures.append((type(error).__name__, str(error), type(error.__cause__).__name__, str(error.__cause__)))
+            raise
+    monkeypatch.setattr(api.remote_inference_admission_broker, "execute", checked_execute)
+    class ProviderClient:
+        def __init__(self, **kwargs):
+            assert kwargs["follow_redirects"] is False
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def post(self, endpoint, *, json, headers):
+            calls.append((endpoint, json, headers))
+            with contact_lock:
+                contact_state["active"] += 1
+                contact_state["peak"] = max(contact_state["peak"], contact_state["active"])
+            if hold_embedding[0]:
+                ordinary_order.append(json["model"])
+            assert endpoint.startswith("https://openrouter.ai/api/v1/")
+            assert json["provider"]["only"] == ["fixture"]
+            assert json["provider"]["allow_fallbacks"] is False
+            result = {"id": "fixture-operation", "usage": {"cost": "0.000001"}}
+            if endpoint.endswith("/embeddings"):
+                assert "input" in json and "messages" not in json
+                dimension = 4 if json["model"] == "fixture/new-embedding" else 3
+                result["data"] = [{"index": 0, "embedding": [0.3] * dimension}]
+            else:
+                assert "messages" in json and "input" not in json
+                if json["model"] == "fixture/vision":
+                    from tests.test_openrouter_screenshot import _analysis_payload
+                    import json as codec
+                    content = codec.dumps(_analysis_payload())
+                else:
+                    content = '{"ok":true}'
+                result["choices"] = [{"message": {"content": content}}]
+            with contact_lock:
+                contact_state["active"] -= 1
+            return httpx.Response(200, json=result, request=httpx.Request("POST", endpoint))
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-canary-fixture")})
+    assert saved.status_code == 200
+    monkeypatch.setattr(api.httpx, "AsyncClient", ProviderClient)
+    for profile_id, capability in (("openrouter.text", "vision"), ("openrouter.vision", "embedding")):
+        blocked = await client.post("/api/settings/model-fabric/canary", json={"profile_id": profile_id,
+            "capability": capability, "timeout_seconds": 45, "proof_ttl_seconds": 600})
+        assert blocked.status_code == 422
+        assert f"capability_not_declared:{capability}" in blocked.json()["detail"]["non_routable_reasons"]
+        assert calls == []
+    unknown = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter.unmapped",
+        "capability": "text", "timeout_seconds": 45, "proof_ttl_seconds": 600})
+    assert unknown.status_code == 404 and calls == []
+    expected_calls = 0
+    for slot, capabilities in (("text", ("text",)), ("vision", ("text", "vision", "structured_output")), ("embedding", ("embedding",))):
+        for capability in (*capabilities, "health", "latency_ms"):
+            response = await client.post("/api/settings/model-fabric/canary", json={"profile_id": f"openrouter.{slot}",
+                "capability": capability, "timeout_seconds": 45, "proof_ttl_seconds": 600})
+            assert response.status_code == 200, response.text
+            assert response.json()["outcome"] == "passed", (response.text, failures)
+            proof = response.json()["proof"]
+            assert proof["profile_id"] == f"openrouter.{slot}"
+            if capability == "embedding":
+                assert proof["proven_value"] == 3
+            expected_calls += 1
+    assert len(calls) == expected_calls == 11
+    assert {body["model"] for _, body, _ in calls} == {"fixture/text", "fixture/vision", "fixture/embedding"}
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert all(state["status"] == "ready" for state in status["openrouter_setup"]["slot_statuses"].values())
+    ledger = await durable_job_repository.inference_accounting_snapshot()
+    assert ledger["committed_microusd"] == 11 and ledger["unknown_microusd"] == 0
+    assert {operation["profile_id"] for operation in ledger["operations"]} == {"openrouter.text", "openrouter.vision", "openrouter.embedding"}
+    assert "sk-canary-fixture" not in status.__str__()
+
+    import asyncio
+    from src.approval.runtime import set_runtime_context, reset_runtime_context
+    from src.auth.service import authenticate_session
+    from src.memory import embedder, vector_store
+    operator = await authenticate_session(login.json()["session_id"], touch=False)
+    tokens = set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+    class EmbeddingClient:
+        def __init__(self, **kwargs):
+            assert kwargs["follow_redirects"] is False
+            assert kwargs["timeout"].read <= 45
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def post(self, endpoint, *, json, headers):
+            calls.append((endpoint, json, headers))
+            with contact_lock:
+                contact_state["active"] += 1
+                contact_state["peak"] = max(contact_state["peak"], contact_state["active"])
+            if hold_embedding[0]:
+                ordinary_order.append(json["model"])
+                if endpoint.endswith("/embeddings"):
+                    embedding_started.set()
+                    assert release_embedding.wait(10), "bounded native embedding did not release"
+            result = {"id": "fixture-native", "usage": {"cost": "0.000001"}}
+            if endpoint.endswith("/embeddings"):
+                assert json["model"] in {"fixture/embedding", "fixture/new-embedding"}
+                dimension = dimension_override[0] or (4 if json["model"] == "fixture/new-embedding" else 3)
+                result["data"] = [{"index": 0, "embedding": [0.3] * dimension}]
+            else:
+                assert endpoint.endswith("/chat/completions") and json["model"] == "fixture/text"
+                result["choices"] = [{"message": {"content": "native chat fixture readback"}}]
+            response = httpx.Response(200, json=result, request=httpx.Request("POST", endpoint))
+            with contact_lock:
+                contact_state["active"] -= 1
+            return response
+    monkeypatch.setattr(embedder.httpx, "Client", EmbeddingClient)
+    monkeypatch.setattr(vector_store, "_db", None)
+    embedder._reset_embedder_state()
+    try:
+        metadata = await asyncio.to_thread(embedder.embedding_metadata)
+        assert metadata.model == "fixture/embedding" and metadata.dimension == 3
+        assert await asyncio.to_thread(vector_store.search_with_status, "no index") == ([], True)
+        assert len(calls) == 11
+        assert vector_store._get_db().table_names() == []
+        memory_id = await asyncio.to_thread(vector_store.add_memory, "explicit existing indexing fixture")
+        assert memory_id
+        table_name = vector_store._table_name(metadata)
+        assert vector_store._get_db().table_names() == [table_name]
+        # Restart restores geometry only from current exact measured proof.
+        embedder._reset_embedder_state()
+        reopened = await asyncio.to_thread(embedder.embedding_metadata)
+        assert reopened == metadata
+        results, degraded = await asyncio.to_thread(vector_store.search_with_status, "current measured namespace")
+        assert not degraded and results[0]["id"] == memory_id
+        assert len(calls) == 13
+        from src.llm_runtime import completion_with_fallback
+        from src.model_fabric.caller_context import build_canonical_inference_context
+        from src.observer.screenshot_semantic_analysis import analyze_screenshot_image
+        from src.observer.screen_analysis_settings import write_screen_analysis_settings
+        write_screen_analysis_settings({"enabled": True})
+        image = model_fabric_workspace / "native-fixture.png"
+        image.write_bytes(api._ONE_PIXEL_PNG)
+        messages = [{"role": "user", "content": "bounded native chat fixture"}]
+        chat_context = build_canonical_inference_context("chat_agent", payload=messages,
+            output_tokens=64, timeout_seconds=45, principal=operator.principal, session_id=operator.session_id)
+        hold_embedding[0] = True
+        embedding_task = asyncio.create_task(asyncio.to_thread(embedder.embed, "native embedding fixture", principal=operator.principal))
+        chat_task = vision_task = None
+        try:
+            assert await asyncio.to_thread(embedding_started.wait, 5)
+            # Both are accepted while embedding occupies the sole serial lane.
+            vision_task = asyncio.create_task(analyze_screenshot_image(image, {"created_at": "2026-10-05T00:00:00Z"}))
+            chat_task = asyncio.create_task(completion_with_fallback(messages=messages, temperature=0,
+                max_tokens=64, runtime_path="chat_agent", request_context=chat_context))
+            for _ in range(100):
+                pending = (await durable_job_repository.inference_accounting_snapshot())["operations"]
+                if len(pending) == 16:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(pending) == 16
+        finally:
+            release_embedding.set()
+            native_results = await asyncio.wait_for(asyncio.gather(*(task for task in (embedding_task, chat_task, vision_task) if task is not None)), 10)
+            hold_embedding[0] = False
+        assert len(native_results[0]) == 3
+        assert native_results[1].choices[0].message.content
+        assert native_results[2].summary == "The operator is reviewing a Seraph test."
+        assert ordinary_order == ["fixture/embedding", "fixture/text", "fixture/vision"]
+        assert contact_state["peak"] == 1 and contact_state["active"] == 0
+        snapshot = await durable_job_repository.inference_accounting_snapshot()
+        assert snapshot["committed_microusd"] == 16 and snapshot["unknown_microusd"] == 0
+        assert len(calls) == 16
+        # A new target without proof cannot query the prior namespace.
+        changed = _v2_setup_payload()
+        changed["routes"]["embedding"]["model_id"] = "fixture/new-embedding"
+        saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": changed})
+        assert saved.status_code == 200
+        assert await asyncio.to_thread(vector_store.search_with_status, "old namespace forbidden") == ([], True)
+        assert len(calls) == 16
+        assert vector_store._get_db().table_names() == [table_name]
+        for capability in ("embedding", "health", "latency_ms"):
+            proven = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter.embedding",
+                "capability": capability, "timeout_seconds": 45, "proof_ttl_seconds": 600})
+            assert proven.status_code == 200 and proven.json()["outcome"] == "passed", proven.text
+            if capability == "embedding":
+                assert proven.json()["proof"]["proven_value"] == 4
+        target = await asyncio.to_thread(embedder.embedding_metadata)
+        assert target.dimension == 4 and target.namespace != metadata.namespace
+        assert await asyncio.to_thread(vector_store.search_with_status, "missing new measured index") == ([], True)
+        assert len(calls) == 19
+        # A response inconsistent with the current measured proof cannot create
+        # or write a table, even though the contacted charge still settles.
+        dimension_override[0] = 3
+        assert await asyncio.to_thread(vector_store.add_memory, "wrong measured dimension") == ""
+        assert vector_store._get_db().table_names() == [table_name]
+        dimension_override[0] = None
+        target_memory = await asyncio.to_thread(vector_store.add_memory, "new geometry indexing fixture")
+        target_table = vector_store._table_name(target)
+        assert target_memory and set(vector_store._get_db().table_names()) == {table_name, target_table}
+        target_results, degraded = await asyncio.to_thread(vector_store.search_with_status, "new namespace readback")
+        assert not degraded and [row["id"] for row in target_results] == [target_memory]
+        assert memory_id not in {row["id"] for row in target_results}
+
+        from src.memory.repository import memory_repository
+        from src.memory.hybrid_retrieval import retrieve_hybrid_memory
+        deleted_text = "explicit existing indexing fixture"
+        canonical = await memory_repository.create_memory(content=deleted_text,
+            embedding_id=memory_id, summary=deleted_text)
+        await memory_repository.mark_memory_tombstoned(canonical.memory_id,
+            actor="operator", reason="namespace rollback deletion fixture")
+        rollback = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 5,
+            "openrouter_setup": _v2_setup_payload()})
+        assert rollback.status_code == 200, rollback.text
+        for capability in ("embedding", "health", "latency_ms"):
+            proven = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter.embedding",
+                "capability": capability, "timeout_seconds": 45, "proof_ttl_seconds": 600})
+            assert proven.status_code == 200 and proven.json()["outcome"] == "passed", proven.text
+        restored = await asyncio.to_thread(embedder.embedding_metadata)
+        assert restored == metadata
+        recalled = await retrieve_hybrid_memory(query="explicit indexing fixture", limit=4)
+        assert deleted_text not in recalled.context and recalled.hits == ()
+        assert await memory_repository.get_memory_tombstone(canonical.memory_id) is not None
+        final_ledger = await durable_job_repository.inference_accounting_snapshot()
+        assert final_ledger["committed_microusd"] == len(calls) == 26
+        assert final_ledger["unknown_microusd"] == 0
+        assert set(vector_store._get_db().table_names()) == {table_name, target_table}
+    finally:
+        reset_runtime_context(tokens)
+        embedder._reset_embedder_state()
+
+
+@pytest.mark.parametrize("vector", ([True], [float("nan")], [float("inf")], [0.0], [10**1000], [], [0.1] * 65_537))
+def test_embedding_canary_rejects_unmeasured_or_unbounded_geometry(vector):
+    from src.api.model_fabric_settings import _embedding_canary_dimension
+    assert _embedding_canary_dimension({"data": [{"index": 0, "embedding": vector}]}) is None
 
 
 @pytest.fixture

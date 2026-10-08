@@ -120,6 +120,21 @@ SOURCE_CONTRACTS: tuple[SourceContractDefinition, ...] = (
         description="Publish an approved goal dossier as one GitHub issue or pull-request comment and verify its destination.",
         preferred_access="goal_followthrough_api",
     ),
+    SourceContractDefinition(
+        name="github_followthrough.publish_tested_patch",
+        description="Publish an exactly approved tested repository repair as a ready PR with independent Git Data and PR readback.",
+        preferred_access="repo_publication_api",
+    ),
+    SourceContractDefinition(
+        name="mail.messages.read",
+        description="Read a bounded, owner-consented Gmail label window and selected message metadata.",
+        preferred_access="authenticated_mail_api",
+    ),
+    SourceContractDefinition(
+        name="mail.reply.prepare_local",
+        description="Prepare a reviewed local reply draft from an explicitly selected Mail message.",
+        preferred_access="authenticated_mail_api",
+    ),
 )
 
 _MANAGED_CAPABILITY_CONTRACTS: dict[str, tuple[str, ...]] = {

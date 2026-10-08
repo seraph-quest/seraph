@@ -8,9 +8,11 @@ even when focused behavioral tests mock the transport.
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
 
 import pytest
+from tests.test_inference_accounting import accounting_db
 
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "src"
@@ -51,6 +53,7 @@ EXPECTED_CANONICAL_ROUTES = {
     "web_researcher",
     "file_worker",
     "workflow_runner",
+    "readonly_research_child",
 }
 
 
@@ -183,24 +186,27 @@ def test_registered_orchestrator_and_specialists_are_zero_transport_without_iden
     transport.assert_not_called()
 
 
-def test_registered_agent_binds_tools_response_format_and_options_to_exact_transport_digest():
+async def test_registered_agent_binds_tools_response_format_and_options_to_exact_transport_digest(accounting_db, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock, patch
 
     from src.llm_runtime import FallbackLiteLLMModel
+    from tests.test_inference_accounting import setup_configuration
+    from src.workflows.job_runtime import DurableJobRepository
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+
+    setup_configuration(ceiling=1000, bound=100)
+    await DurableJobRepository().configure_inference_accounting(1000)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", RemoteInferenceAdmissionBroker(durable_accounting=True))
     from src.security.trust_contract import (
-        AuthorityGrant,
-        PrincipalType,
-        TrustPrincipal,
         canonical_digest,
     )
-
-    principal = TrustPrincipal(
-        principal_id="operator:test-agent",
-        principal_type=PrincipalType.OPERATOR,
-        grants=(AuthorityGrant.MODEL_INFERENCE,),
-        session_id="session-agent",
-    )
+    from config.settings import settings
+    from src.auth.service import create_session
+    monkeypatch.setattr(settings, "operator_auth_secret", "registered-agent-fixture-secret")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    _token, operator = await create_session()
+    principal = operator.principal
     captured = {}
     decision = MagicMock(allowed=True, selected=MagicMock())
 
@@ -214,14 +220,14 @@ def test_registered_agent_binds_tools_response_format_and_options_to_exact_trans
             SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
             ),
-            {"choices": [{"message": {"content": "ok"}}]},
+            {"choices": [{"message": {"content": "ok"}}], "usage": {"cost": "0.000002"}},
         )
 
     model = FallbackLiteLLMModel(
         model_id="openai/test-model",
-        api_base="http://127.0.0.1:8000/v1",
+        api_base="https://openrouter.ai/api/v1",
         api_key="test-key",
-        runtime_profile="default",
+        runtime_profile="openrouter",
         runtime_path="orchestrator_agent",
         temperature=0.25,
         max_tokens=96,
@@ -242,7 +248,8 @@ def test_registered_agent_binds_tools_response_format_and_options_to_exact_trans
         patch("src.llm_runtime._governed_openai_chat_completion", side_effect=transport),
         patch("src.llm_runtime._can_log_request", return_value=False),
     ):
-        model.generate(
+        await asyncio.to_thread(
+            model.generate,
             [{"role": "user", "content": "delegate this exact task"}],
             stop_sequences=["STOP"],
             tools_to_call_from=tools,

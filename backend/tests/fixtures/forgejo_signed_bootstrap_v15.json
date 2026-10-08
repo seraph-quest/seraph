@@ -1,0 +1,31 @@
+{
+  "scope": "actual signed fixture authenticated HTML read ONLY; no browser submit or canonical authority claim",
+  "response_sha256": "393ce15bee21014a7dc237aec82e6361898039885898f00380f8a601bc9475d5",
+  "scripts": [
+    {
+      "attributes": {},
+      "text": "\n\t\n\twindow.addEventListener('error', function(e) {window._globalHandlerErrors=window._globalHandlerErrors||[]; window._globalHandlerErrors.push(e);});\n\twindow.addEventListener('unhandledrejection', function(e) {window._globalHandlerErrors=window._globalHandlerErrors||[]; window._globalHandlerErrors.push(e);});\n\twindow.config = {\n\t\tappUrl: 'https:\\/\\/codeberg.org\\/',\n\t\tappSubUrl: '',\n\t\tassetVersionEncoded: encodeURIComponent('15.0.9~gitea-1.22.0'), \n\t\tassetUrlPrefix: '\\/assets',\n\t\trunModeIsProd:  true ,\n\t\tcustomEmojis: new Set([\"git\",\"gitea\",\"codeberg\",\"gitlab\",\"github\",\"gogs\",\"forgejo\"]),\n\t\tpageData: {\"DATETIMESTRINGS\":{\"FUTURE\":\"in future\",\"NOW\":\"now\",\"relativetime.1day\":\"yesterday\",\"relativetime.1month\":\"last month\",\"relativetime.1week\":\"last week\",\"relativetime.1year\":\"last year\"},\"PLURALSTRINGS_FALLBACK\":{},\"PLURALSTRINGS_LANG\":{\"relativetime.days\":[\"%d day ago\",\"%d days ago\"],\"relativetime.hours\":[\"%d hour ago\",\"%d hours ago\"],\"relativetime.mins\":[\"%d minute ago\",\"%d minutes ago\"],\"relativetime.months\":[\"%d month ago\",\"%d months ago\"],\"relativetime.weeks\":[\"%d week ago\",\"%d weeks ago\"],\"relativetime.years\":[\"%d year ago\",\"%d years ago\"]},\"PLURAL_RULE_FALLBACK\":0,\"PLURAL_RULE_LANG\":0},\n\t\tnotificationSettings: {\"EventSourceUpdateTime\":10000,\"MaxTimeout\":60000,\"MinTimeout\":10000,\"TimeoutStep\":10000}, \n\t\tenableTimeTracking:  true ,\n\t\t\n\t\tmentionValues: Array.from(new Map([['seraph_fixture925', {key: 'seraph_fixture925 ', value: 'seraph_fixture925', name: 'seraph_fixture925', fullname: '', avatar: 'https:\\/\\/codeberg.org\\/avatars\\/6415812775140f1a41b8ffd6bda896f3'}],['seraph_fixture925', {key: 'seraph_fixture925 ', value: 'seraph_fixture925', name: 'seraph_fixture925', fullname: '', avatar: 'https:\\/\\/codeberg.org\\/avatars\\/6415812775140f1a41b8ffd6bda896f3'}],]).values()),\n\t\t\n\t\tmermaidMaxSourceCharacters:  50000 ,\n\t\t\n\t\ti18n: {\n\t\t\tcopy_success: \"Copied!\",\n\t\t\tcopy_error: \"Copy failed\",\n\t\t\terror_occurred: \"An error occurred\",\n\t\t\tnetwork_error: \"Network error\",\n\t\t\tremove_label_str: \"Remove item \\\"%s\\\"\",\n\t\t\tmodal_confirm: \"Confirm\",\n\t\t\tmodal_cancel: \"Cancel\",\n\t\t\tmore_items: \"More items\",\n\t\t\tincorrect_root_url: \"This Forgejo instance is configured to be served on \\\"https://codeberg.org/\\\". You are currently viewing Forgejo through a different URL, which may cause parts of the application to break. The canonical URL is controlled by Forgejo admins via the ROOT_URL setting in the app.ini.\",\n\t\t},\n\t};\n\t\n\twindow.config.pageData = window.config.pageData || {};\n"
+    },
+    {
+      "attributes": {
+        "src": "/assets/js/webcomponents.js?v=15.0.9~gitea-1.22.0"
+      },
+      "text": ""
+    },
+    {
+      "attributes": {},
+      "text": "\n\t\t\tif (localStorage?.getItem('markdown-editor-monospace') === 'true') {\n\t\t\t\tdocument.querySelector('.markdown-text-editor').classList.add('tw-font-mono');\n\t\t\t}\n\t\t"
+    },
+    {
+      "attributes": {},
+      "text": "\n\t\t\tif (localStorage?.getItem('markdown-editor-monospace') === 'true') {\n\t\t\t\tdocument.querySelector('.markdown-text-editor').classList.add('tw-font-mono');\n\t\t\t}\n\t\t"
+    },
+    {
+      "attributes": {
+        "src": "/assets/js/index.js?v=15.0.9~gitea-1.22.0",
+        "onerror": "alert('Failed to load asset files from {path}. Please make sure the asset files can be accessed.'.replace('{path}', this.src))"
+      },
+      "text": ""
+    }
+  ]
+}

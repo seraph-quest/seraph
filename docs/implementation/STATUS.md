@@ -10,23 +10,128 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Document class:** Shipped and Partial implementation inventory.
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
-The detailed inventory below records the large existing baseline. Some shipped
-surfaces remain transitional, including the Mac-hosted core, and Epic #736
-tracks their replacement. New target capabilities remain **Planned** until
+The detailed inventory below records the large existing baseline. Some shipped runtime contracts and implementations remain transitional;
+Epic #736 tracks their migration while macOS and Linux remain peer core-host targets. New target capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
 
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+## Bounded operator workflows (program #899)
+
+The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins
+existing goals, tasks, native jobs, approvals, artifacts and canonical memory
+into complete bounded operator journeys. Availability depends on the installed
+`develop` revision containing the final independently reviewed program merge.
+Before that merge, integration-branch receipts establish only their named
+implementation boundaries; configuration alone does not establish Shipped
+availability. The implemented profiles retain the runtime and proof limits below
+after merge.
+The [Current App Guide](./12-current-app-guide.md) describes the operator flow;
+the Constitution and ADRs remain the target authority.
+
+| Operator outcome | Declared behavior and boundary |
+| --- | --- |
+| Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
+| Run bounded plans and research | Durable inference reservations, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, budget and recovery state. Verified child outputs gate parent adoption; uncertainty holds capacity or liability instead of triggering blind replay. |
+| Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
+| Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
+| Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |
+| Supervise connected actions and attach context | Paired Telegram controls, one exact Gmail reply, one owned nonrecurring timed Calendar reschedule without attendees, the fixed Forgejo title transaction and deliberate ordinary Chromium text selection require their own finite permissions and approvals. Private outputs use current-owner reads and explicit cleanup; they do not become generic model inputs. |
+
+Readiness remains specific to the selected profile. The CPU core, canonical
+workspace and operator controls work without a local model, GPU, VLM service or
+optional companion. Ordinary remote inference uses the governed OpenRouter route and
+stays configuration-required without explicit credentials, upstream policy,
+consent, verified capability and budget. Linux optional isolation proof does not
+establish macOS execution: macOS remains a peer core-host target with unexecuted
+native/companion boundaries named by each adapter. No paid model, real Google
+account or Mac host is a prerequisite for local implementation acceptance.
+
+External-effect recovery preserves the original deadline, fence and liability.
+Gmail and Calendar read-only observations are separate outcomes alongside an
+original Unknown receipt; they never resend or silently declare the original
+write successful. Private-content availability is checked independently from
+historical success. Cleanup uncertainty remains visible and charged where the
+selected profile requires positive physical settlement.
+
+The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
+uses a local pinned-service proof profile; production Codeberg remains blocked pending
+separate account/site/version acceptance. Local revoke invalidates Seraph's
+authority and credentials; it does not prove provider logout or undo history or
+notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+permits ordinary top-frame Chromium text with local preview and deletion-only
+redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
+screenshots, clipboard and background capture, records no learning or analysis,
+and cannot guarantee that an ordinary webpage contains no sensitive text.
+
+These mechanical receipts do not measure live model quality, production
+reliability, comparative advantage or universal security. Independent program
+review and the combined documentation build gate promotion to `develop`;
+milestone review and PR state belong to GitHub, not this inventory.
+
+## Optional NEAR HTTPS text inference
+
+The narrow [#959](https://github.com/seraph-quest/seraph/issues/959) native text
+capability under [ADR-025](./decisions/025-near-https-text-inference.md) is
+**Shipped** on `develop`, disabled by default. Its named keyless managed UI/runtime
+and intercepted native/accounting/readback receipts cover local mechanics;
+they do not establish live provider availability, billing or model quality.
+
+The declared operator path is one private text question through the fixed
+`near.text` HTTPS route and `z-ai/glm-5.3-flash` model. The adapter uses ordinary
+HTTPS certificate validation; NEAR receives plaintext. The keyless/intercepted
+receipts do not prove a live provider TLS handshake. No verified TEE or
+end-to-end encryption claim applies. Local `configured` status means current
+credential, consent and accounting readiness, never provider availability.
+NEAR uses the existing shared deployment ledger and serial inference broker;
+global egress revocation covers both NEAR and OpenRouter. Missing or invalid
+billing retains liability, withholds answer adoption and never replays inference.
+Private output requires current authority and settled-cost readback. The task
+requires human Review; successful execution supplies no automatic approval.
+Unknown cost discards the withheld answer, and debt reconciliation cannot recover
+it or resend inference. Every outcome records `no_learning`.
+
 ## Epic #736/#775 OpenRouter inference phase
 
-This section records the accepted OpenRouter-only inference phase and its
-provider-free implementation contract. The active route is the governed
+This section records the accepted ordinary OpenRouter inference phase and its
+provider-free implementation contract. The ordinary route is the governed
 OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
 remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
+ADR-025 permits only the separate optional NEAR HTTPS text capability described
+above; it retains its own explicit authority and shared accounting gates.
+
+Purpose-specific OpenRouter setup remains **Partial** for operational
+acceptance. Existing settings provides independent text, vision, and embedding
+slots with per-purpose status/proof expiry, shared write-only credential,
+deployment ceiling, and sole serial broker. Save uses witnessed revocation,
+accounting review, and exact-revision activation; stale UI edits require
+explicit refresh/review/re-save. Legacy reads preserve exact authority and
+block incompatible slot projections until explicit save. Vector consumers use
+current measured-proof namespaces and lexical degradation when the selected
+index is unavailable. Provider-intercepted local receipts verify native chat,
+screenshot, and vector execution with one active transport and retained charge
+readback; actual provider availability, model quality, costs, and embedding
+usefulness remain externally unverified. See the [setup guide](./12-current-app-guide.md#configure-the-openrouter-route-epic-736775).
+
+Deployment inference accounting remains **Partial**. The canonical durable job
+repository owns finite reservations, immutable UTC-month attribution, account
+usage settlement, and unknown liabilities that carry across rollover and
+restore. The existing remote broker remains the sole serial executor. Paid
+egress requires a retained lifecycle witness outside root snapshots; stale or
+missing continuity blocks inference while deterministic CPU features remain
+usable. Settings exposes exact-operation manual reconciliation, explicitly
+marked externally unverified, without restoring job or grant authority. Live
+admission also requires exact review of every changed observed UTC month;
+clock correction conservatively retains future charges. Stable profile root
+binding and witnessed policy epochs prevent fresh-root budget bootstrap and
+archived egress reactivation. Overruns require explicit adequate reserve review
+bound to already-settled operation sequence/revision. Live
+provider charges and managed Docker mount operation remain unverified until
+separate operator-authorised operational receipts exist.
 
 The implementation merge gate is local provider-free validation: deterministic
 tests, intercepted transport tests, static/configuration checks, and negative
@@ -49,7 +154,12 @@ contract checks are evidence of the checked revision, not claims of live
 execution or competitive superiority. Receipt schema v2 labels each check as
 static, configuration, integration, external-unverified, or excluded; the
 stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
-checks outside Epic #736 closure.
+checks outside Epic #736 closure. The operator cancelled harness-improvement
+and comparative evaluation campaigns on 2026-10-06; #771 is closed as not planned,
+not delivered. Historical inactive evolution bookkeeping and deterministic
+mechanics receipts are not candidate-quality evaluation or harness-improvement
+proof. External usefulness remains unverified; ordinary regression and security
+checks remain required.
 Required child criteria map #750 conversation identity/outbox, #748 native
 software, #749 paired edge, #751 audio capture/decode/persistence, #752
 Telegram transport, and #755 capability-pack lifecycle. Static source checks
@@ -63,11 +173,25 @@ with exit 2, and a child-reported non-pass result, including `failed`, is
 visibly `degraded` with exit 2; hard configuration or static failures remain
 `failed` with exit 4. Source presence cannot satisfy behavior.
 
-Branch-local #753 adds authenticated local canonical-memory export, deterministic
+Integrated #753 provides authenticated local canonical-memory export, deterministic
 rebuild, tombstone-aware additive restore, and operator-visible recovery status;
 the owning guide records its bounded SQLite proof and remaining StrategyDelta,
-multi-process, production-restore, and semantic-quality limits. It is not
-Shipped `develop` truth until the reviewed milestone change lands.
+multi-process, production-restore, and semantic-quality limits. This bounded
+implementation is present on `develop`; the broader recovery/quality claim
+remains **Partial**. The [5 October baseline](/research/seraph-capability-baseline-2026-10-05)
+separates released main, integrated programs and current test failures. The
+[capability roadmap](./23-guardian-capability-roadmap.md) defines the accepted
+bounded sequence; this page owns its implemented scope and remaining limits.
+Neither the roadmap nor merged source upgrades comparative evidence claims.
+
+The bounded #920 profile adds neutral paired Telegram task notices, explicit bounded
+status review, exact pending-approval denial and original-attempt cancellation.
+Nonce consumption and each canonical decision/intent share the same writer;
+delivery ambiguity and native cancellation uncertainty remain separate Unknown
+states. Provider-free SQLite/HTTP and managed cockpit receipts validate this
+**Partial** implementation. Availability requires the installed reviewed program
+revision. Live Telegram remains unverified; see
+[Presence and Reach](./04-presence-and-reach.md#paired-telegram-task-controls-branch-local-920-partial).
 
 ## Legend
 
@@ -81,6 +205,78 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
+- [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
+  native public browser → deterministic CPU dossier → local plain-text report
+  chain, exact plan review, an original finite deadline and attempt counters,
+  independently verified artifact handoffs, durable authority freezes,
+  liability-preserving source revision and exact uncertain-request recovery.
+  The October 3 managed CPU-host journey used actual operator authentication,
+  real public-network Chromium execution and both CPU leaves, with durable
+  input consumption, unchanged deadline and API/UI report readback.
+  Model planning, arbitrary DAGs, publication and PDF/CSV export are outside
+  this capability. See [Current App Guide](./12-current-app-guide.md#reviewed-public-evidence-pipelines-914-branch-local-target)
+  and [ADR-010](./decisions/010-reviewed-artifact-pipelines.md).
+- [ ] Epic #883 M6 #889 reviewed-procedure v2 adds exactly three
+  fixed templates (`public-browser-check`, `watch-and-public-browser`, and
+  `selected-meeting-prep`) with registered native leaf capabilities, at most
+  two steps/300 seconds, copied server-owned executable inputs, exact source
+  proof, five-minute install approvals, explicit package review/activation,
+  manual invocation, and finite governed public/watch schedules. Owner/session
+  fences, exact unknown-request retry, native readbacks, explicit
+  `no_learning`, quiet-hours and finite goal-budget admission, and CPU-host
+  optional-dependency behavior are part of the capability. This remains
+  **Partial**: October 1 managed CPU-host public-browser execution
+  and twelve native vertical tests establish bounded mechanical execution,
+  and live response-loss recovery passed independent review and focused
+  validation. Live Calendar/model usefulness and production proof remain
+  **external-unverified**. See [Current
+  App Guide](./12-current-app-guide.md#reviewed-procedures-v2-m6-889-branch-local-target).
+- [ ] Epic #883 M4 #887 is a bounded repository-repair capability:
+  selected-source inspection, explicit code-egress consent, one governed
+  `strategist_agent` proposal, exact patch approval, and staged test/readback
+  evidence with `no_learning`. The server-owned selector offers a disabled
+  local host-user runner by default plus optional strict Docker rootless and
+  existing-daemon rootful profiles; every local job requires the exact
+  `local_host_execution` approval and is presented with no isolation guarantee.
+  Missing or drifted readiness blocks the selected backend without fallback;
+  legacy `engineering.repo-change.v1` remains strict rootless-only. One
+  durable `repo-repair-execution` slot spans Goals and recovery, remote
+  inference is released before approval/test dispatch, and one absolute
+  deadline covers staging through publication. Cancellation or unproven
+  cleanup/readback/publication remains recoverable on the same job/attempt.
+  The final native verifier covers one local API journey, two approved Goals
+  sharing one physical native worker, same-job API cancellation with fresh
+  reconciliation, staged readback/cleanup, source/.git preservation, and
+  `no_learning`; its deterministic transport is intercepted. Local execution
+  intentionally has no OS confinement. Intercepted transport and executor
+  mechanics do not prove live provider use or Docker resource enforcement.
+  Provider and account usefulness remain **external-unverified**. This remains
+  **Partial** and is not Shipped
+  `develop` truth. See [Current App Guide](./12-current-app-guide.md#governed-repository-repair-m4-887-branch-local-target).
+- [ ] Epic #899 milestone #912 adds a **Partial** Node repair capability with
+  explicit installed-runtime, approval and recovery boundaries. Availability
+  requires the installed reviewed program revision.
+  [Optional Node Repository Repair](./optional-node-repair.md) documents the
+  installed runtime and exact host approval boundary. ADR-007 accepts one
+  inspected Node/npm profile behind the existing repair journey. Authenticated
+  JS and TypeScript durable-job tests exercise real direct Node build/test
+  execution, exact host approval, artifact hash readback and `no_learning`;
+  their model transport is intercepted. Native supervision is explicitly
+  Linux x86_64 only and blocks other selected-profile platforms while the core
+  and Python default remain usable. Local Node has no OS isolation or enforced
+  CPU/memory/PID guarantee. These receipts do not establish Mac Node parity
+  or live-provider behavior.
+- [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This remains **Partial**; live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
+- [ ] M7 #890 adds a bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. This remains **Partial**. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
+- [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. This remains **Partial**; local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. See [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).
+- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
+- [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
+- [ ] Reviewed public opportunity judgments extend that Inbox with finite Goal policy, immutable public excerpts, one governed native strategist request and exact SHA256 citations. Fixed read-only browser/report plans add bounded generation, separately acknowledged automatic Triage staging, exact Work preview and explicit acceptance through existing native execution. Managed receipts cover browser readback, automatic CPU reports, silent staging, verified cancellation and same-workspace Unknown recovery with unchanged liability. Accepted review corrections preserve current authority, original output integrity and cleanup receipts. Judgment, planning and these executions retain `no_learning`; general proactive learning and live external/provider usefulness remain **Partial**. See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-read-only-opportunity-plans).
+- [ ] Reviewed opportunity feedback and reversible preferences add explicit append-only judgments, one bounded provider-free CPU recommendation, separate literal memory adoption and rollback. Two current verified Helpful outcomes can order eligible blueprint offers for display; two exact-watch Not helpful judgments can suppress optional candidates while source reads continue. Delivery, acknowledgment, unjudged work and task success supply no inferred vote. Current source/outcome/population checks and private-memory retrieval isolation constrain every adopted effect. Generalized learning, measured usefulness and live external/provider usefulness remain **Partial**; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-opportunity-feedback-and-reversible-preferences).
+- [ ] Guided first-result setup is **Partial**, available with the installed reviewed program revision: Home connects a local goal snapshot or public-source baseline plus snapshot to authenticated typed tasks, real dispatcher execution, canonical storage, and explicit verified artifact opening with `no_learning`. Owner/session-scoped activity records retain progress; manual-only public watches start with scheduled jobs disabled and are paused after observation. The managed keyless local journey and disk artifact digest are verified; live public-source usefulness remains externally unverified; see [Guided First Result Setup](./first-result-setup.md).
+- [ ] Unified attention and recovery is **Partial**, available with the installed reviewed program revision: bounded Home attention opens exact task approvals and owning unknown-effect readback in the existing Work inspector, with owner-root-scoped return context and read-only recovered history. Rendered Warsaw approval, denial, cancellation and expiry exercise actual ASGI/SQLite records; same-database app recreation and GET-only readback converge the same original attempt without replay. API timestamps carry UTC offsets. Expiry, revocation and changed goals block task adoption without losing settled-effect truth. These intercepted mechanical receipts use explicit test-only external permission and do not establish production GitHub write-consent creation, managed-host API restart, or live external usefulness; see [Attention and Recovery](./attention-recovery.md).
+- [ ] Stable operator ownership and exact read-only recovery remain **Partial**, available with the installed reviewed program revision: private device continuity can link explicitly selected records across new execution roots, while prior grants, effects and ambiguous legacy ownership remain blocked. Actual authenticated local snapshot execution, selection, fresh empty intent and evidence recall are covered by integrated tests and a managed browser/API/file receipt; prior authority is never restored by availability. See [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
+- [ ] Local task evidence working sets remain **Partial**, available with the installed reviewed program revision: canonical citation references, verified output lineage, exclusion and exact rendered-packet adoption use owner/task/goal/revision checks. Recovered history is read only; private and historic source egress stays blocked for generic strategist use. Focused API, SQLite, artifact and inspector checks establish local mechanics, not live provider usefulness. See [Task Evidence Working Sets](./task-evidence-working-sets.md).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] Public docs target the `v2026.6.30` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.
 - [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.

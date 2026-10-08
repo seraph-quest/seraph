@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +16,7 @@ from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 import src.workflows.native_software_engineering as native_swe
+from src.tools import process_tools
 from src.workflows.native_software_engineering import (
     NativeSoftwareEngineeringRequest,
     build_native_software_engineering_plan,
@@ -430,13 +432,33 @@ async def test_operator_journey_fails_closed_for_identity_approval_digest_and_eg
 def _make_sleeping_fixture(destination: Path) -> Path:
     source = _copy_fixture(destination)
     (source / "tests" / "test_calculator.py").write_text(
-        """import subprocess
+        """import json
+import os
+from pathlib import Path
+import subprocess
 import sys
 import time
 
 
+def identity(pid):
+    observed = {'pid': pid, 'pgid': os.getpgid(pid) if hasattr(os, 'getpgid') else None, 'start_time': None}
+    if sys.platform == 'linux':
+        try:
+            fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+            observed['start_time'] = int(fields[19])
+        except (OSError, ValueError, IndexError):
+            pass
+    return observed
+
+
 def test_add_returns_the_sum():
-    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    root = Path(__file__).resolve().parents[1]
+    temporary = root / 'test-process-started.tmp'
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as stream:
+        json.dump({'leader': identity(os.getpid()), 'descendant': identity(descendant.pid)}, stream)
+    os.replace(temporary, root / 'test-process-started.json')
     time.sleep(30)
 """,
         encoding="utf-8",
@@ -491,11 +513,22 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     )
     runner = asyncio.create_task(run_native_software_engineering_fixture(cancel_request))
     job_root = workspace / ".seraph" / "native-software-engineering" / "jobs" / native_swe._job_token(cancel_job_id)
-    patch_path = job_root / "artifacts" / "patch.json"
+    started_path = job_root / "workspace" / "test-process-started.json"
     deadline = time.monotonic() + 10
-    while not patch_path.exists() and time.monotonic() < deadline:
+    while not started_path.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
-    assert patch_path.exists(), "the real child process did not reach the test phase"
+    assert started_path.exists(), "the genuine test process did not launch its descendant"
+    started = json.loads(started_path.read_text(encoding="utf-8"))
+    assert all(observed["pid"] > 0 for observed in started.values())
+    if started["leader"]["pgid"] is not None:
+        assert started["leader"]["pgid"] == started["leader"]["pid"]
+        assert started["descendant"]["pgid"] == started["leader"]["pgid"]
+    if sys.platform == "linux" and Path("/proc").is_dir():
+        for observed in started.values():
+            assert observed["start_time"] is not None
+            current = process_tools._read_process_identity(observed["pid"])
+            assert current is not None
+            assert current.process_group_id == observed["pgid"] and current.start_time == observed["start_time"]
     cancel_result = await native_swe.cancel_native_software_engineering_job(
         cancel_job_id,
         owner=f"native-swe-worker:{native_swe._job_token(cancel_job_id)}",
@@ -512,3 +545,59 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     assert cancelled["cancellation"]["success_eligible"] is False
     assert cancelled["process_cleanup"]["cleanup_status"] in {"stopped", "unknown", "failed"}
     assert not (job_root / "artifacts" / "readback.json").exists()
+    if sys.platform == "linux" and Path("/proc").is_dir():
+        for observed in started.values():
+            current = process_tools._read_process_stat(observed["pid"])
+            same_live_process = current is not None and current.start_time == observed["start_time"] and current.state != "Z"
+            if cancelled["process_cleanup"]["cleanup_status"] == "stopped":
+                assert not same_live_process, "stopped cleanup retained an observed live process"
+            elif same_live_process:
+                assert cancelled["process_cleanup"]["cleanup_status"] in {"unknown", "failed"}
+
+
+@pytest.mark.asyncio
+async def test_operator_journey_missing_test_executable_fails_without_retry(
+    async_db, tmp_path, monkeypatch, native_context,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    source = _copy_fixture(workspace / "missing-executable-repository")
+    job_id = "native-swe-operator-missing-executable"
+    inspection = preflight_native_software_engineering_fixture(
+        _inspection_request(source, job_id=job_id, session_id=native_context)
+    )
+    request = await _approved_request(
+        source, job_id=job_id, session_id=native_context,
+        source_digest=inspection["source_digest"],
+    )
+    missing = workspace / "nonexistent-pytest-executable"
+    assert not missing.exists()
+    original_normalize = process_tools._normalize_command_invocation
+    dispatched = []
+
+    def normalize(**kwargs):
+        executable, arguments, cwd = original_normalize(**kwargs)
+        if kwargs["command"] == "pytest":
+            dispatched.append(arguments)
+            return str(missing), arguments, cwd
+        return executable, arguments, cwd
+
+    monkeypatch.setattr(process_tools, "_normalize_command_invocation", normalize)
+    failed = await run_native_software_engineering_fixture(request)
+    assert failed["status"] == "failed", failed
+    assert failed["reason_code"] == "test_process_failed"
+    assert failed["durable_job"]["status"] == "failed"
+    assert dispatched == [list(request.test_args)]
+    artifacts = workspace / failed["workspace"]["artifact_relative_path"]
+    test = json.loads((artifacts / "test.json").read_text(encoding="utf-8"))
+    assert test["process"]["exit_code"] == 127
+    assert test["process"]["timed_out"] is False
+    assert test["process"]["stderr_sha256"] == native_swe._digest_text("process_target_exec_unavailable\n")
+    assert test["success_eligible"] is False
+    readback = json.loads((artifacts / "readback.json").read_text(encoding="utf-8"))
+    assert readback["test_success"] is False
+    assert failed["original_fixture_immutable"] is True
+    assert native_swe._fixture_tree_digest(source) == inspection["source_digest"]
+    test_effects = [effect for effect in failed["durable_job"]["effects"] if effect["effect_type"] == "test_process"]
+    assert len(test_effects) == 1 and test_effects[0]["status"] == "failed"

@@ -26,6 +26,7 @@ describe("cockpitLayoutStore", () => {
     localStorageMock.clear();
     vi.clearAllMocks();
     useCockpitLayoutStore.setState({
+      activeSection: "home",
       activeLayoutId: "default",
       inspectorVisible: true,
       paneVisibility: getDefaultPaneVisibility("default"),
@@ -36,8 +37,16 @@ describe("cockpitLayoutStore", () => {
   });
 
   it("starts on the default layout", () => {
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("home");
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("default");
     expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
+    expect(useCockpitLayoutStore.getState().paneVisibility.sessions_pane).toBe(true);
+  });
+
+  it("persists the active workspace section without changing pane layout", () => {
+    useCockpitLayoutStore.getState().setActiveSection("library");
+
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("library");
     expect(useCockpitLayoutStore.getState().paneVisibility.sessions_pane).toBe(true);
   });
 
@@ -81,18 +90,21 @@ describe("cockpitLayoutStore", () => {
 
     const migrated = (await migrate?.(
       {
+        activeSection: "connections",
         activeLayoutId: "focus",
         inspectorVisible: false,
       },
       0,
     )) as {
       activeLayoutId: string;
+      activeSection: string;
       inspectorVisible: boolean;
       paneVisibility: Record<string, boolean>;
       savedPaneVisibility: Record<string, Record<string, boolean>>;
     };
 
     expect(migrated?.activeLayoutId).toBe("focus");
+    expect(migrated?.activeSection).toBe("connections");
     expect(migrated?.inspectorVisible).toBe(false);
     expect(migrated?.paneVisibility.sessions_pane).toBe(false);
     expect(migrated?.paneVisibility.inspector_pane).toBe(false);

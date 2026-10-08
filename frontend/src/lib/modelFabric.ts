@@ -71,22 +71,59 @@ export interface ModelFabricRuntimeStatus {
   openrouter_setup?: OpenRouterSetupStatus | null;
 }
 
-export interface OpenRouterSetupStatus {
-  schema_version: string;
-  profile_id: string;
-  api_base: string;
-  provider_kind: string;
-  model_ids: string[];
+export type OpenRouterPurpose = "text" | "vision" | "embedding";
+
+// Values accepted by PUT exclude the response's readiness and proof metadata.
+export interface OpenRouterRouteValue {
+  model_id: string;
+  enabled: boolean;
   capabilities: string[];
+  allowed_upstreams: string[];
   temperature: number;
   max_output_tokens: number;
   timeout_seconds: number;
-  allowed_upstreams: string[];
+  zero_data_retention: boolean;
+  request_cost_bound_microusd: number;
+}
+
+export interface OpenRouterSlotStatus {
+  status: "configuration_required" | "blocked" | "ready";
+  error_code: string | null;
+  proof_expires_at: string | null;
+}
+
+export interface OpenRouterRouteStatus extends OpenRouterRouteValue, OpenRouterSlotStatus {}
+
+export interface OpenRouterSetupValue {
+  schema_version: "seraph.openrouter.setup.v2";
+  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null>;
+  api_key?: string;
+  egress_class: string;
+  cloud_egress_acknowledged: true;
+  vision_egress_acknowledged?: true;
+  embedding_egress_acknowledged?: true;
+  spend_ceiling_microusd: number;
+  max_queued: number;
+  max_inflight: 1;
+  max_outstanding_per_owner: number;
+  max_retries: number;
+  data_collection: "deny";
+  data_retention_policy: "deny";
+  allow_fallbacks: false;
+  require_parameters: true;
+}
+
+export interface OpenRouterSetupStatus {
+  schema_version: "seraph.openrouter.setup.v2";
+  profile_id: string;
+  api_base: string;
+  provider_kind: string;
+  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null>;
+  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus>;
   allow_fallbacks: boolean;
   require_parameters: boolean;
   data_collection: string;
   data_retention_policy: string;
-  zero_data_retention: boolean;
   egress_class: string;
   cloud_egress_acknowledged: boolean;
   spend_ceiling_microusd: number | null;
@@ -100,6 +137,39 @@ export interface OpenRouterSetupStatus {
   status: string;
   error_code: string | null;
   provider_calls: string;
+}
+
+export const NEAR_TEXT_PROFILE = "near.text";
+export const NEAR_TEXT_MODEL = "z-ai/glm-5.3-flash";
+export const NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1";
+export const NEAR_TEXT_DISCLOSURE = "NEAR receives the question in plaintext over HTTPS.";
+
+export interface NearTextSetupInput {
+  schema_version: "seraph.near.text.v1";
+  enabled: boolean;
+  profile_id: typeof NEAR_TEXT_PROFILE;
+  model_id: typeof NEAR_TEXT_MODEL;
+  api_base: typeof NEAR_TEXT_API_BASE;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  request_cost_bound_microusd: number;
+  spend_ceiling_microusd: number;
+  plaintext_provider_egress_acknowledged: boolean;
+  api_key?: string;
+}
+
+export interface NearTextSetupStatus extends Omit<NearTextSetupInput, "api_key" | "plaintext_provider_egress_acknowledged"> {
+  credential_ref: "vault:near_text_api_key";
+  credential_fingerprint: string | null;
+  plaintext_egress_consent_revision: number | null;
+  key_present: boolean;
+  consent_current: boolean;
+  status: "disabled" | "configuration_required" | "blocked" | "configured";
+  reason_code: string | null;
+  tls_transport: true;
+  tee_verified: false;
+  e2ee: false;
+  provider_plaintext_disclosure: typeof NEAR_TEXT_DISCLOSURE;
 }
 
 export interface ModelFabricSettingsStatus {
@@ -122,6 +192,85 @@ export interface ModelFabricSettingsStatus {
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
   openrouter_setup?: OpenRouterSetupStatus | null;
+  near_text?: NearTextSetupStatus | null;
+  /** Local metadata failure marker; unrelated settings remain usable. */
+  near_text_metadata_unavailable?: boolean;
+  inference_accounting?: InferenceAccountingStatus | null;
+  egress_revision?: number;
+  egress_revoked?: boolean;
+}
+
+export interface InferenceAccountingStatus {
+  status: string;
+  reason_code?: string;
+  accounting_continuity_verified?: boolean;
+  authorized_period?: string;
+  period_high_water?: string;
+  revision?: number;
+  period_review?: { endpoint: string; method: string; period_id: string; expected_revision: number } | null;
+  period_id?: string;
+  settings_revision?: number;
+  ceiling_microusd?: number;
+  committed_microusd?: number;
+  reserved_microusd?: number;
+  unknown_microusd?: number;
+  remaining_microusd?: number | null;
+  operations_truncated?: boolean;
+  operation_count?: number;
+  operations: Array<{
+    operation_id: string; job_id: string; owner_id: string; runtime_path: string;
+    state: string; revision: number; bound_microusd: number; period_id: string;
+    recovery_reason?: string | null;
+    controls?: Array<{ action: string; endpoint: string; method: string; expected_revision: number; job_id: string; operation_id: string }>;
+  }>;
+}
+
+export function normalizeInferenceAccounting(value: unknown): InferenceAccountingStatus | null {
+  const record = recordOf(value);
+  if (!record || typeof record.status !== "string") return null;
+  const operations = Array.isArray(record.operations) ? record.operations : [];
+  const periodReview = recordOf(record.period_review);
+  return {
+    status: record.status,
+    reason_code: typeof record.reason_code === "string" ? record.reason_code : undefined,
+    accounting_continuity_verified: record.accounting_continuity_verified === true,
+    authorized_period: typeof record.authorized_period === "string" ? record.authorized_period : undefined,
+    period_high_water: typeof record.period_high_water === "string" ? record.period_high_water : undefined,
+    revision: typeof record.revision === "number" ? record.revision : undefined,
+    period_review: periodReview && periodReview.endpoint === "/api/settings/model-fabric/accounting/period"
+      && periodReview.method === "POST" && periodReview.period_id === record.period_id
+      && periodReview.expected_revision === record.revision && typeof periodReview.period_id === "string"
+      && /^[0-9]{4}-(0[1-9]|1[0-2])$/.test(periodReview.period_id) && typeof periodReview.expected_revision === "number"
+      && Number.isSafeInteger(periodReview.expected_revision) && periodReview.expected_revision >= 1
+      ? { endpoint: periodReview.endpoint, method: "POST", period_id: periodReview.period_id, expected_revision: periodReview.expected_revision } : null,
+    period_id: typeof record.period_id === "string" ? record.period_id : undefined,
+    settings_revision: typeof record.settings_revision === "number" ? record.settings_revision : undefined,
+    ceiling_microusd: typeof record.ceiling_microusd === "number" ? record.ceiling_microusd : undefined,
+    committed_microusd: typeof record.committed_microusd === "number" ? record.committed_microusd : undefined,
+    reserved_microusd: typeof record.reserved_microusd === "number" ? record.reserved_microusd : undefined,
+    unknown_microusd: typeof record.unknown_microusd === "number" ? record.unknown_microusd : undefined,
+    remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
+    operations_truncated: record.operations_truncated === true,
+    operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
+    operations: operations.flatMap((item) => {
+      const row = recordOf(item);
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];
+      const operationId = row.operation_id;
+      const jobId = row.job_id;
+      const revision = row.revision;
+      return [{ operation_id: row.operation_id, job_id: row.job_id, owner_id: String(row.owner_id ?? ""),
+        runtime_path: String(row.runtime_path ?? ""), state: String(row.state ?? "unknown"), revision: row.revision,
+        bound_microusd: row.bound_microusd, period_id: String(row.period_id ?? ""),
+        recovery_reason: typeof row.recovery_reason === "string" ? row.recovery_reason : null,
+        controls: Array.isArray(row.controls) ? row.controls.flatMap((entry) => {
+          const control = recordOf(entry);
+          if (!control || control.action !== "settle" || control.endpoint !== "/api/settings/model-fabric/accounting/settle" || control.method !== "POST" || control.operation_id !== row.operation_id || control.job_id !== row.job_id || control.expected_revision !== row.revision) return [];
+          return [{ action: "settle", endpoint: control.endpoint, method: "POST", expected_revision: revision,
+            job_id: jobId, operation_id: operationId }];
+        }) : [],
+      }];
+    }),
+  };
 }
 
 export interface ModelFabricCanaryResult {
@@ -170,25 +319,91 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | null {
+  const row = recordOf(value);
+  const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
+    && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
+  if (!row || row.schema_version !== "seraph.near.text.v1" || row.profile_id !== NEAR_TEXT_PROFILE
+    || row.model_id !== NEAR_TEXT_MODEL || row.api_base !== NEAR_TEXT_API_BASE
+    || typeof row.enabled !== "boolean" || !integer("max_output_tokens", 1, 1024)
+    || typeof row.timeout_seconds !== "number" || !Number.isFinite(row.timeout_seconds)
+    || row.timeout_seconds < 1 || row.timeout_seconds > 45
+    || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
+    || !integer("spend_ceiling_microusd", 1, 1_000_000_000)
+    || (row.request_cost_bound_microusd as number) > (row.spend_ceiling_microusd as number)
+    || row.credential_ref !== "vault:near_text_api_key" || typeof row.key_present !== "boolean"
+    || typeof row.consent_current !== "boolean"
+    || !["disabled", "configuration_required", "blocked", "configured"].includes(String(row.status))
+    || !(row.credential_fingerprint === null || typeof row.credential_fingerprint === "string")
+    || !(row.plaintext_egress_consent_revision === null || integer("plaintext_egress_consent_revision", 1, Number.MAX_SAFE_INTEGER))
+    || !(row.reason_code === null || typeof row.reason_code === "string")
+    || row.tls_transport !== true || row.tee_verified !== false || row.e2ee !== false
+    || row.provider_plaintext_disclosure !== NEAR_TEXT_DISCLOSURE) return null;
+  // Whitelist read-only metadata so a secret accidentally returned by GET cannot
+  // enter the retained settings cache or become a subsequent PUT field.
+  return {
+    schema_version: "seraph.near.text.v1", enabled: row.enabled,
+    profile_id: NEAR_TEXT_PROFILE, model_id: NEAR_TEXT_MODEL, api_base: NEAR_TEXT_API_BASE,
+    max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
+    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
+    spend_ceiling_microusd: row.spend_ceiling_microusd as number,
+    credential_ref: "vault:near_text_api_key",
+    credential_fingerprint: row.credential_fingerprint as string | null,
+    plaintext_egress_consent_revision: row.plaintext_egress_consent_revision as number | null,
+    key_present: row.key_present, consent_current: row.consent_current,
+    status: row.status as NearTextSetupStatus["status"], reason_code: row.reason_code as string | null,
+    tls_transport: true, tee_verified: false, e2ee: false, provider_plaintext_disclosure: NEAR_TEXT_DISCLOSURE,
+  };
+}
+
 function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null {
   const record = recordOf(value);
-  if (!record || typeof record.profile_id !== "string") return null;
+  // Legacy migration and purpose consent belong to the backend. Never infer a
+  // new purpose from cached v1 metadata or a partially returned route.
+  const rawRoutes = recordOf(record?.routes);
+  if (!record || record.schema_version !== "seraph.openrouter.setup.v2" || !rawRoutes) return null;
+  const rawStatuses = recordOf(record.slot_statuses);
+  const routes = {} as OpenRouterSetupStatus["routes"];
+  const slot_statuses = {} as OpenRouterSetupStatus["slot_statuses"];
+  for (const slot of ["text", "vision", "embedding"] as const) {
+    const route = recordOf(rawRoutes[slot]);
+    if (rawRoutes[slot] != null && (!route || typeof route.model_id !== "string"
+      || typeof route.enabled !== "boolean" || !Array.isArray(route.capabilities)
+      || !Array.isArray(route.allowed_upstreams)
+      || !["temperature", "max_output_tokens", "timeout_seconds", "request_cost_bound_microusd"].every(
+        (field) => typeof route[field] === "number" && Number.isFinite(route[field]),
+      ) || typeof route.zero_data_retention !== "boolean")) return null;
+    const rawState = recordOf(rawStatuses?.[slot]) ?? route;
+    const state: OpenRouterSlotStatus = {
+      status: rawState?.status === "ready" || rawState?.status === "configuration_required" ? rawState.status : "blocked",
+      error_code: typeof rawState?.error_code === "string" ? rawState.error_code : rawState ? null : "slot_metadata_unavailable",
+      proof_expires_at: typeof rawState?.proof_expires_at === "string" ? rawState.proof_expires_at : null,
+    };
+    slot_statuses[slot] = state;
+    routes[slot] = route ? {
+      model_id: route.model_id as string,
+      enabled: route.enabled as boolean,
+      capabilities: stringArray(route.capabilities),
+      allowed_upstreams: stringArray(route.allowed_upstreams),
+      temperature: route.temperature as number,
+      max_output_tokens: route.max_output_tokens as number,
+      timeout_seconds: route.timeout_seconds as number,
+      zero_data_retention: route.zero_data_retention as boolean,
+      request_cost_bound_microusd: route.request_cost_bound_microusd as number,
+      ...state,
+    } : null;
+  }
   return {
-    schema_version: typeof record.schema_version === "string" ? record.schema_version : "unknown",
-    profile_id: record.profile_id,
+    schema_version: "seraph.openrouter.setup.v2",
+    profile_id: typeof record.profile_id === "string" ? record.profile_id : "openrouter",
     api_base: typeof record.api_base === "string" ? record.api_base : "",
     provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "openrouter",
-    model_ids: stringArray(record.model_ids),
-    capabilities: stringArray(record.capabilities),
-    temperature: typeof record.temperature === "number" ? record.temperature : 0.7,
-    max_output_tokens: typeof record.max_output_tokens === "number" ? record.max_output_tokens : 4096,
-    timeout_seconds: typeof record.timeout_seconds === "number" ? record.timeout_seconds : 120,
-    allowed_upstreams: stringArray(record.allowed_upstreams),
+    routes,
+    slot_statuses,
     allow_fallbacks: record.allow_fallbacks === true,
     require_parameters: record.require_parameters !== false,
     data_collection: typeof record.data_collection === "string" ? record.data_collection : "unknown",
     data_retention_policy: typeof record.data_retention_policy === "string" ? record.data_retention_policy : "unknown",
-    zero_data_retention: record.zero_data_retention === true,
     egress_class: typeof record.egress_class === "string" ? record.egress_class : "unknown",
     cloud_egress_acknowledged: record.cloud_egress_acknowledged === true,
     spend_ceiling_microusd: typeof record.spend_ceiling_microusd === "number"
@@ -337,6 +552,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
   if (!record || typeof record.schema_version !== "string" || typeof record.status !== "string") return null;
   const defaults = recordOf(record.defaults);
   const policies = Array.isArray(record.workload_policies) ? record.workload_policies : [];
+  const nearText = normalizeNearTextSetup(record.near_text);
   return {
     schema_version: record.schema_version,
     status: record.status,
@@ -370,6 +586,11 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
+    near_text: nearText,
+    near_text_metadata_unavailable: record.near_text_metadata_unavailable === true || (record.near_text != null && !nearText),
+    inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
+    egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
+    egress_revoked: record.egress_revoked === true,
   };
 }
 
@@ -413,7 +634,7 @@ export function loadRetainedModelFabricSettings(): ModelFabricSettingsStatus | n
 export function retainModelFabricSettings(value: ModelFabricSettingsStatus): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(MODEL_FABRIC_STORAGE_KEY, JSON.stringify(value));
+    window.localStorage.setItem(MODEL_FABRIC_STORAGE_KEY, JSON.stringify(normalizeModelFabricSettings(value)));
   } catch {
     // Retention is best effort; the live settings endpoint remains authoritative.
   }

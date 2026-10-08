@@ -35,6 +35,7 @@ from src.work_board.repository import BoardError, WorkBoardRepository
 from src.work_board.tools import WorkBoardWorkerRequest, WorkBoardWorkerTools
 from src.security.trust_contract import AuthorityGrant
 import src.workflows.routines as routines_module
+from tests.test_github_connection_consent import active_connection
 
 
 class _VerticalJobs:
@@ -501,6 +502,7 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
         async def project_attempt(self, _db, *_args, **kwargs):
             assert linked is True
             projected.append(dict(kwargs))
+            task.status = kwargs["status"]
             return SimpleNamespace(task=task, attempt=attempt, event=SimpleNamespace(event_id=len(projected)))
 
     task = SimpleNamespace(
@@ -510,6 +512,7 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
         goal_id="goal-real",
         goal_revision=1,
         title="Write the current goal snapshot",
+        pipeline_operation_id=None,
         task_revision=1,
         capability_id=GOAL_SNAPSHOT_CAPABILITY,
         priority=50,
@@ -585,7 +588,7 @@ async def _run_real_board_goal_snapshot(
     )
     task = WorkBoardTask(
         task_id=task_id,
-        owner_principal_id="operator:single",
+        owner_principal_id="operator:root:managed-snapshot-test",
         owner_session_id="managed-session",
         goal_id=goal_id,
         goal_revision=1,
@@ -606,15 +609,16 @@ async def _run_real_board_goal_snapshot(
                 title="Managed board goal",
                 status="active",
                 revision=1,
-                owner_principal_id="operator:single",
+                owner_principal_id="operator:root:managed-snapshot-test",
                 owner_session_id="managed-session",
                 success_criterion_json=criterion.model_dump_json(),
             )
         )
-        db.add(Session(id="managed-session", owner_principal_id="operator:single"))
+        db.add(Session(id="managed-session", owner_principal_id="operator:root:managed-snapshot-test"))
         db.add(
             OperatorSession(
                 id="managed-session",
+                principal_id="operator:root:managed-snapshot-test",
                 token_hash="managed-session-token-hash",
                 idle_expires_at=now + timedelta(hours=1),
                 absolute_expires_at=now + timedelta(hours=1),
@@ -908,8 +912,19 @@ def _github_adapter_task_and_attempt() -> tuple[WorkBoardTask, WorkBoardAttempt]
 
 
 @pytest.mark.asyncio
-async def test_github_board_adapter_reauthenticates_and_passes_live_grant(monkeypatch):
+async def test_github_board_adapter_reauthenticates_and_passes_live_grant(client, async_db, monkeypatch, tmp_path):
+    from src.extensions.github_followthrough import GitHubFollowthroughService
+
+    owner, connection, _binding, _request = await active_connection(client, monkeypatch)
     task, attempt = _github_adapter_task_and_attempt()
+    task.owner_principal_id = owner["principal_id"]
+    task.owner_session_id = owner["session_id"]
+    inputs = {**_github_adapter_inputs(), "connection_revision": connection.revision}
+    task.typed_input_ref, task.typed_input_digest = _write_input(
+        tmp_path,
+        {"schema_version": 1, "capability_id": task.capability_id, "input": inputs},
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     captured: dict[str, object] = {}
 
     async def live_session(session_id: str, *, touch: bool = False):
@@ -923,7 +938,7 @@ async def test_github_board_adapter_reauthenticates_and_passes_live_grant(monkey
             ),
         )
 
-    class FakeGitHubFollowthroughService:
+    class FakeGitHubFollowthroughService(GitHubFollowthroughService):
         async def prepare(self, **kwargs):
             captured.update(kwargs)
             return {"status": "awaiting_approval", "job_id": "github-board-job"}
@@ -937,7 +952,7 @@ async def test_github_board_adapter_reauthenticates_and_passes_live_grant(monkey
     result = await WorkBoardDispatcher()._execute_direct_adapter(
         task,
         attempt,
-        _github_adapter_inputs(),
+        inputs,
         runtime_seconds=300,
         admission_only=False,
     )

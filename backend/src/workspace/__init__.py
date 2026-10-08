@@ -26,7 +26,9 @@ from src.workspace.state_registry import (
     canonical_workspace_root,
     canonical_workspace_root_identity,
     production_workspace_inventory,
+    PROCEDURE_V2_BINDING_TABLE,
     WORK_BOARD_ROUTINE_BINDING_TABLE,
+    procedure_v2_binding_contract,
     work_board_routine_binding_contract,
 )
 from src.workspace.lifecycle import (
@@ -96,7 +98,9 @@ __all__ = [
     "canonical_workspace_root",
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
+    "PROCEDURE_V2_BINDING_TABLE",
     "WORK_BOARD_ROUTINE_BINDING_TABLE",
+    "procedure_v2_binding_contract",
     "work_board_routine_binding_contract",
     "ARCHIVE_FORMAT",
     "ARCHIVE_VERSION",

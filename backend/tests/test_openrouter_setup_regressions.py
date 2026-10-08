@@ -229,7 +229,12 @@ def test_no_setup_put_refuses_to_replace_persisted_openrouter_setup(monkeypatch)
     assert "destructive replacement" in str(error.value.detail)
 
 
-def test_setup_write_restores_vault_and_process_key_if_config_write_fails(monkeypatch):
+@pytest.mark.asyncio
+async def test_setup_write_restores_vault_and_process_key_if_config_write_fails(monkeypatch, async_db, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / f"{tmp_path.name}-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
     setup_input = settings_api.OpenRouterSetupInput(
         model_ids=("anthropic/claude-sonnet-4",),
         capabilities=("text",),
@@ -260,7 +265,7 @@ def test_setup_write_restores_vault_and_process_key_if_config_write_fails(monkey
     monkeypatch.setattr(settings_api, "write_model_fabric_configuration", lambda _config: (_ for _ in ()).throw(OSError("disk full")))
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(settings_api.put_model_fabric_settings(body, _request()))
+        await settings_api.put_model_fabric_settings(body, _request())
 
     assert error.value.status_code == 503
     assert operations == [("store", "replacement-key"), ("store", "previous-vault-key")]

@@ -28,6 +28,10 @@
 #   ./manage.sh -e dev proxy logs       - Tail proxy log file.
 #   ./manage.sh -e prod down            - Stop everything.
 #   ./manage.sh -e prod backup          - Create a verified workspace archive.
+#   ./manage.sh -e prod accounting-reconcile --confirm - Repair a retained accounting commit checkpoint.
+#   ./manage.sh -e prod accounting-reconcile --policy --confirm - Recover provider policy revoked.
+#   ./manage.sh -e prod accounting-reconcile --period YYYY-MM --expected-revision N --confirm - Review exact current UTC month.
+#   ./manage.sh -e prod accounting-rebind --from-root /prior/root --confirm - Retain deployment accounting before root adoption.
 #   ./manage.sh -e prod restore --archive <archive> --confirm
 #   ./manage.sh -e prod status          - Show the durable lifecycle result.
 #   ./manage.sh -e prod identity        - Print the redacted host bind identity.
@@ -653,6 +657,13 @@ function refresh_production_bind_identity() {
         return 1
     fi
     export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
+    SERAPH_WORKSPACE_LIFECYCLE_PATH=$(printf '%s' "$identity_json" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin).get("lifecycle_directory", ""))')
+    if [[ ! -d "$SERAPH_WORKSPACE_LIFECYCLE_PATH" ]]; then
+        echo "Error: production accounting continuity descriptor is unavailable." >&2
+        return 1
+    fi
+    export SERAPH_WORKSPACE_LIFECYCLE_PATH
     echo "Production bind identity refreshed for managed startup."
 }
 
@@ -675,6 +686,7 @@ function reject_prod_local_stack() {
 }
 
 function start_local_backend() {
+    python3 "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
     if local_backend_is_running; then
         local pid
         pid=$(cat "$LOCAL_BACKEND_PID_FILE")
@@ -683,7 +695,15 @@ function start_local_backend() {
     fi
 
     require_free_port "$LOCAL_BACKEND_PORT" "Local backend"
-    mkdir -p "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
+    # A newly-created local workspace is a private operator store.  ``-m``
+    # applies only to directories created by this command; it deliberately
+    # does not chmod an existing workspace or any shared ancestor.  The
+    # backend's trusted-directory reader will keep rejecting an existing
+    # broad workspace rather than silently repairing its root.
+    mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+        'import sys; from pathlib import Path; from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory; prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(sys.argv[1]).resolve()))' \
+        "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; billable inference remains blocked." >&2
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
@@ -884,6 +904,7 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+export SERAPH_WORKSPACE_LIFECYCLE_PATH="$SCRIPT_DIR/docker-data/$ENV/workspace-lifecycle"
 if [ "$TRACE_WAS_ENABLED" = true ]; then
     set -x
 fi
@@ -954,7 +975,7 @@ if [ "$ENV" = "prod" ] && [ "$COMMAND" = "up" ]; then
     refresh_production_bind_identity || exit $?
 fi
 
-if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ]; then
+if [ "$COMMAND" = "backup" ] || [ "$COMMAND" = "restore" ] || [ "$COMMAND" = "status" ] || [ "$COMMAND" = "identity" ] || [ "$COMMAND" = "rollback" ] || [ "$COMMAND" = "accounting-reconcile" ] || [ "$COMMAND" = "accounting-rebind" ]; then
     production_workspace_lifecycle "$COMMAND" "$@"
     exit $?
 fi

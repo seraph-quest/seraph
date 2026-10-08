@@ -19,6 +19,7 @@ def main() -> int:
     parser.add_argument("package_root", help="Directory for the new package")
     parser.add_argument("--id", required=True, dest="extension_id", help="Extension id, e.g. seraph.example-pack")
     parser.add_argument("--name", required=True, dest="display_name", help="Display name for the package")
+    parser.add_argument("--isolated-json", action="store_true", help="Static schema-v2 isolated time-ledger starter; never executes code")
     parser.add_argument(
         "--trust",
         default="local",
@@ -33,6 +34,14 @@ def main() -> int:
         help="Contribution type to scaffold; repeat to include multiple surfaces",
     )
     args = parser.parse_args()
+
+    if args.isolated_json:
+        if args.trust != "local" or args.contributions:
+            parser.error("isolated-json uses unsigned local provenance and fixed adapter contributions")
+        from src.extensions.authored_scaffold import scaffold_adapter
+        manifest = scaffold_adapter(args.package_root, package_id=args.extension_id, display_name=args.display_name)
+        print(f"Created {manifest}; static only, unsigned local package requires exact review and activation.")
+        return 0
 
     package = scaffold_extension_package(
         args.package_root,

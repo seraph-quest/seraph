@@ -719,6 +719,10 @@ async def test_service_executes_governed_boundary_records_job_receipts_and_no_le
     assert workflow.calls == 1
     assert jobs.transitions == [(result.job_id, "queued"), (result.job_id, "running"), (result.job_id, "succeeded")]
     assert jobs.artifacts and jobs.effects
+    assert any(
+        item.get("details", {}).get("learning") == "no_learning"
+        for item in jobs.effects
+    )
     assert any(item.get("receipt_kind") == "readback" for item in jobs.readbacks)
     assert result.authority_receipt
     assert result.authority_receipt["allowed"] is True

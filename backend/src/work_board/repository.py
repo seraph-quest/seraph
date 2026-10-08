@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -21,7 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from src.db.models import (
+    GitHubFollowthroughConnection,
     Goal,
+    OperatorSession,
+    Secret,
     WorkBoardAttempt,
     WorkBoardComment,
     WorkBoardEvent,
@@ -30,8 +33,11 @@ from src.db.models import (
     WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.vault import redaction as vault_redaction
+from src.goals.repository import deserialize_admission_budget
+from src.work_board.authored_packages import stage_package_request, is_authored, is_tool_package
 from src.work_board.contracts import (
     WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardActionRequest,
@@ -108,6 +114,10 @@ _BOARD_BLOCK_KINDS = frozenset(
         "attempt_limit",
     }
 )
+_BROWSER_CAPABILITY_ID = "browser.public-task.v1"
+_BROWSER_GLOBAL_READY_CAPACITY = 8
+_BROWSER_HARD_MAX_ATTEMPTS = 2
+_BROWSER_LEGACY_MAX_OUTSTANDING = _BROWSER_GLOBAL_READY_CAPACITY
 _PRIVATE_RECEIPT_TOKENS = (
     "private",
     "secret",
@@ -135,6 +145,28 @@ _UNSAFE_RECEIPT_PATH_PARTS = frozenset(
         "vault",
     }
 )
+
+
+def effective_browser_limits(goal: Goal | None) -> tuple[int, int]:
+    """Return server-derived browser attempt and outstanding-work limits.
+
+    Browser tasks retain the historical two-attempt/eight-ready defaults for
+    legacy goals without an admission-budget row.  Once a goal carries an
+    admission budget, its finite limits become the authority for that goal;
+    the browser lane can never raise ``max_attempts`` above its two-attempt
+    hard cap.  The values are intentionally derived from the owner-checked
+    ``Goal`` row and are never accepted from a typed browser input payload.
+    """
+
+    budget = deserialize_admission_budget(goal) if goal is not None else None
+    if budget is None:
+        return _BROWSER_HARD_MAX_ATTEMPTS, _BROWSER_LEGACY_MAX_OUTSTANDING
+    return (
+        max(1, min(_BROWSER_HARD_MAX_ATTEMPTS, int(budget.max_attempts))),
+        max(1, int(budget.max_outstanding_jobs)),
+    )
+
+
 _UNSAFE_RECEIPT_FILE_TOKENS = (
     "api-key",
     "api_key",
@@ -279,6 +311,12 @@ def _canonical_json(value: object) -> str:
 
 def _payload_digest(request: WorkBoardTaskCreate) -> str:
     payload = request.model_dump(mode="json")
+    # The server fills the typed reference/digest from an already verified
+    # input artifact.  Keep the legacy idempotency digest independent of that
+    # derived metadata, while including the opaque artifact identity itself so
+    # two reservations cannot replay the same task key interchangeably.
+    if payload.get("input_artifact_id") is None:
+        payload.pop("input_artifact_id", None)
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -448,6 +486,7 @@ def _safe_receipt_refs(
         "verification_status",
         "verified_at",
         "outcome",
+        "learning",
     }
     safe_items: list[dict[str, Any]] = []
     for item in values[:limit]:
@@ -553,6 +592,12 @@ def _safe_receipt_refs(
                     if len(bounded) > 64 or "\n" in bounded or "\r" in bounded:
                         continue
                     safe[key] = bounded
+                elif key == "learning":
+                    # This is a closed typed outcome from the capability
+                    # contract.  Never project arbitrary memory labels, and
+                    # never turn absence into a learning claim.
+                    if bounded == "no_learning":
+                        safe[key] = bounded
                 elif key in {"file_path", "target_path"}:
                     safe_path = _safe_receipt_path(bounded)
                     if safe_path is None:
@@ -824,6 +869,24 @@ class BoardAttemptProjection:
     event: WorkBoardEvent
 
 
+@dataclass(frozen=True)
+class SafeTaskText:
+    owner_principal_id: str
+    original_root_id: str
+    request_digest: str
+    title: str
+    body: str
+
+
+async def stage_safe_task_text(db, owner, request) -> SafeTaskText:
+    lane = _registered_executor_lane(request.capability_id)
+    if lane and request.status is WorkBoardStatus.todo:
+        request = request.model_copy(update={"executor_id": lane})
+    return SafeTaskText(owner.principal_id, owner.session_id, _payload_digest(request),
+        await WorkBoardRepository._safe_text(request.title, db=db),
+        await WorkBoardRepository._safe_text(request.body, db=db))
+
+
 class WorkBoardRepository:
     """Single kernel for all M1 task, dependency, comment, and event writes."""
 
@@ -850,13 +913,19 @@ class WorkBoardRepository:
         return task
 
     @staticmethod
-    async def _safe_text(value: str) -> str:
+    async def _safe_text(value: str, *, db: AsyncSession | None = None) -> str:
         """Persist only vault-redacted bounded operator text.
 
         The redaction helper returns a fixed placeholder when the vault cannot
         be read with ``fail_closed=True``.  That keeps a database or API error
         from becoming a secret disclosure through a task card.
         """
+        if db is not None:
+            return await vault_redaction.redact_secrets_in_text_readonly(
+                db,
+                value,
+                fail_closed=True,
+            )
         return await vault_redaction.redact_secrets_in_text(value, fail_closed=True)
 
     @staticmethod
@@ -1051,6 +1120,7 @@ class WorkBoardRepository:
     def _validate_task_fields(request: WorkBoardTaskCreate) -> None:
         _validate_safe_identifier(request.goal_id, field="goal_id", max_length=128)
         _validate_opaque_identifier(request.capability_id, field="capability_id", max_length=128)
+        _validate_opaque_identifier(request.input_artifact_id, field="input_artifact_id", max_length=512)
         _validate_safe_identifier(request.typed_input_ref, field="typed_input_ref")
         _validate_opaque_identifier(request.executor_id, field="executor_id", max_length=128)
         _validate_opaque_identifier(request.assignee_id, field="assignee_id", max_length=128)
@@ -1060,6 +1130,7 @@ class WorkBoardRepository:
         _validate_opaque_identifier(request.origin_thread_id, field="origin_thread_id", max_length=256)
         _validate_digest(request.typed_input_digest, field="typed_input_digest")
 
+    @stage_package_request
     async def create_task(
         self,
         db: AsyncSession,
@@ -1067,8 +1138,38 @@ class WorkBoardRepository:
         request: WorkBoardTaskCreate,
         *,
         origin_session_id: str | None = None,
+        publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
     ) -> BoardMutation:
+        return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
+            publication_authority_check=publication_authority_check)
+
+    async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
+                                  staged_input=None, publication_witness=None) -> BoardMutation:
+        if not isinstance(staged_text, SafeTaskText):
+            raise BoardError("pipeline_task_changed", "Staged task text is required", status_code=409)
+        if request.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1"}:
+            raise BoardError("pipeline_plan_changed", "The staged helper is limited to fixed plan leaves", status_code=409)
+        return await self._create_task(db, owner, request, staged_text=staged_text,
+                                      staged_input=staged_input, publication_witness=publication_witness)
+
+    async def _create_task(self, db, owner, request, *, origin_session_id=None,
+                           publication_authority_check=None, staged_text=None,
+                           staged_input=None, publication_witness=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if request.capability_id == "inference.near-text.v1":
+            from uuid import UUID
+            try:
+                canonical_key=str(UUID(request.idempotency_key))
+            except (TypeError,ValueError,AttributeError):
+                raise BoardError('near_idempotency_invalid','A canonical task UUID idempotency key is required',status_code=422) from None
+            if canonical_key!=request.idempotency_key:
+                raise BoardError('near_idempotency_invalid','A canonical task UUID idempotency key is required',status_code=422)
+            if 'requires_review' in request.model_fields_set and request.requires_review is not True:
+                raise BoardError('near_human_review_required','NEAR answers require explicit human review',status_code=422)
+            request=request.model_copy(update={'requires_review':True})
+        if request.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import recheck_publication
+            await recheck_publication(db, owner, request, witness=publication_witness)
         # Triage rows may remain unbound until Specify/Decompose acceptance,
         # but an executable Todo row must use the lane derived from the live
         # capability registry.  Normalize a missing lane and reject a forged
@@ -1090,6 +1191,35 @@ class WorkBoardRepository:
                 )
             if request.status is WorkBoardStatus.todo:
                 request = request.model_copy(update={"executor_id": expected_executor})
+        if (
+            request.status is WorkBoardStatus.todo
+            and (request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(request.capability_id))
+            and not request.input_artifact_id
+        ):
+            raise BoardError(
+                "browser_input_artifact_required",
+                "Public browser tasks require a server-bound input artifact",
+                status_code=422,
+            )
+        artifact = None
+        document_stage = None
+        if (request.capability_id == "work.document-compare.v1" or is_authored(request.capability_id)) and request.input_artifact_id:
+            from src.work_board.input_artifacts import resolve_input_artifact_for_task, _metadata_digest
+            artifact = await resolve_input_artifact_for_task(db, owner,
+                artifact_id=request.input_artifact_id, goal_id=request.goal_id,
+                goal_revision=request.goal_revision, capability_id=request.capability_id)
+            document_stage = (_metadata_digest(artifact.row), artifact.row.revision)
+        if staged_text is not None:
+            if (staged_text.owner_principal_id != owner.principal_id
+                or staged_text.original_root_id != owner.session_id
+                or staged_text.request_digest != _payload_digest(request)):
+                raise BoardError("pipeline_task_changed", "The staged task binding changed", status_code=409)
+        elif request.input_artifact_id or publication_authority_check is not None:
+            # Reserve the writer before reading the owner/goal/artifact graph.
+            # Those reads establish the authority that is bound by the task
+            # insert; moving the fence after redaction would allow a stale
+            # graph snapshot to be bound by a later mutation.
+            await _begin_sqlite_immediate(db)
         digest = _payload_digest(request)
         existing_result = await db.execute(
             select(WorkBoardTask).where(
@@ -1101,6 +1231,29 @@ class WorkBoardRepository:
         )
         existing = existing_result.scalar_one_or_none()
         if existing is not None:
+            if request.input_artifact_id:
+                # Replays must remain idempotent after a successful browser
+                # execution consumes its input artifact. The task already
+                # stores the immutable artifact reference/digest, so a
+                # replay only needs an owner-fenced metadata lookup; the
+                # executable resolver is reserved for a new task or a live
+                # dispatch and correctly rejects terminal artifact states.
+                from src.work_board.input_artifacts import read_input_artifact_metadata
+
+                artifact_metadata = await read_input_artifact_metadata(
+                    db,
+                    owner,
+                    artifact_id=request.input_artifact_id,
+                )
+                if (
+                    existing.input_artifact_id != request.input_artifact_id
+                    or artifact_metadata.goal_id != request.goal_id
+                    or int(artifact_metadata.goal_revision) != int(request.goal_revision)
+                    or artifact_metadata.capability_id != (request.capability_id or "")
+                    or existing.typed_input_ref != artifact_metadata.typed_input_ref
+                    or existing.typed_input_digest != artifact_metadata.typed_input_digest
+                ):
+                    raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             if existing.idempotency_payload_digest != digest:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             latest_event = await db.execute(
@@ -1124,12 +1277,44 @@ class WorkBoardRepository:
                 )
             return BoardMutation(existing, event, idempotent_replay=True)
 
+        # Capability-specific checks belong after the repository acquires its
+        # writer transaction. A check performed by the caller before this
+        # method can be separated from publication by the transaction boundary
+        # above. This server-only callback neither grants authority nor commits
+        # the transaction; failure prevents a new task and its artifact binding.
+        if publication_authority_check is not None:
+            await publication_authority_check(db)
+
         await self._validate_goal(
             db,
             owner,
             goal_id=request.goal_id,
             goal_revision=request.goal_revision,
         )
+        if document_stage is not None:
+            from src.db.models import WorkBoardInputArtifact
+            from src.work_board.input_artifacts import _metadata_digest
+            fresh = await db.get(WorkBoardInputArtifact, request.input_artifact_id, populate_existing=True)
+            if (fresh is None or (_metadata_digest(fresh), fresh.revision) != document_stage
+                or fresh.metadata_digest != document_stage[0] or fresh.state != "pending"):
+                raise BoardError("document_pair_binding_changed", "The staged pair changed before binding", status_code=409)
+            from src.work_board.input_artifacts import ResolvedInputArtifact
+            artifact = ResolvedInputArtifact(row=fresh, input=artifact.input, payload=artifact.payload)
+        if request.input_artifact_id:
+            if artifact is None:
+                if staged_text is not None:
+                    from src.work_board.input_artifacts import recheck_staged_input
+                    artifact = await recheck_staged_input(db, owner, request, witness=staged_input)
+                else:
+                    from src.work_board.input_artifacts import resolve_input_artifact_for_task
+                    artifact = await resolve_input_artifact_for_task(db, owner,
+                        artifact_id=request.input_artifact_id, goal_id=request.goal_id,
+                        goal_revision=request.goal_revision, capability_id=request.capability_id or "")
+            typed_input_ref = artifact.row.typed_input_ref
+            typed_input_digest = artifact.row.payload_sha256
+        else:
+            typed_input_ref = request.typed_input_ref
+            typed_input_digest = request.typed_input_digest
         reviewer_id = request.reviewer_id
         if request.requires_review:
             if reviewer_id is not None and reviewer_id != owner.principal_id:
@@ -1139,8 +1324,8 @@ class WorkBoardRepository:
                     status_code=403,
                 )
             reviewer_id = owner.principal_id
-        safe_title = await self._safe_text(request.title)
-        safe_body = await self._safe_text(request.body)
+        safe_title = staged_text.title if staged_text else await self._safe_text(request.title, db=db)
+        safe_body = staged_text.body if staged_text else await self._safe_text(request.body, db=db)
 
         task = WorkBoardTask(
             owner_principal_id=owner.principal_id,
@@ -1152,8 +1337,9 @@ class WorkBoardRepository:
             title=safe_title,
             body=safe_body,
             capability_id=request.capability_id,
-            typed_input_ref=request.typed_input_ref,
-            typed_input_digest=request.typed_input_digest,
+            input_artifact_id=request.input_artifact_id,
+            typed_input_ref=typed_input_ref,
+            typed_input_digest=typed_input_digest,
             executor_id=request.executor_id,
             assignee_id=request.assignee_id,
             priority=request.priority,
@@ -1226,6 +1412,16 @@ class WorkBoardRepository:
             kind="task.created",
             metadata={"status": task.status.value, "task_revision": task.task_revision},
         )
+        if artifact is not None:
+            from src.work_board.input_artifacts import bind_input_artifact
+
+            await bind_input_artifact(
+                db,
+                owner,
+                artifact=artifact,
+                task_id=task.task_id,
+                task_revision=task.task_revision,
+            )
         return BoardMutation(task, event)
 
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
@@ -1242,6 +1438,7 @@ class WorkBoardRepository:
         query: str | None = None,
         after: int | None = None,
         limit: int = _TASK_LIMIT,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> BoardPage:
         # The task rows, dependency counts, and event cursor must all come
         # from one SQLite snapshot.  API callers use a fresh session; an
@@ -1269,9 +1466,9 @@ class WorkBoardRepository:
             str(task_id): index
             for index, task_id in enumerate(ready_result.scalars().all(), start=1)
         }
+        from src.auth.ownership import read_scope_clause
         statement = select(WorkBoardTask).where(
-            WorkBoardTask.owner_principal_id == owner.principal_id,
-            WorkBoardTask.owner_session_id == owner.session_id,
+            read_scope_clause(WorkBoardTask.task_id, WorkBoardTask.owner_session_id, owner.session_id, recovered_read_scopes or {}, principal_column=WorkBoardTask.owner_principal_id, current_principal=owner.principal_id),
         )
         if status is not None:
             statement = statement.where(WorkBoardTask.status == status)
@@ -1469,6 +1666,18 @@ class WorkBoardRepository:
         changes = request.model_dump(exclude_unset=True, exclude={"expected_revision"})
         if not changes:
             raise BoardError("empty_mutation", "At least one task field must change", status_code=400)
+        if task.input_artifact_id and {
+            "capability_id",
+            "typed_input_ref",
+            "typed_input_digest",
+            "executor_id",
+            "goal_id",
+        }.intersection(changes):
+            raise BoardError(
+                "input_artifact_immutable",
+                "An artifact-bound task cannot change its executable input authority",
+                status_code=409,
+            )
         safe_changes: dict[str, Any] = {}
         for field, value in changes.items():
             if field in {"title", "body"}:
@@ -1481,6 +1690,8 @@ class WorkBoardRepository:
                 elif field == "typed_input_digest":
                     _validate_digest(value, field=field)
                 safe_changes[field] = value
+        if task.capability_id == "memory.opportunity-preference.v1" or safe_changes.get("capability_id") == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation binding is immutable", status_code=409)
         post_capability = safe_changes.get("capability_id", task.capability_id)
         expected_executor = _registered_executor_lane(post_capability)
         explicit_executor = "executor_id" in safe_changes
@@ -1546,6 +1757,8 @@ class WorkBoardRepository:
             "assignee_id",
             "scheduled_at",
         }
+        if task.pipeline_operation_id and (authority_fields | {"priority"}).intersection(safe_changes):
+            raise BoardError("pipeline_review_required", "Change unfinished pipeline scope through exact plan review", status_code=409)
         if (
             authority_fields.intersection(safe_changes)
             and task.status is WorkBoardStatus.blocked
@@ -1580,6 +1793,19 @@ class WorkBoardRepository:
         )
         return BoardMutation(task, event)
 
+    async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
+        if task.capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_original_attempt_required", "Inspect or cancel the original recommendation", status_code=409)
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(task.capability_id):
+            linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
+                WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
+            if linked is not None:
+                code = {"work.research-dossier.v1": "research_original_attempt_required",
+                        "work.json-format.v1": "tool_package_original_attempt_required",
+                        "work.document-compare.v1": "document_original_attempt_required"}.get(task.capability_id,"tool_package_original_attempt_required")
+                raise BoardError(code,
+                    "Use explicit capability recovery on the original attempt", status_code=409)
+
     async def action_task(
         self,
         db: AsyncSession,
@@ -1593,6 +1819,10 @@ class WorkBoardRepository:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
         previous = task.status
         values: dict[str, Any] = {}
+        if request.action.value in {"retry", "unblock"}:
+            await self.require_generic_recovery_allowed(db, task)
+        if task.capability_id == "memory.opportunity-preference.v1" and request.action.value not in {"cancel"}:
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation is server-owned", status_code=409)
         if request.action.value == "promote":
             await self.validate_task_goal(db, owner, task)
             if task.status is WorkBoardStatus.triage:
@@ -1779,6 +2009,7 @@ class WorkBoardRepository:
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
+        intent_guard=None,
     ) -> BoardMutation:
         """Persist one operator cancellation intent with a task revision CAS.
 
@@ -1814,6 +2045,11 @@ class WorkBoardRepository:
             )
         if attempt.fencing_token != int(board_fence) or attempt.lease_owner != lease_owner:
             raise BoardError("stale_fence", "The board attempt fence is stale")
+        request_identity = None
+        if intent_guard is not None:
+            # Local database guard only: the nonce and original cancellation
+            # intent must commit together, without a second writer/effect.
+            request_identity = await intent_guard(db, task, attempt)
         if attempt.cancel_requested_at is not None:
             cancel_key = f"work-board-cancel:{task_id}:{attempt_id}"
             latest = (
@@ -1865,6 +2101,9 @@ class WorkBoardRepository:
                 "workflow_run_id": attempt.workflow_run_id,
                 "task_revision": task.task_revision,
                 "recovery_action": "reconcile_external_effect",
+                "request_identity": request_identity,
+                "board_fence": attempt.fencing_token,
+                "lease_owner": attempt.lease_owner,
             },
             actor_principal_id=actor_principal_id or owner.principal_id,
             actor_session_id=actor_session_id or owner.session_id,
@@ -1890,6 +2129,7 @@ class WorkBoardRepository:
 
         await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
+        await self.require_generic_recovery_allowed(db, task)
         expected = int(expected_revision)
         if task.task_revision != expected:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
@@ -1910,7 +2150,7 @@ class WorkBoardRepository:
                 "This block requires its typed recovery path before retry",
                 status_code=409,
             )
-        await self.validate_task_goal(db, owner, task)
+        live_goal = await self.validate_task_goal(db, owner, task)
         if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _now():
             raise BoardError(
                 "retry_prerequisite",
@@ -1963,7 +2203,10 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        max_attempts = 1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else 2
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
+        if attempt_count >= max_attempts:
             raise BoardError(
                 "attempt_limit",
                 "The board attempt limit has been exhausted",
@@ -2123,6 +2366,13 @@ class WorkBoardRepository:
             frontier.extend(str(value) for value in result.scalars().all())
         return False
 
+    async def _add_link_locked(self, db, owner, request, *, staged_context):
+        from src.work_board.pipelines import PipelineAcceptContext
+        if not isinstance(staged_context, PipelineAcceptContext):
+            raise BoardError("pipeline_plan_changed", "Staged link proof is required", status_code=409)
+        return await self.add_link(db, owner, request, acquire_lock=False,
+                                   staged_producer=staged_context.producer_witness)
+
     async def add_link(
         self,
         db: AsyncSession,
@@ -2130,6 +2380,7 @@ class WorkBoardRepository:
         request: WorkBoardLinkCreate,
         *,
         acquire_lock: bool = True,
+        staged_producer=None,
     ) -> tuple[WorkBoardLink, WorkBoardEvent]:
         if request.parent_task_id == request.child_task_id:
             raise BoardError("dependency_cycle", "A task cannot depend on itself")
@@ -2193,15 +2444,13 @@ class WorkBoardRepository:
             # The edge and its immutable proof must commit together.  A
             # completed parent with no verified readback aborts this whole
             # transaction, leaving no dependency edge to bypass provenance.
-            from src.work_board.review import materialize_handoff_for_link
-
-            handoff = await materialize_handoff_for_link(
-                db,
-                owner,
-                parent,
-                child,
-                link,
-            )
+            if staged_producer is not None:
+                from src.work_board.review import _materialize_pipeline_handoff_locked
+                handoff = await _materialize_pipeline_handoff_locked(db, owner, parent, child,
+                    link, witness=staged_producer)
+            else:
+                from src.work_board.review import materialize_handoff_for_link
+                handoff = await materialize_handoff_for_link(db, owner, parent, child, link)
         else:
             handoff = None
         event = await self._event(
@@ -2347,8 +2596,16 @@ class WorkBoardRepository:
         """
 
         observed_at = now or _now()
+        preference_stage = None
+        preference_task = await self._find_task(db,task_id)
+        if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import stage_task_authority
+            preference_stage = await stage_task_authority(db,preference_task)
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
+        if preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_task_authority
+            await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
         if task.status is not WorkBoardStatus.todo:
@@ -2376,6 +2633,80 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            live_goal_for_limits = await db.scalar(
+                select(Goal).where(
+                    Goal.id == task.goal_id,
+                    Goal.owner_principal_id == task.owner_principal_id,
+                    Goal.owner_session_id == task.owner_session_id,
+                )
+            )
+            _browser_max_attempts, browser_max_outstanding = effective_browser_limits(
+                live_goal_for_limits
+            )
+            browser_outstanding = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                        WorkBoardTask.owner_session_id == task.owner_session_id,
+                        WorkBoardTask.goal_id == task.goal_id,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                        WorkBoardTask.status.in_(
+                            (WorkBoardStatus.ready, WorkBoardStatus.running)
+                        ),
+                    )
+                )
+                or 0
+            )
+            if browser_outstanding >= browser_max_outstanding:
+                reason = "browser_goal_outstanding_capacity"
+                if task.block_reason != reason:
+                    task.block_reason = reason
+                    await db.flush()
+                    await self._event(
+                        db,
+                        task,
+                        owner,
+                        kind="task.browser_goal_capacity",
+                        metadata={
+                            "status": WorkBoardStatus.todo.value,
+                            "task_revision": task.task_revision,
+                            "block_reason": reason,
+                        },
+                        actor_principal_id=actor_principal_id,
+                        actor_session_id=actor_session_id or "work-board-dispatch",
+                    )
+                return None
+            # Eight Ready browser rows is the global bounded admission cap.
+            # This check runs under the same SQLite writer fence as the CAS
+            # promotion, so concurrent owners cannot over-admit the lane.
+            browser_ready = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.status == WorkBoardStatus.ready,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                    )
+                )
+                or 0
+            )
+            if browser_ready >= _BROWSER_GLOBAL_READY_CAPACITY:
+                if task.block_reason != "browser_ready_capacity":
+                    task.block_reason = "browser_ready_capacity"
+                    await db.flush()
+                    await self._event(
+                        db,
+                        task,
+                        owner,
+                        kind="task.browser_ready_capacity",
+                        metadata={
+                            "status": WorkBoardStatus.todo.value,
+                            "task_revision": task.task_revision,
+                            "block_reason": "browser_ready_capacity",
+                        },
+                        actor_principal_id=actor_principal_id,
+                        actor_session_id=actor_session_id or "work-board-dispatch",
+                    )
+                return None
         parent_rows = list(
             (
                 await db.execute(
@@ -2474,6 +2805,11 @@ class WorkBoardRepository:
             }
         else:
             values = {"status": WorkBoardStatus.ready}
+            if task.block_reason in {
+                "browser_ready_capacity",
+                "browser_goal_outstanding_capacity",
+            }:
+                values["block_reason"] = None
             event_kind = "task.ready"
             metadata = {"status": WorkBoardStatus.ready.value}
         values.update(
@@ -2517,10 +2853,28 @@ class WorkBoardRepository:
 
         observed_at = now or _now()
         lease_seconds = max(1, min(int(lease_seconds), 900))
+        from src.memory.evidence_dependencies import stage_dependencies, recheck_dependencies
+        staged_dependencies = None
+        dependency_error = None
+        preflight_task = await self._find_task(db, task_id)
+        if preflight_task is not None:
+            try:
+                staged_dependencies = await stage_dependencies(db, preflight_task)
+            except (BoardError, OSError, KeyError, TypeError) as exc:
+                dependency_error = exc
+        preference_stage = None
+        preference_task = await self._find_task(db,task_id)
+        if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import stage_task_authority
+            preference_stage = await stage_task_authority(db,preference_task)
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
+        if preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_task_authority
+            await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
+        await db.refresh(task)
         if task.status is not WorkBoardStatus.ready:
             return None
         if task.task_revision != int(expected_revision):
@@ -2532,10 +2886,15 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
+        browser_max_attempts = _BROWSER_HARD_MAX_ATTEMPTS
+        browser_max_outstanding = _BROWSER_LEGACY_MAX_OUTSTANDING
         # Re-read the owner-bound goal inside the same immediate transaction
         # that creates the board claim.  The preflight pass is advisory; a
         # concurrent revision/owner/status change must not launch stale work.
         try:
+            if dependency_error is not None:
+                raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
+            await recheck_dependencies(db, task, staged_dependencies)
             lane_error = _executor_lane_error(task.capability_id, task.executor_id)
             if lane_error is not None:
                 raise BoardError(lane_error[0], lane_error[1])
@@ -2543,8 +2902,11 @@ class WorkBoardRepository:
             live_goal_status = str(getattr(live_goal.status, "value", live_goal.status) or "")
             if live_goal_status and live_goal_status != "active":
                 raise BoardError("goal_not_admitted", "The task goal is not currently executable")
+            if task.capability_id == _BROWSER_CAPABILITY_ID:
+                browser_max_attempts, browser_max_outstanding = effective_browser_limits(live_goal)
         except BoardError as exc:
-            safe_reason = await self._safe_text(exc.message)
+            safe_reason = ("Selected execution evidence requires review"
+                if exc.code.startswith('evidence_dependency_') else await self._safe_text(exc.message))
             await self._cas_task_update(
                 db,
                 owner,
@@ -2564,11 +2926,36 @@ class WorkBoardRepository:
                 task,
                 owner,
                 kind="task.dispatch_blocked",
-                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code)},
+                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code),
+                          "reason_code": exc.code, "task_revision": task.task_revision},
                 actor_principal_id=actor_principal_id or lease_owner,
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )
             return None
+
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            # A task can remain Ready after a goal budget is tightened or
+            # after an older process promoted siblings under a prior budget.
+            # Recheck the owner/goal queue capacity under the same writer
+            # fence as the claim so a stale Ready row cannot launch beyond
+            # the current server-owned max_outstanding_jobs.
+            browser_outstanding = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                        WorkBoardTask.owner_session_id == task.owner_session_id,
+                        WorkBoardTask.goal_id == task.goal_id,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                        WorkBoardTask.task_id != task.task_id,
+                        WorkBoardTask.status.in_(
+                            (WorkBoardStatus.ready, WorkBoardStatus.running)
+                        ),
+                    )
+                )
+                or 0
+            )
+            if browser_outstanding >= browser_max_outstanding:
+                return None
 
         parent_statuses = list(
             (
@@ -2670,7 +3057,9 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        attempt_limit = (1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else
+            browser_max_attempts if task.capability_id == _BROWSER_CAPABILITY_ID else 2)
+        if attempt_count >= attempt_limit:
             safe_reason = await self._safe_text("The board attempt limit has been exhausted")
             await self._cas_task_update(
                 db,
@@ -2984,6 +3373,7 @@ class WorkBoardRepository:
         reason: str,
         actor_principal_id: str,
         actor_session_id: str,
+        capability_id: str = "guardian-routine.v1",
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Project a routine's explicit human wait as Blocked and release its lease.
@@ -3000,15 +3390,17 @@ class WorkBoardRepository:
             "awaiting_publication_approval",
             "external_mutation_grant_required",
         }
+        if capability_id == "engineering.repo-repair.v1":
+            safe_reasons = {"repo_repair_code_egress_review", "review_repo_repair_proposal"}
         if reason not in safe_reasons:
-            raise BoardError("routine_wait_reason_invalid", "The routine wait reason is not an operator recovery state")
+            raise BoardError("routine_wait_reason_invalid", "The governed wait reason is not an operator recovery state")
         observed_at = now or _now()
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
-        if task.capability_id != "guardian-routine.v1":
-            raise BoardError("routine_wait_not_supported", "Only governed routine attempts can pause for publication review")
+        if task.capability_id != capability_id:
+            raise BoardError("routine_wait_not_supported", "The capability does not support this operator wait")
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if task.status not in {WorkBoardStatus.running, WorkBoardStatus.blocked}:
@@ -3097,6 +3489,7 @@ class WorkBoardRepository:
         workflow_run_id: str,
         actor_principal_id: str,
         actor_session_id: str,
+        capability_id: str = "guardian-routine.v1",
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Reacquire the same suspended routine attempt after approval."""
@@ -3108,16 +3501,19 @@ class WorkBoardRepository:
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
-        if task.capability_id != "guardian-routine.v1":
-            raise BoardError("routine_wait_not_supported", "Only a governed routine can resume through publication recovery")
+        if task.capability_id != capability_id:
+            raise BoardError("routine_wait_not_supported", "The capability does not support this operator recovery")
         if task.status is not WorkBoardStatus.blocked or task.task_revision != int(expected_revision):
             raise BoardError("stale_revision", "The blocked routine card changed before recovery")
-        if task.block_reason not in {
+        allowed_reasons = {
             "awaiting_approval",
             "awaiting_publication_preview",
             "awaiting_publication_approval",
             "external_mutation_grant_required",
-        }:
+        }
+        if capability_id == "engineering.repo-repair.v1":
+            allowed_reasons = {"repo_repair_code_egress_review", "review_repo_repair_proposal"}
+        if task.block_reason not in allowed_reasons:
             raise BoardError("task_not_recoverable", "The routine card is not waiting for publication review")
         attempt = (
             await db.execute(
@@ -3176,7 +3572,34 @@ class WorkBoardRepository:
         )
         return BoardAttemptProjection(task, attempt, event)
 
-    async def project_attempt(
+    async def project_attempt(self,db,task_id,attempt_id,**kwargs):
+        status=kwargs.get("status")
+        task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id == "memory.opportunity-preference.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.opportunity_preference_native import stage_output_source
+            attempt = await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            staged = await stage_output_source(db,task,attempt,require_done=False)
+            return await self._project_attempt(db,task_id,attempt_id,_preference_stage=staged,**kwargs)
+        if task is not None and task.capability_id=="work.document-compare.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.document_compare_native import stage,read_output
+            from src.work_board.dispatcher import _parse_typed_input
+            attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None:raise BoardError("document_output_readback_required","The original native comparison is unavailable")
+            authority=await stage(db,task,attempt,run,_parse_typed_input(task))
+            receipt,_output=read_output(task,attempt,run)
+            return await self._project_attempt(db,task_id,attempt_id,_document_stage=(authority,receipt,run.checkpoint_receipts_json),**kwargs)
+        if task is not None and is_tool_package(task.capability_id) and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.tool_package_native import session_authority_guard,stage_readback
+            attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None:raise BoardError("tool_package_readback_required","The original formatter run is unavailable")
+            async with session_authority_guard(db,task,attempt,run) as authority:
+                readback=stage_readback(task,attempt,run)
+                return await self._project_attempt(db,task_id,attempt_id,_tool_stage=(authority,readback),**kwargs)
+        return await self._project_attempt(db,task_id,attempt_id,**kwargs)
+
+    async def _project_attempt(
         self,
         db: AsyncSession,
         task_id: str,
@@ -3193,9 +3616,13 @@ class WorkBoardRepository:
         block_kind: str | None = None,
         block_reason: str | None = None,
         verified_readback: Mapping[str, Any] | None = None,
+        reconciled_github_root: Mapping[str, Any] | None = None,
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
+        _tool_stage=None,
+        _document_stage=None,
+        _preference_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3222,7 +3649,43 @@ class WorkBoardRepository:
                     "The supplied readback is not an independent durable workflow proof",
                 )
         observed_at = now or _now()
+        # Vault redaction can emit its own audit event. Prepare the existing
+        # policy result before taking the Board writer; nesting that audit
+        # writer under BEGIN IMMEDIATE deadlocks SQLite failure projection.
+        original_projection_reason = block_reason or outcome
+        async def vault_binding(session):
+            size,count = (await session.execute(select(func.coalesce(func.sum(func.length(Secret.encrypted_value)),0),func.count(Secret.id)))).one()
+            if size>1_048_576 or count>1_000:return None
+            rows=(await session.execute(select(Secret.id,Secret.encrypted_value,Secret.updated_at).order_by(Secret.id))).all()
+            return hashlib.sha256(_canonical_json([[row[0],row[1],str(row[2])] for row in rows]).encode()).hexdigest()
+        staged_vault_binding = await vault_binding(db) if status is WorkBoardStatus.blocked else None
+        safe_projection_reason = await self._safe_text(original_projection_reason) if status is WorkBoardStatus.blocked else None
+        reconciliation_owner_live = False
+        from src.memory.evidence_dependencies import stage_dependencies, recheck_dependencies
+        staged_dependencies = None
+        dependency_error = None
+        if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            preflight_task = await self._find_task(db, task_id)
+            if preflight_task is not None:
+                try:
+                    staged_dependencies = await stage_dependencies(db, preflight_task)
+                except (BoardError, OSError, KeyError, TypeError) as exc:
+                    dependency_error = exc
+        if reconciled_github_root is not None:
+            # Authentication may persist expiry/revocation. Run it before the
+            # board write lock, then recheck its row under that lock below.
+            from src.auth.service import AuthFailure, authenticate_session
+            try:
+                operator = await authenticate_session(str(reconciled_github_root.get("session_id") or ""), touch=False)
+                reconciliation_owner_live = operator.principal.principal_id == reconciled_github_root.get("owner", {}).get("principal_id")
+            except AuthFailure:
+                pass
         await _begin_sqlite_immediate(db)
+        if status in {WorkBoardStatus.review,WorkBoardStatus.done} and _preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_projection_source
+            await recheck_projection_source(db,witness=_preference_stage)
+        if safe_projection_reason is not None and (staged_vault_binding is None or await vault_binding(db)!=staged_vault_binding):
+            safe_projection_reason = "execution_blocked_redaction_state_changed"
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -3230,12 +3693,17 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
-        if task.status is not WorkBoardStatus.running:
+        reconciling = reconciled_github_root is not None
+        reconciliation_proof = verified_readback
+        if task.status is not WorkBoardStatus.running and not reconciling:
             raise BoardError("task_not_running", "Only a running task can be projected")
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             try:
+                if dependency_error is not None:
+                    raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
+                await recheck_dependencies(db, task, staged_dependencies)
                 await self.validate_task_goal(db, owner, task)
             except BoardError as exc:
                 # A long-running attempt cannot turn stale or revoked goal
@@ -3243,9 +3711,10 @@ class WorkBoardRepository:
                 # an explicit recoverable block while preserving the durable
                 # run and its evidence for operator reconciliation.
                 status = WorkBoardStatus.blocked
-                outcome = "goal_authority_stale"
-                block_kind = "capability"
-                block_reason = f"goal_authority_stale:{exc.code}"
+                evidence_stale = exc.code.startswith('evidence_dependency_')
+                outcome = "evidence_dependency_stale" if evidence_stale else "goal_authority_stale"
+                block_kind = "dependency" if evidence_stale else "capability"
+                block_reason = f"{outcome}:{exc.code}"
                 verified_readback = None
         attempt = (
             await db.execute(
@@ -3257,7 +3726,55 @@ class WorkBoardRepository:
         ).scalar_one_or_none()
         if attempt is None:
             raise BoardError("attempt_not_found", "The board attempt does not exist", status_code=404)
-        if attempt.lease_owner != lease_owner or attempt.fencing_token != int(board_fence) or attempt.ended_at is not None:
+        if reconciling:
+            latest = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id).order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none()
+            root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))).scalar_one_or_none()
+            if (
+                task.capability_id != "work.github-followthrough.v1" or task.status is not WorkBoardStatus.blocked
+                or task.block_kind != "unknown_effect" or attempt.ended_at is None
+                or latest is None or latest.attempt_id != attempt_id or attempt.fencing_token != int(board_fence)
+                or root is None or root.status != "succeeded" or root.run_identity != reconciled_github_root.get("job_id")
+                or root.owner_kind != "user" or root.owner_principal_id != owner.principal_id
+                or root.session_id != owner.session_id or root.operator_session_id != owner.session_id
+                or root.goal_id != task.goal_id or root.goal_revision != task.goal_revision
+                or root.idempotency_scope != "work-board-attempt" or root.idempotency_key != f"{task_id}:{attempt_id}"
+                or root.revision != reconciled_github_root.get("revision")
+                or any(getattr(root, field) != reconciled_github_root.get(field) for field in ("input_digest", "authority_digest", "run_fingerprint"))
+            ):
+                raise BoardError("reconciliation_binding_mismatch", "Only the exact latest unknown GitHub attempt can adopt its verified root")
+            from src.workflows.job_runtime import _job_has_unsafe_effects
+            effects = json.loads(root.effect_receipts_json or "[]")
+            proof = reconciliation_proof or {}
+            if _job_has_unsafe_effects(effects) or not any(
+                item.get("receipt_kind") == "readback" and item.get("effect_type") == "github_publication"
+                and item.get("status") == "succeeded" and item.get("details", {}).get("verified") is True
+                and item.get("readback_id") == proof.get("readback_id")
+                and item.get("content_sha256") == proof.get("content_sha256")
+                and item.get("verified_at") == proof.get("verified_at") for item in effects
+            ):
+                raise BoardError("verified_readback_required", "Reconciliation needs this root's exact verified GitHub effect")
+            authority = json.loads(root.declared_authority_json or "{}")
+            if root.job_kind != "github_followthrough_v1" or authority.get("capability_id") != "work.github-followthrough.v1":
+                raise BoardError("reconciliation_binding_mismatch", "The durable root is not this GitHub capability")
+            # The supplied projection only identifies a candidate. Authority
+            # comes from the adapter's persisted protected READ-revision
+            # envelope, checked against this same canonical DB session.
+            from src.extensions.github_recovery import check_persisted_readback
+            protected_live = False
+            try:
+                protected = await check_persisted_readback(db, root, final=True, reserved=False)
+                exact = protected["effect_readback"]
+                protected_live = all(proof.get(key) == exact.get(key) for key in
+                    ("readback_id", "content_sha256", "verified_at"))
+            except (ValueError, KeyError, TypeError):
+                pass
+            current_session = await db.get(OperatorSession, owner.session_id)
+            live = reconciliation_owner_live and current_session is not None and current_session.principal_id == owner.principal_id and current_session.revoked_at is None and current_session.replaced_by_id is None and not current_session.is_bearer_tombstone and _utc_datetime(current_session.idle_expires_at) > _now() and _utc_datetime(current_session.absolute_expires_at) > _now()
+            if not live or not protected_live:
+                status = WorkBoardStatus.blocked
+                outcome = block_reason = "reconciliation_authority_changed"
+                block_kind = "capability"
+        elif attempt.lease_owner != lease_owner or attempt.fencing_token != int(board_fence) or attempt.ended_at is not None:
             raise BoardError("stale_fence", "The board attempt fence is stale")
         # A worker can request review after the dispatcher has taken its
         # in-memory claim snapshot.  Treat the exact pending intent as a
@@ -3343,6 +3860,15 @@ class WorkBoardRepository:
             if proof_receipt not in safe_receipts:
                 safe_receipts = [proof_receipt, *safe_receipts[:31]]
         safe_results = _safe_receipt_refs(result_refs, preserve_effect_ids=True)
+        if task.capability_id == "work.document-compare.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.document_compare_native import current
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)
+                .execution_options(populate_existing=True))
+            if (_document_stage is None or run is None or run.status!="succeeded"
+                or run.checkpoint_receipts_json!=_document_stage[2]
+                or _document_stage[1]["cipher_sha256"]!=proof_digest):
+                raise BoardError("document_output_readback_required","The exact native output needs fresh physical readback")
+            await current(db,task,attempt,run,_document_stage[0])
         safe_artifacts = _safe_receipt_refs(artifact_refs, preserve_effect_ids=True)
         unresolved_receipt = any(
             str(item.get("status") or "") in _UNRESOLVED_RECEIPT_STATUSES
@@ -3358,6 +3884,34 @@ class WorkBoardRepository:
                 "unknown_effect_requires_reconciliation",
                 "An unresolved outcome cannot be projected as Review or Done",
             )
+        if (task.capability_id == "work.research-dossier.v1" or is_tool_package(task.capability_id)) and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
+            from src.workflows.research_guard import assert_research_operator_session
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+            if run is None:
+                raise BoardError("research_readback_required", "The original research root is unavailable", status_code=409)
+            await assert_research_operator_session(db, run, now=observed_at)
+            if is_tool_package(task.capability_id):
+                from src.work_board.tool_package_native import verified_output, current
+                await current(db,task,attempt,run,staged=_tool_stage[0] if _tool_stage else None)
+                artifact,_raw=verified_output(task,attempt,run,staged=_tool_stage[1] if _tool_stage else None)
+            else:
+                from src.work_board.research_readback import verified_dossier
+                artifact, _raw = await verified_dossier(db, task, attempt, run)
+            if artifact["content_sha256"] != proof_digest:
+                raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
+            if is_tool_package(task.capability_id):
+                from src.db.models import WorkBoardInputArtifact
+                input_row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+            else:
+                resolved=await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
+                    goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,expected_task_id=task.task_id)
+                input_row=resolved.row
+            if input_row is None or input_row.payload_sha256 != task.typed_input_digest or input_row.bound_task_revision is None:
+                raise BoardError("research_input_changed", "The original admitted input binding changed", status_code=409)
+            if input_row.state != "consumed":
+                await consume_input_artifact(db, owner, task_id=task.task_id,
+                    task_revision=input_row.bound_task_revision, artifact_id=task.input_artifact_id)
         attempt.outcome = str(outcome)[:128]
         attempt.ended_at = observed_at
         attempt.lease_owner = None
@@ -3414,7 +3968,9 @@ class WorkBoardRepository:
             values.update(
                 {
                     "block_kind": _closed_block_kind(block_kind or "transient"),
-                    "block_reason": await self._safe_text(block_reason or outcome),
+                    "block_reason": (safe_projection_reason if (block_reason or outcome)==original_projection_reason and safe_projection_reason is not None
+                        else (block_reason or outcome) if re.fullmatch(r"[a-z0-9_:.]{1,256}",block_reason or outcome)
+                        else "authority_reconciliation_required"),
                     "block_source_status": WorkBoardStatus.running.value,
                     "completed_at": None,
                 }
@@ -3502,6 +4058,24 @@ class WorkBoardRepository:
         )
         return list(result.scalars().all())
 
+    async def list_expired_near_attempts(self, db, *, now, limit=20):
+        """Historical finance inventory; never a grant to resume execution."""
+        newer = aliased(WorkBoardAttempt)
+        rows = await db.execute(select(WorkBoardTask, WorkBoardAttempt, WorkflowRunState)
+            .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+            .join(WorkflowRunState, WorkflowRunState.run_identity == WorkBoardAttempt.workflow_run_id)
+            .where(WorkBoardTask.capability_id == "inference.near-text.v1",
+                WorkflowRunState.job_kind == "inference.near-text.v1",
+                WorkflowRunState.status == "running",
+                WorkflowRunState.lease_expires_at.is_not(None),
+                WorkflowRunState.lease_expires_at <= now,
+                ~select(newer.attempt_id).where(newer.task_id == WorkBoardTask.task_id,
+                    or_(newer.created_at > WorkBoardAttempt.created_at,
+                        (newer.created_at == WorkBoardAttempt.created_at) & (newer.attempt_id > WorkBoardAttempt.attempt_id))).exists())
+            .order_by(WorkBoardAttempt.created_at, WorkBoardAttempt.attempt_id)
+            .limit(max(1, min(int(limit), 100))))
+        return list(rows.all())
+
     async def list_linked_active_attempts(
         self,
         db: AsyncSession,
@@ -3509,12 +4083,14 @@ class WorkBoardRepository:
         limit: int = 20,
     ) -> list[tuple[WorkBoardTask, WorkBoardAttempt]]:
         """Return running board attempts whose durable root is already linked."""
+        newer_attempt = aliased(WorkBoardAttempt)
         result = await db.execute(
             select(WorkBoardTask, WorkBoardAttempt)
             .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+            .outerjoin(WorkflowRunState, WorkflowRunState.run_identity == WorkBoardAttempt.workflow_run_id)
             .where(
                 or_(
-                    WorkBoardTask.status == WorkBoardStatus.running,
+                    (WorkBoardTask.status == WorkBoardStatus.running) & WorkBoardAttempt.ended_at.is_(None),
                     (
                         WorkBoardTask.status == WorkBoardStatus.blocked
                     )
@@ -3525,10 +4101,19 @@ class WorkBoardRepository:
                             "awaiting_publication_preview",
                             "awaiting_publication_approval",
                         )
-                    ),
+                    ) & WorkBoardAttempt.ended_at.is_(None),
+                    (WorkBoardTask.status == WorkBoardStatus.blocked)
+                    & (WorkBoardTask.block_kind == "unknown_effect")
+                    & (WorkBoardTask.capability_id == "work.github-followthrough.v1")
+                    & WorkBoardAttempt.ended_at.is_not(None)
+                    & (WorkflowRunState.status == "succeeded")
+                    & ~select(newer_attempt.attempt_id).where(
+                        newer_attempt.task_id == WorkBoardTask.task_id,
+                        or_(newer_attempt.created_at > WorkBoardAttempt.created_at,
+                            (newer_attempt.created_at == WorkBoardAttempt.created_at) & (newer_attempt.attempt_id > WorkBoardAttempt.attempt_id)),
+                    ).exists(),
                 ),
                 WorkBoardAttempt.workflow_run_id.is_not(None),
-                WorkBoardAttempt.ended_at.is_(None),
             )
             .order_by(WorkBoardAttempt.created_at.asc(), WorkBoardAttempt.attempt_id.asc())
             .limit(max(1, min(int(limit), 100)))
@@ -3710,7 +4295,17 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        attempt_limit = 1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else 2
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            live_goal = await db.scalar(
+                select(Goal).where(
+                    Goal.id == task.goal_id,
+                    Goal.owner_principal_id == task.owner_principal_id,
+                    Goal.owner_session_id == task.owner_session_id,
+                )
+            )
+            attempt_limit, _max_outstanding_jobs = effective_browser_limits(live_goal)
+        if attempt_count >= attempt_limit:
             await self._cas_task_update(
                 db,
                 owner,

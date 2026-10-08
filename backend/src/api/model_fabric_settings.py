@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import base64
 from datetime import datetime, timezone
+from decimal import Decimal
+from dataclasses import replace
 import hashlib
 import json
+import math
 import os
+from pathlib import Path
 import re
 import threading
 import time
+from typing import Literal
 from uuid import uuid4
 
 import httpx
 from config.settings import settings
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from src.approval.runtime import get_current_trust_principal
@@ -24,24 +31,35 @@ from src.model_fabric import (
     ProviderProfile,
     candidate_from_profile,
     finalized_openai_compatible_body,
+    finalized_openai_compatible_embeddings_body,
 )
 from src.model_fabric.caller_context import CANONICAL_ROUTE_SPECS
 from src.model_fabric.configuration import (
     ModelFabricConfiguration,
     OPENROUTER_ENV_CREDENTIAL_REF,
     OPENROUTER_SETUP_SCHEMA_VERSION,
+    OPENROUTER_SETUP_V2_SCHEMA_VERSION,
+    OPENROUTER_ROUTE_SLOTS,
     OPENROUTER_VAULT_CREDENTIAL_REF,
     OpenRouterSetup,
+    OpenRouterRoute,
+    NearTextSetup,
+    deployment_spend_ceiling,
+    validate_near_text_setup,
     WorkloadPolicy,
     credential_ref_allowed,
     effective_workload_policy,
     normalize_openrouter_model_id,
     openrouter_policy_for_setup,
     openrouter_profile_for_setup,
+    openrouter_profiles_for_setup,
+    migrate_openrouter_setup_v1_to_v2,
     hydrate_openrouter_credential,
     _openrouter_setup_payload,
+    _configuration_payload,
     read_model_fabric_configuration,
     validate_active_model_fabric_configuration,
+    validate_openrouter_setup,
     write_model_fabric_configuration,
 )
 from src.model_fabric.contracts import (
@@ -139,10 +157,34 @@ class WorkloadPolicyInput(BaseModel):
     max_cost_microusd: int | None = Field(default=None, ge=0)
 
 
+class OpenRouterRouteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    model_id: str
+    enabled: bool
+    capabilities: list[str]
+    allowed_upstreams: list[str]
+    temperature: float = Field(ge=0, le=2, allow_inf_nan=False)
+    max_output_tokens: int = Field(ge=1, le=131_072)
+    timeout_seconds: float = Field(ge=1, le=120, allow_inf_nan=False)
+    zero_data_retention: bool
+    request_cost_bound_microusd: int = Field(ge=1, le=1_000_000_000)
+
+
+class OpenRouterRouteSlotsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: OpenRouterRouteInput | None = None
+    vision: OpenRouterRouteInput | None = None
+    embedding: OpenRouterRouteInput | None = None
+
+
 class OpenRouterSetupInput(BaseModel):
     """Write-only operator setup fields for the fixed OpenRouter route."""
 
     model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["seraph.openrouter.setup.v1", "seraph.openrouter.setup.v2"] = OPENROUTER_SETUP_SCHEMA_VERSION
+    routes: OpenRouterRouteSlotsInput | None = None
+    vision_egress_acknowledged: bool = Field(default=False, strict=True)
+    embedding_egress_acknowledged: bool = Field(default=False, strict=True)
 
     profile_id: str = "openrouter"
     provider_kind: str = OPENROUTER_PROVIDER_KIND
@@ -174,8 +216,9 @@ class OpenRouterSetupInput(BaseModel):
     egress_class: EgressClass = EgressClass.LOCAL_ONLY
     cloud_egress: EgressClass | None = None
     cloud_egress_acknowledged: bool = False
-    spend_ceiling_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
-    max_cost_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    spend_ceiling_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
+    request_cost_bound_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
+    max_cost_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
     max_queued: int = Field(default=64, ge=1, le=64)
     max_queue_size: int | None = Field(default=None, ge=1, le=64)
     max_inflight: int = Field(default=1, ge=1, le=1)
@@ -186,6 +229,45 @@ class OpenRouterSetupInput(BaseModel):
     # consumed only by the trusted PUT handler and never enters a response.
     api_key: SecretStr | None = Field(default=None, repr=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def closed_v2_contract(cls, data):
+        if isinstance(data, dict) and data.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            legacy = {"model_ids", "models", "model_id", "capabilities", "modalities", "temperature", "max_output_tokens", "timeout_seconds", "timeout", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd", "cloud_egress", "max_cost_microusd", "max_queue_size", "fallback_allowed"}
+            if legacy.intersection(data):
+                raise ValueError("v2 route fields belong inside routes")
+            if not isinstance(data.get("routes"), dict):
+                raise ValueError("v2 requires routes")
+            for field in ("cloud_egress_acknowledged", "allow_fallbacks", "require_parameters"):
+                if field in data and type(data[field]) is not bool:
+                    raise ValueError("v2 shared booleans must be literal")
+            for field in ("max_queued", "max_inflight", "max_outstanding_per_owner", "max_retries"):
+                if field in data and type(data[field]) is not int:
+                    raise ValueError("v2 shared integers must be strict")
+        return data
+
+
+class NearTextSetupInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["seraph.near.text.v1"] = "seraph.near.text.v1"
+    enabled: bool = Field(default=False, strict=True)
+    profile_id: Literal["near.text"] = "near.text"
+    model_id: Literal["z-ai/glm-5.3-flash"] = "z-ai/glm-5.3-flash"
+    api_base: Literal["https://cloud-api.near.ai/v1"] = "https://cloud-api.near.ai/v1"
+    max_output_tokens: int = Field(default=1024, strict=True, ge=1, le=1024)
+    timeout_seconds: float = Field(default=45, ge=1, le=45, allow_inf_nan=False)
+    request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    spend_ceiling_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    plaintext_provider_egress_acknowledged: bool = Field(default=False, strict=True)
+    api_key: SecretStr | None = Field(default=None, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def literal_timeout(cls, value):
+        if isinstance(value, dict) and "timeout_seconds" in value and type(value["timeout_seconds"]) not in (int, float):
+            raise ValueError("NEAR timeout must be numeric")
+        return value
+
 
 class ModelFabricConfigurationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -194,11 +276,18 @@ class ModelFabricConfigurationRequest(BaseModel):
     workload_policies: tuple[WorkloadPolicyInput, ...] = ()
     openrouter: OpenRouterSetupInput | None = None
     openrouter_setup: OpenRouterSetupInput | None = None
+    near_text: NearTextSetupInput | None = None
+    expected_policy_revision: int | None = Field(default=None, ge=1, strict=True)
 
     @model_validator(mode="after")
     def one_openrouter_setup_field(self):
         if self.openrouter is not None and self.openrouter_setup is not None:
             raise ValueError("send only one OpenRouter setup object")
+        if "near_text" in self.model_fields_set:
+            if self.near_text is None:
+                raise ValueError("disable NEAR with enabled=false, not null")
+            if self.openrouter is not None or self.openrouter_setup is not None:
+                raise ValueError("send only one provider setup mutation")
         return self
 
 
@@ -271,6 +360,7 @@ def _openrouter_setup_from_input(
         egress_class=egress_class,
         cloud_egress_acknowledged=body.cloud_egress_acknowledged,
         spend_ceiling_microusd=spend_ceiling,
+        request_cost_bound_microusd=body.request_cost_bound_microusd,
         max_queued=body.max_queue_size if body.max_queue_size is not None else body.max_queued,
         max_inflight=body.max_inflight,
         max_outstanding_per_owner=body.max_outstanding_per_owner,
@@ -279,7 +369,12 @@ def _openrouter_setup_from_input(
             existing.credential_ref if existing is not None else OPENROUTER_VAULT_CREDENTIAL_REF
         ),
         credential_fingerprint=existing.credential_fingerprint if existing is not None else None,
-        schema_version=OPENROUTER_SETUP_SCHEMA_VERSION,
+        schema_version=body.schema_version,
+        routes={slot: OpenRouterRoute(**{**route.model_dump(),
+            "model_id": normalize_openrouter_model_id(route.model_id),
+            "capabilities": tuple(route.capabilities), "allowed_upstreams": tuple(route.allowed_upstreams)}) if route is not None else None
+            for slot, route in ((slot, getattr(body.routes, slot)) for slot in OPENROUTER_ROUTE_SLOTS)} if body.routes is not None else None,
+        purpose_consents=existing.purpose_consents if existing is not None and body.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else None,
     )
 
 
@@ -388,14 +483,15 @@ def _setup_configuration(
     *,
     profiles: tuple[ModelFabricProfileInput, ...],
     policies: tuple[WorkloadPolicyInput, ...],
+    existing_profiles: tuple[ProviderProfile, ...] = (),
 ) -> ModelFabricConfiguration:
-    generated_profile = openrouter_profile_for_setup(setup)
+    generated_profiles = openrouter_profiles_for_setup(setup, existing=existing_profiles)
     if profiles:
         raise ValueError(
             "OpenRouter setup owns the canonical profile; omit API-supplied profiles"
         )
     else:
-        configured_profiles = (generated_profile,)
+        configured_profiles = generated_profiles
     if policies:
         raise ValueError(
             "OpenRouter setup owns the canonical workload policies; omit API-supplied policies"
@@ -413,6 +509,98 @@ def _setup_configuration(
     )
 
 
+def _carry_near_consent(setup, persisted, revision):
+    if setup is None:
+        return None
+    prior = persisted.near_text
+    unchanged = prior is not None and replace(prior, spend_ceiling_microusd=setup.spend_ceiling_microusd,
+        plaintext_egress_consent_revision=None) == replace(setup, plaintext_egress_consent_revision=None)
+    current = prior is not None and prior.enabled and not persisted.egress_revoked and prior.plaintext_egress_consent_revision == persisted.egress_revision
+    return replace(setup, plaintext_egress_consent_revision=revision if setup.enabled and unchanged and current else None)
+
+
+async def _put_near_text(body, persisted):
+    from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, configuration_digest, policy_continuity
+    from src.workspace.production import read_lifecycle_receipt
+    from src.workflows.job_runtime import durable_job_repository
+    revision = persisted.egress_revision
+    if body.expected_policy_revision != revision or persisted.status == "degraded":
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
+    if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
+        raise HTTPException(status_code=422, detail="NEAR owns its fixed dedicated route")
+    incoming = body.near_text
+    fields = incoming.model_dump(exclude={"api_key", "plaintext_provider_egress_acknowledged"})
+    prior = persisted.near_text
+    setup = NearTextSetup(**fields, credential_fingerprint=prior.credential_fingerprint if prior else None)
+    raw_key = incoming.api_key.get_secret_value() if incoming.api_key is not None else ""
+    if raw_key.strip():
+        if len(raw_key) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in raw_key):
+            raise HTTPException(status_code=422, detail="NEAR API key contains unsafe characters")
+        setup = replace(setup, credential_fingerprint=_fingerprint_secret(raw_key))
+    validate_near_text_setup(setup)
+    if persisted.openrouter_setup is not None and setup.spend_ceiling_microusd != persisted.openrouter_setup.spend_ceiling_microusd:
+        raise HTTPException(status_code=409, detail="deployment_spend_ceiling_mismatch")
+    final_revision = revision + 2
+    setup = _carry_near_consent(setup, persisted, final_revision)
+    if setup.enabled and setup.plaintext_egress_consent_revision is None:
+        if not incoming.plaintext_provider_egress_acknowledged:
+            raise HTTPException(status_code=403, detail="near_text_plaintext_acknowledgement_required")
+        setup = replace(setup, plaintext_egress_consent_revision=final_revision)
+    old_or = persisted.openrouter_setup
+    if old_or is not None:
+        consents = {slot: final_revision for slot, epoch in (old_or.purpose_consents or {}).items()
+            if not persisted.egress_revoked and epoch == revision}
+        old_or = replace(old_or, purpose_consents=consents if old_or.routes is not None else old_or.purpose_consents,
+            cloud_egress_acknowledged=old_or.cloud_egress_acknowledged and not persisted.egress_revoked)
+    target = replace(persisted, near_text=setup, openrouter_setup=old_or, status="ready", error_code=None,
+        egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not setup.enabled,
+        egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
+    validate_active_model_fabric_configuration(target)
+    previous_key = await vault_repository.get("near_text_api_key") if raw_key.strip() else None
+    mutated = False
+    root = Path(settings.workspace_dir).resolve()
+    try:
+        with maintenance_accounting_lock(root) as workspace:
+            write_model_fabric_configuration(replace(target, egress_revision=revision + 1, egress_revoked=True),
+                expected_revision=revision, publication_workspace=workspace)
+            try:
+                if raw_key.strip():
+                    mutated = True
+                    await vault_repository.store("near_text_api_key", raw_key, description="Seraph NEAR key (write-only settings input)")
+                bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
+                if old_or is not None:
+                    bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
+                    if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
+                        bounds.append(old_or.request_cost_bound_microusd)
+                review = max(bounds, default=None)
+                ceiling = deployment_spend_ceiling(target)
+                configured = await durable_job_repository.configure_inference_accounting(ceiling,
+                    reserve_review_microusd=review, continuity_workspace=workspace)
+                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
+                retained_review = accounting.get("request_reserve_review")
+                exact_review = review is None or isinstance(retained_review, dict) and retained_review.get("bound_microusd") == review and retained_review.get("settings_revision") == accounting.get("settings_revision") and retained_review.get("accounting_revision") == configured.get("revision", 0) - 1
+                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != ceiling or accounting.get("overrun_max_cost_microusd", 0) or not exact_review or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest")):
+                    raise RuntimeError("accounting_settings_revision_unavailable")
+                write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
+            except Exception:
+                if mutated:
+                    path = root / "model-fabric-settings.json"
+                    actual = json.loads(path.read_text()) if path.is_file() else None
+                    witness = read_lifecycle_receipt(workspace) or {}
+                    active = isinstance(actual, dict) and configuration_digest(actual) == configuration_digest(_configuration_payload(target)) and policy_continuity(workspace, actual)[0]
+                    if not active and isinstance(actual, dict) and actual.get("egress_revoked") is True and witness.get("provider_policy", {}).get("state") == "revoked":
+                        if previous_key is None:
+                            await vault_repository.delete("near_text_api_key")
+                        else:
+                            await vault_repository.store("near_text_api_key", previous_key)
+                raise
+    except PolicyRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed") from exc
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="provider_policy_publication_unavailable") from exc
+    return await model_fabric_settings_payload()
+
+
 @router.get("/settings/model-fabric")
 async def get_model_fabric_settings():
     return await model_fabric_settings_payload()
@@ -420,6 +608,12 @@ async def get_model_fabric_settings():
 
 @router.put("/settings/model-fabric")
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        return await _put_model_fabric_settings_locked(body, request)
+
+
+async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(
             status_code=403,
@@ -431,7 +625,22 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
     try:
         setup_input = body.openrouter_setup or body.openrouter
         persisted = read_model_fabric_configuration()
+        if body.near_text is not None:
+            return await _put_near_text(body, persisted)
+        if setup_input is None and persisted.near_text is not None:
+            if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
+                raise HTTPException(status_code=422, detail="provider setups own their fixed routes")
+            # An omitted optional setup is preservation, never deletion/regrant.
+            return await model_fabric_settings_payload()
         existing = persisted.openrouter_setup
+        if setup_input is not None and (setup_input.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION or persisted.near_text is not None):
+            if existing is not None and existing.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION and setup_input.schema_version != OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+                raise HTTPException(status_code=409, detail="setup_schema_upgrade_required")
+            return await _put_openrouter_v2(body, setup_input, persisted)
+        if existing is not None and existing.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            raise HTTPException(status_code=409, detail="setup_schema_upgrade_required")
+        if persisted.egress_revoked and body.expected_policy_revision != persisted.egress_revision:
+            raise HTTPException(status_code=409, detail="Explicit current policy revision is required to re-grant egress")
         if setup_input is not None:
             # Build and validate the complete profile before writing a new
             # credential. An invalid policy must never leave a usable secret
@@ -475,6 +684,13 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                 status="ready",
             )
         validate_active_model_fabric_configuration(configuration)
+        configuration = replace(configuration, egress_revision=persisted.egress_revision + 1,
+            egress_revoked=False, egress_revocation_key=None)
+        if configuration.openrouter_setup is not None:
+            from src.workflows.job_runtime import durable_job_repository
+            review = (configuration.openrouter_setup.request_cost_bound_microusd or configuration.openrouter_setup.spend_ceiling_microusd) if setup_input is not None and "request_cost_bound_microusd" in setup_input.model_fields_set else None
+            await durable_job_repository.configure_inference_accounting(configuration.openrouter_setup.spend_ceiling_microusd,
+                reserve_review_microusd=review)
         write_model_fabric_configuration(configuration)
     except Exception as exc:
         if credential_mutated:
@@ -482,6 +698,9 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                 await _restore_setup_credential(previous_vault_value, previous_process_value)
             except RuntimeError as rollback_error:
                 raise rollback_error
+        from src.workflows.inference_accounting import InferenceAccountingError
+        if isinstance(exc, InferenceAccountingError):
+            raise HTTPException(status_code=503, detail=exc.code) from exc
         if isinstance(exc, ValueError):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(exc, RuntimeError):
@@ -492,8 +711,182 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
     return await model_fabric_settings_payload()
 
 
+async def _put_openrouter_v2(body, setup_input, persisted):
+    """Witnessed revoke→credential/accounting→activate, never cross-store atomic."""
+    from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, policy_continuity
+    from src.workspace.production import read_lifecycle_receipt
+    from src.workflows.job_runtime import durable_job_repository
+    from src.workflows.inference_accounting import InferenceAccountingError
+
+    revision = persisted.egress_revision
+    if body.expected_policy_revision != revision:
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
+    if persisted.status == "degraded":
+        raise HTTPException(status_code=409, detail="provider_policy_reconciliation_required")
+    existing = persisted.openrouter_setup
+    prior = migrate_openrouter_setup_v1_to_v2(existing, egress_revision=revision,
+        allow_unconsented=persisted.near_text is not None) if existing and setup_input.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else existing
+    setup = _openrouter_setup_from_input(setup_input, existing=prior)
+    raw_key = setup_input.api_key.get_secret_value() if setup_input.api_key is not None else ""
+    if raw_key.strip() and (len(raw_key) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in raw_key)):
+        raise ValueError("OpenRouter API key contains unsafe characters")
+    if raw_key.strip():
+        setup = replace(setup, credential_ref=OPENROUTER_VAULT_CREDENTIAL_REF,
+            credential_fingerprint=_fingerprint_secret(raw_key))
+    final_revision = revision + 2
+    consents = {}
+    for slot in ("vision", "embedding"):
+        route = (setup.routes or {}).get(slot)
+        if route is None or not route.enabled:
+            continue
+        previous_route = (prior.routes or {}).get(slot) if prior else None
+        preserved = prior is not None and not persisted.egress_revoked and route == previous_route and (prior.purpose_consents or {}).get(slot) == revision
+        if not preserved and not getattr(setup_input, f"{slot}_egress_acknowledged"):
+            raise HTTPException(status_code=403, detail=f"{slot}_egress_acknowledgement_required")
+        consents[slot] = final_revision
+    setup = replace(setup, purpose_consents=consents)
+    target = _setup_configuration(setup, profiles=body.profiles, policies=body.workload_policies,
+        existing_profiles=persisted.profiles)
+    snapshot = persisted.v1_rollback_snapshot
+    if existing is not None and existing.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+        snapshot = _configuration_payload(persisted)
+    target = replace(target, egress_revision=final_revision, egress_revoked=False,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        v1_rollback_snapshot=snapshot)
+    if persisted.near_text is not None:
+        near = replace(persisted.near_text, spend_ceiling_microusd=setup.spend_ceiling_microusd)
+        target = replace(target, near_text=_carry_near_consent(near, persisted, final_revision))
+    validate_active_model_fabric_configuration(target)
+    previous_process_value = str(settings.openrouter_api_key or "")
+    previous_vault_value = await _snapshot_setup_credential() if raw_key.strip() else None
+    credential_mutated = False
+    root = Path(settings.workspace_dir).resolve()
+    try:
+        with maintenance_accounting_lock(root) as workspace:
+            revoked = replace(target, egress_revision=revision + 1, egress_revoked=True)
+            write_model_fabric_configuration(revoked, expected_revision=revision, publication_workspace=workspace)
+            try:
+                if raw_key.strip():
+                    # Mark before the await: a failing vault write may already have committed.
+                    credential_mutated = True
+                    stored = await _store_setup_credential(setup, setup_input.api_key)
+                    if stored != setup:
+                        raise RuntimeError("credential target changed")
+                review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
+                if setup.routes is None:
+                    review = setup.request_cost_bound_microusd
+                if target.near_text is not None and target.near_text.enabled:
+                    review = max(review or 0, target.near_text.request_cost_bound_microusd)
+                configured_accounting = await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd,
+                    reserve_review_microusd=review, continuity_workspace=workspace)
+                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
+                persisted_review = accounting.get("request_reserve_review")
+                exact_review = review is None or (
+                    isinstance(persisted_review, dict)
+                    and persisted_review.get("settings_revision") == accounting.get("settings_revision")
+                    and persisted_review.get("bound_microusd") == review
+                    and type(persisted_review.get("accounting_revision")) is int
+                    and persisted_review["accounting_revision"] == configured_accounting.get("revision", 0) - 1
+                )
+                exact_witness = all(accounting.get(field) == configured_accounting.get(field)
+                    for field in ("deployment_id", "revision", "ledger_digest"))
+                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd or accounting.get("overrun_max_cost_microusd", 0) or not exact_review or not exact_witness:
+                    raise InferenceAccountingError("accounting_settings_revision_unavailable")
+                write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
+            except Exception:
+                if credential_mutated:
+                    # Publication can raise after replacing either the witness or file.
+                    # Re-read both before deciding whether restoring the old key is safe.
+                    path = root / "model-fabric-settings.json"
+                    actual = json.loads(path.read_text()) if path.is_file() else None
+                    witness = read_lifecycle_receipt(workspace) or {}
+                    from src.workspace.accounting_witness import configuration_digest
+                    exact_active = isinstance(actual, dict) and configuration_digest(actual) == configuration_digest(_configuration_payload(target)) and policy_continuity(workspace, actual)[0]
+                    if not exact_active:
+                        witnessed_revoked = witness.get("provider_policy", {}).get("state") == "revoked"
+                        if isinstance(actual, dict) and actual.get("egress_revoked") is True and witnessed_revoked:
+                            await _restore_setup_credential(previous_vault_value, previous_process_value)
+                raise
+    except PolicyRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed") from exc
+    except RuntimeError as exc:
+        if "busy" in str(exc):
+            raise HTTPException(status_code=409, detail="provider_policy_revision_changed") from exc
+        raise HTTPException(status_code=503, detail=getattr(exc, "code", "provider_policy_publication_unavailable")) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="provider_policy_publication_unavailable") from exc
+    return await model_fabric_settings_payload()
+
+
+class InferenceSettlementInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1, max_length=256)
+    job_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1, strict=True)
+    actual_cost_microusd: int = Field(ge=0, le=1_000_000_000, strict=True)
+    evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.get("/settings/model-fabric/accounting")
+async def get_inference_accounting(job_id: str | None = Query(default=None, min_length=1, max_length=256)):
+    from src.workflows.job_runtime import durable_job_repository
+    return await durable_job_repository.inference_accounting_snapshot(job_id=job_id)
+
+
+class InferencePeriodReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    period_id: str = Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+    expected_revision: int = Field(strict=True, ge=1)
+
+
+@router.post("/settings/model-fabric/accounting/period")
+async def acknowledge_inference_period(body: InferencePeriodReviewInput, request: Request):
+    from src.auth.service import authenticate_principal
+    from src.workspace.accounting_continuity import acknowledge_accounting_period
+    principal = getattr(getattr(request.state, "operator", None), "principal", None)
+    if principal is None or not principal.authenticated or not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Authenticated deployment accounting owner required")
+    await authenticate_principal(principal.principal_id)
+    try:
+        return await asyncio.to_thread(acknowledge_accounting_period, root=Path(settings.workspace_dir).resolve(),
+            period=body.period_id, expected_revision=body.expected_revision, actor=principal.principal_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/settings/model-fabric/accounting/settle")
+async def settle_inference_accounting(body: InferenceSettlementInput, request: Request):
+    from src.auth.service import authenticate_principal
+    from src.workflows.job_runtime import durable_job_repository
+    from src.workflows.inference_accounting import InferenceAccountingError
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
+    if principal is None or not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Authenticated deployment accounting owner required")
+    await authenticate_principal(principal.principal_id)
+    try:
+        row = await durable_job_repository.settle_inference_cost(**body.model_dump(),
+            operator_id=principal.principal_id, reason="explicit_operator_account_settlement")
+    except InferenceAccountingError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    result = {"status": row["state"], "operation": row, "memory_status": "no_learning",
+        "authority_scope": "deployment_accounting", "job_authority_changed": False}
+    if row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text":
+        try:
+            result["lane_recovery"] = await remote_inference_admission_broker.reconcile_settled_near_operation(
+                operation_id=row["operation_id"], job_id=row["job_id"],
+                expected_revision=row["revision"], operator=getattr(request.state, "operator", None),
+            )
+        except Exception:
+            # Debt settlement already committed; local lane recovery cannot undo it.
+            result["lane_recovery"] = {"status": "deferred", "reason_code": "lane_recovery_unavailable"}
+    return result
+
+
 @router.post("/settings/model-fabric/canary")
 async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Request):
+    if body.profile_id == "near.text":
+        raise HTTPException(status_code=403, detail="near_text_dedicated_native_required")
     if not _is_local_request(request):
         raise HTTPException(
             status_code=403,
@@ -501,7 +894,7 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         )
     if body.capability not in _PROBE_CAPABILITIES:
         raise HTTPException(status_code=422, detail="Unsupported model capability")
-    principal = get_current_trust_principal()
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
     if principal is None:
         raise HTTPException(status_code=401, detail="Authenticated model-inference principal required")
     if AuthorityGrant.MODEL_INFERENCE not in principal.grants:
@@ -511,7 +904,18 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     profile = provider_profiles().get(body.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Model-fabric profile not found")
-    policy = effective_workload_policy("capability_probe")
+    configured = read_model_fabric_configuration()
+    setup = configured.openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        # This existing proof generator is an explicit target exception, never
+        # an ordinary task-class mapping or an unknown-to-text fallback.
+        slot = next((slot for slot in OPENROUTER_ROUTE_SLOTS if profile.id == f"openrouter.{slot}"), None)
+        if slot is None:
+            raise HTTPException(status_code=403, detail="canary_exact_slot_required")
+        runtime_path = {"text": "chat_agent", "vision": "screenshot_image_analysis", "embedding": "memory_embedding"}[slot]
+        policy = effective_workload_policy(runtime_path)
+    else:
+        policy = effective_workload_policy("capability_probe")
     try:
         candidate = candidate_from_profile(profile)
     except ValueError as exc:
@@ -570,7 +974,7 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
         requirements=InferenceRequirements(
             capabilities=(body.capability,),
             context_tokens=128,
-            output_tokens=64,
+            output_tokens=int(fixture.get("output_tokens", 64)),
             max_cost_microusd=policy.max_cost_microusd,
             max_local_resource_ms=int(body.timeout_seconds * 1000),
             max_latency_ms=int(body.timeout_seconds * 1000),
@@ -659,10 +1063,17 @@ def _canary_fixture(profile: ProviderProfile, capability: str) -> dict[str, obje
                 "file": file_metadata,
             },
         }
-    payload = _chat_canary_payload(profile.model, capability)
+    if profile.transport_adapter == "openai_compatible_embeddings":
+        payload = finalized_openai_compatible_embeddings_body(model_id=profile.model,
+            inputs="Seraph fixed non-sensitive embedding canary.", options=profile.options)
+        return {"json": payload, "digest_payload": payload, "output_tokens": 1}
+    controls = profile.options.get("_seraph_openrouter", {})
+    payload = _chat_canary_payload(profile.model, capability, options=profile.options,
+        output_tokens=min(64, int(controls.get("output_limit", 64))))
     return {
         "json": payload,
         "digest_payload": payload,
+        "output_tokens": payload["max_tokens"],
     }
 
 
@@ -702,7 +1113,8 @@ def _static_profile_route_reasons(
             reasons.append("adapter_capability_mismatch")
     if profile.context_window_tokens is None or profile.context_window_tokens < 128:
         reasons.append("profile_limit_unknown_or_insufficient:context_tokens")
-    if profile.max_output_tokens is None or profile.max_output_tokens < 64:
+    output_tokens = 1 if profile.transport_adapter == "openai_compatible_embeddings" else min(64, int(profile.options.get("_seraph_openrouter", {}).get("output_limit", 64)))
+    if profile.max_output_tokens is None or profile.max_output_tokens < output_tokens:
         reasons.append("profile_limit_unknown_or_insufficient:output_tokens")
     timeout_ms = int(timeout_seconds * 1000)
     if profile.max_latency_ms is None or profile.max_latency_ms > timeout_ms:
@@ -728,7 +1140,7 @@ def _static_profile_route_reasons(
 
 async def model_fabric_settings_payload() -> dict[str, object]:
     configured = read_model_fabric_configuration()
-    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup)
+    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup, configuration=configured)
     proof_metadata_degraded = False
     try:
         proofs = await _profile_proof_statuses()
@@ -744,6 +1156,14 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         status = "configuration_required"
     else:
         status = configured.status
+    from src.workflows.job_runtime import durable_job_repository
+    accounting = await durable_job_repository.inference_accounting_snapshot()
+    near_status = await _near_text_setup_status(configured, accounting)
+    if openrouter_setup_status is not None and (configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged or accounting["status"] != "ready"):
+        openrouter_setup_status["status"] = "blocked"
+        openrouter_setup_status["error_code"] = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else "openrouter_egress_acknowledgement_required" if not configured.openrouter_setup.cloud_egress_acknowledged else accounting.get("reason_code")
+        status = "blocked"
+        _block_setup_slots(openrouter_setup_status, openrouter_setup_status["error_code"])
     return {
         "schema_version": "seraph.model-fabric.settings.v1",
         "status": "degraded" if configured.status == "degraded" else status,
@@ -757,10 +1177,53 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "defaults": {"egress_class": EgressClass.LOCAL_ONLY.value, "fallback_allowed": False},
         "canary_endpoint": "/api/settings/model-fabric/canary",
         "openrouter_setup": openrouter_setup_status,
+        "near_text": near_status,
+        "inference_accounting": accounting,
+        "egress_revision": configured.egress_revision,
+        "egress_revoked": configured.egress_revoked,
     }
 
 
-async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, object] | None:
+async def _near_text_setup_status(configured, accounting):
+    setup = configured.near_text
+    if setup is None:
+        return None
+    key_present = False
+    key_unavailable = False
+    try:
+        key = await vault_repository.get("near_text_api_key")
+        key_present = isinstance(key, str) and bool(key) and _fingerprint_secret(key) == setup.credential_fingerprint
+    except Exception:
+        key_unavailable = True
+    consent = not configured.egress_revoked and setup.enabled and setup.plaintext_egress_consent_revision == configured.egress_revision
+    reason = None
+    if not setup.enabled:
+        status = "disabled"
+    elif configured.status != "ready" or configured.egress_revoked or not consent:
+        status = "blocked"
+        reason = configured.error_code or ("provider_policy_revoked" if configured.egress_revoked else "near_text_plaintext_consent_required")
+    elif not key_present:
+        status = "configuration_required"
+        reason = "near_text_credential_unavailable" if key_unavailable else "near_text_credential_required"
+    elif accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd:
+        status = "blocked"
+        reason = accounting.get("reason_code") or "inference_accounting_unavailable"
+    else:
+        status = "configured"
+    return {**setup.__dict__, "key_present": key_present, "consent_current": consent,
+        "status": status, "reason_code": reason, "tls_transport": True, "tee_verified": False,
+        "e2ee": False, "provider_plaintext_disclosure": "NEAR receives the question in plaintext over HTTPS."}
+
+
+def _block_setup_slots(payload, reason):
+    for slot, state in payload.get("slot_statuses", {}).items():
+        route = payload.get("routes", {}).get(slot)
+        if route is not None and route.get("enabled"):
+            state.update(status="blocked", error_code=reason)
+            route.update(state)
+
+
+async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configuration=None) -> dict[str, object] | None:
     """Return setup metadata while keeping credentials backend-only."""
     if setup is None:
         return None
@@ -780,6 +1243,10 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, o
             )
         except Exception:
             credential_store_error = "credential_store_unavailable"
+    original_setup = setup
+    revision = configuration.egress_revision if configuration is not None else 1
+    setup = migrate_openrouter_setup_v1_to_v2(setup, egress_revision=revision,
+        allow_unconsented=configuration is not None and configuration.near_text is not None)
     payload = _openrouter_setup_payload(setup)
     payload.update(
         {
@@ -796,12 +1263,62 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, o
     # credential-like field in a later schema revision.
     for secret_field in ("api_key", "secret", "token", "authorization"):
         payload.pop(secret_field, None)
+    payload.pop("purpose_consents", None)
+    payload["slot_statuses"] = {}
+    for slot in OPENROUTER_ROUTE_SLOTS:
+        route = (setup.routes or {}).get(slot)
+        payload["routes"].setdefault(slot, None)
+        state = {"status": "configuration_required", "error_code": "route_disabled" if route is not None else "route_missing", "proof_expires_at": None}
+        if route is not None and route.enabled:
+            state.update(status="blocked", error_code=credential_store_error or "credential_missing" if not credential else "capability_proof_missing")
+            if not credential:
+                state["status"] = "configuration_required"
+            elif original_setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+                state["error_code"] = "setup_schema_upgrade_required"
+            elif slot != "text" and (setup.purpose_consents or {}).get(slot) != revision:
+                state["error_code"] = "purpose_consent_stale"
+            else:
+                profile = provider_profiles().get(f"openrouter.{slot}")
+                if profile is not None:
+                    candidate = candidate_from_profile(profile)
+                    proofs = []
+                    try:
+                        for capability in {*route.capabilities, "health", "latency_ms"}:
+                            proof = await model_fabric_repository.latest_capability_proof(
+                                profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
+                                profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
+                                endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
+                            if proof is None or not proof_is_fresh(proof):
+                                break
+                            proofs.append(proof)
+                        else:
+                            state.update(status="ready", error_code=None,
+                                proof_expires_at=datetime.fromtimestamp(min(proof.expires_at for proof in proofs), timezone.utc).isoformat())
+                    except Exception:
+                        state["error_code"] = "proof_metadata_unavailable"
+            if original_setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+                try:
+                    validate_openrouter_setup(replace(setup, routes={slot: route}))
+                except ValueError:
+                    state.update(status="blocked", error_code="legacy_route_capabilities_require_review")
+        if route is not None:
+            payload["routes"][slot].update(state)
+        payload["slot_statuses"][slot] = state
+    if credential:
+        payload["status"] = "ready" if any(state["status"] == "ready" for state in payload["slot_statuses"].values()) else "blocked"
     return payload
 
 
 async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, object]:
     configured = read_model_fabric_configuration()
-    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup)
+    openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup, configuration=configured)
+    from src.workflows.job_runtime import durable_job_repository
+    accounting = await durable_job_repository.inference_accounting_snapshot()
+    accounting_reason = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else accounting.get("reason_code") if accounting["status"] != "ready" else None
+    if openrouter_setup_status is not None and accounting_reason:
+        openrouter_setup_status["status"] = "blocked"
+        openrouter_setup_status["error_code"] = accounting_reason
+        _block_setup_slots(openrouter_setup_status, accounting_reason)
     runtime_paths = {}
     degraded = configured.status == "degraded"
     status_paths = (*CANONICAL_ROUTE_SPECS, "capability_probe")
@@ -841,6 +1358,9 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         all_profiles,
         active_profile=active_profile,
     )
+    if accounting_reason:
+        inference_readiness = {**inference_readiness, "status": "blocked",
+            "reasons": list(dict.fromkeys([*inference_readiness["reasons"], accounting_reason]))}
     return {
         "status": (
             "degraded"
@@ -854,6 +1374,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "configuration_error": configured.error_code,
         "configured_chat_profile": active_profile,
         "inference_readiness": inference_readiness,
+        "inference_accounting": {key: value for key, value in accounting.items() if key != "operations"},
         "profiles": [item for item in all_profiles if item["model_fabric_eligible"]],
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
@@ -931,11 +1452,13 @@ async def _execute_canary_transport(
     requirements,
     fixture,
 ):
+    from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage, capture_response_usage
     endpoint = transport_endpoint(profile)
     headers = {"Content-Type": "application/json"}
     if profile.api_key:
         headers["Authorization"] = f"Bearer {profile.api_key}"
     started = time.monotonic()
+    embedding_dimension = None
     async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False) as client:
         if profile.transport_adapter == "vlm_analyze_file":
             response = await client.post(
@@ -950,28 +1473,40 @@ async def _execute_canary_transport(
         else:
             payload = fixture["json"]
             if capability == ModelCapability.STREAMING.value:
+                assert_current_inference_policy()
                 async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                     response.raise_for_status()
                     observed = False
                     async for line in response.aiter_lines():
+                        if line.strip().startswith("data:"):
+                            try:
+                                capture_inference_usage(json.loads(line.strip()[5:].strip(), parse_float=Decimal))
+                            except (ValueError, TypeError):
+                                pass
                         if _streaming_canary_delta(line):
                             observed = True
-                            break
                 if not observed:
                     return CapabilityProbeObservation(False, error_code="stream_empty")
             else:
+                assert_current_inference_policy()
                 response = await client.post(endpoint, headers=headers, json=payload)
+                capture_response_usage(response)
                 response.raise_for_status()
-                if not _validate_chat_canary_response(response.json(), capability):
+                if profile.transport_adapter == "openai_compatible_embeddings":
+                    embedding_dimension = _embedding_canary_dimension(response.json())
+                    valid = embedding_dimension is not None
+                else:
+                    valid = _validate_chat_canary_response(response.json(), capability)
+                if not valid:
                     return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
     elapsed_ms = max(int((time.monotonic() - started) * 1000), 0)
-    value = _proven_value(capability, elapsed_ms)
+    value = embedding_dimension if capability == ModelCapability.EMBEDDING.value else _proven_value(capability, elapsed_ms)
     if value is None:
         return CapabilityProbeObservation(False, error_code="proof_value_unknown")
     return CapabilityProbeObservation(True, proven_value=value)
 
 
-def _chat_canary_payload(model: str, capability: str) -> dict[str, object]:
+def _chat_canary_payload(model: str, capability: str, *, options=None, output_tokens=64) -> dict[str, object]:
     content: object = "Reply with CANARY_OK only."
     messages: list[dict[str, object]] = [{"role": "user", "content": content}]
     additional_fields: dict[str, object] = {}
@@ -989,10 +1524,31 @@ def _chat_canary_payload(model: str, capability: str) -> dict[str, object]:
     return finalized_openai_compatible_body(
         model_id=model,
         messages=messages,
-        max_tokens=64,
+        max_tokens=output_tokens,
+        options=options,
         stream=True if streaming else None,
         additional_fields=additional_fields,
     )
+
+
+def _embedding_canary_dimension(payload: object) -> int | None:
+    """Measure one bounded finite vector without retaining its contents."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or len(payload["data"]) != 1:
+        return None
+    row = payload["data"][0]
+    if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] != 0:
+        return None
+    vector = row.get("embedding")
+    if not isinstance(vector, list) or not 1 <= len(vector) <= 65_536:
+        return None
+    try:
+        if any(type(value) not in {int, float} or not math.isfinite(value) for value in vector):
+            return None
+    except OverflowError:
+        return None
+    if not any(value != 0 for value in vector):
+        return None
+    return len(vector)
 
 
 def _validate_chat_canary_response(payload: object, capability: str) -> bool:

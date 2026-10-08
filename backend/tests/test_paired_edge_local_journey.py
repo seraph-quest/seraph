@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from threading import Barrier
 from pathlib import Path
@@ -13,18 +12,17 @@ import sys
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from config.settings import settings
 from src.api import nodes
 from src.auth.middleware import OperatorAuthMiddleware
+from src.auth.service import create_session
 from src.db.models import PairedEdgeArtifact
 from src.extensions import paired_edge
 from src.extensions.state import (
     ExtensionStateRevisionConflict,
+    ExtensionStateBusy,
     load_extension_state_payload,
     save_extension_state_payload,
 )
@@ -60,10 +58,13 @@ def test_concurrent_mutations_cannot_both_commit_same_revision(tmp_path, monkeyp
             return "committed"
         except ExtensionStateRevisionConflict:
             return "conflict"
+        except ExtensionStateBusy as exc:
+            assert str(exc) == "extension_state_busy"
+            return "busy"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = sorted(pool.map(attempt, ("rotating", "revoking")))
-    assert outcomes == ["committed", "conflict"]
+    assert outcomes in (["committed", "conflict"], ["busy", "committed"])
     persisted = json.loads((tmp_path / "extensions-state.json").read_text(encoding="utf-8"))
     assert persisted["revision"] == 2
 
@@ -99,59 +100,29 @@ def _write_edge_extension(workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp_path, monkeypatch):
+async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp_path, monkeypatch, async_db):
     """Exercise the daemon adapter against the real FastAPI ingress routes."""
 
     workspace = tmp_path / "workspace"
     _write_edge_extension(workspace)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     monkeypatch.setattr(settings, "deployment_environment", "test")
-    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "paired-edge-local-test-secret")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test")
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "https://test")
 
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=[PairedEdgeArtifact.__table__],
-            )
-        )
-
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
+    get_session = async_db
     monkeypatch.setattr(nodes, "get_session", get_session)
-    credentials: dict[str, str] = {}
-
-    async def vault_store(key: str, value: str, description: str | None = None):
-        credentials[key] = value
-        return None
-
-    async def vault_get(key: str) -> str | None:
-        return credentials.get(key)
-
-    monkeypatch.setattr(paired_edge.vault_repository, "store", vault_store)
-    monkeypatch.setattr(paired_edge.vault_repository, "get", vault_get)
+    token, operator = await create_session()
 
     app = FastAPI()
     app.add_middleware(OperatorAuthMiddleware)
     app.include_router(nodes.router, prefix="/api")
     asgi_transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=asgi_transport, base_url="https://test") as client:
+        client.cookies.set(settings.operator_auth_cookie_name, token)
         pair_response = await client.post(
             "/api/nodes/pairings/pair",
             headers={"Origin": "https://test"},
@@ -168,6 +139,16 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         credential = pair_payload["credential"]
         assert pair_payload["credential_ref"].startswith("vault://")
         assert credential not in (workspace / "extensions-state.json").read_text(encoding="utf-8")
+        entry = load_extension_state_payload()["extensions"]["seraph.openclaw-device-bridge"]["node_pairings"]["connectors/nodes/device.yaml"]
+        assert entry["owner_principal_id"] == operator.principal.principal_id
+        secret = await paired_edge.vault_repository.snapshot(
+            entry["credential_vault_key"], owner_principal_id=operator.principal.principal_id
+        )
+        assert secret is not None and secret.value == credential
+        assert await paired_edge.vault_repository.snapshot(
+            entry["credential_vault_key"], owner_principal_id="operator:foreign"
+        ) is None
+
 
         from paired_edge import PairedEdgeTransport
 
@@ -227,14 +208,12 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         assert out_of_order.status_code == 409
         assert out_of_order.json()["status"] == "out_of_order"
 
-        monkeypatch.setattr(settings, "operator_auth_secret", "operator-secret")
         bad_origin = await client.post(
             "/api/nodes/edge/upload",
             headers={"Authorization": f"Bearer {credential}", "Origin": "http://evil"},
             json=valid_payload,
         )
         assert bad_origin.status_code == 403
-        monkeypatch.setattr(settings, "operator_auth_secret", "")
 
         wrong_auth = await client.post(
             "/api/nodes/edge/upload",
@@ -297,4 +276,3 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
         assert rejected_after_revoke.queued is False
         await transport.close()
         await restarted.close()
-    await engine.dispose()

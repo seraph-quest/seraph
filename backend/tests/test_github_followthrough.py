@@ -24,6 +24,7 @@ from src.extensions.github_followthrough import (
     GitHubFollowthroughError,
     GitHubFollowthroughService,
     PrepareRequest,
+    ReconcileRequest,
     PreparedPublication,
     _final_body,
     _followthrough_approval_scope,
@@ -34,9 +35,14 @@ from src.extensions.github_followthrough import (
 )
 from src.approval.repository import fingerprint_tool_call
 from src.db.models import GitHubFollowthroughConnection
+from src.db import engine as db_engine
+from src.extensions.github_consent import GitHubConsentRequest
+from src.vault.repository import vault_repository
+from tests.test_github_connection_consent import active_connection, ORIGIN
 from src.workflows.job_runtime import (
     DurableJobLeaseError,
     DurableJobRoutinePublicationAdmissionGuard,
+    durable_job_repository,
 )
 
 
@@ -294,126 +300,68 @@ class _MemoryDurableJobs:
         return copy.deepcopy(self.current)
 
 
-@pytest.mark.parametrize("approval_status", ["approved", "consumed"])
-@pytest.mark.asyncio
-async def test_execute_posts_once_then_reads_back_exact_issue_without_secret_receipt(monkeypatch, approval_status):
-    prepared = _prepared()
-    durable = _MemoryDurableJobs(_job(prepared))
-    expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
-    approval_details = {"approval_expires_at": expiry}
-    if approval_status == "consumed":
-        durable.current["effects"][0].update(
-            {
-                "approval_request_status": "consumed",
-                "expires_at": expiry,
-                "operator_principal_id": prepared.owner_principal_id,
-                "operator_session_id": prepared.owner_session_id,
-                "owner_kind": "user",
-                "owner_principal_id": prepared.owner_principal_id,
-                "authority_digest": "authority-1",
-                "goal_id": prepared.goal_id,
-                "goal_revision": prepared.goal_revision,
-                "plan_revision": prepared.plan_revision,
-                "capability_version": "1",
-                "budget_digest": "budget-1",
-            }
-        )
-        approval_details.update(
-            {
-                "durable_approval_id": "approval-1",
-                "durable_job_id": prepared.job_id,
-                "durable_owner_kind": "user",
-                "durable_owner_principal_id": prepared.owner_principal_id,
-                "durable_authority_digest": "authority-1",
-                "durable_goal_id": prepared.goal_id,
-                "durable_goal_revision": prepared.goal_revision,
-                "durable_plan_revision": prepared.plan_revision,
-                "durable_capability_version": "1",
-                "durable_budget_digest": "budget-1",
-                "operator_session_id": prepared.owner_session_id,
-            }
-        )
-    calls: list[tuple[str, str]] = []
+async def _canonical_publication_case(client, monkeypatch, tmp_path, *, readback_missing=False):
+    from tests.test_github_finite_consent_vertical import actual_source_dossier
 
-    async def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, str(request.url)))
-        assert request.headers["authorization"] == "Bearer secret-token"
+    owner, consent, goal, dossier_id, dossier_sha, _ = await actual_source_dossier(client, monkeypatch, tmp_path)
+    calls = []
+    remote = {}
+
+    def transport(request):
+        calls.append(request.method)
+        assert request.headers["authorization"] == "Bearer fixture-token"
         if request.method == "POST":
             payload = json.loads(request.content)
-            assert payload == {"title": prepared.title, "body": prepared.body}
-            return httpx.Response(
-                201,
-                json={"number": 42, "title": prepared.title, "body": prepared.body},
-                request=request,
-            )
-        return httpx.Response(
-            200,
-            json={"number": 42, "title": prepared.title, "body": prepared.body},
-            request=request,
-        )
+            assert payload == {"title": immutable_prepared.title, "body": immutable_prepared.body}
+            remote.update(payload, number=42)
+            return httpx.Response(201, json=remote)
+        if readback_missing and len(calls) <= 4:
+            return httpx.Response(404)
+        return httpx.Response(200, json=remote)
 
     service = GitHubFollowthroughService(
-        resolver=_public_resolver,
-        transport=httpx.MockTransport(handler),
-        sleep=lambda _delay: _public_resolver("", 0),
+        resolver=_public_resolver, transport=httpx.MockTransport(transport),
+        sleep=lambda _delay: _async_value(None),
     )
-    connection = SimpleNamespace(
-        id=prepared.connection_id,
-        revision=prepared.connection_revision,
-        repository=prepared.repository,
-        mode="active",
-        vault_key="github-token",
-        active_job_id=prepared.job_id,
-        active_fence=1,
+    view = await service.prepare(
+        owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],
+        request=PrepareRequest(conversation_id=owner["session_id"], goal_id=goal.id,
+            goal_revision=goal.revision, dossier_artifact_id=dossier_id, dossier_sha256=dossier_sha,
+            connection_revision=consent["revision"], action=ACTION_CREATE_ISSUE,
+            title="Guardian update", body="A bounded guardian update.", idempotency_key=str(uuid.uuid4())),
     )
-    monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
-    monkeypatch.setattr(service, "_read_prepared", lambda _current: _async_value(prepared))
-    monkeypatch.setattr(service, "_get_connection_row", lambda _owner: _async_value(connection))
-    monkeypatch.setattr(service, "_reserve_connection", lambda **_kwargs: _async_value(1))
-    monkeypatch.setattr(service, "_verify_live_handoff", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_assert_dispatch_binding", lambda **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_load_token", lambda _connection: _async_value("secret-token"))
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.approval_repository.get",
-        lambda _approval_id: _async_value(
-            SimpleNamespace(
-                id="approval-1",
-                status=approval_status,
-                owner_principal_id=prepared.owner_principal_id,
-                operator_session_id=prepared.owner_session_id,
-                session_id=prepared.owner_session_id,
-                details_json=json.dumps(approval_details),
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        service,
-        "_finalize_verified",
-        lambda *_args, **_kwargs: _mark_success(durable),
-    )
-    async def live_session(session_id: str, *, touch: bool = False):
-        return SimpleNamespace(
-            session_id=session_id,
-            principal=SimpleNamespace(
-                principal_id=prepared.owner_principal_id,
-                grants={"external_mutation"},
-            ),
-        )
+    current = await durable_job_repository.get_job(view["job_id"])
+    immutable_prepared = await service._read_prepared(current)
+    approved = await client.post(f"/api/approvals/{view['approval_id']}/approve", headers=ORIGIN)
+    assert approved.status_code == 200, approved.text
+    return owner, service, view, calls, remote
 
-    monkeypatch.setattr("src.extensions.github_followthrough.authenticate_session", live_session)
 
-    result = await service.execute(
-        owner_principal_id=prepared.owner_principal_id,
-        owner_session_id=prepared.owner_session_id,
-        external_mutation_granted=True,
-        job_id=prepared.job_id,
-    )
+@pytest.mark.parametrize("approval_status", ["approved", "consumed"])
+@pytest.mark.asyncio
+async def test_execute_posts_once_then_reads_back_exact_issue_without_secret_receipt(client, async_db, monkeypatch, tmp_path, approval_status):
+    owner, service, view, calls, remote = await _canonical_publication_case(client, monkeypatch, tmp_path)
+    if approval_status == "consumed":
+        # Resume is a real approval-consumption CAS; simulate interruption before claim.
+        async def stop_before_claim(*_args, **_kwargs):
+            raise RuntimeError("fixture interrupted after approval consumption")
+        with monkeypatch.context() as interruption:
+            interruption.setattr(durable_job_repository, "claim_job", stop_before_claim)
+            with pytest.raises(RuntimeError, match="after approval consumption"):
+                await service.execute(owner_principal_id=owner["principal_id"],
+                    owner_session_id=owner["session_id"], job_id=view["job_id"])
+        from src.approval.repository import approval_repository
+        approval = await approval_repository.get(view["approval_id"])
+        assert approval.status == "consumed"
+        assert calls == []
 
-    assert result["status"] == "succeeded"
-    assert [method for method, _url in calls] == ["POST", "GET"]
-    assert sum(method == "POST" for method, _url in calls) == 1
-    assert "secret-token" not in json.dumps(durable.current)
-    assert prepared.body not in json.dumps(durable.current)
+    result = await service.execute(owner_principal_id=owner["principal_id"],
+        owner_session_id=owner["session_id"], job_id=view["job_id"])
+    assert result["status"] == "succeeded", result
+    assert calls == ["POST", "GET"]
+    current = await durable_job_repository.get_job(view["job_id"])
+    assert "fixture-token" not in json.dumps(current)
+    assert remote["body"] not in json.dumps(current)
 
 
 @pytest.mark.asyncio
@@ -839,11 +787,12 @@ async def test_current_routine_binding_requires_recovered_child_approval_checkpo
 
 
 @pytest.mark.asyncio
-async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(monkeypatch):
+async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(client, async_db, monkeypatch):
     """A cancellation finishing after preflight cannot be followed by M3 insert."""
 
-    owner = "operator:prepare-race"
-    session_id = "session:prepare-race"
+    operator, connection, _, _ = await active_connection(client, monkeypatch)
+    owner = operator["principal_id"]
+    session_id = operator["session_id"]
     operation_uuid = uuid.UUID("22222222-2222-4222-8222-222222222222")
     job_id = f"ghfollow_{_operation_id(owner, operation_uuid).hex}"
     parent_id = "routine-invocation:prepare-race"
@@ -861,9 +810,9 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
         "goal_id": "goal-prepare-race",
         "goal_revision": 3,
         "source_watch_id": "watch-prepare-race",
-        "connection_id": "connection-prepare-race",
-        "connection_revision": 1,
-        "repository": "seraph-quest/seraph",
+        "connection_id": connection.id,
+        "connection_revision": connection.revision,
+        "repository": connection.repository,
         "action": ACTION_CREATE_ISSUE,
         "operation_uuid": str(operation_uuid),
     }
@@ -902,22 +851,11 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
 
     durable = _RaceDurable()
     service = GitHubFollowthroughService()
-    connection = SimpleNamespace(
-        id="connection-prepare-race",
-        revision=1,
-        repository="seraph-quest/seraph",
-        mode="active",
-        vault_key="github-token",
-    )
     packet = SimpleNamespace(plan_revision=4)
     watch = SimpleNamespace(id="watch-prepare-race", plan_revision=4)
     goal = SimpleNamespace(id="goal-prepare-race", revision=3)
     monkeypatch.setattr(
         "src.extensions.github_followthrough.durable_job_repository", durable
-    )
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough._require_live_owner_session",
-        lambda **_kwargs: _async_value(None),
     )
     monkeypatch.setattr(service, "_get_connection_row", lambda _owner: _async_value(connection))
     monkeypatch.setattr(
@@ -951,10 +889,6 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
             raise AssertionError("approval must not be created after guarded admission rejection")
 
     monkeypatch.setattr("src.extensions.github_followthrough.approval_repository", _NoApproval())
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.vault_repository.exists",
-        lambda _key: _async_value(True),
-    )
 
     async def cancellation_after_final_absent_read():
         await preflight_started.wait()
@@ -975,7 +909,7 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
                 goal_revision=3,
                 dossier_artifact_id="dossier-prepare-race",
                 dossier_sha256="a" * 64,
-                connection_revision=1,
+                connection_revision=connection.revision,
                 action=ACTION_CREATE_ISSUE,
                 title="Prepare race",
                 body="bounded body",
@@ -997,14 +931,14 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
     assert "approval" not in get_job_ids
 
 
-def _prepare_race_request() -> PrepareRequest:
+def _prepare_race_request(owner, connection) -> PrepareRequest:
     return PrepareRequest(
-        conversation_id="session-prepare-race",
+        conversation_id=owner["session_id"],
         goal_id="goal-prepare-race",
         goal_revision=3,
         dossier_artifact_id="dossier-prepare-race",
         dossier_sha256="a" * 64,
-        connection_revision=2,
+        connection_revision=connection.revision,
         action=ACTION_CREATE_ISSUE,
         title="Prepare race",
         body="bounded body",
@@ -1012,22 +946,11 @@ def _prepare_race_request() -> PrepareRequest:
     )
 
 
-def _patch_prepare_race_dependencies(monkeypatch, service, durable):
-    connection = SimpleNamespace(
-        id="connection-prepare-race",
-        revision=2,
-        repository="acme/example",
-        mode="active",
-        vault_key="github-token",
-    )
+def _patch_prepare_race_dependencies(monkeypatch, service, durable, connection):
     packet = SimpleNamespace(plan_revision=4)
     watch = SimpleNamespace(id="watch-prepare-race", plan_revision=4)
     goal = SimpleNamespace(id="goal-prepare-race", revision=3)
     monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough._require_live_owner_session",
-        lambda **_kwargs: _async_value(None),
-    )
     monkeypatch.setattr(service, "_get_connection_row", lambda _owner: _async_value(connection))
     monkeypatch.setattr(
         service,
@@ -1038,10 +961,6 @@ def _patch_prepare_race_dependencies(monkeypatch, service, durable):
         service,
         "_discover_routine_publication_binding",
         lambda **_kwargs: _async_value(None),
-    )
-    monkeypatch.setattr(
-        "src.extensions.github_followthrough.vault_repository.exists",
-        lambda _key: _async_value(True),
     )
     return connection, packet, watch, goal
 
@@ -1134,13 +1053,14 @@ class _PrepareRaceDurable:
 
 @pytest.mark.asyncio
 async def test_prepare_cancellation_after_artifact_before_approval_denies_new_pending_row(
-    monkeypatch, tmp_path
+    client, async_db, monkeypatch, tmp_path
 ):
     """A pending approval created after cancellation cannot remain unbound."""
 
     durable = _PrepareRaceDurable()
     service = GitHubFollowthroughService()
-    _patch_prepare_race_dependencies(monkeypatch, service, durable)
+    owner, connection, _, _ = await active_connection(client, monkeypatch)
+    _patch_prepare_race_dependencies(monkeypatch, service, durable, connection)
     payload_path = tmp_path / "prepare-race.json"
     monkeypatch.setattr(
         "src.extensions.github_followthrough._safe_resolve",
@@ -1179,7 +1099,7 @@ async def test_prepare_cancellation_after_artifact_before_approval_denies_new_pe
                 tool_name=kwargs["tool_name"],
                 session_id=kwargs["session_id"],
                 operator_session_id=kwargs["session_id"],
-                owner_principal_id="operator:prepare-race",
+                owner_principal_id=owner["principal_id"],
                 details_json=json.dumps(details),
                 expires_at=datetime.now(timezone.utc) + timedelta(minutes=4),
             )
@@ -1201,10 +1121,10 @@ async def test_prepare_cancellation_after_artifact_before_approval_denies_new_pe
     monkeypatch.setattr("src.extensions.github_followthrough.approval_repository", approvals)
     with pytest.raises(GitHubFollowthroughError, match="prepare_approval_bind_job_not_current"):
         await service.prepare(
-            owner_principal_id="operator:prepare-race",
-            owner_session_id="session-prepare-race",
+            owner_principal_id=owner["principal_id"],
+            owner_session_id=owner["session_id"],
             external_mutation_granted=True,
-            request=_prepare_race_request(),
+            request=_prepare_race_request(owner, connection),
         )
 
     assert len(approval_calls) == 1
@@ -1216,13 +1136,14 @@ async def test_prepare_cancellation_after_artifact_before_approval_denies_new_pe
 
 @pytest.mark.asyncio
 async def test_prepare_cancellation_after_file_write_before_artifact_cas_removes_private_file(
-    monkeypatch, tmp_path
+    client, async_db, monkeypatch, tmp_path
 ):
     """A lost artifact CAS cannot strand the private payload file."""
 
     durable = _PrepareRaceDurable(cancel_before_artifact=True)
     service = GitHubFollowthroughService()
-    _patch_prepare_race_dependencies(monkeypatch, service, durable)
+    owner, connection, _, _ = await active_connection(client, monkeypatch)
+    _patch_prepare_race_dependencies(monkeypatch, service, durable, connection)
     payload_path = tmp_path / "prepare-race.json"
     monkeypatch.setattr(
         "src.extensions.github_followthrough._safe_resolve",
@@ -1250,10 +1171,10 @@ async def test_prepare_cancellation_after_file_write_before_artifact_cas_removes
 
     with pytest.raises(DurableJobLeaseError, match="artifact CAS lost"):
         await service.prepare(
-            owner_principal_id="operator:prepare-race",
-            owner_session_id="session-prepare-race",
+            owner_principal_id=owner["principal_id"],
+            owner_session_id=owner["session_id"],
             external_mutation_granted=True,
-            request=_prepare_race_request(),
+            request=_prepare_race_request(owner, connection),
         )
 
     assert not payload_path.exists()
@@ -1491,208 +1412,103 @@ def test_consumed_approval_resume_rejects_stale_or_incomplete_binding():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_binding_fence_rejects_connection_swap_before_post(monkeypatch):
+async def test_dispatch_binding_fence_rejects_connection_swap_before_post(client, async_db, monkeypatch):
     """A held reservation blocks reconfiguration and stale final dispatch."""
-
+    owner, row, _, _ = await active_connection(client, monkeypatch)
+    await vault_repository.store("rotated-token", "rotated-fixture", owner_principal_id=owner["principal_id"])
     service = GitHubFollowthroughService()
-    monkeypatch.setattr("src.extensions.github_followthrough.vault_repository.exists", lambda _key: _async_value(True))
-    async with _local_table_database(GitHubFollowthroughConnection) as get_session:
-        monkeypatch.setattr("src.extensions.github_followthrough.db_engine.get_session", get_session)
-        async with get_session() as db:
-            db.add(
-                GitHubFollowthroughConnection(
-                    id="connection-race",
-                    owner_principal_id="operator-1",
-                    repository="acme/example",
-                    vault_key="github-token",
-                    revision=2,
-                    mode="active",
-                )
-            )
-
-        fence = await service._reserve_connection(
-            owner_principal_id="operator-1",
-            connection_id="connection-race",
-            expected_revision=2,
-            job_id="ghfollow-race",
-        )
-        with pytest.raises(GitHubFollowthroughError, match="connection_reserved"):
-            await service.put_connection(
-                owner_principal_id="operator-1",
-                repository="acme/example",
-                vault_key="rotated-token",
-                mode="disabled",
-                expected_revision=2,
-            )
-
-        await service._assert_dispatch_binding(
-            owner_principal_id="operator-1",
-            connection_id="connection-race",
-            expected_revision=2,
-            repository="acme/example",
-            vault_key="github-token",
-            mode="active",
-            job_id="ghfollow-race",
-            fence=fence,
-        )
-        assert await service._release_connection(
-            connection_id="connection-race",
-            owner_principal_id="operator-1",
-            job_id="ghfollow-race",
-            fence=fence,
-        )
-        changed = await service.put_connection(
-            owner_principal_id="operator-1",
-            repository="acme/example",
-            vault_key="rotated-token",
-            mode="active",
-            expected_revision=2,
-        )
-        assert changed["revision"] == 3
-        with pytest.raises(GitHubFollowthroughError, match="connection_dispatch_binding_stale"):
-            await service._assert_dispatch_binding(
-                owner_principal_id="operator-1",
-                connection_id="connection-race",
-                expected_revision=2,
-                repository="acme/example",
-                vault_key="github-token",
-                mode="active",
-                job_id="ghfollow-race",
-                fence=fence,
-            )
+    fence = await service._reserve_connection(owner_principal_id=owner["principal_id"],
+        connection_id=row.id, expected_revision=row.revision, job_id="ghfollow-race")
+    with pytest.raises(GitHubFollowthroughError, match="connection_reserved"):
+        await service.put_connection(owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],
+            repository=row.repository, vault_key="rotated-token", mode="disabled", expected_revision=row.revision)
+    await service._assert_dispatch_binding(owner_principal_id=owner["principal_id"], connection_id=row.id,
+        expected_revision=row.revision, repository=row.repository, vault_key=row.vault_key,
+        mode="active", job_id="ghfollow-race", fence=fence)
+    assert await service._release_connection(connection_id=row.id, owner_principal_id=owner["principal_id"],
+        job_id="ghfollow-race", fence=fence)
+    changed = await service.put_connection(owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],
+        repository=row.repository, vault_key="rotated-token", mode="active", expected_revision=row.revision,
+        consent=GitHubConsentRequest(acknowledged=True, duration_seconds=60, actions=["github_issue_write"]))
+    assert changed["revision"] == row.revision + 1
+    with pytest.raises(GitHubFollowthroughError, match="connection_dispatch_binding_stale"):
+        await service._assert_dispatch_binding(owner_principal_id=owner["principal_id"], connection_id=row.id,
+            expected_revision=row.revision, repository=row.repository, vault_key=row.vault_key,
+            mode="active", job_id="ghfollow-race", fence=fence)
 
 
 @pytest.mark.asyncio
-async def test_execute_rechecks_live_external_mutation_grant(monkeypatch):
-    prepared = _prepared()
-    service = GitHubFollowthroughService()
-    durable = _MemoryDurableJobs(_job(prepared))
-    monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
-
-    async def live_session(session_id: str, *, touch: bool = False):
-        return SimpleNamespace(
-            session_id=session_id,
-            principal=SimpleNamespace(
-                principal_id=prepared.owner_principal_id,
-                grants=set(),
-            ),
-        )
-
-    monkeypatch.setattr("src.extensions.github_followthrough.authenticate_session", live_session)
-
-    with pytest.raises(GitHubFollowthroughError, match="external_mutation_grant_required"):
-        await service.execute(
-            owner_principal_id=prepared.owner_principal_id,
-            owner_session_id=prepared.owner_session_id,
-            external_mutation_granted=True,
-            job_id=prepared.job_id,
-        )
+async def test_execute_rechecks_live_external_mutation_grant(client, async_db, monkeypatch, tmp_path):
+    """The legacy grant Boolean cannot override revoked canonical consent."""
+    owner, service, view, calls, _ = await _canonical_publication_case(client, monkeypatch, tmp_path)
+    row = await service._get_connection_row(owner["principal_id"])
+    stopped = await client.post("/api/capabilities/github/connection/revoke",
+        json={"expected_revision": row.revision}, headers=ORIGIN)
+    assert stopped.status_code == 200, stopped.text
+    result = await service.execute(owner_principal_id=owner["principal_id"],
+        owner_session_id=owner["session_id"], external_mutation_granted=True, job_id=view["job_id"])
+    assert result["status"] == "blocked", result
+    current = await durable_job_repository.get_job(view["job_id"])
+    assert current["failure_reason"] == "connection_revision_stale"
+    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_execute_requires_explicit_external_mutation_grant(monkeypatch):
-    prepared = _prepared()
-    service = GitHubFollowthroughService()
-    durable = _MemoryDurableJobs(_job(prepared))
-    monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
+async def test_execute_requires_explicit_external_mutation_grant(client, async_db, monkeypatch, tmp_path):
+    """Explicit authority is finite canonical consent, independent of the old Boolean."""
+    from sqlalchemy import update
+    from src.extensions.github_consent import require_followthrough_consent
 
-    with pytest.raises(GitHubFollowthroughError, match="external_mutation_grant_required"):
-        await service.execute(
-            owner_principal_id=prepared.owner_principal_id,
-            owner_session_id=prepared.owner_session_id,
-            job_id=prepared.job_id,
-        )
-
-
-@pytest.mark.asyncio
-async def test_reconcile_only_reads_back_and_never_reposts(monkeypatch):
-    prepared = _prepared(issue_number=42)
-    current = _job(prepared, status="unknown_external_effect")
-    current["effects"] = [
-        {
-            "effect_id": f"github:{prepared.operation_id}",
-            "effect_type": "github_publication",
-            "status": "unknown",
-            "target_path": "/repos/acme/example/issues",
-            "target_digest": prepared.body_sha256,
-            "details": {"remote_id": 42},
-        }
-    ]
-    durable = _MemoryDurableJobs(current)
-    calls: list[str] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.method)
-        return httpx.Response(
-            200,
-            json={"number": 42, "title": prepared.title, "body": prepared.body},
-            request=request,
-        )
-
-    service = GitHubFollowthroughService(
-        resolver=_public_resolver,
-        transport=httpx.MockTransport(handler),
-        sleep=lambda _delay: _public_resolver("", 0),
-    )
-    connection = SimpleNamespace(
-        id=prepared.connection_id,
-        revision=prepared.connection_revision,
-        repository=prepared.repository,
-        mode=CONNECTION_MODE_RECONCILE_ONLY,
-        vault_key="github-token",
-        active_job_id=None,
-        active_fence=None,
-    )
-    monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
-    monkeypatch.setattr(service, "_read_prepared", lambda _current: _async_value(prepared))
-    monkeypatch.setattr(service, "_get_connection_row", lambda _owner: _async_value(connection))
-    monkeypatch.setattr(service, "_load_token", lambda _connection: _async_value("secret-token"))
-    monkeypatch.setattr(service, "_finalize_reconciled", lambda *_args, **_kwargs: _mark_success(durable))
-
-    result = await service.reconcile(
-        owner_principal_id=prepared.owner_principal_id,
-        job_id=prepared.job_id,
-        request=type("Reconcile", (), {"remote_id": 42})(),
-    )
-
-    assert result["status"] == "succeeded"
-    assert calls == ["GET"]
-    assert "secret-token" not in json.dumps(durable.current)
+    owner, service, view, calls, _ = await _canonical_publication_case(client, monkeypatch, tmp_path)
+    row = await service._get_connection_row(owner["principal_id"])
+    async with async_db() as db:
+        await db.execute(update(GitHubFollowthroughConnection).where(
+            GitHubFollowthroughConnection.id == row.id).values(consent_id=None))
+    with pytest.raises(GitHubFollowthroughError, match="github_connection_needs_consent"):
+        await require_followthrough_consent(principal=owner["principal_id"], root=owner["session_id"],
+            action=ACTION_CREATE_ISSUE, repository=row.repository, revision=row.revision)
+    result = await service.execute(owner_principal_id=owner["principal_id"],
+        owner_session_id=owner["session_id"], job_id=view["job_id"])
+    assert result["status"] == "unknown_external_effect", result
+    current = await durable_job_repository.get_job(view["job_id"])
+    assert current["failure_reason"] == "transport_error"
+    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_reconcile_rejects_remote_id_that_conflicts_with_effect(monkeypatch):
-    prepared = _prepared(issue_number=42)
-    current = _job(prepared, status="unknown_external_effect")
-    current["effects"] = [
-        {
-            "effect_id": f"github:{prepared.operation_id}",
-            "effect_type": "github_publication",
-            "status": "unknown",
-            "details": {"remote_id": 42},
-        }
-    ]
-    durable = _MemoryDurableJobs(current)
-    service = GitHubFollowthroughService()
-    connection = SimpleNamespace(
-        id=prepared.connection_id,
-        revision=prepared.connection_revision,
-        repository=prepared.repository,
-        mode=CONNECTION_MODE_RECONCILE_ONLY,
-        vault_key="github-token",
-        active_job_id=None,
-        active_fence=None,
-    )
-    monkeypatch.setattr("src.extensions.github_followthrough.durable_job_repository", durable)
-    monkeypatch.setattr(service, "_read_prepared", lambda _current: _async_value(prepared))
-    monkeypatch.setattr(service, "_get_connection_row", lambda _owner: _async_value(connection))
+async def test_reconcile_only_reads_back_and_never_reposts(client, async_db, monkeypatch, tmp_path):
+    from sqlalchemy import update
 
+    owner, service, view, calls, _ = await _canonical_publication_case(client, monkeypatch, tmp_path, readback_missing=True)
+    unknown = await service.execute(owner_principal_id=owner["principal_id"],
+        owner_session_id=owner["session_id"], job_id=view["job_id"])
+    assert unknown["status"] == "unknown_external_effect", unknown
+    row = await service._get_connection_row(owner["principal_id"])
+    async with async_db() as db:
+        await db.execute(update(GitHubFollowthroughConnection).where(
+            GitHubFollowthroughConnection.id == row.id).values(mode=CONNECTION_MODE_RECONCILE_ONLY))
+    before = len(calls)
+    result = await service.reconcile(owner_principal_id=owner["principal_id"], job_id=view["job_id"],
+        request=ReconcileRequest(remote_id=42, acknowledged_readback=True, expected_connection_revision=row.revision))
+    assert result["status"] == "succeeded", result
+    assert calls[before:] == ["GET"]
+    assert calls.count("POST") == 1
+    current = await durable_job_repository.get_job(view["job_id"])
+    assert "fixture-token" not in json.dumps(current)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_rejects_remote_id_that_conflicts_with_effect(client, async_db, monkeypatch, tmp_path):
+    owner, service, view, calls, _ = await _canonical_publication_case(client, monkeypatch, tmp_path, readback_missing=True)
+    unknown = await service.execute(owner_principal_id=owner["principal_id"],
+        owner_session_id=owner["session_id"], job_id=view["job_id"])
+    assert unknown["status"] == "unknown_external_effect", unknown
+    row = await service._get_connection_row(owner["principal_id"])
+    before = list(calls)
     with pytest.raises(GitHubFollowthroughError, match="remote_id_binding_conflict"):
-        await service.reconcile(
-            owner_principal_id=prepared.owner_principal_id,
-            job_id=prepared.job_id,
-            request=type("Reconcile", (), {"remote_id": 99})(),
-        )
+        await service.reconcile(owner_principal_id=owner["principal_id"], job_id=view["job_id"],
+            request=ReconcileRequest(remote_id=99, acknowledged_readback=True, expected_connection_revision=row.revision))
+    assert calls == before
 
 
 @pytest.mark.asyncio

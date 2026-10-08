@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import type { GitHubCapacityClosure, GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 
 import { SourceWatchForm, type SourceWatchFormGoal } from "./SourceWatchForm";
 
@@ -58,6 +59,7 @@ export interface OutcomeApprovalSummary {
   actionStatus?: string | null;
   scope?: string[];
   permissions?: string[];
+  localHostExecutionRequired?: boolean;
   threadLabel?: string | null;
   authorized?: boolean;
   ownerPrincipal?: string | null;
@@ -124,6 +126,9 @@ export interface GitHubFollowthroughSummary {
   remoteId?: number | null;
   remoteUrl?: string | null;
   recoveryReason?: string | null;
+  jobId?: string | null;
+  jobRevision?: number | null;
+  capacityClosure?: GitHubCapacityClosure | null;
 }
 
 interface OutcomeAction {
@@ -161,6 +166,11 @@ export interface OutcomeCockpitPanelProps {
   onExecuteGitHubFollowthrough?: () => void;
   onCancelGitHubFollowthrough?: () => void;
   onReconcileGitHubFollowthrough?: () => void;
+  onCloseGitHubCapacity?: (acknowledged: true) => void;
+  githubCapacityAcknowledgmentScope?: string | null;
+  githubCapacityCloseInspection?: GitHubCapacityCloseInspection | null;
+  onInspectGitHubCapacity?: () => void;
+  onDiscardRejectedGitHubCapacity?: () => void;
   githubConnectionReady?: boolean;
   githubConnectionLoaded?: boolean;
   /** Goal binding is supplied by the existing outcome route; loading is explicit to preserve refresh order. */
@@ -308,11 +318,21 @@ export function OutcomeCockpitPanel({
   onExecuteGitHubFollowthrough,
   onCancelGitHubFollowthrough,
   onReconcileGitHubFollowthrough,
+  onCloseGitHubCapacity,
+  githubCapacityAcknowledgmentScope = null,
+  githubCapacityCloseInspection = null,
+  onInspectGitHubCapacity,
+  onDiscardRejectedGitHubCapacity,
   githubConnectionReady = false,
   githubConnectionLoaded = false,
   sourceWatchGoal = null,
   recoveryAuthorized = false,
 }: OutcomeCockpitPanelProps) {
+  const capacityAckScope = githubCapacityAcknowledgmentScope && githubFollowthrough?.jobId && githubFollowthrough.jobRevision
+    ? `${githubCapacityAcknowledgmentScope}:${githubFollowthrough.jobId}:${githubFollowthrough.jobRevision}` : null;
+  const [acknowledgedScope, setAcknowledgedScope] = useState<string | null>(null);
+  const capacityAcknowledged = Boolean(capacityAckScope && acknowledgedScope === capacityAckScope);
+  useEffect(() => { setAcknowledgedScope(null); }, [capacityAckScope, githubFollowthrough?.capacityClosure?.closure_id]);
   const approvalLocked = approvalLoadState !== "ready"
     || actionLocked(approval?.state ?? "empty", approval?.authorized === true);
   const recoveryApprovalLocked = Boolean(approval) && (
@@ -322,6 +342,8 @@ export function OutcomeCockpitPanel({
   );
   const approvalCardState: OutcomeCockpitState = approval?.state
     ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : "empty");
+  const localHostExecution = approval?.localHostExecutionRequired === true
+    || approval?.permissions?.includes("local_host_execution") === true;
   const recoveryLocked = !(
     work?.state
     && !RECOVERY_LOCKED_STATES.includes(work.state)
@@ -443,7 +465,7 @@ export function OutcomeCockpitPanel({
               {approval && onApprove ? (
                 <ActionButton
                   action={{
-                    label: "Approve",
+                    label: localHostExecution ? "Approve local tests on this host" : "Approve",
                     onClick: onApprove,
                     disabled: approvalLocked,
                     title: approvalLocked ? "Approval authority is stale, unavailable, or blocked." : undefined,
@@ -471,6 +493,9 @@ export function OutcomeCockpitPanel({
               <ValueRow label="action" value={display(approval.actionStatus, "pending")}/>
               <ValueRow label="scope" value={approval.scope?.length ? approval.scope.join(" · ") : "scope unavailable"} />
               <ValueRow label="permission scope" value={approval.permissions?.length ? approval.permissions.join(" · ") : "permission scope unavailable"} />
+              {localHostExecution && (
+                <div className="rounded border border-amber-500/40 bg-amber-950/10 p-2 text-[11px] text-amber-200">Host permission: this repair runs as the Seraph user with filesystem, network, and host resource access after approval. No isolation guarantee is provided.</div>
+              )}
               <ValueRow label="thread" value={display(approval.threadLabel, "thread unavailable")} />
               <ValueRow label="owner principal" value={display(approval.ownerPrincipal)} />
               <ValueRow label="owner session" value={display(approval.ownerSession)} />
@@ -588,7 +613,7 @@ export function OutcomeCockpitPanel({
                   action={{
                     label: "Cancel publication",
                     onClick: onCancelGitHubFollowthrough,
-                    disabled: !githubFollowthrough || ["succeeded", "failed", "cancelled"].includes(githubState),
+                    disabled: !githubFollowthrough || Boolean(githubFollowthrough.capacityClosure) || ["succeeded", "failed", "cancelled"].includes(githubState),
                   }}
                 />
               ) : null}
@@ -616,6 +641,16 @@ export function OutcomeCockpitPanel({
               )}
               {githubFollowthrough.marker ? <ValueRow label="marker" value={githubFollowthrough.marker} /> : null}
               {githubFollowthrough.remoteUrl ? <ValueRow label="verified destination" value={githubFollowthrough.remoteUrl} /> : null}
+              {githubFollowthrough.capacityClosure ? <div role="status">Capacity released. Effect, cost and job status remain unchanged; no learning.</div> : onCloseGitHubCapacity && ["blocked", "degraded", "partial_metadata", "failed"].includes(githubState) ? <div>
+                <label><input type="checkbox" checked={capacityAcknowledged} disabled={!capacityAckScope} onChange={event => setAcknowledgedScope(event.target.checked ? capacityAckScope : null)} /> I authorize separate capacity closure using complete GET-only proof under the current connection revision.</label>
+                <ActionButton action={{ label: "Close GitHub capacity", disabled: !capacityAcknowledged || !githubFollowthrough.jobId || !githubFollowthrough.jobRevision, onClick: () => { if (capacityAcknowledged) onCloseGitHubCapacity(true); } }} />
+              </div> : null}
+              {onInspectGitHubCapacity && githubFollowthrough.jobId ? <ActionButton action={{ label: "Inspect retained close request", disabled: !capacityAckScope, onClick: () => { setAcknowledgedScope(null); onInspectGitHubCapacity(); } }} /> : null}
+              {githubCapacityAcknowledgmentScope && githubCapacityCloseInspection?.job_id === githubFollowthrough.jobId && githubCapacityCloseInspection?.state === "inconclusive" ? <div role="status">The close outcome is inconclusive. Keep the exact retained request for manual retry.</div> : null}
+              {githubCapacityAcknowledgmentScope && githubCapacityCloseInspection?.job_id === githubFollowthrough.jobId && githubCapacityCloseInspection?.state === "permanently_stale_not_applied" ? <div>
+                <div role="status">The server confirms this retained request was not applied and can never apply.</div>
+                {onDiscardRejectedGitHubCapacity ? <ActionButton action={{ label: "Discard rejected request", onClick: () => { setAcknowledgedScope(null); onDiscardRejectedGitHubCapacity(); } }} /> : null}
+              </div> : null}
               {githubFollowthrough.recoveryReason ? <div className="cockpit-outcome-note">{githubFollowthrough.recoveryReason}</div> : null}
             </>
           ) : (

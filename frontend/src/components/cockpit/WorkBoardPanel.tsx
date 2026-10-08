@@ -1,12 +1,43 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
 import { apiFetch } from "../../lib/api";
+import { fetchGuardianInboxItem, normalizeOpportunityPlanReference, normalizeOpportunityPlanPreview, planReferenceMatchesPreview, retainOpportunityBrowserAcceptance } from "../../lib/guardianInbox";
+import { BrowserTaskForm } from "./BrowserTaskForm";
+import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
+import { CalendarPrepForm } from "./CalendarPrepForm";
+import { CalendarRescheduleInspector } from "./CalendarRescheduleInspector";
+import { SelectedContextInspector } from "./SelectedContextInspector";
+import type { PendingCalendarSubmission } from "./CalendarPrepForm";
+import { RepoRepairForm } from "./RepoRepairForm";
+import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
+import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { TaskApprovalReview } from "./TaskApprovalReview";
+import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
+import { ResearchDossierPanel } from "./ResearchDossierPanel";
+import { JsonFormatterPanel } from "./JsonFormatterPanel";
+import { isAuthoredCapability } from "../../lib/toolPackage";
+import { DocumentComparisonPanel } from "./DocumentComparisonPanel";
+import { NearTextWorkPanel } from "./NearTextWorkPanel";
+import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
+import { TaskEffectRecovery } from "./TaskEffectRecovery";
+import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import { TelegramTaskNotice } from "./TelegramTaskNotice";
+import { SpecificationEvidenceReview, specificationScope, retainSpecificationAcceptance } from "./SpecificationEvidenceReview";
+import type { SpecificationReplacement } from "./SpecificationEvidenceReview";
+import { RepoRepairInspector } from "./RepoRepairInspector";
+import { validateCalendarExecution } from "../../lib/calendar";
 import type {
   GoalInfo,
+  CalendarPrepResponse,
+  GuardianInboxItem,
+  WorkBoardAttempt,
+  WorkBoardBrowserExecution,
+  CalendarExecutionProjection,
   WorkBoardActionRequest,
   WorkBoardComment,
   WorkBoardCommentCreateRequest,
@@ -102,13 +133,24 @@ const RECONNECT_DELAY_MS = 3_000;
 const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 const ROUTINE_SOURCE_CAPABILITY = "guardian.research-watch.v1";
 const ROUTINE_ACTION_CAPABILITY = "work.github-followthrough.v1";
+const GUARDIAN_INBOX_SCOPE = /^guardian-inbox:([A-Za-z0-9_-]{1,128})$/;
 
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
+  onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  focusTaskId?: string | null;
+  onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
+  /** Safe task metadata link for the Library's explicit procedure source picker. */
+  onSelectedTaskChange?: (task: WorkBoardTask | null) => void;
+  attentionContext?: { taskId: string; approvalId?: string | null; origin: "home" | "inbox"; goalId?: string | null; threadId?: string | null } | null;
+  onReturnAttention?: () => void;
+  onOpenAttentionGoal?: () => void;
+  onOpenAttentionThread?: () => void;
+  onOpenAccounting?: () => void;
 }
 
 export interface WorkBoardArtifactInspectRequest {
@@ -177,6 +219,45 @@ interface PendingTaskCreate {
 }
 
 const pendingTaskCreates = new Map<string, PendingTaskCreate>();
+
+const MAX_PENDING_BROWSER_SUBMISSIONS = 32;
+const pendingBrowserSubmissions = new Map<string, PendingBrowserSubmission>();
+
+const MAX_PENDING_CALENDAR_SUBMISSIONS = 32;
+const pendingCalendarSubmissions = new Map<string, PendingCalendarSubmission>();
+
+const MAX_PENDING_REPO_REPAIR_SUBMISSIONS = 32;
+const pendingRepoRepairSubmissions = new Map<string, PendingRepoRepairSubmission>();
+
+function rememberPendingBrowserSubmission(scope: string, pending: PendingBrowserSubmission): void {
+  pendingBrowserSubmissions.delete(scope);
+  pendingBrowserSubmissions.set(scope, pending);
+  while (pendingBrowserSubmissions.size > MAX_PENDING_BROWSER_SUBMISSIONS) {
+    const oldest = pendingBrowserSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingBrowserSubmissions.delete(oldest);
+  }
+}
+
+function rememberPendingCalendarSubmission(scope: string, pending: PendingCalendarSubmission): void {
+  pendingCalendarSubmissions.delete(scope);
+  pendingCalendarSubmissions.set(scope, pending);
+  while (pendingCalendarSubmissions.size > MAX_PENDING_CALENDAR_SUBMISSIONS) {
+    const oldest = pendingCalendarSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingCalendarSubmissions.delete(oldest);
+  }
+}
+
+function rememberPendingRepoRepairSubmission(scope: string, pending: PendingRepoRepairSubmission): void {
+  pendingRepoRepairSubmissions.delete(scope);
+  pendingRepoRepairSubmissions.set(scope, pending);
+  while (pendingRepoRepairSubmissions.size > MAX_PENDING_REPO_REPAIR_SUBMISSIONS) {
+    const oldest = pendingRepoRepairSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingRepoRepairSubmissions.delete(oldest);
+  }
+}
 
 interface PendingRoutineInvocation {
   routineId: string;
@@ -568,6 +649,7 @@ function receiptTitle(reference: WorkBoardReceiptReference): string {
 
 function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
   return reference.artifact_id
+    || reference.artifact_ref
     || reference.workflow_run_id
     || reference.job_id
     || reference.readback_id
@@ -579,6 +661,111 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
     || "Safe reference";
 }
 
+function browserArtifactPath(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  if (!candidate || candidate.length > 512 || candidate.startsWith("/") || candidate.includes("\\") || candidate.includes("\u0000")) {
+    return undefined;
+  }
+  const segments = candidate.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return undefined;
+  return candidate;
+}
+
+/**
+ * BrowserRunner receipts use the capability's artifact_ref/artifact_sha256
+ * names. The existing WorkBoard inspector deliberately accepts only its
+ * owner-bound file_path/content_sha256 projection, so adapt those safe server
+ * fields into the established request shape without manufacturing a URL or
+ * weakening the workflow/session checks in CockpitView.
+ */
+function browserEvidenceReference(reference: WorkBoardReceiptReference): WorkBoardReceiptReference {
+  const artifactPath = browserArtifactPath(reference.artifact_ref);
+  const artifactDigest = typeof reference.artifact_sha256 === "string"
+    && /^[a-f0-9]{64}$/i.test(reference.artifact_sha256.trim())
+    ? reference.artifact_sha256.trim().toLowerCase()
+    : undefined;
+  return {
+    ...reference,
+    file_path: reference.file_path ?? artifactPath,
+    content_sha256: reference.content_sha256 ?? artifactDigest,
+  };
+}
+
+function safeBrowserExecution(value: WorkBoardBrowserExecution | null | undefined): WorkBoardBrowserExecution | null {
+  if (!value || value.capability_id !== "browser.public-task.v1") return null;
+  if (typeof value.job_id !== "string" || !value.job_id.trim() || typeof value.durable_status !== "string") return null;
+  return value;
+}
+
+function browserExecutionForAttempt(task: WorkBoardTask, attempt: WorkBoardAttempt): WorkBoardBrowserExecution | null {
+  const latest = task.latest_attempt;
+  // The authenticated task-detail DTO carries the verified browser projection
+  // on latest_attempt. The historical attempts list remains metadata-only;
+  // prefer the detail projection for the same attempt and never replace a
+  // server-provided null with an older list receipt.
+  if (latest?.attempt_id === attempt.attempt_id
+    && Object.prototype.hasOwnProperty.call(latest, "browser_execution")) {
+    return safeBrowserExecution(latest.browser_execution);
+  }
+  return safeBrowserExecution(attempt.browser_execution);
+}
+
+function browserExecutionCount(value: number | null, minimum: number, maximum: number): string {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum
+    ? String(value)
+    : "unavailable";
+}
+
+function browserExecutionAction(value: WorkBoardBrowserExecution): string {
+  const count = browserExecutionCount(value.action_count, 1, 8);
+  if (typeof value.action_index !== "number" || !Number.isInteger(value.action_index) || value.action_index < -1 || value.action_index > 7) {
+    return `action unavailable/${count}`;
+  }
+  return value.action_index < 0 ? `action not started/${count}` : `action ${value.action_index + 1}/${count}`;
+}
+
+function browserExecutionReference(value: WorkBoardBrowserExecution): WorkBoardReceiptReference | null {
+  if (!value.file_path || !value.content_sha256 || !/^[a-f0-9]{64}$/i.test(value.content_sha256)) return null;
+  const reference: WorkBoardReceiptReference = {
+    file_path: value.file_path,
+    content_sha256: value.content_sha256.toLowerCase(),
+    job_id: value.job_id,
+    verified: true,
+  };
+  if (value.artifact_id) reference.artifact_id = value.artifact_id;
+  if (value.readback_id) reference.readback_id = value.readback_id;
+  return reference;
+}
+
+function safeCalendarExecution(value: unknown): CalendarExecutionProjection | null {
+  try {
+    return validateCalendarExecution(value);
+  } catch {
+    return null;
+  }
+}
+
+function calendarExecutionForAttempt(task: WorkBoardTask, attempt: WorkBoardAttempt): CalendarExecutionProjection | null {
+  const latest = task.latest_attempt;
+  if (latest?.attempt_id === attempt.attempt_id && Object.prototype.hasOwnProperty.call(latest, "calendar_execution")) {
+    return safeCalendarExecution(latest.calendar_execution);
+  }
+  return safeCalendarExecution(attempt.calendar_execution);
+}
+
+function calendarExecutionReference(value: CalendarExecutionProjection): WorkBoardReceiptReference | null {
+  if (!value.artifact_id || !value.file_path || !value.content_sha256 || !value.readback_id || !value.verified_at || !/^(?:sha256:)?[a-f0-9]{64}$/i.test(value.content_sha256)) return null;
+  return {
+    artifact_id: value.artifact_id,
+    file_path: value.file_path,
+    content_sha256: value.content_sha256.replace(/^sha256:/i, "").toLowerCase(),
+    readback_id: value.readback_id,
+    job_id: value.job_id,
+    verified: true,
+    artifact_type: "calendar_meeting_prep_result",
+  };
+}
+
 function proposalStatusLabel(proposal: WorkBoardProposal): string {
   return (proposal.status ?? "unknown").replace(/_/g, " ");
 }
@@ -586,6 +773,7 @@ function proposalStatusLabel(proposal: WorkBoardProposal): string {
 function hasServerAuthorityPreview(authority: unknown): authority is string {
   if (typeof authority !== "string") return false;
   const currentPreflight = authority.includes("Current provider-free preflight: READY;")
+    || authority.includes("Current provider-free preflight: PENDING input binding at acceptance; dispatch remains unavailable.")
     || /Current provider-free preflight: BLOCKED code=[a-z0-9_]+;/.test(authority);
   return authority.includes("Owner: authenticated owner/session; goal ")
     && authority.includes("Capability-specific authority requirements: ")
@@ -608,15 +796,37 @@ function referenceWorkflowRunId(
 
 function WorkBoardPanel({
   onOpenApprovals,
+  onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
+  focusTaskId,
+  onFocusTaskHandled,
   ownerPrincipalId,
   ownerSessionId,
+  onSelectedTaskChange,
+  attentionContext,
+  onReturnAttention,
+  onOpenAttentionGoal,
+  onOpenAttentionThread,
+  onOpenAccounting,
 }: WorkBoardPanelProps) {
   const pendingCreateScope = ownerPrincipalId && ownerSessionId
     ? `${ownerPrincipalId}\u0000${ownerSessionId}`
     : null;
   const pendingCreateAtMount = pendingCreateScope ? pendingTaskCreates.get(pendingCreateScope) ?? null : null;
+  const pendingBrowserAtMount = pendingCreateScope ? pendingBrowserSubmissions.get(pendingCreateScope) ?? null : null;
+  const pendingCalendarAtMount = pendingCreateScope ? pendingCalendarSubmissions.get(pendingCreateScope) ?? null : null;
+  const pendingRepoRepairAtMount = pendingCreateScope ? pendingRepoRepairSubmissions.get(pendingCreateScope) ?? null : null;
+  const previousBrowserScopeRef = useRef<string | null>(pendingCreateScope);
+  useEffect(() => {
+    const previousScope = previousBrowserScopeRef.current;
+    if (previousScope && previousScope !== pendingCreateScope) {
+      pendingBrowserSubmissions.delete(previousScope);
+      pendingCalendarSubmissions.delete(previousScope);
+      pendingRepoRepairSubmissions.delete(previousScope);
+    }
+    previousBrowserScopeRef.current = pendingCreateScope;
+  }, [pendingCreateScope]);
   const createIdempotencyRef = useRef(pendingCreateAtMount?.idempotencyKey ?? makeIdempotencyKey());
   const [pendingCreate, setPendingCreate] = useState<PendingTaskCreate | null>(pendingCreateAtMount);
   const [tasks, setTasks] = useState<WorkBoardTask[]>([]);
@@ -633,12 +843,24 @@ function WorkBoardPanel({
   const [showArchived, setShowArchived] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WorkBoardTaskDetail | null>(null);
+  const [inboxOrigin, setInboxOrigin] = useState<{ requestKey: string; item: GuardianInboxItem } | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [moveFeedback, setMoveFeedback] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
+  const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [formatterOpen, setFormatterOpen] = useState(false);
+  const [authoredPackageOpen, setAuthoredPackageOpen] = useState(false);
+  const [documentOpen, setDocumentOpen] = useState(false);
+  const [nearTextOpen, setNearTextOpen] = useState(false);
+  const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
+  const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
+  const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
+  const [repoRepairOpen, setRepoRepairOpen] = useState(Boolean(pendingRepoRepairAtMount));
+  const [repoRepairReceipt, setRepoRepairReceipt] = useState<RepoRepairSubmissionReceipt | null>(null);
   const [createError, setCreateError] = useState<string | null>(pendingCreateAtMount
     ? "A previous create did not return a receipt. Retry the same request to reconcile it before editing or starting another task."
     : null);
@@ -657,6 +879,10 @@ function WorkBoardPanel({
   const [unblockResolution, setUnblockResolution] = useState("");
   const [reviewChangesReason, setReviewChangesReason] = useState("");
   const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
+  const [proposalEvidence, setProposalEvidence] = useState<{ scope: string; replacement: SpecificationReplacement | null } | null>(null);
+  const updateProposalEvidence = useCallback((scope: string, replacement: SpecificationReplacement | null) => {
+    setProposalEvidence({ scope, replacement });
+  }, []);
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
   const [routineSourceTaskId, setRoutineSourceTaskId] = useState("");
@@ -719,6 +945,8 @@ function WorkBoardPanel({
   const reconnectRef = useRef<(() => Promise<boolean>) | null>(null);
   const eventReconcileQueueRef = useRef<Promise<void>>(Promise.resolve());
   const taskDetailRequestVersionRef = useRef(new Map<string, number>());
+  const inboxOriginControllerRef = useRef<AbortController | null>(null);
+  const inboxOriginRequestKeyRef = useRef<string | null>(null);
   const requestControllersRef = useRef(new Set<AbortController>());
   const createDialogRef = useRef<HTMLFormElement | null>(null);
   const createOpenerRef = useRef<HTMLElement | null>(null);
@@ -787,6 +1015,26 @@ function WorkBoardPanel({
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
+  const selectedPlanPreview = selectedDetail?.task.plan_preview ?? selectedDetail?.plan_preview;
+  const selectedPlanProposalId = normalizeOpportunityPlanReference(selectedPlanReference)?.proposal_id;
+  useEffect(() => {
+    const reference = normalizeOpportunityPlanReference(selectedPlanReference);
+    const preview = normalizeOpportunityPlanPreview(selectedPlanPreview);
+    if (!reference || reference.parent_task_id !== selectedDetail?.task.task_id) return;
+    setProposal((current) => current && current.proposal_id === reference.proposal_id
+      && reference.proposal_revision >= current.proposal_revision ? { ...current, ...reference,
+        proposal_ref: reference, plan_preview: preview, opportunity_id: preview?.opportunity_id ?? current.opportunity_id,
+        opportunity_revision: preview?.opportunity_revision ?? current.opportunity_revision } : current);
+  }, [selectedDetail, selectedPlanReference, selectedPlanPreview, proposal?.proposal_id, proposal?.proposal_revision, proposal?.status, proposal?.kind]);
+  const selectedInboxScope = selectedTask?.idempotency_scope ?? null;
+  const selectedInboxScopeMatch = selectedInboxScope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
+  const selectedInboxOriginKey = selectedTask && selectedInboxScopeMatch
+    ? `${selectedTask.task_id}\u0000${selectedInboxScope}`
+    : null;
+  const selectedInboxOrigin = selectedInboxOriginKey && inboxOrigin?.requestKey === selectedInboxOriginKey
+    ? inboxOrigin.item
+    : null;
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
   const verifiedRoutineSourceTasks = useMemo(
     () => tasks.filter((task) => task.status === "done" && task.capability_id === ROUTINE_SOURCE_CAPABILITY),
@@ -1175,6 +1423,8 @@ function WorkBoardPanel({
       eventReconcileQueueRef.current = Promise.resolve();
       requestControllersRef.current.forEach((controller) => controller.abort());
       requestControllersRef.current.clear();
+      inboxOriginControllerRef.current?.abort();
+      inboxOriginControllerRef.current = null;
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
       socketRef.current?.close(1000, "component_unmounted");
@@ -1207,6 +1457,42 @@ function WorkBoardPanel({
       .finally(() => { if (active) setDetailLoading(false); });
     return () => { active = false; };
   }, [readTaskDetail, selectedTaskId]);
+
+  useEffect(() => {
+    const taskId = selectedTask?.task_id ?? null;
+    const scope = selectedTask?.idempotency_scope ?? null;
+    const scopeMatch = scope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
+    const requestKey = taskId && scopeMatch ? `${taskId}\u0000${scope}` : null;
+    const previousRequestKey = inboxOriginRequestKeyRef.current;
+
+    if (previousRequestKey !== requestKey) {
+      inboxOriginControllerRef.current?.abort();
+      inboxOriginControllerRef.current = null;
+      inboxOriginRequestKeyRef.current = requestKey;
+      setInboxOrigin(null);
+    }
+    if (!taskId || !scopeMatch || !requestKey || previousRequestKey === requestKey) return;
+
+    const controller = new AbortController();
+    inboxOriginControllerRef.current = controller;
+    void fetchGuardianInboxItem(scopeMatch[1], controller.signal)
+      .then((item) => {
+        if (stoppedRef.current || controller.signal.aborted
+          || inboxOriginRequestKeyRef.current !== requestKey
+          || selectedTaskIdRef.current !== taskId) return;
+        if (item.task_id !== taskId || item.state !== "accepted") return;
+        setInboxOrigin({ requestKey, item });
+      })
+      .catch(() => {
+        // A missing, mismatched, or unavailable candidate is not an origin
+        // receipt. Keep the board usable without manufacturing provenance.
+      })
+      .finally(() => {
+        if (inboxOriginRequestKeyRef.current === requestKey) {
+          inboxOriginControllerRef.current = null;
+        }
+      });
+  }, [selectedTask?.idempotency_scope, selectedTask?.task_id]);
 
   useEffect(() => {
     setRoutineRecords([]);
@@ -1251,14 +1537,34 @@ function WorkBoardPanel({
     let active = true;
     void requestBoard<{ proposals: WorkBoardProposal[] }>(
       `/tasks/${encodeURIComponent(taskId)}/proposals`,
-    ).then((payload) => {
+    ).then(async (payload) => {
       if (!active || stoppedRef.current
         || proposalSelectionVersionRef.current !== selectionVersion
         || selectedTaskIdRef.current !== taskId) return;
       const proposals = Array.isArray(payload?.proposals) ? payload.proposals : [];
-      const nextProposal = proposals.find((item) => item.status === "proposed" || item.status === "pending_inference")
+      let nextProposal = proposals.find((item) => item.status === "proposed" || item.status === "pending_inference")
         ?? proposals[0]
         ?? null;
+      if (nextProposal && (nextProposal.opportunity_id || nextProposal.kind === "opportunity_plan"
+        || normalizeOpportunityPlanReference(nextProposal.proposal_ref)
+        || selectedPlanProposalId === nextProposal.proposal_id)) {
+        const summary = nextProposal;
+        const canonical = await requestBoard<WorkBoardProposal>(`/proposals/${encodeURIComponent(summary.proposal_id)}`);
+        if (!active || stoppedRef.current || proposalSelectionVersionRef.current !== selectionVersion
+          || selectedTaskIdRef.current !== taskId) return;
+        if (canonical.proposal_id !== summary.proposal_id || canonical.parent_task_id !== taskId) {
+          throw new WorkBoardSyncError("The recovered proposal does not match the selected task. Refresh before accepting.");
+        }
+        nextProposal = canonical;
+        const detailReference = normalizeOpportunityPlanReference(selectedPlanReference);
+        const detailPreview = normalizeOpportunityPlanPreview(selectedPlanPreview);
+        if (detailReference?.proposal_id === canonical.proposal_id && detailReference.parent_task_id === taskId
+          && detailReference.proposal_revision >= canonical.proposal_revision) {
+          nextProposal = { ...canonical, ...detailReference, proposal_ref: detailReference, plan_preview: detailPreview,
+            opportunity_id: detailPreview?.opportunity_id ?? canonical.opportunity_id,
+            opportunity_revision: detailPreview?.opportunity_revision ?? canonical.opportunity_revision };
+        }
+      }
       if (nextProposal?.idempotency_key) {
         const scope = `${nextProposal.parent_task_id}:${nextProposal.parent_revision}:${nextProposal.kind}`;
         proposalKeysRef.current.set(scope, nextProposal.idempotency_key);
@@ -1274,7 +1580,7 @@ function WorkBoardPanel({
       }
     });
     return () => { active = false; };
-  }, [requestBoard, selectedTaskId]);
+  }, [ownerPrincipalId, ownerSessionId, requestBoard, selectedTaskId, selectedPlanProposalId]);
 
   useEffect(() => {
     if (selectedTaskId) {
@@ -1469,18 +1775,30 @@ function WorkBoardPanel({
     setRoutineInvokeReceipt(null);
     setSourceWatchError(null);
     const openedTask = tasks.find((task) => task.task_id === taskId);
+    onSelectedTaskChange?.(openedTask ?? null);
     setRoutineName(openedTask?.status === "done" ? `${openedTask.title} procedure` : "");
     routineRequestKeyRef.current = makeIdempotencyKey();
     setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
     setDetail(null);
-  }, [tasks]);
+  }, [onSelectedTaskChange, tasks]);
+
+  useEffect(() => {
+    if (!focusTaskId) return;
+    openTask(focusTaskId);
+    onFocusTaskHandled?.(focusTaskId);
+  }, [focusTaskId, onFocusTaskHandled, openTask]);
 
   const closeTask = useCallback(() => {
     selectedTaskIdRef.current = null;
     setSelectedTaskId(null);
-  }, []);
+    onSelectedTaskChange?.(null);
+    inboxOriginControllerRef.current?.abort();
+    inboxOriginControllerRef.current = null;
+    inboxOriginRequestKeyRef.current = null;
+    setInboxOrigin(null);
+  }, [onSelectedTaskChange]);
 
   const openCreateDialog = (event: MouseEvent<HTMLButtonElement>) => {
     createOpenerRef.current = event.currentTarget;
@@ -1734,6 +2052,9 @@ function WorkBoardPanel({
   const currentAttempt = selectedTask?.latest_attempt
     ?? selectedDetail?.attempts[0]
     ?? null;
+  const currentCalendarExecution = selectedTask && currentAttempt
+    ? calendarExecutionForAttempt(selectedTask, currentAttempt)
+    : null;
   const currentOwnerSession = Boolean(
     selectedTask
     && ownerPrincipalId
@@ -2331,7 +2652,7 @@ function WorkBoardPanel({
     return key;
   };
 
-  const requestProposal = async (kind: WorkBoardProposal["kind"], forceNew = false) => {
+  const requestProposal = async (kind: "specify" | "decompose", forceNew = false) => {
     if (!selectedTask || !["triage", "todo"].includes(selectedTask.status)) return;
     const taskId = selectedTask.task_id;
     // Invalidate an in-flight hydration GET before issuing the operator's
@@ -2384,6 +2705,7 @@ function WorkBoardPanel({
 
   const decideProposal = async (decision: "accept" | "reject") => {
     if (!proposal) return;
+    if (proposal.kind === "public-evidence-pipeline.v1" || (proposal.kind === "opportunity_plan" && !linkedPlanReady)) return;
     const taskId = selectedTaskIdRef.current;
     const selectionVersion = proposalSelectionVersionRef.current;
     const proposalId = proposal.proposal_id;
@@ -2394,9 +2716,17 @@ function WorkBoardPanel({
       ? {
         expected_proposal_revision: proposal.proposal_revision,
         expected_parent_revision: proposal.parent_revision,
+        ...(selectedTask && proposal.kind === "specify" && proposalEvidence?.scope === specificationScope(selectedTask, proposal, ownerSessionId)
+          && proposalEvidence.replacement ? { execution_replacement: proposalEvidence.replacement } : {}),
       }
       : { expected_proposal_revision: proposal.proposal_revision };
     try {
+      if (decision === "accept" && proposal.kind === "opportunity_plan") retainOpportunityBrowserAcceptance(
+        `seraph.opportunity-plan-accept.v1:${ownerPrincipalId}:${ownerSessionId}:${proposal.proposal_id}`, path,
+        { expected_proposal_revision: proposal.proposal_revision, expected_parent_revision: proposal.parent_revision });
+      const retainedBody = decision === "accept" && selectedTask && proposal.kind === "specify"
+        ? retainSpecificationAcceptance(specificationScope(selectedTask, proposal, ownerSessionId), body as import('./SpecificationEvidenceReview').SpecificationAcceptance)
+        : body;
       const receipt = await requestBoard<{
         proposal_id: string;
         status: string;
@@ -2405,7 +2735,7 @@ function WorkBoardPanel({
       }>(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(retainedBody),
       });
       if (stoppedRef.current
         || proposalSelectionVersionRef.current !== selectionVersion
@@ -2583,6 +2913,7 @@ function WorkBoardPanel({
 
   const canRetry = Boolean(
     selectedTask
+    && selectedTask.capability_id !== NEAR_TEXT_CAPABILITY
     && selectedTask.status === "blocked"
     && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "")
     && !isActiveAttempt(selectedTask)
@@ -2604,6 +2935,20 @@ function WorkBoardPanel({
     && proposal.proposed_tasks.length > 0
     && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
   );
+  const linkedPlan = Boolean(proposal?.opportunity_id || selectedPlanReference || proposal?.proposal_ref || proposal?.kind === "opportunity_plan");
+  const linkedReference = normalizeOpportunityPlanReference(selectedTask?.pipeline_operation_id
+    ? selectedPlanReference ?? proposal?.proposal_ref : proposal?.proposal_ref ?? selectedPlanReference);
+  const linkedPreview = normalizeOpportunityPlanPreview(proposal?.plan_preview ?? selectedPlanPreview);
+  const linkedPlanReady = Boolean(linkedReference && linkedPreview && selectedTask && currentOwnerSession
+    && linkedReference.proposal_id === proposal?.proposal_id && linkedReference.parent_task_id === selectedTask.task_id
+    && linkedReference.parent_revision === selectedTask.task_revision && linkedReference.proposal_revision === proposal?.proposal_revision
+    && linkedReference.status === proposal?.status && linkedReference.proposal_digest === proposal?.proposal_digest
+    && linkedReference.kind === proposal?.kind && linkedPreview.goal_id === selectedTask.goal_id
+    && linkedPreview.goal_revision === selectedTask.goal_revision && linkedPreview.opportunity_id === proposal?.opportunity_id
+    && linkedPreview.opportunity_revision === proposal?.opportunity_revision && planReferenceMatchesPreview(linkedReference, linkedPreview)
+    && Date.parse(linkedReference.expires_at) > Date.now());
+  const linkedInspectionReady = Boolean(linkedReference?.status === "accepted" && selectedTask && currentOwnerSession
+    && linkedReference.parent_task_id === selectedTask.task_id && selectedTask.pipeline_operation_id === linkedReference.proposal_id);
   const routineVersion = routinePreview?.version_plan.version
     ?? routine?.current_version
     ?? routine?.versions[0]?.version
@@ -2798,6 +3143,57 @@ function WorkBoardPanel({
     }
   };
 
+  const setBrowserPending = (pending: PendingBrowserSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingBrowserSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingBrowserSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeBrowserTask = () => {
+    if (pendingCreateScope && pendingBrowserSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The public browser task outcome is unconfirmed. Keep the form open and retry the exact request before closing it.");
+      return;
+    }
+    setBrowserTaskOpen(false);
+  };
+
+  const setCalendarPending = (pending: PendingCalendarSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingCalendarSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingCalendarSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeCalendarPrep = () => {
+    if (pendingCreateScope && pendingCalendarSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The calendar preparation outcome is unconfirmed. Keep the form open and retry the exact request before closing it.");
+      return;
+    }
+    setCalendarPrepOpen(false);
+  };
+
+  const setRepoRepairPending = (pending: PendingRepoRepairSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingRepoRepairSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingRepoRepairSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeRepoRepair = () => {
+    if (pendingCreateScope && pendingRepoRepairSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The repository repair outcome is unconfirmed. Keep this form open and retry the exact request before closing it.");
+      return;
+    }
+    setRepoRepairOpen(false);
+  };
+
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
       <div className="cockpit-operator-row flex-wrap">
@@ -2811,6 +3207,22 @@ function WorkBoardPanel({
         <div className="cockpit-operator-actions flex-wrap">
           <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setBrowserTaskReceipt(null); setBrowserTaskOpen(true); }}>
+            Public browser task
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setResearchOpen(true)}>
+            Research dossier
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setFormatterOpen(true)}>Isolated JSON formatter</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setAuthoredPackageOpen(true)}>Reviewed authored package</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setDocumentOpen(true)}>Private invoice comparison</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setNearTextOpen(true)}>NEAR text question</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
+            Calendar meeting prep
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setRepoRepairReceipt(null); setRepoRepairOpen(true); }}>
+            Repository repair
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => void refreshSnapshot()} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh board"}
@@ -2864,6 +3276,21 @@ function WorkBoardPanel({
       )}
       {moveFeedback && <div className="mt-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{moveFeedback}</div>}
       {goalError && <div className="mt-2 text-xs text-amber-300" role="status">Goal metadata unavailable: {goalError}</div>}
+      {browserTaskReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Public browser task input artifact verified: <span className="font-mono break-all">{browserTaskReceipt.artifactId}</span> · {browserTaskReceipt.actionCount} action{browserTaskReceipt.actionCount === 1 ? "" : "s"} · SHA-256 <span className="font-mono break-all">{browserTaskReceipt.digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
+      {calendarPrepReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Calendar preparation task input artifact verified: <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.artifact_id}</span> · SHA-256 <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.typed_input_digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
+      {repoRepairReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Repository repair input artifact verified: <span className="font-mono break-all">{repoRepairReceipt.artifactId}</span> · SHA-256 <span className="font-mono break-all">{repoRepairReceipt.digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
       <div className="sr-only" aria-live="polite">{announcement}</div>
 
       {loading && tasks.length === 0 ? (
@@ -2893,14 +3320,16 @@ function WorkBoardPanel({
                         <article
                           key={task.task_id}
                           role="listitem"
-                          draggable
+                          draggable={task.ownership_access !== "recovered_read_only"}
                           onDragStart={(event) => {
+                            if (task.ownership_access === "recovered_read_only") { event.preventDefault(); return; }
                             dragTaskIdRef.current = task.task_id;
                             event.dataTransfer.setData("text/plain", task.task_id);
                             event.dataTransfer.effectAllowed = "move";
                           }}
                           className="rounded border border-white/10 bg-slate-950/60 p-3 text-xs"
                         >
+                          {task.ownership_access === "recovered_read_only" && <div className="mb-2 text-amber-200">Recovered original · read only</div>}
                           <button type="button" className="w-full text-left" onClick={() => openTask(task.task_id)} aria-label={`Open task ${task.title}`}>
                             <div className="flex items-start justify-between gap-2">
                               <span className="break-all font-mono text-[10px] opacity-70">{task.task_id}</span>
@@ -2912,6 +3341,7 @@ function WorkBoardPanel({
                               <div>Goal: {task.goal_id} · Dependencies: {task.completed_dependency_count}/{task.dependency_count}</div>
                               <div>Latest attempt: {attemptLabel(task)} · Age: {formatAge(task.created_at)}</div>
                               {status === "ready" && task.dispatch_rank !== null && <div>Server dispatch rank: #{task.dispatch_rank}</div>}
+                              {task.dispatch_wait_reason && <div className="text-amber-200">Dispatch waiting: {task.dispatch_wait_reason === "browser_cleanup_required" ? "browser cleanup recovery is required" : task.dispatch_wait_reason}</div>}
                               {status === "running" && <div>Lease: {active ? safeDateTime(latest?.lease_expires_at) : "not active"} · started {formatAge(latest?.started_at)}</div>}
                               {status === "blocked" && <div className="text-amber-200">Blocked: {task.block_reason || "The server did not provide a safe reason."}</div>}
                               {status === "review" && <div>Reviewer: {task.reviewer_id ?? "Not named"} · Readback: {READBACK_LABELS[task.readback_status]} · Verification: {VERIFICATION_LABELS[task.verification_status]}</div>}
@@ -2951,19 +3381,43 @@ function WorkBoardPanel({
         </section>
       )}
 
-      {selectedTask && (
-        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 shadow-2xl">
-            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
-              <div>
+      {selectedTask && createPortal(
+        <aside hidden={createOpen || browserTaskOpen || researchOpen || formatterOpen || authoredPackageOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
+              <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
                 <h2 id="work-board-detail-title" className="text-lg font-semibold">{selectedTask.title}</h2>
               </div>
-              <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {attentionContext?.taskId === selectedTask.task_id && onReturnAttention && <button type="button" className="cockpit-feedback-button" onClick={() => { closeTask(); onReturnAttention(); }}>Return to {attentionContext.origin === "home" ? "Home attention" : "Inbox decision"}</button>}
+                <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              </div>
             </div>
-
+            {attentionContext?.taskId === selectedTask.task_id && <div className="mb-3 flex flex-wrap gap-2" aria-label="Originating context">
+              {attentionContext.goalId && onOpenAttentionGoal && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionGoal}>Open originating goal</button>}
+              {attentionContext.threadId && onOpenAttentionThread && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionThread}>Open originating thread</button>}
+            </div>}
+            {selectedTask.ownership_access === "recovered_read_only" && <div role="status" className="mb-3 text-amber-200">Recovered original · read only. Previous approvals, jobs and permissions stay blocked. Create fresh reviewed intent through operator ownership recovery.</div>}
+            <fieldset disabled={selectedTask.ownership_access === "recovered_read_only"}>
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
             {detailError && <div className="mb-3 rounded border border-red-500/40 p-2 text-sm" role="alert">{detailError}<button type="button" className="ml-2 underline" onClick={() => void refreshSelectedTask()}>Refresh detail</button></div>}
             {actionError && <div className="mb-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{actionError}</div>}
+            {selectedTask.dispatch_wait_reason && <div className="mb-3 rounded border border-amber-500/40 bg-amber-950/20 p-2 text-sm" role="status">Dispatch waiting: {selectedTask.dispatch_wait_reason === "browser_cleanup_required" ? "browser cleanup recovery is required before this task can run." : selectedTask.dispatch_wait_reason}</div>}
+            {selectedInboxOrigin && (
+              <section className="mb-3 rounded border border-cyan-400/30 bg-cyan-950/10 p-3 text-xs" aria-label="Inbox origin">
+                <div className="font-semibold">Created from Inbox candidate</div>
+                <div className="mt-1 break-all">Candidate {selectedInboxOrigin.id} · accepted</div>
+                {onOpenInboxCandidate && (
+                  <button
+                    type="button"
+                    className="cockpit-feedback-button mt-2"
+                    onClick={() => onOpenInboxCandidate(selectedInboxOrigin)}
+                  >
+                    Review Inbox decision
+                  </button>
+                )}
+              </section>
+            )}
 
             <div className="grid gap-3 text-xs">
               <section className="rounded border border-white/10 p-3">
@@ -3015,10 +3469,73 @@ function WorkBoardPanel({
                 </form>
               )}
 
+              {selectedTask.capability_id === "calendar.meeting-prep.v1" && (
+                <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Calendar meeting preparation execution">
+                  <div className="font-semibold">Calendar preparation execution</div>
+                  {!currentCalendarExecution ? (
+                    <div className="mt-1 text-amber-200">Execution receipt unavailable. The board will not infer provider, model, artifact, or readback success.</div>
+                  ) : (
+                    <div className="mt-2 grid gap-1">
+                      <div>Durable job <span className="font-mono break-all">{currentCalendarExecution.job_id}</span> · {currentCalendarExecution.durable_status}</div>
+                      <div>Read 1: {currentCalendarExecution.read_1?.status ?? "unavailable"} · Read 2: {currentCalendarExecution.read_2?.status ?? "unavailable"}</div>
+                      <div>Effective route: {currentCalendarExecution.effective_route ? `${currentCalendarExecution.effective_route.runtime_path} · ${currentCalendarExecution.effective_route.provider} · ${currentCalendarExecution.effective_route.model}` : "not confirmed"}</div>
+                      <div>Memory: {currentCalendarExecution.memory_status ?? "unavailable"} · verified {safeDateTime(currentCalendarExecution.verified_at)}</div>
+                      {currentCalendarExecution.failure_code && <div className="text-amber-200">Failure: {currentCalendarExecution.failure_code}{currentCalendarExecution.recovery_action ? ` · recovery ${currentCalendarExecution.recovery_action}` : ""}</div>}
+                      {(() => {
+                        const reference = calendarExecutionReference(currentCalendarExecution);
+                        return reference && onInspectArtifact ? <button type="button" className="cockpit-feedback-button mt-2 justify-self-start" onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: currentCalendarExecution.job_id, parentWorkflowRunId: currentAttempt?.workflow_run_id ?? null })}>Inspect verified calendar artifact</button> : <div className="text-amber-200">Verified artifact/readback is unavailable.</div>;
+                      })()}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {selectedTask.capability_id === "engineering.repo-repair.v1"
+                && currentAttempt?.workflow_run_id
+                && (
+                  <RepoRepairInspector
+                    jobId={currentAttempt.workflow_run_id}
+                    onOpenApprovals={onOpenApprovals}
+                    ownerPrincipalId={ownerPrincipalId}
+                    ownerSessionId={ownerSessionId}
+                    taskOwnerPrincipalId={selectedTask.owner_principal_id}
+                    taskOwnerSessionId={selectedTask.owner_session_id}
+                  />
+                )}
+
+              {selectedTask.capability_id === "calendar.event.reschedule.v1"
+                && selectedTask.owner_principal_id === ownerPrincipalId && selectedTask.owner_session_id === ownerSessionId
+                && selectedTask.ownership_access !== "recovered_read_only" && <CalendarRescheduleInspector
+                  taskId={selectedTask.task_id} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals}
+                />}
+              {selectedTask.capability_id === "work.mail-reply-draft.v1" && (
+                <MailPanel
+                  taskId={selectedTask.task_id}
+                  ownerPrincipalId={ownerPrincipalId}
+                  ownerSessionId={ownerSessionId}
+                />
+              )}
+
+              {selectedTask.capability_id !== "work.mail-reply-draft.v1" && selectedInboxOrigin?.mail && (
+                <MailPanel
+                  taskId={selectedTask.task_id}
+                  ownerPrincipalId={ownerPrincipalId}
+                  ownerSessionId={ownerSessionId}
+                  mailOrigin={selectedInboxOrigin.mail}
+                  goalId={selectedInboxOrigin.goal_id}
+                  goalRevision={selectedInboxOrigin.goal_revision}
+                />
+              )}
+
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && (selectedTask.recovery_action === "approve_existing_run" || (attentionContext?.taskId === selectedTask.task_id && attentionContext.approvalId)) && <TaskApprovalReview
+                  task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} approvalId={attentionContext?.taskId === selectedTask.task_id ? attentionContext.approvalId : null}
+                  metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask}
+                />}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && selectedTask.recovery_action === "reconcile_external_effect" && <TaskEffectRecovery task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask} onOpenAccounting={onOpenAccounting} />}
                 {selectedTask.capability_id === "guardian-routine.v1" && routinePublication && (
                   <section className="mt-3 rounded border border-amber-500/40 bg-amber-950/10 p-3" aria-label="Routine publication recovery">
                     <div className="font-semibold">Governed publication recovery</div>
@@ -3064,10 +3581,10 @@ function WorkBoardPanel({
                   {selectedTask.status === "triage" && (
                     <button type="button" className="cockpit-feedback-button" disabled={!canPromote || busyAction} onClick={() => void performAction("promote")} title={!canPromote ? "Complete the typed specification and acknowledge the current server limit first." : undefined}>Promote to Todo</button>
                   )}
-                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && (
+                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && !linkedPlan && (
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("specify")}>Specify for review</button>
                   )}
-                  {selectedTask.status === "todo" && currentOwnerSession && (
+                  {selectedTask.status === "todo" && currentOwnerSession && !linkedPlan && (
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("decompose")}>Decompose for review</button>
                   )}
                   {selectedTask.status === "running" && currentOwnerSession && (
@@ -3085,7 +3602,7 @@ function WorkBoardPanel({
                       <button type="submit" className="cockpit-feedback-button self-start" disabled={busyAction || !unblockResolution.trim() || unblockResolution.trim().length > 1000}>Unblock after rechecking authority</button>
                     </form>
                   )}
-                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !isActiveAttempt(selectedTask) && (
+                  {selectedTask.capability_id !== NEAR_TEXT_CAPABILITY && selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !isActiveAttempt(selectedTask) && (
                     <button
                       type="button"
                       className="cockpit-feedback-button"
@@ -3094,7 +3611,7 @@ function WorkBoardPanel({
                       onClick={() => void performAction("retry", {}, true)}
                     >{selectedTask.recovery_action === "restore_prerequisite" ? "Retry after rechecking prerequisites (new attempt)" : "Retry (new attempt)"}</button>
                   )}
-                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !canRetry && (
+                  {selectedTask.capability_id !== NEAR_TEXT_CAPABILITY && selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !canRetry && (
                     <div className="w-full text-amber-200" role="status">
                       Retry stays disabled until the current goal revision limit is loaded and acknowledged. {detailLimitError ?? "Check the current runtime limit above."}
                     </div>
@@ -3150,7 +3667,7 @@ function WorkBoardPanel({
                 {proposal && (
                   <section className="mt-3 rounded border border-white/10 bg-black/20 p-3" aria-label="Triage proposal preview">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="font-semibold">{proposal.kind === "specify" ? "Specify" : "Decompose"} proposal preview</div>
+                      <div className="font-semibold">{linkedPlan ? "Read-only opportunity plan" : proposal.kind === "specify" ? "Specify" : "Decompose"} proposal preview</div>
                       <span className="text-[10px] uppercase opacity-70">{proposalStatusLabel(proposal)} · revision {proposal.proposal_revision}</span>
                     </div>
                     {proposal.blocked_reason && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
@@ -3161,6 +3678,7 @@ function WorkBoardPanel({
                           : "Resolve the prerequisite, then retry the unchanged request only when its durable receipt proves that provider contact never started; a changed binding requires a new request key."}
                     </div>}
                     {proposal.recovery_action === "retry_same_binding_after_prerequisite"
+                      && (proposal.kind === "specify" || proposal.kind === "decompose")
                       && selectedTask
                       && ["triage", "todo"].includes(selectedTask.status)
                       && currentOwnerSession
@@ -3169,12 +3687,18 @@ function WorkBoardPanel({
                           type="button"
                           className="cockpit-feedback-button mt-2"
                           disabled={proposalBusy}
-                          onClick={() => void requestProposal(proposal.kind, true)}
+                          onClick={() => void requestProposal(proposal.kind as "specify" | "decompose", true)}
                         >Retry with new request key</button>
                       )}
                     <div className="mt-2">Estimated cost: {proposal.estimated_cost ?? "Not provided"}</div>
                     <div className="mt-1 break-all">Proposal capability: {proposal.capability_id ?? "Governed proposal route"}{proposal.capability_version ? ` · version ${proposal.capability_version}` : ""}</div>
                     <div className="mt-1">Parent revision: {proposal.parent_revision} · expires {safeDateTime(proposal.expires_at)}</div>
+                    {linkedPlan && <div>
+                      <p>Non-executable Triage staging. Acceptance authorizes the existing queue under native approval gates; no_learning.</p>
+                      {linkedPreview ? <pre className="whitespace-pre-wrap break-all" aria-label="Exact read-only opportunity plan">{JSON.stringify(linkedPreview, null, 2)}</pre>
+                        : <p role="status">Exact plan preview is unavailable. Actions remain blocked.</p>}
+                      {!linkedPlanReady ? <p role="status">Plan bindings are incomplete or stale. Refresh current Goal, source and parent before accepting.</p> : null}
+                    </div>}
                     <div className="mt-2 grid gap-2">
                       {proposal.proposed_tasks.map((proposedTask, index) => (
                         <article key={proposedTask.task_id ?? `${proposal.proposal_id}:task:${index}`} className="rounded border border-white/10 p-2">
@@ -3187,17 +3711,22 @@ function WorkBoardPanel({
                           {proposedTask.cost_estimate && <div>Task cost estimate: {proposedTask.cost_estimate}</div>}
                         </article>
                       ))}
-                      {proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
+                      {!linkedPlan && proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
                     </div>
                     {proposal.proposed_links.length > 0 && <div className="mt-2">Proposed dependencies: {proposal.proposed_links.map((link) => `${link.parent_task_id} → ${link.child_task_id}`).join(" · ")}</div>}
-                    {proposal.status === "proposed" && !proposalAuthorityComplete && (
+                    {proposal.status === "proposed" && !linkedPlan && !proposalAuthorityComplete && (
                       <div className="mt-2 text-amber-200" role="status">A complete server-derived authority preview is missing. Request a fresh proposal before accepting this one.</div>
                     )}
                     {proposal.status === "proposed" && (
+                      <>
+                      {proposal.kind === "specify" && <SpecificationEvidenceReview
+                        key={specificationScope(selectedTask, proposal, ownerSessionId)} task={selectedTask}
+                        proposal={proposal} ownerSessionId={ownerSessionId} onReplacement={updateProposalEvidence} />}
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || !proposalAuthorityComplete} onClick={() => void decideProposal("accept")}>Accept proposal</button>
-                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button>
+                        {proposal.kind !== "public-evidence-pipeline.v1" ? <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || (linkedPlan ? !linkedPlanReady : !proposalAuthorityComplete)} onClick={() => void decideProposal("accept")}>{linkedPlan ? "Accept and queue this read-only plan" : "Accept proposal"}</button> : null}
+                        {!linkedPlan ? <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button> : null}
                       </div>
+                      </>
                     )}
                     {proposal.status === "pending_inference" && <div className="mt-2 text-amber-200" role="status">The governed proposal request is pending. Refresh or retry the same request only after its durable receipt is reconciled.</div>}
                   </section>
@@ -3224,8 +3753,8 @@ function WorkBoardPanel({
                       >
                         <option value="">Create from a verified journey</option>
                         {routineRecords.map((record) => (
-                          <option key={record.id} value={record.id}>
-                            {record.name} · {record.state} · revision {record.revision}
+                          <option key={record.id} value={record.id} disabled={record.ownership_access === "recovered_read_only"}>
+                            {record.name}{record.ownership_access === "recovered_read_only" ? " · recovered read only" : ""} · {record.state} · revision {record.revision}
                           </option>
                         ))}
                       </select>
@@ -3464,7 +3993,7 @@ function WorkBoardPanel({
                                 onChange={(event) => { setRoutineInvocationGoalId(event.currentTarget.value); setRoutineInvocationWatchId(""); setRoutineInvokeReceipt(null); setRoutineError(null); }}
                               >
                                 <option value="">Choose an active goal</option>
-                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
+                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
                               </select>
                             </label>
                             <label>Approved source watch
@@ -3532,37 +4061,143 @@ function WorkBoardPanel({
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
                       <div>Readback {READBACK_LABELS[attempt.readback_status]} · verification {VERIFICATION_LABELS[attempt.verification_status]}</div>
                       {attempt.workflow_run_id && <div className="mt-1 break-all">Workflow run {attempt.workflow_run_id}{onInspectWorkflowRun && <button type="button" className="ml-2 underline" onClick={() => onInspectWorkflowRun(attempt.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}</div>}
-                      {[...attempt.receipt_refs].map((receipt, index) => (
-                        <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
-                          <div>{receiptTitle(receipt)} · {safeReferenceLabel(receipt)}</div>
-                          <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
-                          {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
-                          {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id_digest ?? receipt.readback_id ?? receipt.verification_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                          {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
-                        </div>
-                      ))}
+                      {selectedTask.capability_id === "browser.public-task.v1" && (() => {
+                        const execution = browserExecutionForAttempt(selectedTask, attempt);
+                        if (!execution) {
+                          return <div className="mt-1 rounded border border-amber-500/30 p-2 text-[10px]" aria-label="Browser durable execution receipt">Durable browser execution receipt unavailable; progress, cleanup, and readback remain unknown until a current owner-bound receipt is returned.</div>;
+                        }
+                        const executionReference = browserExecutionReference(execution);
+                        return (
+                          <div className="mt-1 rounded border border-cyan-500/30 p-2 text-[10px]" aria-label="Browser durable execution receipt">
+                            <div>Browser durable execution · job <span className="font-mono break-all">{execution.job_id}</span> · status {execution.durable_status || "unknown"}</div>
+                            <div>Browser progress · {browserExecutionAction(execution)} · {browserExecutionCount(execution.request_count, 0, 32)} requests</div>
+                            <div>Cleanup {execution.cleanup_status || "unknown"} · Memory {execution.memory_status || "unknown"}</div>
+                            {execution.readback_id && <div className="break-all">Readback {execution.readback_id}</div>}
+                            {execution.file_path && <div className="break-all">Artifact path {execution.file_path}</div>}
+                            {executionReference && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${execution.file_path}`} onClick={() => onInspectArtifact({ reference: executionReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: execution.job_id, parentWorkflowRunId: attempt.workflow_run_id })}>Inspect browser artifact</button>}
+                          </div>
+                        );
+                      })()}
+                      {[...attempt.receipt_refs].map((receipt, index) => {
+                        const inspectReference = browserEvidenceReference(receipt);
+                        const inspectLabel = inspectReference.file_path
+                          ?? inspectReference.target_path
+                          ?? inspectReference.artifact_id
+                          ?? inspectReference.artifact_ref
+                          ?? inspectReference.effect_id_digest
+                          ?? inspectReference.readback_id
+                          ?? inspectReference.verification_id
+                          ?? "available evidence";
+                        const inspectable = Boolean(
+                          inspectReference.file_path
+                          || inspectReference.artifact_id
+                          || inspectReference.target_path
+                          || inspectReference.effect_id_digest
+                          || inspectReference.readback_id
+                          || inspectReference.verification_id,
+                        );
+                        return (
+                          <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
+                            <div>{receiptTitle(receipt)} · {safeReferenceLabel(inspectReference)}</div>
+                            <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? selectedTask.capability_id === NEAR_TEXT_CAPABILITY ? " · local readback passed" : " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
+                            {(receipt.checkpoint_id || typeof receipt.action_index === "number" || typeof receipt.action_count === "number" || typeof receipt.request_count === "number") && (
+                              <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
+                                Browser progress
+                                {receipt.checkpoint_id ? ` · checkpoint ${receipt.checkpoint_id}` : ""}
+                                {typeof receipt.action_index === "number" ? ` · action ${receipt.action_index + 1}${typeof receipt.action_count === "number" ? `/${receipt.action_count}` : ""}` : typeof receipt.action_count === "number" ? ` · ${receipt.action_count} actions` : ""}
+                                {typeof receipt.request_count === "number" ? ` · ${receipt.request_count} requests` : ""}
+                              </div>
+                            )}
+                            {receipt.durable_status && <div className="text-[10px]">Durable status {receipt.durable_status}</div>}
+                            {receipt.artifact_ref && <div className="break-all text-[10px]">Browser artifact receipt {receipt.artifact_ref}</div>}
+                            {inspectReference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {inspectReference.content_sha256}</div>}
+                            {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
+                            {receipt.cleanup_status && <div className="text-[10px]">Cleanup {receipt.cleanup_status}</div>}
+                            {receipt.memory_status && <div className="text-[10px]">Memory {receipt.memory_status}</div>}
+                            {inspectable && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${inspectLabel}`} onClick={() => onInspectArtifact({ reference: inspectReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                            {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
-                  {[...selectedTask.result_refs, ...selectedTask.artifact_refs].map((reference, index) => (
-                    <div key={`task-ref:${index}`} className="rounded bg-black/20 p-2">
-                      <div>{receiptTitle(reference)} · {safeReferenceLabel(reference)}</div>
-                      <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
-                      {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
-                      {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest ?? reference.readback_id ?? reference.verification_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                      {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
-                    </div>
-                  ))}
+                  {[...selectedTask.result_refs, ...selectedTask.artifact_refs].map((reference, index) => {
+                    const inspectReference = browserEvidenceReference(reference);
+                    const inspectLabel = inspectReference.file_path
+                      ?? inspectReference.target_path
+                      ?? inspectReference.artifact_id
+                      ?? inspectReference.artifact_ref
+                      ?? inspectReference.effect_id_digest
+                      ?? inspectReference.readback_id
+                      ?? inspectReference.verification_id
+                      ?? "available evidence";
+                    const inspectable = Boolean(
+                      inspectReference.file_path
+                      || inspectReference.artifact_id
+                      || inspectReference.target_path
+                      || inspectReference.effect_id_digest
+                      || inspectReference.readback_id
+                      || inspectReference.verification_id,
+                    );
+                    return (
+                      <div key={`task-ref:${index}`} className="rounded bg-black/20 p-2">
+                        <div>{receiptTitle(reference)} · {safeReferenceLabel(inspectReference)}</div>
+                        <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? selectedTask.capability_id === NEAR_TEXT_CAPABILITY ? " · local readback passed" : " · verified" : ""}</div>
+                        {(reference.checkpoint_id || typeof reference.action_index === "number" || typeof reference.action_count === "number" || typeof reference.request_count === "number") && (
+                          <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
+                            Browser progress
+                            {reference.checkpoint_id ? ` · checkpoint ${reference.checkpoint_id}` : ""}
+                            {typeof reference.action_index === "number" ? ` · action ${reference.action_index + 1}${typeof reference.action_count === "number" ? `/${reference.action_count}` : ""}` : typeof reference.action_count === "number" ? ` · ${reference.action_count} actions` : ""}
+                            {typeof reference.request_count === "number" ? ` · ${reference.request_count} requests` : ""}
+                          </div>
+                        )}
+                        {reference.durable_status && <div className="text-[10px]">Durable status {reference.durable_status}</div>}
+                        {reference.artifact_ref && <div className="break-all text-[10px]">Browser artifact receipt {reference.artifact_ref}</div>}
+                        {inspectReference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {inspectReference.content_sha256}</div>}
+                        {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
+                        {reference.cleanup_status && <div className="text-[10px]">Cleanup {reference.cleanup_status}</div>}
+                        {reference.memory_status && <div className="text-[10px]">Memory {reference.memory_status}</div>}
+                        {inspectable && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${inspectLabel}`} onClick={() => onInspectArtifact({ reference: inspectReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                        {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
+                      </div>
+                    );
+                  })}
                   {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
                 </div>
               </section>
 
-              <WorkBoardMemoryReview
+              <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
+              {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || selectedTask.capability_id === NEAR_TEXT_CAPABILITY || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
+                This capability has an explicit no_learning policy. Its native receipt records that result; no memory proposal is created.
+              </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
-              />
+              />}
+              {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
+                key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); }} />}
+              {selectedTask.capability_id === "work.document-compare.v1" && <DocumentComparisonPanel
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask} />}
+              {selectedTask.capability_id === NEAR_TEXT_CAPABILITY && <NearTextWorkPanel
+                key={`near-text-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask}
+                onOpenAccounting={onOpenAccounting} />}
+              {(selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"")) && <JsonFormatterPanel
+                key={`formatter-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); }} />}
+
+              {ownerPrincipalId && ownerSessionId && (!linkedPlan || linkedReference?.kind === "public-evidence-pipeline.v1") && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
+                opportunityPlan={Boolean(linkedPlan)}
+                proposal_ref={(linkedPlanReady || linkedInspectionReady) && linkedReference?.blueprint_id === "public-evidence-report" ? linkedReference : null}
+                plan_preview={(linkedPlanReady || linkedInspectionReady) && linkedReference?.blueprint_id === "public-evidence-report" ? linkedPreview : null}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
+                onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
+              <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
+              <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
                 <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">
@@ -3626,12 +4261,15 @@ function WorkBoardPanel({
                 </div>
               </section>
             </div>
-        </aside>
+            </fieldset>
+        </aside>,
+        document.querySelector(".cockpit-shell") ?? document.body,
       )}
 
+      {createPortal(<div className="relative z-[200]">
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
-          <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 shadow-2xl" onSubmit={(event) => void createTask(event)}>
+          <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>
             <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy || Boolean(pendingCreate)}>Close</button></div>
             <p className="mt-1 text-xs opacity-70">A free-text idea starts in Triage. Todo requires a typed capability input and current runtime-limit acknowledgment. The dispatcher alone promotes eligible work to Ready.</p>
             {pendingCreate && <p className="mt-2 rounded border border-amber-500/40 p-2 text-sm" role="status">This exact task request has an unconfirmed receipt. Its fields and idempotency key are held until the server confirms the existing task or accepts the same request.</p>}
@@ -3639,7 +4277,7 @@ function WorkBoardPanel({
             <fieldset disabled={Boolean(pendingCreate)} className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="sm:col-span-2">Title<input className="cockpit-input mt-1 w-full" autoFocus={!pendingCreate} maxLength={200} required value={createDraft.title} onChange={(event) => setCreateField("title", event.currentTarget.value)} /></label>
               <label className="sm:col-span-2">Bounded task description<textarea className="cockpit-input mt-1 w-full" maxLength={4000} rows={3} value={createDraft.body} onChange={(event) => setCreateField("body", event.currentTarget.value)} /></label>
-              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · {goal.id}</option>)}</select></label>
+              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · {goal.id}</option>)}</select></label>
               <label>Goal revision<input className="cockpit-input mt-1 w-full" type="number" min={1} readOnly value={createDraft.goalRevision} aria-readonly="true" /></label>
               <label>Initial status<select className="cockpit-input mt-1 w-full" value={createDraft.status} onChange={(event) => setCreateField("status", event.currentTarget.value as CreateDraft["status"])}><option value="triage">Triage · rough idea</option><option value="todo">Todo · specified</option></select></label>
               <label>Priority 0–100<input className="cockpit-input mt-1 w-full" type="number" min={0} max={100} value={createDraft.priority} onChange={(event) => setCreateField("priority", event.currentTarget.value)} /></label>
@@ -3660,6 +4298,96 @@ function WorkBoardPanel({
           </form>
         </div>
       )}
+      {formatterOpen && <JsonFormatterPanel key={`${ownerPrincipalId}:${ownerSessionId}:formatter-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setFormatterOpen(false)} onCreated={async (task) => {
+          setFormatterOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {authoredPackageOpen && <JsonFormatterPanel authored key={`${ownerPrincipalId}:${ownerSessionId}:authored-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setAuthoredPackageOpen(false)} onCreated={async (task) => {
+          setAuthoredPackageOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {documentOpen && <DocumentComparisonPanel key={`${ownerPrincipalId}:${ownerSessionId}:document-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setDocumentOpen(false)} onCreated={async (task) => {
+          setDocumentOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
+      }} />}
+      {nearTextOpen && <NearTextWorkPanel key={`${ownerPrincipalId}:${ownerSessionId}:near-text-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onOpenAccounting={onOpenAccounting} onOpenApprovals={onOpenApprovals}
+        onClose={() => setNearTextOpen(false)} onCreated={async (task) => {
+          setNearTextOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {researchOpen && <ResearchDossierPanel key={`${ownerPrincipalId}:${ownerSessionId}:research-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setResearchOpen(false)} onCreated={async (task) => {
+          setResearchOpen(false);
+          await refreshSnapshot();
+          if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {browserTaskOpen && (
+        <BrowserTaskForm
+          key={pendingCreateScope ?? "anonymous"}
+          goals={allGoals}
+          initialPending={pendingBrowserAtMount}
+          onPendingChange={setBrowserPending}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
+          onClose={closeBrowserTask}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingBrowserSubmissions.delete(pendingCreateScope);
+            setBrowserTaskReceipt(receipt);
+            setBrowserTaskOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Public browser task ${task.title} was created with input artifact ${receipt.artifactId}, ${receipt.actionCount} actions, digest ${receipt.digest}.`);
+          }}
+        />
+      )}
+      {calendarPrepOpen && (
+        <CalendarPrepForm
+          key={pendingCreateScope ?? "anonymous"}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
+          goals={allGoals}
+          initialPending={pendingCalendarAtMount}
+          onPendingChange={setCalendarPending}
+          onClose={closeCalendarPrep}
+          onOpenSettings={() => setAnnouncement("Open Settings → Calendar to configure an active read-only connection.")}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingCalendarSubmissions.delete(pendingCreateScope);
+            setCalendarPrepReceipt(receipt);
+            setCalendarPrepOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Calendar meeting preparation task ${task.title} was created with artifact ${receipt.input_artifact.artifact_id}.`);
+          }}
+        />
+      )}
+      {repoRepairOpen && (
+        <RepoRepairForm
+          key={pendingCreateScope ?? "anonymous"}
+          goals={allGoals}
+          initialPending={pendingRepoRepairAtMount}
+          onPendingChange={setRepoRepairPending}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
+          onClose={closeRepoRepair}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingRepoRepairSubmissions.delete(pendingCreateScope);
+            setRepoRepairReceipt(receipt);
+            setRepoRepairOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Repository repair task ${task.title} was created with input artifact ${receipt.artifactId}.`);
+          }}
+        />
+      )}
+      </div>, document.querySelector(".cockpit-shell") ?? document.body)}
     </section>
   );
 }

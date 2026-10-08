@@ -35,6 +35,13 @@ class CanonicalRouteSpec:
 
 
 CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
+    "readonly_research_child": CanonicalRouteSpec(
+        InferenceWorkload.REPORT,
+        (ModelCapability.TEXT,),
+        "report_synthesis",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "normal",
+    ),
     "chat_agent": CanonicalRouteSpec(
         InferenceWorkload.INTERACTIVE,
         (ModelCapability.TEXT,),

@@ -27,6 +27,7 @@ from .remote_inference_admission import (
     stable_remote_inference_operation_id,
 )
 from .selector import select_route
+from .gpu_admission import GpuPriority
 
 
 _SyncResult = TypeVar("_SyncResult")
@@ -335,6 +336,7 @@ async def run_preflighted_adapter(
     decision: RouteDecision,
     adapter: Callable[[ModelRouteCandidate, bool], Awaitable[object]],
     hooks: RouteReceiptHooks,
+    admission_priority: GpuPriority | None = None,
 ) -> object:
     """Run a preflighted non-streaming adapter (for example VLM analyze-file)."""
     if not decision.allowed or decision.selected is None:
@@ -352,12 +354,14 @@ async def run_preflighted_adapter(
         raise NoCompliantModelRouteError()
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
+        priority=admission_priority,
         operation_id=stable_remote_inference_operation_id(
             context,
             profile_id=decision.selected.profile.id,
             fallback=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
         ),
-        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
+        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"
+            or context.runtime_path == "near_text_native" and decision.selected.profile.id == "near.text"),
     )
     await prepare_bound_remote_inference(
         admission_request,
@@ -486,6 +490,10 @@ def execute_sync_adapter(
             )
         )
 
+    # The coroutine bridge copies context; a ContextVar set only inside it
+    # cannot survive back into the synchronous broker caller.
+    from .accounting import bind_accounting_profile
+    bind_accounting_profile(admission_request.operation_id, decision.selected.profile.id)
     _run_awaitable_sync(
         prepare_bound_remote_inference(
             admission_request,

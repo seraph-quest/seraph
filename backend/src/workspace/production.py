@@ -31,10 +31,12 @@ from src.workspace.lifecycle import (
     workspace_restore_staging_dir,
 )
 from src.workspace.state_registry import (
+    WORK_BOARD_INPUT_ARTIFACT_TABLE,
     WORK_BOARD_ROUTINE_BINDING_TABLE,
     WorkspaceStateError,
     canonical_workspace_root,
     canonical_workspace_root_identity,
+    work_board_input_artifact_contract,
     work_board_routine_binding_contract,
 )
 
@@ -44,9 +46,11 @@ PRODUCTION_BIND_ENV = "BACKEND_DATA_PATH_PROD"
 WORKSPACE_ENV = "WORKSPACE_DIR"
 MOUNT_SOURCE_ENV = "SERAPH_PRODUCTION_MOUNT_SOURCE"
 BIND_IDENTITY_ENV = "SERAPH_PRODUCTION_BIND_IDENTITY"
+LIFECYCLE_PATH_ENV = "SERAPH_WORKSPACE_LIFECYCLE_PATH"
 MAINTENANCE_LOCK_NAME = ".seraph-workspace-maintenance.lock"
 MOUNTINFO_PATH = "/proc/self/mountinfo"
 MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024
+MAX_ACCOUNTING_CHECKPOINT_BYTES = 1024 * 1024
 
 
 class ProductionWorkspaceError(WorkspaceStateError):
@@ -172,6 +176,7 @@ class ProductionWorkspace:
 
     host_root: Path
     container_root: Path = Path(CANONICAL_CONTAINER_WORKSPACE)
+    lifecycle_path: Path | None = None
 
     @property
     def backup_root(self) -> Path:
@@ -180,6 +185,20 @@ class ProductionWorkspace:
     @property
     def restore_staging_root(self) -> Path:
         return workspace_restore_staging_dir(self.host_root)
+
+    @property
+    def lifecycle_directory(self) -> Path:
+        # This directory is intentionally outside every restorable root.
+        # Docker binds the directory, so receipt replacement remains atomic.
+        if self.host_root == Path(CANONICAL_CONTAINER_WORKSPACE):
+            return Path("/app/workspace-lifecycle")
+        if self.lifecycle_path is not None:
+            return self.lifecycle_path
+        if os.environ.get(LIFECYCLE_PATH_ENV):
+            return Path(os.environ[LIFECYCLE_PATH_ENV])
+        # Legacy lifecycle inspection only. Billable runtime explicitly
+        # requires the managed descriptor and never initializes this fallback.
+        return self.host_root.with_name(self.host_root.name + ".lifecycle")
 
     @property
     def maintenance_lock_path(self) -> Path:
@@ -235,8 +254,12 @@ class ProductionWorkspace:
                 "work_board_routine_binding": work_board_routine_binding_contract(
                     present=None
                 ),
+                "work_board_input_artifact": work_board_input_artifact_contract(
+                    present=None
+                ),
                 "inventory_source": "workspace_state_registry",
                 "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
+                "input_artifact_table_name": WORK_BOARD_INPUT_ARTIFACT_TABLE,
             },
         }
 
@@ -272,14 +295,14 @@ def resolve_production_workspace(
     if raw_workspace and raw_workspace != CANONICAL_CONTAINER_WORKSPACE:
         lexical_workspace = _absolute_path(raw_workspace, base_dir=root_base, label=WORKSPACE_ENV)
         if allow_missing and not lexical_workspace.exists():
-            return ProductionWorkspace(host_root=host_root)
+            return ProductionWorkspace(host_root=host_root, lifecycle_path=Path(_env_value(values, LIFECYCLE_PATH_ENV) or root_base / "docker-data/prod/workspace-lifecycle"))
         workspace_root = _existing_directory(lexical_workspace, label=WORKSPACE_ENV)
         if workspace_root != host_root:
             raise ProductionWorkspaceError(
                 "BACKEND_DATA_PATH_PROD and WORKSPACE_DIR identify different roots"
             )
 
-    return ProductionWorkspace(host_root=host_root)
+    return ProductionWorkspace(host_root=host_root, lifecycle_path=Path(_env_value(values, LIFECYCLE_PATH_ENV) or root_base / "docker-data/prod/workspace-lifecycle"))
 
 
 def validate_container_workspace_mount(
@@ -487,13 +510,144 @@ def runtime_workspace_owner(root: str | os.PathLike[str]) -> Iterator[None]:
 
 def lifecycle_receipt_path(workspace: ProductionWorkspace) -> Path:
     """Return the durable redacted receipt path beside the canonical root."""
-    return workspace.host_root.parent / f".{workspace.host_root.name}.workspace-lifecycle.json"
+    return workspace.lifecycle_directory / "receipt.json"
 
 
-def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str, Any]) -> Path:
+def prepare_lifecycle_directory(workspace: ProductionWorkspace) -> Path:
+    """Migrate the exact legacy receipt under the managed ownership fence.
+
+    No archive contains this directory. An existing legacy receipt is retained
+    if a crash interrupts migration, and differing generations fail closed.
+    """
+    with maintenance_fence(workspace):
+        directory = workspace.lifecycle_directory
+        if directory.exists() and (directory.is_symlink() or not directory.is_dir()):
+            raise ProductionWorkspaceError("workspace lifecycle directory is unsafe")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        old_directory = workspace.host_root.with_name(workspace.host_root.name + ".lifecycle")
+        if old_directory != directory and old_directory.exists():
+            if old_directory.is_symlink() or not old_directory.is_dir():
+                raise ProductionWorkspaceError("legacy lifecycle directory is unsafe")
+            allowed = {"receipt.json", "accounting-checkpoint.json", "accounting.lock", "provider-policy-checkpoint.json"}
+            if any(item.name not in allowed or item.is_symlink() or not item.is_file() for item in old_directory.iterdir()):
+                raise ProductionWorkspaceError("legacy lifecycle migration requires reconciliation")
+            source = ProductionWorkspace(host_root=workspace.host_root, lifecycle_path=old_directory)
+            prior = read_lifecycle_receipt(source)
+            current = read_lifecycle_receipt(workspace)
+            source_digest = hashlib.sha256(json.dumps(prior, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            migrated = current and current.get("legacy_lifecycle_migration", {}).get("source_receipt_digest") == source_digest
+            if current is not None and current != prior and not migrated:
+                raise ProductionWorkspaceError("legacy lifecycle migration generations differ")
+            if current is None and prior is not None:
+                # Maintenance ownership excludes any live legacy writer.
+                for name in ("accounting-checkpoint.json", "provider-policy-checkpoint.json"):
+                    path = old_directory / name
+                    if path.exists():
+                        payload = _read_private_checkpoint(path)
+                        _write_private_checkpoint(directory / name, payload)
+                write_lifecycle_receipt(workspace, prior)
+                current = read_lifecycle_receipt(workspace)
+            if prior is not None and not migrated:
+                current["legacy_lifecycle_migration"] = {"revision": 1, "source_receipt_digest": source_digest,
+                    "source_directory_digest": hashlib.sha256(str(old_directory).encode()).hexdigest()}
+                write_lifecycle_receipt(workspace, current)
+        legacy = workspace.host_root.parent / f".{workspace.host_root.name}.workspace-lifecycle.json"
+        if legacy.exists() or legacy.is_symlink():
+            if legacy.is_symlink() or not legacy.is_file() or legacy.stat().st_size > MAX_LIFECYCLE_RECEIPT_BYTES:
+                raise ProductionWorkspaceError("legacy workspace lifecycle receipt is unsafe")
+            try:
+                prior = json.loads(legacy.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ProductionWorkspaceError("legacy workspace lifecycle receipt is invalid") from exc
+            if not isinstance(prior, dict) or prior.get("secret_values_included") is not False:
+                raise ProductionWorkspaceError("legacy workspace lifecycle receipt is invalid")
+            current = read_lifecycle_receipt(workspace)
+            if current is not None and current != prior:
+                raise ProductionWorkspaceError("legacy lifecycle receipt requires reconciliation")
+            if current is None:
+                write_lifecycle_receipt(workspace, prior)
+            legacy.unlink()
+            parent = os.open(legacy.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        receipt = read_lifecycle_receipt(workspace) or {"secret_values_included": False}
+        if "deployment_binding" not in receipt:
+            # An existing ledger must prove its current generation before a
+            # legacy descriptor is bound. Missing proof is never bootstrap.
+            if receipt.get("inference_accounting"):
+                from src.workspace.accounting_continuity import verify_accounting_generation
+                verify_accounting_generation(workspace.host_root / "seraph.db", receipt["inference_accounting"])
+            receipt["deployment_binding"] = {"revision": 1, "root_path_digest": workspace.identity_digest,
+                "host_bind_identity": workspace.bind_identity_digest}
+            if "provider_policy" not in receipt:
+                receipt["provider_policy"] = {"revision": 0, "configuration_digest": None, "state": "uninitialized"}
+            write_lifecycle_receipt(workspace, receipt)
+            if receipt.get("inference_accounting") and receipt["provider_policy"]["revision"] == 0:
+                from src.workspace.accounting_witness import revoke_restored_policy
+                revoke_restored_policy(active=workspace, target=workspace.host_root)
+        elif receipt["deployment_binding"].get("root_path_digest") == workspace.identity_digest:
+            # Supported same-path restore changes the inode, not deployment.
+            binding = receipt["deployment_binding"]
+            if binding.get("host_bind_identity") != workspace.bind_identity_digest:
+                receipt["deployment_binding"] = {**binding, "revision": binding["revision"] + 1,
+                    "host_bind_identity": workspace.bind_identity_digest}
+                write_lifecycle_receipt(workspace, receipt)
+        return directory
+
+
+def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *, _accounting_lock_held: bool = False) -> Path:
     """Atomically persist a bounded operator receipt without secret values."""
+    directory = workspace.lifecycle_directory
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise ProductionWorkspaceError("workspace lifecycle directory is unsafe")
+    if not directory.exists():
+        if workspace.host_root == Path(CANONICAL_CONTAINER_WORKSPACE):
+            raise ProductionWorkspaceError("accounting_continuity_unavailable")
+        directory.mkdir(mode=0o700, parents=False)
+    if _accounting_lock_held:
+        return _write_lifecycle_receipt_locked(workspace, receipt)
+    descriptor = os.open(directory / "accounting.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ProductionWorkspaceError("workspace accounting continuity is busy") from exc
+        return _write_lifecycle_receipt_locked(workspace, receipt)
+    finally:
+        os.close(descriptor)
+
+
+def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Mapping[str, Any]) -> Path:
     path = lifecycle_receipt_path(workspace)
     payload = dict(receipt)
+    # Lifecycle status updates must not erase the accounting high-water mark.
+    prior = read_lifecycle_receipt(workspace)
+    for name in ("provider_policy", "deployment_binding", "legacy_lifecycle_migration"):
+        if prior is None or name not in prior:
+            continue
+        previous = prior[name]
+        if name not in payload:
+            payload[name] = previous
+        else:
+            incoming = payload[name]
+            if (not isinstance(previous, dict) or not isinstance(incoming, dict)
+                or type(incoming.get("revision")) is not int or type(previous.get("revision")) is not int
+                or incoming["revision"] < previous["revision"]
+                or (incoming["revision"] == previous["revision"] and incoming != previous)):
+                raise ProductionWorkspaceError("workspace continuity witness cannot regress")
+    if prior is not None and "inference_accounting" in prior:
+        if "inference_accounting" not in payload:
+            payload["inference_accounting"] = prior["inference_accounting"]
+        else:
+            previous, incoming = prior["inference_accounting"], payload["inference_accounting"]
+            if (not isinstance(previous, dict) or not isinstance(incoming, dict)
+                or incoming.get("deployment_id") != previous.get("deployment_id")
+                or type(incoming.get("revision")) is not int or type(previous.get("revision")) is not int
+                or incoming["revision"] < previous["revision"]
+                or (incoming["revision"] == previous["revision"] and incoming != previous)):
+                raise ProductionWorkspaceError("workspace accounting witness cannot regress")
     payload["secret_values_included"] = False
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     if len(encoded) > MAX_LIFECYCLE_RECEIPT_BYTES:
@@ -527,6 +681,8 @@ def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str
 def read_lifecycle_receipt(workspace: ProductionWorkspace) -> dict[str, Any] | None:
     """Read the durable operator receipt, failing closed on tampering."""
     path = lifecycle_receipt_path(workspace)
+    if workspace.lifecycle_directory.is_symlink():
+        raise ProductionWorkspaceError("workspace lifecycle directory is unsafe")
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -542,6 +698,84 @@ def read_lifecycle_receipt(workspace: ProductionWorkspace) -> dict[str, Any] | N
     if not isinstance(value, dict) or value.get("secret_values_included") is not False:
         raise ProductionWorkspaceError("workspace lifecycle receipt is invalid")
     return value
+
+
+def write_accounting_checkpoint(workspace: ProductionWorkspace, payload: Mapping[str, Any]) -> None:
+    """Retain one content-free transaction delta under the accounting lock."""
+    path = workspace.lifecycle_directory / "accounting-checkpoint.json"
+    prior = read_accounting_checkpoint(workspace)
+    if prior is not None and prior.get("witness", {}).get("revision", 0) > payload.get("witness", {}).get("revision", 0):
+        raise ProductionWorkspaceError("accounting checkpoint cannot regress")
+    _write_private_checkpoint(path, payload)
+
+
+def _write_private_checkpoint(path: Path, payload: Mapping[str, Any]) -> None:
+    encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    if len(encoded) > MAX_ACCOUNTING_CHECKPOINT_BYTES or payload.get("secret_values_included") is not False:
+        raise ProductionWorkspaceError("continuity checkpoint exceeds bounded contract")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_accounting_checkpoint(workspace: ProductionWorkspace) -> dict[str, Any] | None:
+    path = workspace.lifecycle_directory / "accounting-checkpoint.json"
+    return _read_private_checkpoint(path)
+
+
+def _read_private_checkpoint(path: Path) -> dict[str, Any] | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_ACCOUNTING_CHECKPOINT_BYTES or metadata.st_mode & 0o077:
+        raise ProductionWorkspaceError("accounting checkpoint is unsafe")
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise ProductionWorkspaceError("accounting checkpoint is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("secret_values_included") is not False:
+        raise ProductionWorkspaceError("accounting checkpoint is invalid")
+    return payload
+
+
+def _invalidate_transport_credentials(connection) -> int:
+    """Exact legacy edge/Telegram generations; no provider/config secrets."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(secrets)")}
+    if not {"key", "encrypted_value"}.issubset(columns):
+        return 0
+    revoked = ", revoked_at = CURRENT_TIMESTAMP" if "revoked_at" in columns else ""
+    before = connection.total_changes
+    connection.execute(
+        "UPDATE secrets SET encrypted_value = 'revoked:workspace-restore'" + revoked +
+        " WHERE (substr(key,1,20) = 'seraph-node-pairing-' AND length(key) = 60 AND substr(key,21) NOT GLOB '*[^0-9a-f]*') "
+        "OR (substr(key,1,25) = 'telegram.transport.token:' AND length(key) = 89 AND substr(key,26) NOT GLOB '*[^0-9a-f]*')"
+    )
+    return connection.total_changes - before
+
+
+def _invalidate_continuity_credentials(connection) -> int:
+    """A restored proof snapshot must never resurrect consumed/revoked hashes."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(operator_continuity_credentials)")}
+    if not columns:
+        return 0
+    if not {"token_hash", "kind", "revoked_at"}.issubset(columns):
+        raise ProductionWorkspaceReconciliationError("continuity credential invalidation schema is unavailable")
+    count = int(connection.execute("SELECT COUNT(*) FROM operator_continuity_credentials WHERE revoked_at IS NULL").fetchone()[0])
+    connection.execute("UPDATE operator_continuity_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE revoked_at IS NULL")
+    return count
 
 
 def reconcile_production_restore(
@@ -597,7 +831,12 @@ def reconcile_production_restore(
     database_path = stage / registry.config.database_path
     if not database_path.is_file() or database_path.is_symlink():
         raise ProductionWorkspaceReconciliationError("staged authority database is unavailable")
+    from src.workspace.accounting_continuity import retain_inference_accounting
+    accounting = retain_inference_accounting(active=root, target=stage, database_path=registry.config.database_path)
+    from src.workspace.accounting_witness import revoke_restored_policy
+    revoke_restored_policy(active=ProductionWorkspace(host_root=root), target=stage)
     invalidated_sessions = 0
+    invalidated_continuity = 0
     invalidated_authority = 0
     tables_present: list[str] = []
     try:
@@ -628,6 +867,8 @@ def reconcile_production_restore(
                     "UPDATE operator_sessions SET revoked_at = CURRENT_TIMESTAMP "
                     "WHERE revoked_at IS NULL"
                 )
+            invalidated_continuity = _invalidate_continuity_credentials(connection)
+            _invalidate_transport_credentials(connection)
             if "production_workflow_authority_states" in table_names:
                 tables_present.append("production_workflow_authority_states")
                 columns = {
@@ -672,6 +913,7 @@ def reconcile_production_restore(
         optional_tokens_invalidated.append("google_calendar_token.json")
     return {
         "status": "ready",
+        "inference_accounting": accounting,
         "derived_rebuild": {
             "status": "clean_targets_recreated",
             "rebuilt_directories": rebuilt_directories,
@@ -681,6 +923,7 @@ def reconcile_production_restore(
             "status": "applied",
             "tables_present": tables_present,
             "operator_sessions_invalidated": invalidated_sessions,
+            "continuity_credentials_invalidated": invalidated_continuity,
             "workflow_authority_rows_blocked": invalidated_authority,
         },
         "token_invalidation": {
@@ -710,6 +953,10 @@ def reconcile_production_rollback(
 
     active_db = active / registry.config.database_path
     target_db = target / registry.config.database_path
+    from src.workspace.accounting_continuity import retain_inference_accounting
+    accounting = retain_inference_accounting(active=active, target=target, database_path=registry.config.database_path)
+    from src.workspace.accounting_witness import revoke_restored_policy
+    revoke_restored_policy(active=ProductionWorkspace(host_root=active), target=target)
     if (
         not active_db.is_file()
         or active_db.is_symlink()
@@ -740,6 +987,7 @@ def reconcile_production_rollback(
     merged_rows: dict[str, int] = {}
     preserved_rows: dict[str, int] = {}
     invalidated_sessions = 0
+    invalidated_continuity = 0
     blocked_authority = 0
     try:
         source = sqlite3.connect(active_db)
@@ -787,6 +1035,8 @@ def reconcile_production_rollback(
                     "WHERE revoked_at IS NULL"
                 )
 
+            invalidated_continuity = _invalidate_continuity_credentials(target_connection)
+            _invalidate_transport_credentials(target_connection)
             if "production_workflow_authority_states" in target_tables:
                 columns = set(
                     table_columns(target_connection, "production_workflow_authority_states")
@@ -829,8 +1079,10 @@ def reconcile_production_rollback(
     return {
         "status": "ready",
         "rows_merged": merged_rows,
+        "inference_accounting": accounting,
         "rows_preserved": preserved_rows,
         "operator_sessions_invalidated": invalidated_sessions,
+            "continuity_credentials_invalidated": invalidated_continuity,
         "workflow_authority_rows_blocked": blocked_authority,
         "optional_credentials_invalidated": ["google_calendar_token.json"]
         if optional_token_invalidated

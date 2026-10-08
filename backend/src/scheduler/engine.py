@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -113,6 +114,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.calendar_scan import run_calendar_scan
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
     from src.work_board.dispatcher import run_work_board_dispatch
+    from src.guardian.opportunity_runtime import run_opportunity_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -154,6 +156,13 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "trigger": IntervalTrigger(seconds=5),
             "id": "work_board_dispatch",
             "name": "Operator work-board dispatch",
+            "misfire_grace_time": 5,
+        },
+        {
+            "func": _async_job_wrapper(run_opportunity_tick, loop, job_id="guardian_opportunity_assessment", allow_model_inference=True),
+            "trigger": IntervalTrigger(seconds=5),
+            "id": "guardian_opportunity_assessment",
+            "name": "Bounded guardian opportunity assessment",
             "misfire_grace_time": 5,
         },
         {
@@ -306,9 +315,17 @@ async def sync_scheduled_jobs() -> None:
                     logger.exception("Failed to remove disabled scheduled job %s", job["id"])
             continue
         try:
+            async def _run_scheduled_job(job_id: str = job["id"], job_record: dict[str, Any] = job) -> None:
+                slot_utc = None
+                if job_record.get("action_type") in {"calendar.observe_due_events.v1", "guardian.run_procedure.v2"}:
+                    from src.scheduler.governed_schedules import latest_due_slot
+
+                    slot_utc = latest_due_slot(job_record.get("trigger_spec") or {}, datetime.now(timezone.utc))
+                await execute_scheduled_job(job_id, scheduled_slot_utc=slot_utc)
+
             _scheduler.add_job(
                 _async_job_wrapper(
-                    lambda job_id=job["id"]: execute_scheduled_job(job_id),
+                    _run_scheduled_job,
                     _scheduler_loop,
                     job_id=apscheduler_id,
                 ),

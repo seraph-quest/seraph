@@ -52,6 +52,7 @@ function task(overrides: Partial<WorkBoardTask> = {}): WorkBoardTask {
     dependency_count: 0,
     completed_dependency_count: 0,
     dispatch_rank: null,
+    dispatch_wait_reason: null,
     recovery_action: null,
     readback_status: "not_started",
     verification_status: "not_started",
@@ -134,6 +135,28 @@ function limits(goalRevision = 3) {
   };
 }
 
+function guardianInboxCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "disposition-12345678",
+    revision: 4,
+    state: "accepted",
+    source_kind: "source_packet",
+    source_id: "packet-1",
+    title: "Watched source changed",
+    summary: "A verified dossier is ready",
+    why_now: "The source changed",
+    goal_id: "goal-1",
+    goal_revision: 3,
+    watch_id: "watch-1",
+    plan_revision: 2,
+    task_id: "task-1",
+    expires_at: "2026-10-07T12:00:00Z",
+    evidence_refs: [],
+    allowed_actions: [],
+    ...overrides,
+  };
+}
+
 function taskResponse(
   fetchMock: ReturnType<typeof vi.fn>,
   currentTask: WorkBoardTask,
@@ -200,6 +223,37 @@ describe("WorkBoardPanel", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("keeps one research inspector across refreshed detail reconciliation", async () => {
+    const currentTask = task({ capability_id: "work.research-dossier.v1", status: "done" });
+    taskResponse(fetchMock, currentTask);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const props = { ownerPrincipalId: "operator:one", ownerSessionId: "operator-session-1" };
+    const mounted = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Research dossier inspector" });
+    for (let revision = 0; revision < 3; revision++) {
+      mounted.rerender(<WorkBoardPanel {...props} focusTaskId="task-1" onFocusTaskHandled={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh board" }));
+      await waitFor(() => expect(screen.getAllByRole("region", { name: "Research dossier inspector" })).toHaveLength(1));
+    }
+    expect(errors.mock.calls.some((args) => args.some((value) => String(value).includes("same key")))).toBe(false);
+    expect(screen.getAllByRole("button", { name: "Refresh research" })).toHaveLength(1);
+  });
+
+  it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
+    const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
+    taskResponse(fetchMock, currentTask);
+    const returnContext = vi.fn(); const goal = vi.fn(); const thread = vi.fn();
+    render(<WorkBoardPanel focusTaskId="task-1" ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" attentionContext={{ taskId: "task-1", origin: "inbox", goalId: "goal-1", threadId: "thread-1" }} onReturnAttention={returnContext} onOpenAttentionGoal={goal} onOpenAttentionThread={thread} />);
+    const returnButton = await screen.findByRole("button", { name: "Return to Inbox decision" });
+    fireEvent.click(screen.getByRole("button", { name: "Open originating goal" })); expect(goal).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Open originating thread" })); expect(thread).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Reconcile recorded GitHub effect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve exact action" })).not.toBeInTheDocument();
+    fireEvent.click(returnButton); expect(returnContext).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
   it("carries the server snapshot cursor to the authenticated socket and reconnects from a fresh snapshot", async () => {
@@ -481,11 +535,12 @@ describe("WorkBoardPanel", () => {
     fireEvent.dragStart(triageCard, { dataTransfer: { setData: vi.fn(), getData: vi.fn(() => "task-1"), effectAllowed: "move" } });
     fireEvent.drop(screen.getByRole("region", { name: "Running column" }), { dataTransfer: { getData: () => "task-1" } });
     await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Running"))).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Running"))).toHaveTextContent(/board was refreshed from the server/i));
     fireEvent.drop(screen.getByRole("region", { name: "Done column" }), { dataTransfer: { getData: () => "task-1" } });
 
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
     await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Done"))).toBe(true));
-    expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Done"))).toHaveTextContent(/board was refreshed from the server/i);
+    await waitFor(() => expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Done"))).toHaveTextContent(/board was refreshed from the server/i));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/work-board/tasks?")).length).toBeGreaterThanOrEqual(2));
   });
 
@@ -877,6 +932,72 @@ describe("WorkBoardPanel", () => {
     expect(onInspectWorkflowRun).toHaveBeenCalledWith("workflow-run-1", "canonical-owner-session");
   });
 
+  it("shows a verified Inbox origin and routes review back to the existing Inbox inspector", async () => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:disposition-12345678" });
+    const candidate = guardianInboxCandidate();
+    const onOpenInboxCandidate = vi.fn();
+    fetchMock.mockClear();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox/disposition-12345678")) return Promise.resolve(response({ item: candidate }));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([currentTask])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes(`/api/work-board/tasks/${currentTask.task_id}`)) return Promise.resolve(response(detail(currentTask)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel onOpenInboxCandidate={onOpenInboxCandidate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    expect(await screen.findByText("Created from Inbox candidate")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Review Inbox decision" }));
+
+    expect(onOpenInboxCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      id: candidate.id,
+      state: "accepted",
+      task_id: currentTask.task_id,
+    }));
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/guardian/inbox/"))).toHaveLength(1);
+  });
+
+  it.each([
+    ["a mismatched task", guardianInboxCandidate({ task_id: "another-task" }), 200],
+    ["a non-accepted candidate", guardianInboxCandidate({ state: "pending" }), 200],
+    ["a missing candidate", { detail: { code: "not_found" } }, 404],
+  ])("does not claim an Inbox origin after %s", async (_label, payload, status) => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:disposition-12345678" });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox/disposition-12345678")) return Promise.resolve(response(payload, status === 200, status));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([currentTask])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes(`/api/work-board/tasks/${currentTask.task_id}`)) return Promise.resolve(response(detail(currentTask)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/guardian/inbox/")).length).toBe(1));
+    expect(screen.queryByText("Created from Inbox candidate")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review Inbox decision" })).not.toBeInTheDocument();
+  });
+
+  it("does not fetch an Inbox origin for a malformed task scope", async () => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:../unsafe" });
+    fetchMock.mockClear();
+    taskResponse(fetchMock, currentTask);
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/guardian/inbox/"))).toBe(false);
+    expect(screen.queryByText("Created from Inbox candidate")).not.toBeInTheDocument();
+  });
+
   it("opens attempt receipt artifacts with their immutable workflow run context", async () => {
     const reference = { artifact_id: "artifact:attempt-output", file_path: "artifacts/output.md", verified: true };
     const currentTask = task({ title: "Attempt artifact task" });
@@ -895,6 +1016,190 @@ describe("WorkBoardPanel", () => {
       workflowRunId: "workflow-run-1",
       parentWorkflowRunId: "workflow-run-1",
     });
+  });
+
+  it("projects BrowserRunner progress and artifact receipts into the owner-bound inspector", async () => {
+    const browserReference = {
+      artifact_ref: "artifacts/browser/result.json",
+      artifact_sha256: "c".repeat(64),
+      checkpoint_id: "action-0-post-checks",
+      action_index: 0,
+      action_count: 2,
+      request_count: 3,
+      durable_status: "succeeded",
+      cleanup_status: "cleanup_verified",
+      memory_status: "no_learning",
+      job_id: "browser-job-1",
+      workflow_run_id: "workflow-run-1",
+      readback_id: "readback-browser-1",
+      verified: true,
+    };
+    const currentTask = task({ title: "Browser result task" });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({ receipt_refs: [browserReference] })],
+    }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result task" }));
+    expect(await screen.findByText(/Browser progress · checkpoint action-0-post-checks · action 1\/2 · 3 requests/)).toBeInTheDocument();
+    expect(screen.getByText("Browser artifact receipt artifacts/browser/result.json")).toBeInTheDocument();
+    expect(screen.getByText("Cleanup cleanup_verified")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/result.json" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        ...browserReference,
+        file_path: "artifacts/browser/result.json",
+        content_sha256: "c".repeat(64),
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-job-1",
+      parentWorkflowRunId: "workflow-run-1",
+    });
+  });
+
+  it("renders the canonical owner-bound browser execution DTO and keeps unknown progress explicit", async () => {
+    const currentTask = task({
+      title: "Canonical browser execution",
+      capability_id: "browser.public-task.v1",
+    });
+    const browserExecution = {
+      capability_id: "browser.public-task.v1" as const,
+      job_id: "browser-task:task-1:attempt-1",
+      durable_status: "running",
+      action_index: 1,
+      action_count: 3,
+      request_count: 4,
+      cleanup_status: "cleanup_unknown" as const,
+      memory_status: "unknown" as const,
+      readback_id: null,
+      artifact_id: "browser-artifact-1",
+      file_path: "artifacts/browser/result.json",
+      content_sha256: "d".repeat(64),
+    };
+    const onInspectArtifact = vi.fn();
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({
+        workflow_run_id: "browser-task:task-1:attempt-1",
+        browser_execution: browserExecution,
+      })],
+    }));
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Canonical browser execution" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent(/Browser durable execution.*status running/);
+    expect(receipt).toHaveTextContent("Browser progress · action 2/3 · 4 requests");
+    expect(receipt).toHaveTextContent("Cleanup cleanup_unknown · Memory unknown");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/result.json" }));
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        artifact_id: "browser-artifact-1",
+        file_path: "artifacts/browser/result.json",
+        content_sha256: "d".repeat(64),
+        job_id: "browser-task:task-1:attempt-1",
+        verified: true,
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-task:task-1:attempt-1",
+      parentWorkflowRunId: "browser-task:task-1:attempt-1",
+    });
+  });
+
+  it("uses the verified browser DTO on task.latest_attempt when the attempts list is metadata-only", async () => {
+    const browserExecution = {
+      capability_id: "browser.public-task.v1" as const,
+      job_id: "browser-task:task-1:attempt-1",
+      durable_status: "succeeded",
+      action_index: 1,
+      action_count: 2,
+      request_count: 2,
+      cleanup_status: "cleanup_verified" as const,
+      memory_status: "no_learning" as const,
+      readback_id: "readback-detail-1",
+      artifact_id: "artifact-detail-1",
+      file_path: "artifacts/browser/detail.json",
+      content_sha256: "f".repeat(64),
+    };
+    const latestAttempt = endedAttempt({ browser_execution: browserExecution });
+    const currentTask = task({
+      title: "Browser detail projection",
+      capability_id: "browser.public-task.v1",
+      latest_attempt: latestAttempt,
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      // The real detail endpoint keeps the attempts list metadata-only while
+      // enriching task.latest_attempt with the verified browser projection.
+      attempts: [endedAttempt({ attempt_id: latestAttempt.attempt_id, workflow_run_id: latestAttempt.workflow_run_id })],
+    }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser detail projection" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent("Browser durable execution");
+    expect(receipt).toHaveTextContent("status succeeded");
+    expect(receipt).toHaveTextContent("2 requests");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/detail.json" }));
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        artifact_id: "artifact-detail-1",
+        file_path: "artifacts/browser/detail.json",
+        content_sha256: "f".repeat(64),
+        job_id: "browser-task:task-1:attempt-1",
+        readback_id: "readback-detail-1",
+        verified: true,
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-task:task-1:attempt-1",
+      parentWorkflowRunId: "workflow-run-1",
+    });
+  });
+
+  it("shows the server quarantine wait reason without inventing browser progress", async () => {
+    const currentTask = task({
+      title: "Browser cleanup waiter",
+      capability_id: "browser.public-task.v1",
+      status: "ready",
+      dispatch_wait_reason: "browser_cleanup_required",
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask));
+    render(<WorkBoardPanel />);
+
+    expect(await screen.findByText("Dispatch waiting: browser cleanup recovery is required")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open task Browser cleanup waiter" }));
+    const details = await screen.findByRole("region", { name: "Task details for Browser cleanup waiter" });
+    expect(within(details).getByText("Dispatch waiting: browser cleanup recovery is required before this task can run.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Browser durable execution receipt")).not.toBeInTheDocument();
+  });
+
+  it("does not invent browser progress or a success receipt for a missing or foreign execution DTO", async () => {
+    const currentTask = task({ title: "Unverified browser execution", capability_id: "browser.public-task.v1" });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({
+        browser_execution: {
+          capability_id: "other.capability" as unknown as "browser.public-task.v1",
+          job_id: "",
+          durable_status: "succeeded",
+          action_index: 7,
+          action_count: 8,
+          request_count: 32,
+          cleanup_status: "cleanup_verified",
+          memory_status: "no_learning",
+          readback_id: "foreign-readback",
+          artifact_id: "foreign-artifact",
+          file_path: "artifacts/foreign.json",
+          content_sha256: "e".repeat(64),
+        },
+      })],
+    }));
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Unverified browser execution" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent(/receipt unavailable/i);
+    expect(receipt).not.toHaveTextContent(/status succeeded/);
+    expect(receipt).not.toHaveTextContent(/32 requests/);
+    expect(screen.queryByRole("button", { name: /Inspect execution evidence artifacts\/foreign\.json/ })).not.toBeInTheDocument();
   });
 
   it("retries a create after a transient 429 with the same payload and idempotency key after remount", async () => {
@@ -1047,16 +1352,50 @@ describe("WorkBoardPanel", () => {
     expect(document.activeElement).toBe(opener);
   });
 
-  it("traps focus in the create dialog, closes on Escape, and restores focus", async () => {
+  it.each([
+    ["Create task", "Create a goal-linked task"],
+    ["Public browser task", "Public browser task"],
+    ["Calendar meeting prep", "Prepare for a calendar meeting"],
+    ["Repository repair", "Repository repair"],
+  ])("keeps the selected task drawer behind the %s form", async (action, dialogName) => {
+    taskResponse(fetchMock, task({ title: "Preserved selection" }));
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Preserved selection" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Preserved selection" });
+    const opener = screen.getByRole("button", { name: action });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const dialog = await screen.findByRole("dialog", { name: dialogName });
+    expect(dialog).toBeVisible();
+    expect(dialog.closest("section[aria-label='Work board']")).toBeNull();
+    expect(drawer).not.toBeVisible();
+    expect(screen.queryByRole("region", { name: "Task details for Preserved selection" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: action === "Create task" ? "Cancel" : "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: dialogName })).not.toBeInTheDocument());
+    expect(screen.getByRole("region", { name: "Task details for Preserved selection" })).toBe(drawer);
+    expect(drawer).toBeVisible();
+  });
+
+  it("traps focus in the create dialog above a selected task, closes on Escape, and restores focus", async () => {
     taskResponse(fetchMock, task());
     render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Bounded task" });
     const opener = await screen.findByRole("button", { name: "Create task" });
     fireEvent.click(opener);
     const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
+    expect(drawer).not.toBeVisible();
     const focusables = Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled])"));
     expect(document.activeElement).toBe(focusables[0]);
-    const background = opener.closest<HTMLElement>(".cockpit-operator-row");
-    expect(background?.inert).toBe(true);
+    const backgroundIsInert = () => {
+      for (let element: HTMLElement | null = opener; element; element = element.parentElement) {
+        if (element.inert) return true;
+      }
+      return false;
+    };
+    expect(backgroundIsInert()).toBe(true);
 
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
@@ -1071,7 +1410,8 @@ describe("WorkBoardPanel", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create a goal-linked task" })).not.toBeInTheDocument());
     expect(document.activeElement).toBe(opener);
-    expect(background?.inert).toBe(false);
+    expect(backgroundIsInert()).toBe(false);
+    expect(drawer).toBeVisible();
   });
 
   it("refreshes canonical detail and snapshot after a stale revision conflict", async () => {
@@ -1278,5 +1618,91 @@ describe("WorkBoardPanel", () => {
     }));
     expect(JSON.stringify(actionBody)).not.toContain("run_id");
     expect(JSON.stringify(actionBody)).not.toContain("workflow_run_id");
+  });
+
+  it("restores an unknown public browser submission after Work Board remount with the same artifact request", async () => {
+    const browserGoal = {
+      id: "goal-browser-remount",
+      parent_id: null,
+      path: "/goal-browser-remount",
+      level: "root" as const,
+      title: "Browser remount goal",
+      description: "A bounded public browser goal",
+      status: "active" as const,
+      domain: "research",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 4,
+    };
+    const browserTask = task({
+      task_id: "task-browser-remount",
+      title: "Read public page",
+      owner_principal_id: "operator:browser-owner",
+      owner_session_id: "session:browser-owner",
+      goal_id: browserGoal.id,
+      goal_revision: browserGoal.revision,
+      capability_id: "browser.public-task.v1",
+      input_artifact_id: "artifact-browser-remount",
+    });
+    const artifact = {
+      artifact_id: "artifact-browser-remount",
+      typed_input_ref: "workspace-json:artifacts/browser-remount.json",
+      typed_input_digest: "b".repeat(64),
+      capability_id: "browser.public-task.v1" as const,
+      goal_id: browserGoal.id,
+      goal_revision: browserGoal.revision,
+      expires_at: "2026-10-01T12:00:00Z",
+    };
+    let artifactAttempts = 0;
+    let taskAttempts = 0;
+    let firstArtifactBody: unknown = null;
+    let retryArtifactBody: unknown = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([], 0)));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events(0)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([browserGoal]));
+      if (url.endsWith(`/api/work-board/goals/${browserGoal.id}/execution-limits`)) return Promise.resolve(response(limits(browserGoal.revision)));
+      if (url.endsWith("/input-artifacts") && init?.method === "POST") {
+        artifactAttempts += 1;
+        const body = JSON.parse(String(init.body));
+        if (artifactAttempts === 1) {
+          firstArtifactBody = body;
+          return Promise.reject(new TypeError("connection lost after artifact commit"));
+        }
+        retryArtifactBody = body;
+        return Promise.resolve(response(artifact));
+      }
+      if (url.endsWith("/api/work-board/tasks") && init?.method === "POST") {
+        taskAttempts += 1;
+        return Promise.resolve(response({ task: browserTask, idempotent_replay: true }));
+      }
+      if (url.endsWith(`/api/work-board/tasks/${browserTask.task_id}`)) return Promise.resolve(response(detail(browserTask)));
+      return Promise.resolve(response({}));
+    });
+
+    const props = { ownerPrincipalId: "operator:browser-owner", ownerSessionId: "session:browser-owner" };
+    const firstMount = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Public browser task" }));
+    await waitFor(() => expect(screen.getByLabelText("Browser goal")).toHaveValue(browserGoal.id));
+    fireEvent.change(await screen.findByLabelText("Browser start URL"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Approved URL prefixes"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Browser action 1 URL"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Final check 1 value"), { target: { value: "public.example" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /I consent to this one bounded task/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Create public browser task" }));
+    await screen.findByRole("button", { name: "Retry exact request" });
+    firstMount.unmount();
+
+    render(<WorkBoardPanel {...props} />);
+    const restored = await screen.findByRole("dialog", { name: "Public browser task" });
+    const retryButton = within(restored).getByRole("button", { name: "Retry exact request" });
+    await waitFor(() => expect(within(restored).getByLabelText("Browser goal")).toHaveValue(browserGoal.id));
+    expect(retryButton).toBeInTheDocument();
+    fireEvent.click(retryButton);
+    await waitFor(() => expect(taskAttempts).toBe(1));
+    expect(retryArtifactBody).toEqual(firstArtifactBody);
+    expect(artifactAttempts).toBe(2);
   });
 });

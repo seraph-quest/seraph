@@ -1,3 +1,6 @@
+import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
+import { publicationKey } from "../../lib/repoPublication";
+import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
@@ -8,16 +11,25 @@ import {
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { useOptionalOperatorAuth } from "../auth/OperatorAuthGate";
+import { useAttentionNavigation } from "../../hooks/useAttentionNavigation";
+import { validateCalendarResultPreview } from "../../lib/calendar";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
+import type { CockpitSection } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type {
   ChatMessage,
+  CanonicalMemoryLink,
   ConnectionStatus,
+  GuardianInboxEvidencePreview,
+  GuardianInboxEvidenceRef,
+  GuardianInboxItem,
   GoalInfo,
   GoalLoopReceipt,
+  WorkBoardTask,
   WorkBoardReceiptReference,
 } from "../../types";
 import {
@@ -58,6 +70,12 @@ import {
   type OutcomeApprovalSummary,
   type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
+import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
+import { CockpitSectionNav } from "./CockpitSectionNav";
+import { CockpitHome } from "./CockpitHome";
+import { GuardianCandidateInspector } from "./GuardianCandidateInspector";
+import { CanonicalMemoryPanel } from "./CanonicalMemoryPanel";
+import { ProcedureV2Review } from "./ProcedureV2Review";
 import {
   displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
@@ -69,6 +87,7 @@ import {
   type ApprovalLoadState,
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
+import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
 import { PttAudioControl } from "../chat/PttAudioControl";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
@@ -1373,7 +1392,68 @@ interface PendingApproval {
   package_path?: string | null;
   lifecycle_boundaries?: string[] | null;
   permissions?: Record<string, unknown> | null;
+  local_host_execution_required?: boolean;
+  required_permissions?: string[];
 }
+
+function approvalHasLocalHostPermission(value: Record<string, unknown> | null | undefined): boolean {
+  if (!value) return false;
+  const required = value.required_permissions;
+  if (Array.isArray(required) && required.some((item) => item === "local_host_execution")) return true;
+  return ["approval_context", "permissions", "sandbox"].some((key) => {
+    const nested = value[key];
+    return nested && typeof nested === "object" && !Array.isArray(nested)
+      ? approvalHasLocalHostPermission(nested as Record<string, unknown>)
+      : false;
+  });
+}
+
+function isLocalHostExecutionApproval(approval: PendingApproval | null | undefined): boolean {
+  if (!approval) return false;
+  return approval.local_host_execution_required === true
+    || approval.required_permissions?.includes("local_host_execution") === true
+    || approvalHasLocalHostPermission(approval.permissions)
+    || approvalHasLocalHostPermission(approval.approval_scope)
+    || approvalHasLocalHostPermission(approval.approval_context);
+}
+
+function approvalActionLabel(approval: PendingApproval | null | undefined): string {
+  return isLocalHostExecutionApproval(approval) ? "Approve local tests on this host" : "Approve";
+}
+
+const MAX_APPROVAL_PERMISSION_BYTES = 128;
+
+function isBoundedApprovalPermission(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= MAX_APPROVAL_PERMISSION_BYTES
+    && !value.includes("\u0000");
+}
+
+function normalizeApprovalPermissionList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isBoundedApprovalPermission) : [];
+}
+
+function normalizeApprovalPermissions(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) return { required_permissions: normalizeApprovalPermissionList(value) };
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (record.required_permissions === undefined) return record;
+  if (!Array.isArray(record.required_permissions)) return null;
+  return {
+    ...record,
+    required_permissions: normalizeApprovalPermissionList(record.required_permissions),
+  };
+}
+
+function approvalPermissionLabels(value: Record<string, unknown> | null | undefined): string[] {
+  if (!value) return [];
+  const required = normalizeApprovalPermissionList(value.required_permissions);
+  const keys = Object.keys(value).filter(isBoundedApprovalPermission).filter((key) => key !== "required_permissions");
+  return [...new Set([...required, ...keys])];
+}
+
+type ExactApprovalLoadState = "idle" | "loading" | "ready" | "missing" | "unavailable";
 
 function normalizePendingApprovals(value: unknown): PendingApproval[] {
   if (!Array.isArray(value)) return [];
@@ -1392,9 +1472,10 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
     const optionalTime = (value: unknown): string | number | null => (
       typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : null
     );
-    const permissions = record.permissions && typeof record.permissions === "object" && !Array.isArray(record.permissions)
-      ? record.permissions as Record<string, unknown>
-      : null;
+    const permissions = normalizeApprovalPermissions(record.permissions);
+    const requiredPermissions = Array.isArray(record.required_permissions)
+      ? normalizeApprovalPermissionList(record.required_permissions)
+      : [];
     const approvalScope = record.approval_scope && typeof record.approval_scope === "object" && !Array.isArray(record.approval_scope)
       ? record.approval_scope as Record<string, unknown>
       : null;
@@ -1440,6 +1521,8 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
         ? record.lifecycle_boundaries.filter((item): item is string => typeof item === "string")
         : null,
       permissions,
+      local_host_execution_required: record.local_host_execution_required === true,
+      required_permissions: requiredPermissions,
     });
     return items;
   }, []);
@@ -1692,6 +1775,48 @@ interface ObserverContinuitySnapshot {
   summary?: ObserverContinuitySummary;
   threads?: ObserverContinuityThread[];
   recovery_actions?: ObserverContinuityRecoveryAction[];
+}
+
+function isContinuityRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFiniteNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function hasConfirmedContinuityPayload(value: unknown): value is ObserverContinuitySnapshot {
+  if (!isContinuityRecord(value)) return false;
+  const daemon = isContinuityRecord(value.daemon) ? value.daemon : null;
+  const reach = isContinuityRecord(value.reach) ? value.reach : null;
+  const summary = isContinuityRecord(value.summary) ? value.summary : null;
+  return (
+    typeof daemon?.connected === "boolean"
+    && isFiniteNonNegativeInteger(daemon.pending_notification_count)
+    && Array.isArray(value.notifications)
+    && Array.isArray(value.queued_insights)
+    && isFiniteNonNegativeInteger(value.queued_insight_count)
+    && Array.isArray(value.recent_interventions)
+    && Array.isArray(reach?.route_statuses)
+    && typeof summary?.continuity_health === "string"
+    && typeof summary?.primary_surface === "string"
+    && isFiniteNonNegativeInteger(summary?.actionable_thread_count)
+    && isFiniteNonNegativeInteger(summary?.pending_notification_count)
+    && isFiniteNonNegativeInteger(summary?.queued_insight_count)
+    && isFiniteNonNegativeInteger(summary?.degraded_route_count)
+    && isFiniteNonNegativeInteger(summary?.degraded_source_adapter_count)
+    && isFiniteNonNegativeInteger(summary?.attention_family_count)
+    && [
+      "ambient_item_count",
+      "recent_intervention_count",
+      "presence_surface_count",
+      "attention_presence_surface_count",
+      "paired_presence_surface_count",
+      "unpaired_presence_surface_count",
+      "revoked_presence_surface_count",
+      "blocked_device_surface_count",
+    ].every((key) => summary?.[key] === undefined || isFiniteNonNegativeInteger(summary[key]))
+  );
 }
 
 interface SkillInfo {
@@ -2632,7 +2757,7 @@ type InspectorSelection =
   | { kind: "trace"; message: ChatMessage }
   | { kind: "audit"; event: CockpitAuditEvent }
   | { kind: "operator"; entity: OperatorEntity }
-  | { kind: "artifact"; artifact: ArtifactRecord };
+  | { kind: "artifact"; artifact: BoardArtifactRecord };
 
 function formatAge(value: number | string): string {
   const timestamp = typeof value === "number" ? value : new Date(value).getTime();
@@ -6288,6 +6413,79 @@ type BoardBoundWorkflowRun = WorkflowRunRecord & {
   [BOARD_BOUND_WORKFLOW]: true;
 };
 
+const BROWSER_RESULT_ARTIFACT_TYPE = "browser_public_task_result" as const;
+const BROWSER_RESULT_MAX_BYTES = 64 * 1024;
+const BROWSER_RESULT_MAX_EXTRACTS = 8;
+const BROWSER_RESULT_MAX_CHECKS = 72;
+const BROWSER_RESULT_CHECK_KINDS = new Set([
+  "url_host",
+  "url_path_prefix",
+  "text_contains",
+  "text_sha256",
+]);
+const BROWSER_RESULT_ATTRIBUTES = new Set([
+  "href",
+  "title",
+  "aria-label",
+  "alt",
+  "datetime",
+  "src",
+]);
+
+const CALENDAR_RESULT_ARTIFACT_TYPE = "calendar_meeting_prep_result" as const;
+
+interface BoardCalendarResultPreview {
+  schema_version: 1;
+  capability_id: "calendar.meeting-prep.v1";
+  artifact_id: string;
+  readback_id: string;
+  file_path: string;
+  content_sha256: string;
+  event_key: string;
+  event_revision: string;
+  summary: string;
+  agenda: string[];
+  questions: string[];
+  risks: string[];
+  preparation_steps: string[];
+}
+
+interface BoardBrowserResultExtract {
+  action_index: number;
+  kind: "extract";
+  attribute: string | null;
+  selector_digest: string;
+  value: string;
+}
+
+interface BoardBrowserResultCheck {
+  action_index: number | null;
+  kind: string;
+  selector_digest: string | null;
+  expected_digest: string;
+  actual_digest: string | null;
+  passed: boolean;
+}
+
+interface BoardBrowserResultPreview {
+  schema_version: 1;
+  capability_id: "browser.public-task.v1";
+  artifact_id: string;
+  readback_id: string;
+  content_sha256: string;
+  file_path: string;
+  extracts: BoardBrowserResultExtract[];
+  checks: BoardBrowserResultCheck[];
+  request_count: number;
+}
+
+type BoardArtifactRecord = ArtifactRecord & {
+  browserResultRequested?: boolean;
+  browserResult?: BoardBrowserResultPreview | null;
+  calendarResultRequested?: boolean;
+  calendarResult?: BoardCalendarResultPreview | null;
+};
+
 function isBoardBoundWorkflowRun(workflow: WorkflowRunRecord): workflow is BoardBoundWorkflowRun {
   return (workflow as Partial<BoardBoundWorkflowRun>)[BOARD_BOUND_WORKFLOW] === true;
 }
@@ -6305,6 +6503,187 @@ function boardBoundRecords(value: unknown): Record<string, unknown>[] {
         return record ? [record] : [];
       })
     : [];
+}
+
+function boardSafeReceiptIdentifier(value: unknown, maxLength = 256): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return null;
+  return /^[A-Za-z0-9:_-]+$/.test(value) ? value : null;
+}
+
+function boardSafeReceiptDigest(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+function boardSafeReceiptPath(value: unknown): string | null {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || value.startsWith("/")
+    || value.includes("\\")
+    || value.includes("\u0000")
+  ) return null;
+  const segments = value.split("/");
+  return segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+    ? null
+    : value;
+}
+
+function boardSafeReceiptText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string" || value.length > maxLength) return null;
+  return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) ? null : value;
+}
+
+function boardUtf8ByteLength(value: string): number {
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function isBrowserResultReference(reference: WorkBoardReceiptReference): boolean {
+  if (reference.artifact_type === BROWSER_RESULT_ARTIFACT_TYPE) return true;
+  const path = reference.file_path;
+  return typeof path === "string"
+    && /^artifacts\/work-board\/browser\/result-[a-f0-9]{32}\.json$/i.test(path);
+}
+
+function isCalendarResultReference(reference: WorkBoardReceiptReference): boolean {
+  if (reference.artifact_type === CALENDAR_RESULT_ARTIFACT_TYPE) return true;
+  const path = reference.file_path;
+  return typeof path === "string" && /^artifacts\/work-board\/calendar\/result-[a-f0-9]{32}\.json$/i.test(path);
+}
+
+function normalizeBoardCalendarResult(
+  value: unknown,
+  reference: WorkBoardReceiptReference,
+): BoardCalendarResultPreview | null {
+  const parsed = validateCalendarResultPreview(value);
+  if (!parsed) return null;
+  const path = boardSafeReceiptPath(parsed.file_path);
+  const digest = boardSafeReceiptDigest(
+    typeof parsed.content_sha256 === "string"
+      ? parsed.content_sha256.replace(/^sha256:/i, "")
+      : parsed.content_sha256,
+  );
+  if (!path || !digest || !reference.artifact_id || reference.artifact_id !== parsed.artifact_id
+    || !reference.readback_id || reference.readback_id !== parsed.readback_id
+    || !reference.file_path || reference.file_path !== path
+    || !reference.content_sha256 || reference.content_sha256.replace(/^sha256:/i, "").toLowerCase() !== digest) return null;
+  return {
+    ...parsed,
+    file_path: path,
+    content_sha256: digest,
+  };
+}
+
+function normalizeBoardBrowserResult(
+  value: unknown,
+  reference: WorkBoardReceiptReference,
+): BoardBrowserResultPreview | null {
+  const record = boardBoundRecord(value);
+  if (!record || record.schema_version !== 1 || record.capability_id !== "browser.public-task.v1") return null;
+  const artifactId = boardSafeReceiptIdentifier(record.artifact_id);
+  const readbackId = boardSafeReceiptIdentifier(record.readback_id);
+  const contentSha256 = boardSafeReceiptDigest(record.content_sha256);
+  const filePath = boardSafeReceiptPath(record.file_path);
+  if (!artifactId || !readbackId || !contentSha256 || !filePath) return null;
+  if (
+    !reference.artifact_id
+    || reference.artifact_id !== artifactId
+    || !reference.readback_id
+    || reference.readback_id !== readbackId
+    || !reference.file_path
+    || reference.file_path !== filePath
+    || !reference.content_sha256
+    || reference.content_sha256.toLowerCase() !== contentSha256
+  ) return null;
+
+  const rawExtracts = record.extracts;
+  const rawChecks = record.checks;
+  if (!Array.isArray(rawExtracts) || rawExtracts.length > BROWSER_RESULT_MAX_EXTRACTS) return null;
+  if (!Array.isArray(rawChecks) || rawChecks.length > BROWSER_RESULT_MAX_CHECKS) return null;
+
+  const extracts: BoardBrowserResultExtract[] = [];
+  for (const value of rawExtracts) {
+    const item = boardBoundRecord(value);
+    if (!item) return null;
+    const actionIndex = item.action_index;
+    const attribute = item.attribute === null ? null : boardSafeReceiptText(item.attribute, 128);
+    const selectorDigest = boardSafeReceiptDigest(item.selector_digest);
+    const extractValue = boardSafeReceiptText(item.value, BROWSER_RESULT_MAX_BYTES);
+    if (
+      typeof actionIndex !== "number"
+      || !Number.isInteger(actionIndex)
+      || actionIndex < 0
+      || actionIndex > 7
+      || item.kind !== "extract"
+      || (item.attribute !== null && attribute === null)
+      || (attribute !== null && !BROWSER_RESULT_ATTRIBUTES.has(attribute))
+      || !selectorDigest
+      || extractValue === null
+    ) return null;
+    extracts.push({
+      action_index: actionIndex,
+      kind: "extract",
+      attribute,
+      selector_digest: selectorDigest,
+      value: extractValue,
+    });
+  }
+
+  const checks: BoardBrowserResultCheck[] = [];
+  for (const value of rawChecks) {
+    const item = boardBoundRecord(value);
+    if (!item) return null;
+    const actionIndex = item.action_index === null ? null : item.action_index;
+    const kind = boardSafeReceiptText(item.kind, 128);
+    const selectorDigest = item.selector_digest === null ? null : boardSafeReceiptDigest(item.selector_digest);
+    const expectedDigest = boardSafeReceiptDigest(item.expected_digest);
+    const actualDigest = item.actual_digest === null ? null : boardSafeReceiptDigest(item.actual_digest);
+    if (
+      (actionIndex !== null && (
+        typeof actionIndex !== "number"
+        || !Number.isInteger(actionIndex)
+        || actionIndex < -1
+        || actionIndex > 7
+      ))
+      || !kind
+      || !BROWSER_RESULT_CHECK_KINDS.has(kind)
+      || (item.selector_digest !== null && !selectorDigest)
+      || !expectedDigest
+      || (item.actual_digest !== null && !actualDigest)
+      || typeof item.passed !== "boolean"
+    ) return null;
+    checks.push({
+      action_index: actionIndex,
+      kind,
+      selector_digest: selectorDigest,
+      expected_digest: expectedDigest,
+      actual_digest: actualDigest,
+      passed: item.passed,
+    });
+  }
+
+  const requestCount = record.request_count;
+  if (
+    typeof requestCount !== "number"
+    || !Number.isInteger(requestCount)
+    || requestCount < 0
+    || requestCount > 32
+  ) return null;
+  const boundedPayload = JSON.stringify({ extracts, checks });
+  if (typeof boundedPayload !== "string" || boardUtf8ByteLength(boundedPayload) > BROWSER_RESULT_MAX_BYTES) return null;
+
+  return {
+    schema_version: 1,
+    capability_id: "browser.public-task.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    content_sha256: contentSha256,
+    file_path: filePath,
+    extracts,
+    checks,
+    request_count: requestCount,
+  };
 }
 
 function boardBoundStatus(value: unknown): WorkflowRunRecord["status"] {
@@ -6388,8 +6767,14 @@ function boardBoundJobMatchesReference(
   value: Record<string, unknown>,
   reference: WorkBoardReceiptReference,
 ): boolean {
-  const receipts = [...boardBoundRecords(value.artifacts), ...boardBoundRecords(value.effects)];
-  return receipts.some((receipt) => {
+  const artifactReceipts = boardBoundRecords(value.artifacts);
+  const effectReceipts = boardBoundRecords(value.effects);
+  const receipts = [...artifactReceipts, ...effectReceipts];
+  const directMatch = receipts.some((receipt) => {
+    // A board child readback is a parent effect receipt. Its safe projection
+    // intentionally omits artifact/readback IDs, so it must pass the bounded
+    // effect fence below rather than matching on a path or digest alone.
+    if (receipt.effect_type === "board_child_readback") return false;
     if (reference.artifact_id && receipt.artifact_id !== reference.artifact_id) return false;
     if (
       reference.effect_id_digest
@@ -6415,6 +6800,28 @@ function boardBoundJobMatchesReference(
       || reference.readback_id
       || reference.verification_id,
     );
+  });
+  if (directMatch) return true;
+
+  const referenceEffectDigest = reference.effect_id_digest?.toLowerCase() ?? "";
+  if (!/^[0-9a-f]{16}$/.test(referenceEffectDigest)) return false;
+  const expectedContentDigests = [reference.content_sha256, reference.target_digest]
+    .filter((digest): digest is string => typeof digest === "string" && /^[a-f0-9]{64}$/i.test(digest))
+    .map((digest) => digest.toLowerCase());
+  if (expectedContentDigests.length === 0) return false;
+  return effectReceipts.some((receipt) => {
+    if (receipt.effect_type !== "board_child_readback") return false;
+    if (receipt.receipt_kind !== "readback" || receipt.status !== "succeeded") return false;
+    if (String(receipt.effect_id_digest ?? "").toLowerCase() !== referenceEffectDigest) return false;
+    const receiptContentDigests = [receipt.content_sha256, receipt.target_digest, receipt.readback_digest]
+      .filter((digest): digest is string => typeof digest === "string" && /^[a-f0-9]{64}$/i.test(digest))
+      .map((digest) => digest.toLowerCase());
+    if (!expectedContentDigests.every((digest) => receiptContentDigests.includes(digest))) return false;
+    const expectedPaths = [reference.file_path, reference.target_path]
+      .filter((path): path is string => typeof path === "string" && path.length > 0);
+    const receiptPaths = [receipt.file_path, receipt.target_path]
+      .filter((path): path is string => typeof path === "string" && path.length > 0);
+    return expectedPaths.every((path) => receiptPaths.includes(path));
   });
 }
 
@@ -7364,6 +7771,11 @@ function storeRuntimeReceipt(status: RuntimeStatus) {
 }
 
 type CockpitFetchResult = { ok: boolean; payload: unknown | null; status?: number };
+type CockpitRefreshRequest = {
+  isCancelled: () => boolean;
+  promise: Promise<void>;
+  resolve: () => void;
+};
 type OperatorAuthState = {
   status: "loading" | "authenticated" | "unauthorized" | "degraded";
   principalId: string | null;
@@ -7376,6 +7788,8 @@ type GitHubConnectionState = {
   revision?: number | null;
   mode?: "disabled" | "active" | "reconcile_only" | string | null;
   credential_configured?: boolean;
+  active_fence?: number;
+  active_job_id?: string | null;
 };
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
@@ -7429,6 +7843,8 @@ function normalizeGitHubFollowthrough(
     : null;
   const action = preview?.action === "create_comment" ? "create_comment" : preview?.action === "create_issue" ? "create_issue" : null;
   if (!action) return null;
+  const closure = githubCapacityClosure(value.github_capacity_closure);
+  if (closure && closure.native_kind !== "github_followthrough_v1") return null;
   const issueNumber = typeof preview?.issue_number === "number" ? preview.issue_number : null;
   const remoteId = typeof value.remote_id === "number" ? value.remote_id : null;
   return {
@@ -7446,6 +7862,8 @@ function normalizeGitHubFollowthrough(
     remoteId,
     remoteUrl: typeof value.remote_url === "string" ? value.remote_url : null,
     recoveryReason: typeof value.recovery_reason === "string" ? value.recovery_reason : null,
+    jobRevision: typeof value.revision === "number" && Number.isSafeInteger(value.revision) ? value.revision : null,
+    capacityClosure: closure,
     jobId: typeof value.job_id === "string" ? value.job_id : null,
     approvalId: typeof value.approval_id === "string" ? value.approval_id : null,
   };
@@ -7459,6 +7877,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [approvalLoadState, setApprovalLoadState] = useState<ApprovalLoadState>("loading");
+  const [exactApprovalLoadState, setExactApprovalLoadState] = useState<ExactApprovalLoadState>("idle");
   const [operatorAuth, setOperatorAuth] = useState<OperatorAuthState>({
     status: "loading",
     principalId: null,
@@ -7468,9 +7887,35 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [githubConnection, setGithubConnection] = useState<GitHubConnectionState | null>(null);
   const [githubConnectionLoaded, setGithubConnectionLoaded] = useState(false);
   const [githubFollowthrough, setGithubFollowthrough] = useState<CockpitGitHubFollowthrough | null>(null);
+  const capacityScope = `${operatorAuth.principalId}:${operatorAuth.sessionId}:${githubFollowthrough?.jobId}`;
+  const capacityGeneration = useRef({ scope: capacityScope, revision: 0 });
+  if (capacityGeneration.current.scope !== capacityScope) capacityGeneration.current = { scope: capacityScope, revision: capacityGeneration.current.revision + 1 };
+  const [capacityInspection, setCapacityInspection] = useState<{ scope: string; result: GitHubCapacityCloseInspection } | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const [libraryInspectorOpen, setLibraryInspectorOpen] = useState(false);
+  const [guardianSelection, setGuardianSelection] = useState<{ ownerKey: string | null; item: GuardianInboxItem } | null>(null);
+  const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const attentionAuth = useOptionalOperatorAuth();
+  const attentionSession = attentionAuth?.session;
+  const attentionOwner = attentionSession && Date.parse(attentionSession.absolute_expires_at) > Date.now() && Date.parse(attentionSession.idle_expires_at) > Date.now()
+    ? { principalId: attentionSession.principal_id, sessionId: attentionSession.session_id }
+    : operatorAuth.status === "authenticated" && !attentionAuth && operatorAuth.principalId && operatorAuth.sessionId && operatorAuth.expiresAt && Date.parse(operatorAuth.expiresAt) > Date.now()
+      ? { principalId: operatorAuth.principalId, sessionId: operatorAuth.sessionId } : null;
+  const attentionNavigation = useAttentionNavigation(attentionOwner);
+  const attentionOwnerKey = attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : null;
+  const selectedGuardianCandidate = guardianSelection?.ownerKey === attentionOwnerKey ? guardianSelection.item : null;
+  const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
+    setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
+  }, [attentionOwnerKey]);
+  const refreshSelectedGuardianCandidate = useCallback((itemId: string, item: GuardianInboxItem | null) => {
+    setGuardianSelection((current) => current?.ownerKey === attentionOwnerKey && current.item.id === itemId
+      ? item ? { ownerKey: attentionOwnerKey, item } : null
+      : current);
+  }, [attentionOwnerKey]);
+  const [selectedProcedureSourceTask, setSelectedProcedureSourceTask] = useState<WorkBoardTask | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
   const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
@@ -7481,6 +7926,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [continuitySourceAdapters, setContinuitySourceAdapters] = useState<ObserverSourceAdapterSnapshot | null>(null);
   const [continuityPresenceSurfaces, setContinuityPresenceSurfaces] = useState<ObserverPresenceSurfaceSnapshot | null>(null);
   const [continuitySummary, setContinuitySummary] = useState<ObserverContinuitySummary | null>(null);
+  const [continuityHasConfirmedPayload, setContinuityHasConfirmedPayload] = useState(false);
   const [continuityThreads, setContinuityThreads] = useState<ObserverContinuityThread[]>([]);
   const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
@@ -7521,6 +7967,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
+  const cockpitRefreshCurrentRef = useRef<CockpitRefreshRequest | null>(null);
+  const cockpitRefreshPendingRef = useRef<CockpitRefreshRequest | null>(null);
+  const exactApprovalRequestRef = useRef(0);
+  const exactApprovalOwnerKeyRef = useRef<string | null>(null);
+  const cockpitMountedRef = useRef(false);
+  useEffect(() => {
+    // StrictMode runs effect cleanup/setup during its development probe. Reset
+    // the flag in setup so a probe cleanup cannot suppress the real mount.
+    cockpitMountedRef.current = true;
+    return () => {
+      cockpitMountedRef.current = false;
+    };
+  }, []);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
   const workBoardInspectionGenerationRef = useRef(0);
   useEffect(() => () => {
@@ -7530,6 +7989,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [workBoardEvidenceStatus, setWorkBoardEvidenceStatus] = useState<string | null>(null);
   const [onboardingActionStatus, setOnboardingActionStatus] = useState<string | null>(null);
   const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
     presence: "idle",
@@ -7573,8 +8033,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [windowsMenuOpen, setWindowsMenuOpen] = useState(false);
+  // The section view is intentionally quiet. The existing draggable windows
+  // remain available through the explicit Windows control for operators who
+  // need the full diagnostic workspace.
+  const [advancedWorkspaceOpen, setAdvancedWorkspaceOpen] = useState(false);
+  const [libraryCapabilitiesOpen, setLibraryCapabilitiesOpen] = useState(false);
   const windowsMenuRef = useRef<HTMLDivElement | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
+  const activeSection = useCockpitLayoutStore((s) => s.activeSection);
   const paneVisibility = useCockpitLayoutStore((s) => s.paneVisibility);
   const savedPaneVisibility = useCockpitLayoutStore((s) => s.savedPaneVisibility);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -7588,6 +8054,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const resetCockpitLayout = usePanelLayoutStore((s) => s.resetCockpitLayout);
   const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
   const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
+  const setActiveSection = useCockpitLayoutStore((s) => s.setActiveSection);
+
+  const legacyWorkspaceVisible = advancedWorkspaceOpen
+    || activeSection === "work"
+    || activeSection === "connections"
+    || (activeSection === "library" && (libraryInspectorOpen || libraryCapabilitiesOpen));
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -7665,6 +8137,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     [bringToFront, paneVisibility, setPaneVisible],
   );
 
+  const selectCockpitSection = useCallback((section: CockpitSection) => {
+    setAdvancedWorkspaceOpen(false);
+    setLibraryInspectorOpen(false);
+    setLibraryCapabilitiesOpen(false);
+    setActiveSection(section);
+    if (section === "work") focusPane("work_board_pane");
+    if (section === "goals") setQuestPanelOpen(true);
+    if (section === "connections") {
+      setPaneVisible("presence_pane", true);
+      focusPane("desktop_shell_pane");
+    }
+  }, [focusPane, setActiveSection, setPaneVisible, setQuestPanelOpen]);
+
   const closeWindowPane = useCallback(
     (paneId: CockpitPaneId) => {
       setPaneVisible(paneId, false);
@@ -7689,8 +8174,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     void restoreLastSession();
-    refreshGoals();
-  }, [refreshGoals, restoreLastSession]);
+  }, [restoreLastSession]);
+
+  useEffect(() => {
+    if (activeSection !== "home") void refreshGoals();
+  }, [activeSection, refreshGoals]);
 
   useEffect(() => {
     const goalId = currentGoal?.id ?? null;
@@ -7711,12 +8199,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     if (!pendingLifecycleApprovalId) return;
+    if (exactApprovalLoadState !== "ready") return;
     const approval = pendingApprovals.find((item) => item.id === pendingLifecycleApprovalId);
     if (!approval) return;
     focusPane("approvals_pane");
     setSelectedInspector({ kind: "approval", approval });
     setPendingLifecycleApprovalId(null);
-  }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+    setExactApprovalLoadState("idle");
+  }, [exactApprovalLoadState, focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+
+  useEffect(() => {
+    if (exactApprovalOwnerKeyRef.current === null) return;
+    const ownerKey = operatorAuth.principalId && operatorAuth.sessionId
+      ? `${operatorAuth.principalId}:${operatorAuth.sessionId}`
+      : null;
+    if (exactApprovalOwnerKeyRef.current === ownerKey) return;
+    exactApprovalRequestRef.current += 1;
+    exactApprovalOwnerKeyRef.current = ownerKey;
+    setPendingLifecycleApprovalId(null);
+    setExactApprovalLoadState("idle");
+  }, [operatorAuth.principalId, operatorAuth.sessionId]);
 
   const fetchCockpitJson = useCallback(async (
     url: string,
@@ -7741,6 +8243,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       window.clearTimeout(timeout);
     }
   }, []);
+
+  const loadExactApproval = useCallback(async (approvalId: string, requestNumber: number, ownerKey: string) => {
+    const result = await fetchCockpitJson(
+      `${API_URL}/api/approvals/pending?approval_id=${encodeURIComponent(approvalId)}&limit=1`,
+      5000,
+    );
+    if (exactApprovalRequestRef.current !== requestNumber || exactApprovalOwnerKeyRef.current !== ownerKey) return;
+    if (!result.ok || !Array.isArray(result.payload)) {
+      setExactApprovalLoadState("unavailable");
+      return;
+    }
+    const matches = normalizePendingApprovals(result.payload).filter((approval) => approval.id === approvalId);
+    if (matches.length !== 1) {
+      setExactApprovalLoadState("missing");
+      return;
+    }
+    const [approval] = matches;
+    setPendingApprovals((current) => [
+      ...current.filter((candidate) => candidate.id !== approval.id),
+      approval,
+    ]);
+    // The exact owner-bound row is sufficient authority for this targeted
+    // action even when the capped generic list was unavailable.
+    setApprovalLoadState("ready");
+    setExactApprovalLoadState("ready");
+  }, [fetchCockpitJson]);
 
   // GitHub connection metadata is intentionally loaded only when the operator
   // opens the follow-through action. It must not perturb the cockpit's stable
@@ -7776,7 +8304,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return results.map((result) => result ?? { ok: false, payload: null });
   }, []);
 
-  const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
+  const refreshCockpitNow = useCallback(async (isCancelled: () => boolean = () => false) => {
     const [
       authResult,
       runtimeStatusResult,
@@ -7917,6 +8445,86 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }, [fetchCockpitBatch, fetchCockpitJson, sessionId]);
 
+  // Keep one metadata batch in flight while coalescing the latest request
+  // raised by a navigation/effect transition. A cancelled effect never
+  // starts a stale follow-up, but a live successor gets its own refresh as
+  // soon as the current batch releases the gate.
+  const refreshCockpit = useCallback((isCancelled: () => boolean = () => false): Promise<void> => {
+    if (isCancelled()) return Promise.resolve();
+    const createRequest = (): CockpitRefreshRequest => {
+      let resolveRequest: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        resolveRequest = resolve;
+      });
+      return { isCancelled, promise, resolve: resolveRequest };
+    };
+    const run = (next: CockpitRefreshRequest) => {
+      if (next.isCancelled()) {
+        next.resolve();
+        return;
+      }
+      cockpitRefreshInFlightRef.current = true;
+      cockpitRefreshCurrentRef.current = next;
+      void refreshCockpitNow(next.isCancelled)
+        .catch(() => undefined)
+        .finally(() => {
+          next.resolve();
+          if (cockpitRefreshCurrentRef.current === next) {
+            cockpitRefreshCurrentRef.current = null;
+          }
+          cockpitRefreshInFlightRef.current = false;
+          const pending = cockpitRefreshPendingRef.current;
+          // Clear before invoking the successor so a successor-triggered
+          // request replaces this slot instead of recursively reusing it.
+          cockpitRefreshPendingRef.current = null;
+          if (pending && !pending.isCancelled()) run(pending);
+          else pending?.resolve();
+        });
+    };
+
+    if (cockpitRefreshInFlightRef.current) {
+      const current = cockpitRefreshCurrentRef.current;
+      if (current && !current.isCancelled()) return current.promise;
+      const pending = cockpitRefreshPendingRef.current;
+      if (pending) {
+        // Keep one bounded pending promise while allowing the newest live
+        // effect to own cancellation for the successor batch.
+        pending.isCancelled = isCancelled;
+        return pending.promise;
+      }
+      const request = createRequest();
+      cockpitRefreshPendingRef.current = request;
+      return request.promise;
+    }
+
+    const request = createRequest();
+    run(request);
+    return request.promise;
+  }, [refreshCockpitNow]);
+
+  const openApprovalsPane = useCallback((approvalId?: string) => {
+    // The Library card carries the server-created approval id. Refresh before
+    // selecting so a transient empty/stale list never looks like proof that
+    // the exact approval disappeared.
+    const requestNumber = exactApprovalRequestRef.current + 1;
+    exactApprovalRequestRef.current = requestNumber;
+    exactApprovalOwnerKeyRef.current = operatorAuth.principalId && operatorAuth.sessionId
+      ? `${operatorAuth.principalId}:${operatorAuth.sessionId}`
+      : null;
+    setPendingLifecycleApprovalId(approvalId ?? null);
+    setExactApprovalLoadState(approvalId ? "loading" : "idle");
+    setApprovalLoadState("loading");
+    setAdvancedWorkspaceOpen(true);
+    setPaneVisible("approvals_pane", true);
+    window.setTimeout(() => bringToFront("approvals_pane"), 0);
+    setWindowsMenuOpen(false);
+    void refreshCockpit().then(() => {
+      if (approvalId && exactApprovalRequestRef.current === requestNumber && exactApprovalOwnerKeyRef.current) {
+        void loadExactApproval(approvalId, requestNumber, exactApprovalOwnerKeyRef.current);
+      }
+    });
+  }, [bringToFront, loadExactApproval, operatorAuth.principalId, operatorAuth.sessionId, refreshCockpit, setPaneVisible]);
+
   const updateDeepPaneState = useCallback((pane: DeepPaneKey, state: DeepPaneLoadState) => {
     setDeepPaneLoadState((current) => ({ ...current, [pane]: state }));
   }, []);
@@ -7925,16 +8533,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     updateDeepPaneState(pane, ok ? "loaded" : "stale");
   }, [updateDeepPaneState]);
 
-  const loadPresenceContinuity = useCallback(async () => {
+  const loadPresenceContinuity = useCallback(async (isCurrent: () => boolean = () => true) => {
+    if (!isCurrent()) return;
     updateDeepPaneState("presence", "loading");
-    const result = await fetchCockpitJson(`${API_URL}/api/observer/continuity`, 5000);
-    if (result.ok && result.payload) {
-      const continuityPayload = result.payload as ObserverContinuitySnapshot;
+    const result = await fetchCockpitJson(`${API_URL}/api/observer/continuity`, 5000, () => !isCurrent());
+    if (!isCurrent()) {
+      // A hidden Connections refresh may be cancelled during section
+      // hydration/navigation. Release its visible loading state so an
+      // operator can explicitly retry from the current surface.
+      updateDeepPaneState("presence", "idle");
+      return;
+    }
+    if (result.ok && hasConfirmedContinuityPayload(result.payload)) {
+      const continuityPayload = result.payload;
       setDaemonPresence(continuityPayload.daemon);
       setDesktopNotifications(continuityPayload.notifications ?? []);
-      setQueuedInsights(continuityPayload.queued_insights ?? []);
-      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-      setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      setQueuedInsights(continuityPayload.queued_insights);
+      // Older observer receipts did not include the aggregate count. Preserve
+      // the useful queued-item signal from the bounded page in that case.
+      setQueuedBundleCount(continuityPayload.queued_insight_count);
+      setRecentInterventions(continuityPayload.recent_interventions);
       setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
       setContinuityImportedReach(continuityPayload.imported_reach ?? null);
       setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
@@ -7942,6 +8560,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setContinuitySummary(continuityPayload.summary ?? null);
       setContinuityThreads(continuityPayload.threads ?? []);
       setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
+      setContinuityHasConfirmedPayload(true);
       markDeepPaneLoaded("presence", true);
       return;
     }
@@ -8132,17 +8751,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!advancedWorkspaceOpen && activeSection !== "work" && activeSection !== "connections") return;
+    let disposed = false;
+    const effectWasAdvanced = advancedWorkspaceOpen;
+    const isCancelled = () => {
+      if (!cockpitMountedRef.current) return true;
+      if (useCockpitLayoutStore.getState().activeSection !== activeSection) return true;
+      // Opening Windows replaces the quiet section effect while keeping the
+      // in-flight batch useful. Closing an already-open Windows workspace
+      // should cancel its refresh because that surface is no longer visible.
+      return disposed && effectWasAdvanced;
+    };
 
-    const refresh = async () => {
-      if (cockpitRefreshInFlightRef.current) return;
-      cockpitRefreshInFlightRef.current = true;
-      try {
-        await refreshCockpit(() => cancelled);
-      } catch {
-      } finally {
-        cockpitRefreshInFlightRef.current = false;
-      }
+    const refresh = () => {
+      if (isCancelled()) return;
+      void refreshCockpit(isCancelled);
     };
 
     void refresh();
@@ -8150,10 +8773,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       void refresh();
     }, 30_000);
     return () => {
-      cancelled = true;
+      disposed = true;
       window.clearInterval(interval);
     };
-  }, [refreshCockpit]);
+  }, [activeSection, advancedWorkspaceOpen, refreshCockpit]);
+
+  useEffect(() => {
+    if (activeSection !== "connections") return;
+    let cancelled = false;
+    const isCurrent = () => (
+      !cancelled
+      && cockpitMountedRef.current
+      && useCockpitLayoutStore.getState().activeSection === "connections"
+    );
+    void loadPresenceContinuity(isCurrent);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, loadPresenceContinuity]);
+
+  useEffect(() => {
+    if (activeSection !== "library" || !libraryCapabilitiesOpen) return;
+    let cancelled = false;
+    void refreshCockpit(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, libraryCapabilitiesOpen, refreshCockpit]);
+
+  useEffect(() => {
+    if (activeSection !== "inbox" && activeSection !== "library" && activeSection !== "work" && activeSection !== "connections") return;
+    let cancelled = false;
+    void fetchCockpitJson(`${API_URL}/api/auth/session`, 5000, () => cancelled).then((result) => {
+      if (cancelled) return;
+      const payload = result.ok && result.payload && typeof result.payload === "object"
+        ? result.payload as { authenticated?: unknown; principal_id?: unknown; session_id?: unknown; absolute_expires_at?: unknown; idle_expires_at?: unknown }
+        : null;
+      if (
+        payload?.authenticated === true
+        && typeof payload.principal_id === "string"
+        && payload.principal_id.trim()
+        && typeof payload.session_id === "string"
+        && payload.session_id.trim()
+      ) {
+        setOperatorAuth({
+          status: "authenticated",
+          principalId: payload.principal_id.trim(),
+          sessionId: payload.session_id.trim(),
+          expiresAt: typeof payload.absolute_expires_at === "string"
+            ? payload.absolute_expires_at
+            : typeof payload.idle_expires_at === "string" ? payload.idle_expires_at : null,
+        });
+      } else if (result.status === 401 || result.status === 403) {
+        setOperatorAuth({ status: "unauthorized", principalId: null, sessionId: null, expiresAt: null });
+      } else {
+        setOperatorAuth({ status: "degraded", principalId: null, sessionId: null, expiresAt: null });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, fetchCockpitJson]);
 
   useEffect(() => {
     const focusComposer = () => inputRef.current?.focus();
@@ -8410,27 +9090,52 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
   ].join(" · ");
   const visibleSections = useMemo(
-    () => ({
-      rail:
-        paneVisibility.sessions_pane
-        || paneVisibility.goals_pane
-        || paneVisibility.outputs_pane
-        || paneVisibility.approvals_pane,
-      guardianState: paneVisibility.guardian_state_pane,
-      timeline: paneVisibility.operator_timeline_pane,
-      workflows: paneVisibility.workflows_pane,
-      workBoard: paneVisibility.work_board_pane,
-      interventions: paneVisibility.interventions_pane,
-      audit: paneVisibility.audit_pane,
-      trace: paneVisibility.trace_pane,
-      inspector: paneVisibility.inspector_pane,
-      conversation:
-        paneVisibility.presence_pane
-        || paneVisibility.conversation_pane
-        || paneVisibility.desktop_shell_pane
-        || paneVisibility.operator_surface_pane,
-    }),
-    [paneVisibility],
+    () => {
+      if (advancedWorkspaceOpen) {
+        return {
+          rail:
+            paneVisibility.sessions_pane
+            || paneVisibility.goals_pane
+            || paneVisibility.outputs_pane
+            || paneVisibility.approvals_pane,
+          guardianState: paneVisibility.guardian_state_pane,
+          timeline: paneVisibility.operator_timeline_pane,
+          workflows: paneVisibility.workflows_pane,
+          workBoard: paneVisibility.work_board_pane,
+          interventions: paneVisibility.interventions_pane,
+          audit: paneVisibility.audit_pane,
+          trace: paneVisibility.trace_pane,
+          inspector: paneVisibility.inspector_pane,
+          conversation:
+            paneVisibility.presence_pane
+            || paneVisibility.conversation_pane
+            || paneVisibility.desktop_shell_pane
+            || paneVisibility.operator_surface_pane,
+        };
+      }
+
+      return {
+        // Goals owns the existing priorities overlay. Its legacy windows stay
+        // behind the explicit Windows control rather than reopening the shell.
+        rail: false,
+        guardianState: false,
+        timeline: false,
+        workflows: false,
+        workBoard: activeSection === "work" && paneVisibility.work_board_pane,
+        interventions: false,
+        audit: false,
+        trace: false,
+        inspector:
+          (activeSection === "work" || activeSection === "connections" || (activeSection === "library" && libraryInspectorOpen))
+          && paneVisibility.inspector_pane,
+        // Connections exposes its existing desktop shell; chat/presence and
+        // diagnostics remain available from Windows when explicitly requested.
+          conversation:
+            (activeSection === "connections" && (paneVisibility.desktop_shell_pane || paneVisibility.presence_pane))
+            || (activeSection === "library" && libraryCapabilitiesOpen && paneVisibility.operator_surface_pane),
+      };
+    },
+    [activeSection, advancedWorkspaceOpen, libraryCapabilitiesOpen, libraryInspectorOpen, paneVisibility],
   );
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
@@ -9006,28 +9711,73 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     workflowRunId: string,
     ownerSessionId: string,
     isCurrentInspection: () => boolean,
+    browserReference?: WorkBoardReceiptReference | null,
+    calendarReference?: WorkBoardReceiptReference | null,
   ): Promise<{
     job: Record<string, unknown> | null;
     workflow: BoardBoundWorkflowRun | null;
     status?: number;
+    browserResultRequested?: boolean;
+    browserResult?: BoardBrowserResultPreview | null;
+    calendarResultRequested?: boolean;
+    calendarResult?: BoardCalendarResultPreview | null;
   }> {
+    const browserResultRequested = Boolean(
+      browserReference && isBrowserResultReference(browserReference),
+    );
+    const calendarResultRequested = Boolean(
+      calendarReference && isCalendarResultReference(calendarReference),
+    );
+    const query = browserResultRequested
+      ? "?include_browser_result=true"
+      : calendarResultRequested
+        ? "?include_calendar_result=true"
+        : "";
     const result = await fetchCockpitJson(
-      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}`,
+      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}${query}`,
       5000,
       () => !isCurrentInspection(),
     );
     if (!isCurrentInspection() || !result.ok) {
-      return { job: null, workflow: null, status: result.status };
+      return {
+        job: null,
+        workflow: null,
+        status: result.status,
+        browserResultRequested,
+        browserResult: null,
+        calendarResultRequested,
+        calendarResult: null,
+      };
     }
     const payload = boardBoundRecord(result.payload);
     const job = boardBoundRecord(payload?.job);
     if (!job || job.job_id !== workflowRunId) {
-      return { job: null, workflow: null, status: result.status };
+      return {
+        job: null,
+        workflow: null,
+        status: result.status,
+        browserResultRequested,
+        browserResult: null,
+        calendarResultRequested,
+        calendarResult: null,
+      };
     }
+    const browserResultStatus = job.browser_result_status;
+    const browserResult = browserResultRequested && browserResultStatus === "available"
+      ? normalizeBoardBrowserResult(job.browser_result, browserReference!)
+      : null;
+    const calendarResultStatus = job.calendar_result_status;
+    const calendarResult = calendarResultRequested && calendarResultStatus === "available"
+      ? normalizeBoardCalendarResult(job.calendar_result, calendarReference!)
+      : null;
     return {
       job,
       workflow: normalizeBoardBoundWorkflowJob(job, ownerSessionId),
       status: result.status,
+      browserResultRequested,
+      browserResult,
+      calendarResultRequested,
+      calendarResult,
     };
   }
 
@@ -9041,8 +9791,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
     if (!ownerSessionId) {
-      setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+      const message = "Task workflow evidence is unavailable because the task's canonical owner session is missing.";
+      setWorkBoardEvidenceStatus(message);
+      setOperatorStatus(message);
       return;
     }
     focusPane("workflows_pane");
@@ -9050,53 +9803,80 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ workflow, status }) => {
       if (!isCurrentInspection()) return;
       if (!workflow) {
-        setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+        const message = boardWorkflowEvidenceUnavailable(status);
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
         return;
       }
       setSelectedInspector({ kind: "workflow", workflow });
+      setWorkBoardEvidenceStatus(null);
     }).catch(() => {
       if (!isCurrentInspection()) return;
-      setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+      const message = "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+      setWorkBoardEvidenceStatus(message);
+      setOperatorStatus(message);
     });
   }
   function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    setWorkBoardEvidenceStatus(null);
     const { reference, ownerSessionId, workflowRunId, parentWorkflowRunId } = request;
     const expectedParentWorkflowRunId = parentWorkflowRunId && parentWorkflowRunId !== workflowRunId
       ? parentWorkflowRunId
       : null;
     if (workflowRunId) {
       if (!ownerSessionId) {
-        setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+        const message = "Task workflow evidence is unavailable because the task's canonical owner session is missing.";
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
         return;
       }
       focusPane("workflows_pane");
+      setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
       setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ job, workflow, status }) => {
+      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection, reference, reference).then(({ job, workflow, status, browserResultRequested, browserResult, calendarResultRequested, calendarResult }) => {
         if (!isCurrentInspection()) return;
         if (!job || !workflow) {
-          setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+          const message = boardWorkflowEvidenceUnavailable(status);
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         if (expectedParentWorkflowRunId && workflow.parentRunIdentity !== expectedParentWorkflowRunId) {
-          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
+          const message = "Task child workflow evidence is hidden because its parent does not match the task's immutable run link.";
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         if (!boardBoundJobMatchesReference(job, reference)) {
-          setOperatorStatus("The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.");
+          const message = "The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.";
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
         if (artifact) {
-          setSelectedInspector({ kind: "artifact", artifact });
+          const selectedArtifact: BoardArtifactRecord = {
+            ...artifact,
+            ...(browserResultRequested
+              ? { browserResultRequested: true, browserResult: browserResult ?? null }
+              : {}),
+            ...(calendarResultRequested
+              ? { calendarResultRequested: true, calendarResult: calendarResult ?? null }
+              : {}),
+          };
+          setSelectedInspector({ kind: "artifact", artifact: selectedArtifact });
           focusPane("inspector_pane");
         } else {
           setSelectedInspector({ kind: "workflow", workflow });
         }
+        setWorkBoardEvidenceStatus(null);
       }).catch(() => {
         if (!isCurrentInspection()) return;
-        setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+        const message = "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
       });
       return;
     }
@@ -9105,10 +9885,66 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (artifact) {
       setSelectedInspector({ kind: "artifact", artifact });
       focusPane("inspector_pane");
+      setWorkBoardEvidenceStatus(null);
       return;
     }
     focusPane("inspector_pane");
-    setOperatorStatus(`Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`);
+    const message = `Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`;
+    setWorkBoardEvidenceStatus(message);
+    setOperatorStatus(message);
+  }
+
+  function inspectGuardianInboxArtifact(
+    reference: GuardianInboxEvidenceRef,
+    preview?: GuardianInboxEvidencePreview,
+  ) {
+    const currentOwnerSession = operatorAuth.sessionId;
+    const ownerSessionId = reference.owner_session_id ?? preview?.owner_session_id ?? currentOwnerSession;
+    const contentSha256 = reference.content_sha256 ?? reference.sha256 ?? preview?.sha256 ?? null;
+    if (!currentOwnerSession || !ownerSessionId || ownerSessionId !== currentOwnerSession) {
+      setOperatorStatus("Guardian evidence is unavailable because its canonical owner session does not match this operator session.");
+      return;
+    }
+    if (preview?.owner_session_id && preview.owner_session_id !== currentOwnerSession) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its owner session does not match this operator session.");
+      return;
+    }
+    if (preview?.artifact_id && preview.artifact_id !== reference.artifact_id) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its artifact identity does not match the verified reference.");
+      return;
+    }
+    if (preview?.sha256 && contentSha256 && preview.sha256.toLowerCase() !== contentSha256.toLowerCase()) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its digest does not match the verified reference.");
+      return;
+    }
+    const artifactId = reference.artifact_id ?? preview?.artifact_id;
+    const filePath = reference.file_path ?? preview?.file_path;
+    if (!artifactId || !filePath || !contentSha256 || !/^[a-f0-9]{64}$/i.test(contentSha256)) {
+      setOperatorStatus("Guardian evidence is unavailable because its verified artifact metadata is incomplete.");
+      return;
+    }
+    const workflowRunId = reference.workflow_run_id ?? preview?.workflow_run_id ?? null;
+    const artifact: ArtifactRecord = {
+      id: artifactId,
+      source: "authenticated guardian inbox evidence",
+      filePath,
+      sessionId: currentOwnerSession,
+      createdAt: reference.last_verified_at ?? new Date().toISOString(),
+      summary: preview?.text ?? "Verified Guardian evidence preview unavailable; refresh the inbox detail.",
+      artifactType: reference.artifact_type ?? preview?.artifact_type ?? "guardian_evidence",
+      producer: "guardian.research-watch.v1",
+      runId: workflowRunId,
+      contentSha256,
+      trustBoundary: {
+        owner_session_id: currentOwnerSession,
+        workflow_run_id: workflowRunId,
+        trust: preview?.trust ?? "verified_metadata_only",
+        source: "authenticated_guardian_inbox_detail",
+      },
+      recoveryHint: preview ? null : "Refresh Guardian evidence details to load the bounded redacted preview.",
+    };
+    setSelectedInspector({ kind: "artifact", artifact });
+    focusPane("inspector_pane");
   }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,
@@ -9517,11 +10353,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const workspaceTelemetryRight = effectiveConnectionStatus === "connected"
     ? `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`
     : `DIRECT FALLBACK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
-  const desktopPresenceLabel = daemonPresence?.connected
-    ? "desktop live"
-    : runtimeAvailable
-      ? "desktop optional"
-      : "desktop offline";
+  const presenceMetadataState = deriveSeraphPresenceMetadataState(
+    deepPaneLoadState.presence,
+    continuityHasConfirmedPayload,
+  );
+  const presenceMetadataUnavailable = presenceMetadataState === "unavailable";
+  const presenceMetadataStale = presenceMetadataState === "stale";
+  const desktopPresenceLabel = presenceMetadataUnavailable
+    ? "desktop unknown"
+    : presenceMetadataStale
+      ? "desktop last confirmed"
+      : daemonPresence?.connected
+        ? "desktop live"
+        : runtimeAvailable
+          ? "desktop optional"
+          : "desktop offline";
+  const bundleQueueLabel = presenceMetadataUnavailable
+    ? "bundle unknown"
+    : presenceMetadataStale
+      ? `bundle ${queuedBundleCount} queued · last confirmed`
+      : `bundle ${queuedBundleCount} queued`;
+  const desktopShellMeta = presenceMetadataUnavailable
+    ? "presence unknown · alerts unknown"
+    : presenceMetadataStale
+      ? `last confirmed · ${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`
+      : `${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`;
+  const desktopContinuitySummary = presenceMetadataUnavailable
+    ? "presence unknown · bundle unknown · recent unknown"
+    : presenceMetadataStale
+      ? `presence last confirmed · ${daemonPresence?.connected ? "linked" : "offline"} · bundle last confirmed ${queuedInsights.length} · recent last confirmed ${recentInterventions.length}`
+      : `presence ${daemonPresence?.connected ? "linked" : "offline"} · bundle ${queuedInsights.length} · recent ${recentInterventions.length}`;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
     () => runbooks,
@@ -9544,6 +10405,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const seraphPresenceSnapshot = useMemo(
     () => ({
       connectionStatus: effectiveConnectionStatus,
+      metadataState: presenceMetadataState,
       animationState: agentVisual.animationState,
       isAgentBusy,
       pendingApprovalCount: pendingApprovals.length,
@@ -9568,6 +10430,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       agentVisual.animationState,
       ambientState,
       effectiveConnectionStatus,
+      continuityHasConfirmedPayload,
+      presenceMetadataState,
       continuitySummary?.actionable_thread_count,
       continuitySummary?.attention_family_count,
       continuitySummary?.attention_presence_surface_count,
@@ -9583,6 +10447,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       continuityThreads.length,
       desktopNotifications.length,
       desktopRouteStatuses,
+      deepPaneLoadState.presence,
       isAgentBusy,
       latestResponse?.role,
       observerState?.data_quality,
@@ -10190,7 +11055,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     approvalMode !== "off" ? "approval" : null,
     toolPolicyMode !== "unknown" ? "tool policy" : null,
     mcpPolicyMode !== "unknown" ? "mcp policy" : null,
-    ...(m7RevocationTarget ? [m7RevocationTarget.boundary_scope ?? m7RevocationTarget.boundary_posture ?? "presence"] : []),
+    ...(m7RevocationTarget
+      || (continuityPresenceSurfaces?.summary.surface_count ?? 0) > 0
+      ? [m7RevocationTarget?.boundary_scope ?? m7RevocationTarget?.boundary_posture ?? "presence"]
+      : []),
   ].filter(Boolean).length;
   const m7TrustBoundaryCount = m7Summary?.trust_boundary_count ?? m7FallbackTrustBoundaryCount;
   const m7MemoryEvidenceCount = operatorM6MemorySuperiority
@@ -10436,7 +11304,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       createdAt: outcomeApproval.created_at,
       actionStatus: outcomeApprovalActionState,
       scope: approvalScopeLabels,
-      permissions: outcomeApproval.permissions ? Object.keys(outcomeApproval.permissions) : [],
+      permissions: [...new Set([
+        ...approvalPermissionLabels(outcomeApproval.permissions),
+        ...normalizeApprovalPermissionList(outcomeApproval.required_permissions),
+      ])],
+      localHostExecutionRequired: isLocalHostExecutionApproval(outcomeApproval),
       threadLabel: outcomeApproval.thread_label ?? outcomeApproval.thread_id ?? outcomeApproval.session_id ?? null,
       authorized: approvalAuthorityReady,
       ownerPrincipal: redactIdentifier(outcomeApproval.approval_owner_principal_id),
@@ -10574,13 +11446,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
-  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile", body?: Record<string, unknown>) {
-    if (!operatorAuth.sessionId) return;
+  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile" | "/close-capacity", body?: Record<string, unknown>, currentScope?: () => boolean) {
+    if (!operatorAuth.sessionId || (currentScope && !currentScope())) return;
+    const controller = new AbortController();
+    const closeTimer = path === "/close-capacity" ? setTimeout(() => controller.abort(), 15000) : null;
     try {
       const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}${path}`, {
         method: path ? "POST" : "GET",
         headers: path ? { "Content-Type": "application/json" } : undefined,
         body: path ? JSON.stringify(body ?? {}) : undefined,
+        signal: controller.signal,
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
@@ -10590,6 +11465,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setOperatorStatus(`GitHub follow-through refused: ${typeof detail === "string" ? detail : "the current job state is stale"}.`);
         return;
       }
+      if (currentScope && !currentScope()) return;
       const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
       if (next) {
         setGithubFollowthrough((current) => ({
@@ -10598,8 +11474,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }));
       }
       await refreshCockpit();
+      return next;
     } catch {
       setOperatorStatus("GitHub follow-through status is temporarily unavailable; inspect the durable job before acting again.");
+    } finally {
+      if (closeTimer !== null) clearTimeout(closeTimer);
     }
   }
 
@@ -10617,9 +11496,73 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     await refreshGitHubJob(jobId, "/cancel");
   }
 
+  async function closeGitHubCapacity(acknowledged: true) {
+    const jobId = githubFollowthrough?.jobId;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    const capturedGeneration = capacityGeneration.current;
+    const stillCurrent = () => capacityGeneration.current === capturedGeneration;
+    if (acknowledged !== true || !jobId || !originalOwner || !originalRoot || !githubFollowthrough?.jobRevision) return;
+    setCapacityInspection(null);
+    try {
+      const connection = await loadGithubConnection();
+      const response = await apiFetch(`${API_URL}/api/auth/session`);
+      const current = await response.json();
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || !stillCurrent()) throw new Error("Original login changed");
+      const pending = githubCapacityClosePending(`${originalOwner}:${originalRoot}:${jobId}:work.github-followthrough.v1`, {
+        acknowledged_capacity_close: true, expected_job_revision: githubFollowthrough.jobRevision,
+        expected_connection_revision: connection.revision, expected_connection_fence: connection.active_fence,
+        idempotency_key: publicationKey(), ...(githubFollowthrough.remoteId ? { remote_id: githubFollowthrough.remoteId } : {}),
+      });
+      const next = await refreshGitHubJob(jobId, "/close-capacity", pending.body, stillCurrent);
+      if (next?.capacityClosure) pending.clear();
+    } catch {
+      setOperatorStatus("Capacity closure unavailable; no new request can be sent without exact original-login metadata and durable request storage.");
+    }
+  }
+
+  async function inspectGitHubCapacity(discardRejected = false) {
+    const jobId = githubFollowthrough?.jobId;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    const capturedGeneration = capacityGeneration.current;
+    const scope = capacityScope;
+    const stillCurrent = () => capacityGeneration.current === capturedGeneration;
+    if (operatorAuth.status !== "authenticated" || !jobId || !originalOwner || !originalRoot) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const pending = githubCapacityCloseStored(`${originalOwner}:${originalRoot}:${jobId}:work.github-followthrough.v1`);
+      if (!pending) throw new Error("No retained close request");
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}?pending_capacity_close=${encodeURIComponent(JSON.stringify(pending.body))}`, { signal: controller.signal });
+      const payload = await response.json();
+      if (!response.ok) throw new Error("Canonical pending-close inspection unavailable");
+      const result = githubCapacityCloseInspection(payload.pending_capacity_close, jobId, pending.body);
+      const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
+      if (!next || next.jobId !== jobId || next.jobRevision !== result.job_revision) throw new Error("Canonical job inspection changed");
+      if (!stillCurrent()) return;
+      setGithubFollowthrough(current => ({ ...next, approvalStatus: current?.approvalStatus ?? next.approvalStatus }));
+      setCapacityInspection({ scope, result });
+      if (result.state === "applied") pending.clear();
+      else if (discardRejected && result.state === "permanently_stale_not_applied") {
+        pending.clear();
+        setCapacityInspection(null);
+        await loadGithubConnection();
+        setOperatorStatus("Rejected request discarded. Review current metadata and acknowledge a new capacity-close request separately.");
+      }
+    } catch {
+      if (stillCurrent()) {
+        setCapacityInspection(null);
+        setOperatorStatus("Pending-close inspection is inconclusive; the exact retained request is unchanged.");
+      }
+    } finally { clearTimeout(timer); }
+  }
+
   async function reconcileGitHubFollowthrough() {
     const jobId = githubFollowthrough?.jobId;
-    if (!jobId) return;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    if (!jobId || !originalOwner || !originalRoot) return;
     const suggested = githubFollowthrough.remoteId ? String(githubFollowthrough.remoteId) : "";
     const rawRemoteId = typeof window !== "undefined"
       ? window.prompt("Enter the verified GitHub object ID if it is known; leave blank to receive a durable block.", suggested)
@@ -10629,7 +11572,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus("GitHub reconciliation cancelled: the remote ID must be a positive integer.");
       return;
     }
-    await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
+    if (rawRemoteId === null || !window.confirm("Authorize GET-only readback of this exact publication under the current connection revision? This does not permit another publication.")) return;
+    try {
+      const connection = await loadGithubConnection();
+      const response = await apiFetch(`${API_URL}/api/auth/session`);
+      const current = await response.json();
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || typeof connection.revision !== "number" || !Number.isSafeInteger(connection.revision) || connection.revision < 1) {
+        setOperatorStatus("GitHub readback blocked: the original login or connection metadata changed.");
+        return;
+      }
+      const { githubReadbackRequest } = await import("../../lib/githubReadback");
+      await refreshGitHubJob(jobId, "/reconcile", githubReadbackRequest(true, connection.revision, remoteId));
+    } catch {
+      setOperatorStatus("GitHub readback metadata unavailable; no reconciliation request was sent.");
+    }
   }
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(
@@ -11780,10 +12736,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ): Promise<boolean> {
     const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
     if (approvalDetail) {
-      setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
       setStatus(`${approvalDetail.message} Review Pending approvals, then retry.`);
-      focusPane("approvals_pane");
-      await refreshCockpit();
+      openApprovalsPane(approvalDetail.approval_id || undefined);
       appendOperatorFeed(
         `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
         "info",
@@ -13669,6 +14623,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
     const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
     const selectedWorkflowHistorySummary = selectedWorkflow ? workflowHistorySummary(selectedWorkflow) : [];
+    const selectedBrowserArtifact = selectedInspector.kind === "artifact"
+      ? selectedInspector.artifact
+      : null;
+    const selectedBrowserResult = selectedBrowserArtifact?.browserResult ?? null;
+    const browserResultRequested = selectedBrowserArtifact?.browserResultRequested === true;
+    const selectedCalendarResult = selectedBrowserArtifact?.calendarResult ?? null;
+    const calendarResultRequested = selectedBrowserArtifact?.calendarResultRequested === true;
     const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
     const selectedWorkflowCheckpointDraftByStep = new Map(
       selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
@@ -13677,6 +14638,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
       const owner = displayApprovalOwnerMetadata(approval);
+      const localHostApproval = isLocalHostExecutionApproval(approval);
       const approvalScope = approval.approval_scope ?? approval.approval_context;
       const approvalScopeAction = approvalScope
         && typeof approvalScope === "object"
@@ -13689,7 +14651,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ...displayApprovalScopeTarget(approvalScope),
       ].filter((value): value is string => Boolean(value)).join(" · ") || "unavailable";
       title = approval.tool_name;
-      meta = `${approval.risk_level} approval`;
+      meta = `${approval.risk_level} approval${localHostApproval ? " · host execution" : ""}`;
       body = `approval request · ${redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}`;
       details = {
         approval_id: approval.id,
@@ -13706,6 +14668,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         package_path: approval.package_path ?? "n/a",
         lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
         permissions: approval.permissions ?? {},
+        permission_boundary: localHostApproval
+          ? "Approve local tests on this host · host-user filesystem/network/resource access is visible; no isolation guarantee"
+          : "n/a",
         approval_scope: approvalScopeDisplay,
         bound_revision: approval.goal_revision ?? approval.plan_revision ?? "unavailable",
         authority: approvalActionAllowed(approval) ? "ready" : "locked",
@@ -13814,6 +14779,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         file_path: artifact.filePath,
         session_id: artifact.sessionId ?? "n/a",
         created_at: artifact.createdAt,
+        ...(artifact.browserResultRequested
+          ? { browser_result_status: artifact.browserResult ? "available" : "unavailable" }
+          : {}),
+        ...(artifact.calendarResultRequested
+          ? { calendar_result_status: artifact.calendarResult ? "available" : "unavailable" }
+          : {}),
       };
     }
 
@@ -13914,7 +14885,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   disabled={approvalActionDisabled(selectedWorkflowApproval)}
                   onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
                 >
-                  Approve
+                  {approvalActionLabel(selectedWorkflowApproval)}
                 </button>
                 <button
                   className="cockpit-feedback-button"
@@ -14075,11 +15046,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               })()}
               <button
                 className="cockpit-feedback-button"
-                aria-label={`Approve approval context for ${selectedWorkflowName}`}
+                aria-label={`${approvalActionLabel(selectedWorkflowApproval)} approval context for ${selectedWorkflowName}`}
                 disabled={approvalActionDisabled(selectedWorkflowApproval)}
                 onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
               >
-                Approve
+                {approvalActionLabel(selectedWorkflowApproval)}
               </button>
               <button
                 className="cockpit-feedback-button"
@@ -15179,6 +16150,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </>
           );
         })()}
+        {selectedInspector.kind === "artifact" && browserResultRequested && (
+          <section className="cockpit-inspector-stack" aria-label="Verified browser result preview">
+            {selectedBrowserResult ? (
+              <>
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">browser result</div>
+                  <div className="cockpit-value">verified extraction readback</div>
+                  <div className="cockpit-value">
+                    requests {selectedBrowserResult.request_count ?? "unavailable"}
+                  </div>
+                </div>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified browser result extracts">
+                  <div className="cockpit-key">extracts</div>
+                  {selectedBrowserResult.extracts.length > 0 ? selectedBrowserResult.extracts.map((extract, index) => (
+                    <div key={`browser-extract:${index}:${extract.action_index}`} className="cockpit-inspector-detail">
+                      <div className="cockpit-value">
+                        extract {index + 1} · action {extract.action_index + 1}
+                        {extract.attribute ? ` · attribute ${extract.attribute}` : " · page text"}
+                      </div>
+                      <pre className="cockpit-inspector-value">{extract.value}</pre>
+                    </div>
+                  )) : (
+                    <div className="cockpit-value">No extracted values.</div>
+                  )}
+                </section>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified browser result checks">
+                  <div className="cockpit-key">checks</div>
+                  {selectedBrowserResult.checks.length > 0 ? selectedBrowserResult.checks.map((check, index) => (
+                    <div key={`browser-check:${index}:${check.kind}`} className="cockpit-value">
+                      check {index + 1} · {check.kind} · {check.passed ? "passed" : "failed"}
+                      {check.actual_digest ? ` · actual ${check.actual_digest}` : ""}
+                    </div>
+                  )) : (
+                    <div className="cockpit-value">No checks recorded.</div>
+                  )}
+                </section>
+              </>
+            ) : (
+              <div
+                className="cockpit-feedback-status"
+                role="status"
+                aria-label="Browser result preview unavailable; verified artifact metadata remains available."
+              >
+                Browser result preview unavailable; verified artifact metadata remains available. Refresh task evidence and retry.
+              </div>
+            )}
+          </section>
+        )}
+        {selectedInspector.kind === "artifact" && calendarResultRequested && (
+          <section className="cockpit-inspector-stack" aria-label="Verified calendar preparation result">
+            {selectedCalendarResult ? (
+              <>
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">calendar result</div>
+                  <div className="cockpit-value">verified preparation readback</div>
+                  <div className="cockpit-value">event binding {selectedCalendarResult.event_key} · revision {selectedCalendarResult.event_revision}</div>
+                </div>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified calendar preparation text">
+                  <div className="cockpit-key">summary</div>
+                  <pre className="cockpit-inspector-value whitespace-pre-wrap">{selectedCalendarResult.summary}</pre>
+                  {(["agenda", "questions", "risks", "preparation_steps"] as const).map((field) => (
+                    <div key={field} className="cockpit-inspector-detail">
+                      <div className="cockpit-key">{field.replace(/_/g, " ")}</div>
+                      {selectedCalendarResult[field].length > 0 ? selectedCalendarResult[field].map((item, index) => <pre key={`${field}:${index}`} className="cockpit-inspector-value whitespace-pre-wrap">{item}</pre>) : <div className="cockpit-value">None recorded.</div>}
+                    </div>
+                  ))}
+                </section>
+              </>
+            ) : (
+              <div className="cockpit-feedback-status" role="status" aria-label="Calendar result preview unavailable; verified artifact metadata remains available.">
+                Calendar preparation preview unavailable; verified artifact metadata remains available. Refresh task evidence and retry.
+              </div>
+            )}
+          </section>
+        )}
         <div className="cockpit-inspector-details">
           {Object.entries(details).map(([key, value]) => (
             <div key={key} className="cockpit-inspector-detail">
@@ -15236,7 +16282,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClick={() => setSettingsPanelOpen(true)}
                 title="Open settings to inspect or dismiss pending desktop notifications"
               >
-                native {daemonPresence.pending_notification_count} queued
+                native {daemonPresence.pending_notification_count} queued{presenceMetadataStale ? " · last confirmed" : ""}
               </button>
             )}
             <button
@@ -15247,7 +16293,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               onClick={() => void loadPresenceContinuity()}
               title={deepPaneLoadState.presence === "loaded" ? "Refresh deferred bundle items and recent guardian continuity" : "Load deferred bundle items and recent guardian continuity"}
             >
-              bundle {queuedBundleCount} queued
+              {bundleQueueLabel}
             </button>
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}
@@ -15306,7 +16352,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
             <button
               className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
-              onClick={() => setWindowsMenuOpen((current) => !current)}
+              onClick={() => {
+                setAdvancedWorkspaceOpen(true);
+                setWindowsMenuOpen((current) => !current);
+              }}
               title="Show or hide workspace windows"
               aria-label="Windows"
             >
@@ -15319,7 +16368,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
                 </div>
                 <div className="cockpit-windows-menu-toolbar">
-                  <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                  <button
+                    className="cockpit-windows-menu-action"
+                    onClick={() => {
+                      setAdvancedWorkspaceOpen(true);
+                      showAllPanes();
+                    }}
+                  >
                     Show all
                   </button>
                   <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
@@ -15392,10 +16447,157 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </section>
       )}
 
+      <div className="cockpit-main-stage">
+        <CockpitSectionNav activeSection={activeSection} onSelect={selectCockpitSection} />
+        <main className="cockpit-section-content">
+
+      {activeSection === "home" ? (
+        <CockpitHome
+          owner={attentionOwner}
+          focusAttentionId={attentionNavigation.homeFocusId}
+          onOpenAttention={(item) => {
+            if (item.taskId && attentionNavigation.fromHome(item)) {
+              setFocusTaskId(item.taskId);
+              selectCockpitSection("work");
+            } else if (item.inboxId) {
+              setSelectedGuardianCandidate(null);
+              attentionNavigation.focusInbox(item.inboxId);
+              selectCockpitSection("inbox");
+            }
+          }}
+          onOpenSection={selectCockpitSection}
+          onOpenApprovals={openApprovalsPane}
+          goalSummary={currentGoal ? {
+            title: currentGoal.title,
+            status: currentGoal.status,
+            criterion: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+          } : null}
+          onOpenTask={(taskId) => {
+            setFocusTaskId(taskId);
+            selectCockpitSection("work");
+          }}
+        />
+      ) : null}
+
+      {activeSection === "inbox" ? (
+        <section className="cockpit-section-surface cockpit-inbox-surface" data-testid="cockpit-inbox-section">
+          <div className="cockpit-section-header">
+            <div>
+              <div className="cockpit-eyebrow">INBOX</div>
+              <h2>Guardian decisions</h2>
+              <p>Review verified source changes and route accepted work into the existing board.</p>
+            </div>
+          </div>
+          <div className="cockpit-inbox-layout">
+            <GuardianInboxPanel
+              key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+              ref={guardianInboxRef}
+              currentOwnerPrincipalId={attentionOwner?.principalId ?? null}
+              currentRootId={attentionOwner?.sessionId ?? null}
+              active
+              pageSize={20}
+              pollIntervalMs={0}
+              focusItemId={attentionNavigation.inboxFocusId}
+              autoFocusAcceptedTask
+              onSelectItem={setSelectedGuardianCandidate}
+              selectedItemId={selectedGuardianCandidate?.id ?? null}
+              onRefreshSelectedItem={refreshSelectedGuardianCandidate}
+              onOpenTask={(taskId, item) => {
+                attentionNavigation.fromInbox(taskId, item);
+                setFocusTaskId(taskId);
+                selectCockpitSection("work");
+              }}
+              onOpenGoals={() => selectCockpitSection("goals")}
+              onOpenWork={() => selectCockpitSection("work")}
+              onInspectArtifact={inspectGuardianInboxArtifact}
+            />
+            <GuardianCandidateInspector
+              item={selectedGuardianCandidate}
+              onClose={() => {
+                const itemId = selectedGuardianCandidate?.id;
+                setSelectedGuardianCandidate(null);
+                if (itemId) window.setTimeout(() => {
+                  const testId = `guardian-inbox-row-${itemId}`;
+                  Array.from(document.querySelectorAll<HTMLElement>("[data-testid^=\"guardian-inbox-row-\"]"))
+                    .find((row) => row.dataset.testid === testId)
+                    ?.focus();
+                }, 0);
+              }}
+              onOpenTask={(taskId) => {
+                attentionNavigation.fromInbox(taskId, selectedGuardianCandidate);
+                setFocusTaskId(taskId);
+                selectCockpitSection("work");
+              }}
+              onInspectArtifact={inspectGuardianInboxArtifact}
+            />
+          </div>
+        </section>
+      ) : null}
+
+      {activeSection === "library" ? (
+        <>
+          <ProcedureV2Review
+            active
+            ownerPrincipalId={operatorAuth.principalId}
+            ownerSessionId={operatorAuth.sessionId}
+            selectedSourceTask={selectedProcedureSourceTask}
+            goals={activeGoalsForCockpit}
+            pendingApprovals={pendingApprovals.map((approval) => ({
+              id: approval.id,
+              status: approval.status,
+              tool_name: approval.tool_name,
+              summary: redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context),
+              expires_at: approval.expires_at,
+            }))}
+            onOpenApprovals={openApprovalsPane}
+            onOpenTask={(taskId) => {
+              setFocusTaskId(taskId);
+              selectCockpitSection("work");
+            }}
+          />
+          <CanonicalMemoryPanel
+            active
+            onOpenTask={(taskId) => {
+              setFocusTaskId(taskId);
+              selectCockpitSection("work");
+            }}
+            onOpenMemoryControls={() => {
+              setAdvancedWorkspaceOpen(true);
+              focusPane("operator_surface_pane");
+              void loadGuardianMemory();
+            }}
+            onOpenCapabilities={() => {
+              setLibraryCapabilitiesOpen(true);
+              setPaneVisible("operator_surface_pane", true);
+              focusPane("operator_surface_pane");
+            }}
+            onInspectLink={(link: CanonicalMemoryLink) => {
+              const id = link.id;
+              if (!id || !operatorAuth.sessionId) {
+                setOperatorStatus("Memory evidence is unavailable because its owner-bound reference is incomplete.");
+                return;
+              }
+              if (link.kind.includes("artifact")) {
+                setLibraryInspectorOpen(true);
+                inspectWorkBoardArtifact({
+                  reference: { artifact_id: id },
+                  ownerSessionId: operatorAuth.sessionId,
+                  workflowRunId: null,
+                  parentWorkflowRunId: null,
+                });
+                return;
+              }
+              setOperatorStatus(`Memory ${link.kind} ${id} is an opaque reference without an owner task link. It remains unavailable in this surface.`);
+            }}
+          />
+        </>
+      ) : null}
+
+      {legacyWorkspaceVisible ? (
       <div className="cockpit-workspace">
         {visibleSections.rail && (
           <>
-            {paneVisibility.sessions_pane && (
+            {advancedWorkspaceOpen && paneVisibility.sessions_pane && (
               <CockpitWorkspaceWindow
                 panelId="sessions_pane"
                 title="Sessions"
@@ -15453,7 +16655,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.goals_pane && (
+            {advancedWorkspaceOpen && paneVisibility.goals_pane && (
               <CockpitWorkspaceWindow
                 panelId="goals_pane"
                 title="Priorities"
@@ -15495,7 +16697,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.outputs_pane && (
+            {advancedWorkspaceOpen && paneVisibility.outputs_pane && (
               <CockpitWorkspaceWindow
                 panelId="outputs_pane"
                 title="Recent outputs"
@@ -15614,11 +16816,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.approvals_pane && (
+            {advancedWorkspaceOpen && paneVisibility.approvals_pane && (
               <CockpitWorkspaceWindow
                 panelId="approvals_pane"
                 title="Pending approvals"
-                meta={`${pendingApprovals.length} waiting`}
+                meta={approvalLoadState === "loading"
+                  ? "refreshing"
+                  : approvalLoadState === "stale"
+                    ? "unavailable"
+                    : `${pendingApprovals.length} waiting`}
                 hint={COCKPIT_WINDOW_HINTS.approvals}
                 showHint={cockpitHintsEnabled}
                 minWidth={300}
@@ -15626,6 +16832,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("approvals_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
+                  {approvalLoadState === "loading" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Refreshing the authoritative approval list…
+                    </div>
+                  )}
+                  {approvalLoadState === "stale" && (
+                    <div className="cockpit-sublist-item" role="alert">
+                      The approval list could not be refreshed. Existing approval actions remain unavailable until the owner-bound list is read successfully.
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "loading" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Reading the exact server-owned approval before selecting it…
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "unavailable" && (
+                    <div className="cockpit-sublist-item" role="alert">
+                      The exact approval <span className="font-mono">{pendingLifecycleApprovalId}</span> could not be read for this owner session. No other approval was selected; retry from the procedure card.
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "missing" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Exact approval <span className="font-mono">{pendingLifecycleApprovalId}</span> is unavailable for this owner session. No other pending approval was selected; refresh the procedure card to reconcile its server-owned receipt.
+                    </div>
+                  )}
                   <div className="cockpit-list">
                     {pendingApprovals.map((approval) => (
                       <div key={approval.id} className="cockpit-row">
@@ -15650,6 +16881,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               ? ` · thread ${approval.thread_id.slice(0, 6)}`
                               : ""}
                         </div>
+                        {isLocalHostExecutionApproval(approval) && (
+                          <div className="cockpit-row-meta text-amber-200">Host permission · no isolation guarantee · review the exact host scope</div>
+                        )}
                       </button>
                       <div className="cockpit-feedback-row">
                         {approval.resume_message && (
@@ -15681,7 +16915,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           disabled={approvalActionDisabled(approval)}
                           onClick={() => void handleApprovalDecision(approval, "approve")}
                         >
-                          Approve
+                          {approvalActionLabel(approval)}
                         </button>
                         <button
                           className="cockpit-feedback-button"
@@ -15696,7 +16930,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       </div>
                     ))}
-                    {pendingApprovals.length === 0 && (
+                    {pendingApprovals.length === 0 && approvalLoadState === "ready" && !pendingLifecycleApprovalId && (
                       <div className="cockpit-empty">No pending approvals.</div>
                     )}
                   </div>
@@ -15706,7 +16940,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </>
         )}
 
-        {paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
+        {advancedWorkspaceOpen && paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
           <CockpitWorkspaceWindow
             panelId="response_pane"
             title="Latest response"
@@ -15790,6 +17024,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
                 onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
                 onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
+                githubCapacityAcknowledgmentScope={operatorAuth.status === "authenticated" ? capacityScope : null}
+                onCloseGitHubCapacity={acknowledged => { void closeGitHubCapacity(acknowledged); }}
+                githubCapacityCloseInspection={capacityInspection?.scope === capacityScope ? capacityInspection.result : null}
+                onInspectGitHubCapacity={() => { void inspectGitHubCapacity(); }}
+                onDiscardRejectedGitHubCapacity={() => { void inspectGitHubCapacity(true); }}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
@@ -15833,6 +17072,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   }
                 }}
               />
+              {activeSection !== "inbox" ? (
+                <GuardianInboxPanel
+                  key={attentionOwnerKey ?? "unconfirmed"}
+                  currentOwnerPrincipalId={attentionOwner?.principalId ?? null}
+                  currentRootId={attentionOwner?.sessionId ?? null}
+                  active={advancedWorkspaceOpen}
+                  pageSize={20}
+                  onSelectItem={setSelectedGuardianCandidate}
+                  selectedItemId={selectedGuardianCandidate?.id ?? null}
+                  onRefreshSelectedItem={refreshSelectedGuardianCandidate}
+                  onOpenTask={(taskId) => {
+                    setFocusTaskId(taskId);
+                    selectCockpitSection("work");
+                  }}
+                  onInspectArtifact={inspectGuardianInboxArtifact}
+                />
+              ) : null}
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>
@@ -16272,10 +17528,41 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             minHeight={360}
             onClose={() => closeWindowPane("work_board_pane")}
           >
+            {workBoardEvidenceStatus && (
+              <div className="cockpit-sublist-item" role="status" aria-label={workBoardEvidenceStatus} aria-live="polite">
+                {workBoardEvidenceStatus}
+              </div>
+            )}
             <WorkBoardPanel
-              ownerPrincipalId={operatorAuth.principalId}
-              ownerSessionId={operatorAuth.sessionId}
+              key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+              attentionContext={attentionNavigation.origin}
+              onReturnAttention={() => {
+                const section = attentionNavigation.returnContext();
+                if (section) selectCockpitSection(section);
+              }}
+              onOpenAttentionGoal={() => {
+                if (!attentionOwner || !attentionNavigation.origin?.goalId) return;
+                selectCockpitSection("goals");
+                appEventBus.emit("attention:inspect-goal", { ...attentionOwner, goalId: attentionNavigation.origin.goalId });
+              }}
+              onOpenAttentionThread={() => {
+                if (!attentionOwner || !attentionNavigation.origin?.threadId) return;
+                const ownerKey = attentionNavigation.origin.ownerKey;
+                void openThread(attentionNavigation.origin.threadId).then((opened) => { if (opened && attentionNavigation.isCurrent(ownerKey)) selectCockpitSection("home"); });
+              }}
+              onOpenAccounting={() => {
+                if (attentionOwner) appEventBus.emit("settings:inspect-accounting", attentionOwner);
+              }}
+              ownerPrincipalId={attentionOwner?.principalId ?? null}
+              ownerSessionId={attentionOwner?.sessionId ?? null}
+              focusTaskId={focusTaskId}
+              onFocusTaskHandled={() => setFocusTaskId(null)}
+              onSelectedTaskChange={setSelectedProcedureSourceTask}
               onOpenApprovals={() => focusPane("approvals_pane")}
+              onOpenInboxCandidate={(item) => {
+                setSelectedGuardianCandidate(item);
+                selectCockpitSection("inbox");
+              }}
               onInspectArtifact={inspectWorkBoardArtifact}
               onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
             />
@@ -16364,6 +17651,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflowSupervisionSummary(workflow).join(" · ")}
                           </div>
                         ) : null}
+                        {approval && isLocalHostExecutionApproval(approval) && (
+                          <div className="cockpit-row-meta text-amber-200">Host permission · no isolation guarantee · review the exact host scope</div>
+                        )}
                         {workflowBranchDebugSummary(workflow).length > 0 ? (
                           <div className="cockpit-row-meta">
                             {workflowBranchDebugSummary(workflow).join(" · ")}
@@ -16391,7 +17681,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               disabled={approvalActionDisabled(approval)}
                               onClick={() => void handleApprovalDecision(approval, "approve")}
                             >
-                              Approve
+                              {approvalActionLabel(approval)}
                             </button>
                             <button
                               className="cockpit-feedback-button"
@@ -16681,9 +17971,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
+        {activeSection === "connections" && operatorAuth.status === "authenticated" && <EffectiveGrantsPanel key={operatorAuth.sessionId ?? "none"} sessionId={operatorAuth.sessionId} />}
+
         {visibleSections.conversation && (
           <>
-            {paneVisibility.presence_pane && (
+            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.presence_pane && (
               <CockpitWorkspaceWindow
                 panelId="presence_pane"
                 title="Seraph presence"
@@ -16698,7 +17990,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.conversation_pane && (
+            {advancedWorkspaceOpen && paneVisibility.conversation_pane && (
               <CockpitWorkspaceWindow
                 panelId="conversation_pane"
                 title="Conversation"
@@ -16762,11 +18054,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.desktop_shell_pane && (
+            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.desktop_shell_pane && (
               <CockpitWorkspaceWindow
                 panelId="desktop_shell_pane"
                 title="Desktop shell"
-                meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
+                meta={desktopShellMeta}
                 hint={COCKPIT_WINDOW_HINTS.desktopShell}
                 showHint={cockpitHintsEnabled}
                 minWidth={340}
@@ -16783,7 +18075,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   </div>
                   <div className="cockpit-sublist-item">
-                    presence {daemonPresence?.connected ? "linked" : "offline"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
+                    {desktopContinuitySummary}
                   </div>
                   {continuitySummary && (
                     <>
@@ -17088,15 +18380,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     </div>
                   ))}
-                  {desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
-                    <div className="cockpit-empty">No desktop continuity items yet.</div>
+                  {presenceMetadataUnavailable && (
+                    <div className="cockpit-empty">Desktop continuity items unknown. Load presence continuity to confirm.</div>
+                  )}
+                  {!presenceMetadataUnavailable && desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
+                    <div className="cockpit-empty">
+                      {presenceMetadataStale ? "No desktop continuity items in the last confirmed snapshot." : "No desktop continuity items yet."}
+                    </div>
                   )}
                 </div>
               </section>
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.operator_surface_pane && (
+            {(advancedWorkspaceOpen || (activeSection === "library" && libraryCapabilitiesOpen)) && paneVisibility.operator_surface_pane && (
               <CockpitWorkspaceWindow
                 panelId="operator_surface_pane"
                 title="Operator terminal"
@@ -17435,7 +18732,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <button
                         type="button"
                         className="cockpit-operator-button"
-                        aria-label="Approve top M7 approval"
+                        aria-label={`${approvalActionLabel(primaryApprovalTriageEntry?.approval)} top M7 approval`}
                         disabled={
                           !primaryApprovalTriageEntry?.approval
                           || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry?.approval))
@@ -17443,7 +18740,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         }
                         onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
                       >
-                        approve
+                        {approvalActionLabel(primaryApprovalTriageEntry?.approval)}
                       </button>
                       <button
                         type="button"
@@ -18670,10 +19967,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               <button
                                 type="button"
                                 className="cockpit-operator-button"
-                                aria-label={`Approve ${entry.label}`}
+                                aria-label={`${approvalActionLabel(entry.approval)} ${entry.label}`}
                                 onClick={() => approveOperatorTriageEntry(entry)}
                               >
-                                approve
+                                {approvalActionLabel(entry.approval)}
                               </button>
                               <button
                                 type="button"
@@ -19566,11 +20863,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              aria-label={`Approve ${entry.label}`}
+                              aria-label={`${approvalActionLabel(entry.approval)} ${entry.label}`}
                               disabled={approvalActionDisabled(entry.approval)}
                               onClick={() => void handleApprovalDecision(entry.approval!, "approve")}
                             >
-                              approve
+                              {approvalActionLabel(entry.approval)}
                             </button>
                           )}
                           {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
@@ -20617,6 +21914,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </>
         )}
+      </div>
+      ) : null}
+        </main>
       </div>
 
       {studioOpen && (

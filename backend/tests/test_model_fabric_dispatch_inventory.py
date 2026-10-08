@@ -303,8 +303,26 @@ def _review(
 
 _CANONICAL_ADAPTERS = (
     _review(
+        "model_fabric/near_text.py",
+        87,
+        "_read_response",
+        "client.stream",
+        "canonical_adapter",
+        "ADR-025 fixed HTTPS nonstreaming NEAR leaf, called through run_preflighted_adapter after current native authority, plaintext policy, final-payload preflight and durable accounting ownership; transfer has deadline/byte bounds with TLS verification and redirects disabled.",
+        "Retain as the dedicated near_text_native/near.text admitted leaf; preserve shared serial admission, policy rechecks and accounting ownership before extending callers.",
+    ),
+    _review(
         "llm_runtime.py",
-        1602,
+        1671,
+        "_governed_research_chat_completion",
+        "client.stream",
+        "canonical_adapter",
+        "Existing readonly_research_child leaf transfers one nonstreaming model response under the governed route, original deadline and fixed byte envelope; HTTP streaming bounds transfer rather than enabling a new inference caller.",
+        "Retain as a governed leaf adapter with the existing caller context, current policy fence and accounting ownership.",
+    ),
+    _review(
+        "llm_runtime.py",
+        1614,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -313,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4609,
+        4756,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -322,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "memory/embedder.py",
-        476,
+        501,
         "_request_embeddings",
         "client.post",
         "canonical_adapter",
@@ -331,7 +349,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "observer/screenshot_semantic_analysis.py",
-        491,
+        508,
         "_analyze_with_openrouter._transport",
         "client.post",
         "canonical_adapter",
@@ -343,8 +361,26 @@ _CANONICAL_ADAPTERS = (
 
 _REVIEWED_EXCEPTIONS = (
     _review(
+        "browser/pinned_transport.py",
+        638,
+        "PinnedBrowserTransport.resolve_and_fetch",
+        "client.stream",
+        "non_model_transport",
+        "Existing bounded public browser retrieval pins the destination and streams bytes under the browser envelope; it does not request model inference.",
+        "Keep behind the guarded browser source-read contract; reclassify if the endpoint becomes an inference route.",
+    ),
+    _review(
+        "security/http_transport.py",
+        442,
+        "_request_pinned_https",
+        "client.stream",
+        "non_model_transport",
+        "Existing generic pinned HTTPS transport serves external integrations with authority checks and transfer bounds; it does not submit model inference.",
+        "Keep in the guarded external transport; route through model-fabric admission if this leaf becomes a model request.",
+    ),
+    _review(
         "llm_runtime.py",
-        3703,
+        3848,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -353,7 +389,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3782,
+        3927,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -362,7 +398,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4228,
+        4373,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -371,7 +407,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4306,
+        4451,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -380,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        941,
+        1464,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -389,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        953,
+        1477,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -398,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        963,
+        1492,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -440,15 +476,6 @@ _REVIEWED_EXCEPTIONS = (
         "non_model_transport",
         "Outbound request to the sandbox evaluator; this is code execution transport, not model inference.",
         "No model-fabric migration; keep behind the sandbox capability policy and reclassify if the endpoint becomes an inference route.",
-    ),
-    _review(
-        "security/http_transport.py",
-        196,
-        "request_pinned_https",
-        "client.request",
-        "non_model_transport",
-        "Bounded public-source retrieval pins the resolved destination and does not submit model inference.",
-        "Keep in the guarded source-read transport; route it through model-fabric admission only if it becomes a model request.",
     ),
 )
 

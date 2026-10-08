@@ -1,10 +1,11 @@
 """OpenRouter-only active model-fabric policy tests."""
 
 from dataclasses import replace
+import time
 
 import pytest
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from config.settings import settings
 from src.model_fabric import (
     ACTIVE_PROVIDER_KINDS,
@@ -384,6 +385,59 @@ def test_governed_preflight_rejects_caller_local_endpoint_before_transport(monke
     assert proof_hashes == ()
 
 
+@pytest.mark.asyncio
+async def test_async_governed_preflight_reports_missing_key_without_transport(async_db, monkeypatch):
+    from src.llm_runtime import preflight_governed_completion_target_async
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    profile = _profile(id="openrouter")
+    context = replace(
+        _context(),
+        allowed_provider_kinds=("openrouter",),
+        deadline_at=time.time() + 600,
+    )
+    with (
+        patch("src.llm_runtime.provider_profiles", return_value={"openrouter": profile}),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        reason = await preflight_governed_completion_target_async(
+            runtime_path="strategist_agent",
+            profile="openrouter",
+            request_context=context,
+        )
+
+    assert reason == "credential_missing"
+
+
+@pytest.mark.asyncio
+async def test_async_governed_preflight_db_failure_stays_no_contact(async_db, monkeypatch):
+    from src.llm_runtime import preflight_governed_completion_target_async
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "openrouter-test-key")
+    profile = _profile(id="openrouter")
+    context = replace(
+        _context(),
+        allowed_provider_kinds=("openrouter",),
+        deadline_at=time.time() + 600,
+    )
+    with (
+        patch("src.llm_runtime.provider_profiles", return_value={"openrouter": profile}),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+        patch(
+            "src.model_fabric.repository.model_fabric_repository.latest_capability_proof",
+            new=AsyncMock(side_effect=RuntimeError("proof store unavailable")),
+        ),
+    ):
+        reason = await preflight_governed_completion_target_async(
+            runtime_path="strategist_agent",
+            profile="openrouter",
+            request_context=context,
+        )
+
+    assert reason == "route_preflight_unavailable"
+
+
 def test_openrouter_phase_rejects_unregistered_sync_route_before_litellm(monkeypatch):
     from src.llm_runtime import completion_with_fallback_sync
 
@@ -463,7 +517,9 @@ def test_canonical_caller_context_defaults_to_openrouter_and_disables_legacy_fal
     assert context.fallback_allowed is False
 
 
-def test_canonical_runtime_ignores_persisted_model_override():
+def test_canonical_runtime_ignores_persisted_model_override(monkeypatch):
+    # The invariant is ignoring the override, independent of an operator's env.
+    monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
     with patch.object(
         settings,
         "runtime_model_overrides",

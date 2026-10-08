@@ -32,8 +32,15 @@ from .selector import active_provider_exclusion_reason, classify_endpoint, profi
 
 CONFIG_SCHEMA_VERSION = "seraph.model-fabric.settings.v1"
 OPENROUTER_SETUP_SCHEMA_VERSION = "seraph.openrouter.setup.v1"
+OPENROUTER_SETUP_V2_SCHEMA_VERSION = "seraph.openrouter.setup.v2"
+OPENROUTER_ROUTE_SLOTS = ("text", "vision", "embedding")
 OPENROUTER_VAULT_CREDENTIAL_REF = "vault:openrouter_api_key"
 OPENROUTER_ENV_CREDENTIAL_REF = "env:OPENROUTER_API_KEY"
+NEAR_TEXT_SCHEMA_VERSION = "seraph.near.text.v1"
+NEAR_TEXT_PROFILE_ID = "near.text"
+NEAR_TEXT_MODEL_ID = "z-ai/glm-5.3-flash"
+NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1"
+NEAR_TEXT_CREDENTIAL_REF = "vault:near_text_api_key"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_UPSTREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
@@ -66,6 +73,19 @@ class WorkloadPolicy:
 
 
 @dataclass(frozen=True)
+class OpenRouterRoute:
+    model_id: str
+    enabled: bool
+    capabilities: tuple[str, ...]
+    allowed_upstreams: tuple[str, ...]
+    temperature: float
+    max_output_tokens: int
+    timeout_seconds: float
+    zero_data_retention: bool
+    request_cost_bound_microusd: int
+
+
+@dataclass(frozen=True)
 class OpenRouterSetup:
     """Operator-supplied OpenRouter policy and bounded request settings.
 
@@ -89,6 +109,7 @@ class OpenRouterSetup:
     egress_class: EgressClass = EgressClass.LOCAL_ONLY
     cloud_egress_acknowledged: bool = False
     spend_ceiling_microusd: int | None = None
+    request_cost_bound_microusd: int | None = None
     max_queued: int = _MAX_OPENROUTER_QUEUE
     max_inflight: int = 1
     max_outstanding_per_owner: int = _MAX_OPENROUTER_OWNER_OUTSTANDING
@@ -96,6 +117,91 @@ class OpenRouterSetup:
     credential_ref: str = OPENROUTER_VAULT_CREDENTIAL_REF
     credential_fingerprint: str | None = None
     schema_version: str = OPENROUTER_SETUP_SCHEMA_VERSION
+    routes: dict[str, OpenRouterRoute | None] | None = None
+    purpose_consents: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class NearTextSetup:
+    spend_ceiling_microusd: int
+    request_cost_bound_microusd: int
+    schema_version: str = NEAR_TEXT_SCHEMA_VERSION
+    enabled: bool = False
+    profile_id: str = NEAR_TEXT_PROFILE_ID
+    model_id: str = NEAR_TEXT_MODEL_ID
+    api_base: str = NEAR_TEXT_API_BASE
+    max_output_tokens: int = 1024
+    timeout_seconds: float = 45.0
+    credential_ref: str = NEAR_TEXT_CREDENTIAL_REF
+    credential_fingerprint: str | None = None
+    plaintext_egress_consent_revision: int | None = None
+
+
+def validate_near_text_setup(setup: NearTextSetup) -> None:
+    for field, expected in (("schema_version", NEAR_TEXT_SCHEMA_VERSION),
+            ("profile_id", NEAR_TEXT_PROFILE_ID), ("model_id", NEAR_TEXT_MODEL_ID),
+            ("api_base", NEAR_TEXT_API_BASE), ("credential_ref", NEAR_TEXT_CREDENTIAL_REF)):
+        if getattr(setup, field) != expected:
+            raise ValueError(f"invalid NEAR {field}")
+    if type(setup.enabled) is not bool:
+        raise ValueError("invalid NEAR enabled")
+    for field, maximum in (("max_output_tokens", 1024),
+            ("request_cost_bound_microusd", 1_000_000_000), ("spend_ceiling_microusd", 1_000_000_000)):
+        value = getattr(setup, field)
+        if type(value) is not int or not 1 <= value <= maximum:
+            raise ValueError(f"invalid NEAR {field}")
+    value = setup.timeout_seconds
+    if type(value) not in (int, float) or not math.isfinite(value) or not 1 <= value <= 45:
+        raise ValueError("invalid NEAR timeout_seconds")
+    if setup.request_cost_bound_microusd > setup.spend_ceiling_microusd:
+        raise ValueError("NEAR request reserve exceeds shared ceiling")
+    if setup.credential_fingerprint is not None and (not isinstance(setup.credential_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None):
+        raise ValueError("invalid NEAR credential fingerprint")
+    revision = setup.plaintext_egress_consent_revision
+    if revision is not None and (type(revision) is not int or revision < 1):
+        raise ValueError("invalid NEAR consent revision")
+    if not setup.enabled and revision is not None:
+        raise ValueError("disabled NEAR route has consent")
+
+
+def near_text_profile_for_setup(setup: NearTextSetup) -> ProviderProfile:
+    validate_near_text_setup(setup)
+    return ProviderProfile(id=NEAR_TEXT_PROFILE_ID, provider_kind="near", model=NEAR_TEXT_MODEL_ID,
+        api_base=NEAR_TEXT_API_BASE, secret_env=NEAR_TEXT_CREDENTIAL_REF,
+        capabilities=("text",), task_class="near_text_native", enabled=setup.enabled,
+        max_output_tokens=setup.max_output_tokens, max_latency_ms=int(setup.timeout_seconds * 1000),
+        safety_notes="NEAR receives plaintext over HTTPS; no TEE or E2EE verification.")
+
+
+def deployment_spend_ceiling(configuration: ModelFabricConfiguration) -> int:
+    values = [setup.spend_ceiling_microusd for setup in
+        (configuration.openrouter_setup, configuration.near_text) if setup is not None]
+    if not values or any(type(value) is not int or not 1 <= value <= 1_000_000_000 for value in values):
+        raise ValueError("deployment spend ceiling unavailable")
+    if len(set(values)) != 1:
+        raise ValueError("deployment spend ceiling mismatch")
+    return values[0]
+
+
+async def capture_near_text_credential(*, expected_revision: int, expected_fingerprint: str) -> str:
+    from .effective_policy import current_near_text_policy
+    from src.vault.repository import vault_repository
+    configured, digest = current_near_text_policy()
+    if configured.egress_revision != expected_revision or configured.near_text.credential_fingerprint != expected_fingerprint:
+        raise PermissionError("near_text_credential_revision_changed")
+    value = await vault_repository.get("near_text_api_key")
+    if not isinstance(value, str) or not value or len(value) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PermissionError("near_text_credential_unavailable")
+    current, current_digest = current_near_text_policy()
+    if current_digest != digest or current.egress_revision != expected_revision or _near_credential_fingerprint(value) != expected_fingerprint:
+        raise PermissionError("near_text_credential_revision_changed")
+    return value
+
+
+def _near_credential_fingerprint(value: str) -> str:
+    import hashlib
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -106,6 +212,11 @@ class ModelFabricConfiguration:
     error_code: str | None = None
     updated_at: str | None = None
     openrouter_setup: OpenRouterSetup | None = None
+    near_text: NearTextSetup | None = None
+    egress_revision: int = 1
+    egress_revoked: bool = False
+    egress_revocation_key: str | None = None
+    v1_rollback_snapshot: dict[str, object] | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -115,11 +226,19 @@ def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> Wo
     route.  Keeping this derivation here prevents readiness and caller-side
     admission from falling back to mutable legacy environment controls.
     """
+    profile_id = setup.profile_id
+    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        from .caller_context import canonical_route_spec
+        slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+        route = (setup.routes or {}).get(slot)
+        if route is None or not route.enabled or slot != "text" and slot not in (setup.purpose_consents or {}):
+            return WorkloadPolicy(runtime_path=runtime_path)
+        profile_id = f"openrouter.{slot}"
     return WorkloadPolicy(
         runtime_path=runtime_path,
         egress_class=setup.egress_class,
         cloud_egress_acknowledged=setup.cloud_egress_acknowledged,
-        allowed_profile_ids=(setup.profile_id,),
+        allowed_profile_ids=(profile_id,),
         allowed_provider_kinds=(OPENROUTER_PROVIDER_KIND,),
         fallback_allowed=False,
         max_cost_microusd=setup.spend_ceiling_microusd,
@@ -136,7 +255,18 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
         return ModelFabricConfiguration()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return _configuration_from_payload(payload)
+        configured = _configuration_from_payload(payload)
+        if configured.openrouter_setup is not None or configured.near_text is not None:
+            from src.workspace.accounting_witness import policy_continuity
+            from src.workspace.production import ProductionWorkspace
+            try:
+                valid, retained = policy_continuity(ProductionWorkspace(host_root=path.parent), payload)
+            except (RuntimeError, ValueError):
+                valid, retained = False, None
+            if not valid:
+                return replace(configured, status="degraded", error_code="provider_policy_continuity_unavailable",
+                    egress_revoked=True, egress_revision=max(configured.egress_revision, (retained or {}).get("revision", 0)))
+        return configured
     except (OSError, ValueError, json.JSONDecodeError):
         return ModelFabricConfiguration(status="degraded", error_code="configuration_unreadable")
 
@@ -173,7 +303,7 @@ async def hydrate_openrouter_credential() -> bool:
     return False
 
 
-def write_model_fabric_configuration(configuration: ModelFabricConfiguration) -> None:
+def write_model_fabric_configuration(configuration: ModelFabricConfiguration, *, expected_revision: int | None = None, publication_workspace=None) -> None:
     """Persist a structurally valid configuration, including legacy profiles.
 
     Active route eligibility is checked by the selector and by
@@ -184,6 +314,15 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration) ->
     validated = _configuration_from_payload(_configuration_payload(configuration))
     path = model_fabric_configuration_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if validated.openrouter_setup is not None or validated.near_text is not None:
+        from src.workspace.accounting_witness import _publish_policy_locked, publish_policy_configuration
+        if publication_workspace is None:
+            publish_policy_configuration(path.parent, _configuration_payload(validated), expected_revision=expected_revision)
+        else:
+            if publication_workspace.host_root != path.parent:
+                raise ValueError("publication workspace does not match configuration")
+            _publish_policy_locked(publication_workspace, _configuration_payload(validated), target_path=path, expected_revision=expected_revision)
+        return
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(_configuration_payload(validated), indent=2, sort_keys=True),
@@ -210,7 +349,10 @@ def validate_active_model_fabric_configuration(
         if policy.allowed_provider_kinds and set(policy.allowed_provider_kinds) != {"openrouter"}:
             raise ValueError("active model-fabric policies may allow only openrouter")
     if validated.openrouter_setup is not None:
-        validate_openrouter_setup(validated.openrouter_setup)
+        validate_openrouter_setup(validated.openrouter_setup, allow_unconsented=validated.near_text is not None)
+    if validated.near_text is not None:
+        validate_near_text_setup(validated.near_text)
+        deployment_spend_ceiling(validated)
 
 
 def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> dict[str, ProviderProfile]:
@@ -243,8 +385,17 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
 
 def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
+    if configured.egress_revoked:
+        return WorkloadPolicy(runtime_path=runtime_path)
     if configured.status == "ready":
         if configured.openrouter_setup is not None:
+            if not configured.openrouter_setup.cloud_egress_acknowledged:
+                return WorkloadPolicy(runtime_path=runtime_path)
+            if configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+                from .caller_context import canonical_route_spec
+                slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+                if slot != "text" and (configured.openrouter_setup.purpose_consents or {}).get(slot) != configured.egress_revision:
+                    return WorkloadPolicy(runtime_path=runtime_path)
             return openrouter_policy_for_setup(configured.openrouter_setup, runtime_path)
         for policy in configured.workload_policies:
             if policy.runtime_path == runtime_path:
@@ -255,6 +406,8 @@ def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
 def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
     if not isinstance(payload, dict) or payload.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError("unsupported model-fabric configuration schema")
+    if type(payload.get("egress_revision", 1)) is not int or payload.get("egress_revision", 1) < 1 or type(payload.get("egress_revoked", False)) is not bool:
+        raise ValueError("invalid model-fabric egress revision")
     raw_profiles = payload.get("profiles", [])
     raw_policies = payload.get("workload_policies", [])
     if not isinstance(raw_profiles, list) or not isinstance(raw_policies, list):
@@ -265,15 +418,33 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         raise ValueError("model-fabric profile ids must be unique")
     if len({policy.runtime_path for policy in policies}) != len(policies):
         raise ValueError("model-fabric workload policies must be unique")
+    raw_near = payload.get("near_text")
+    near = None
+    if raw_near is not None:
+        if not isinstance(raw_near, dict) or set(raw_near) - set(NearTextSetup.__dataclass_fields__):
+            raise ValueError("invalid NEAR setup fields")
+        try:
+            near = NearTextSetup(**raw_near)
+        except TypeError as exc:
+            raise ValueError("invalid NEAR setup") from exc
+        validate_near_text_setup(near)
     raw_setup = payload.get("openrouter_setup")
-    setup = _openrouter_setup_from_payload(raw_setup) if raw_setup is not None else None
-    return ModelFabricConfiguration(
+    setup = _openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None) if raw_setup is not None else None
+    configuration = ModelFabricConfiguration(
         profiles=profiles,
         workload_policies=policies,
         status="ready",
         updated_at=str(payload.get("updated_at") or "") or None,
         openrouter_setup=setup,
+        near_text=near,
+        egress_revision=payload.get("egress_revision", 1),
+        egress_revoked=payload.get("egress_revoked", False),
+        egress_revocation_key=payload.get("egress_revocation_key"),
+        v1_rollback_snapshot=payload.get("v1_rollback_snapshot"),
     )
+    if near is not None:
+        deployment_spend_ceiling(configuration)
+    return configuration
 
 
 def _profile_from_payload(payload: object) -> ProviderProfile:
@@ -364,6 +535,9 @@ def _policy_from_payload(payload: object) -> WorkloadPolicy:
 def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": CONFIG_SCHEMA_VERSION,
+        "egress_revision": configuration.egress_revision,
+        "egress_revoked": configuration.egress_revoked,
+        "egress_revocation_key": configuration.egress_revocation_key,
         "updated_at": configuration.updated_at or datetime.now(timezone.utc).isoformat(),
         "profiles": [_profile_payload(profile) for profile in configuration.profiles],
         "workload_policies": [
@@ -376,8 +550,12 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
             for policy in configuration.workload_policies
         ],
     }
+    if configuration.v1_rollback_snapshot is not None:
+        payload["v1_rollback_snapshot"] = configuration.v1_rollback_snapshot
     if configuration.openrouter_setup is not None:
         payload["openrouter_setup"] = _openrouter_setup_payload(configuration.openrouter_setup)
+    if configuration.near_text is not None:
+        payload["near_text"] = asdict(configuration.near_text)
     return payload
 
 
@@ -409,20 +587,147 @@ def normalize_openrouter_model_id(value: object) -> str:
     return f"openrouter/{candidate}"
 
 
-def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
+def route_slot_for_task_class(task_class: str) -> str:
+    mapping = {"interactive_chat": "text", "agent_reasoning": "text",
+        "report_synthesis": "text", "memory_synthesis": "text",
+        "vision_analysis": "vision", "memory_embedding": "embedding"}
+    if task_class not in mapping:
+        raise ValueError("route_slot_unmapped")
+    return mapping[task_class]
+
+
+def openrouter_profile_id_for_runtime_path(runtime_path: str) -> str:
+    configured = read_model_fabric_configuration()
+    if configured.openrouter_setup is not None and configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        from .caller_context import canonical_route_spec
+        return f"openrouter.{route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)}"
+    return "openrouter"
+
+
+def _legacy_setup_for_route(setup: OpenRouterSetup, route: OpenRouterRoute) -> OpenRouterSetup:
+    return replace(setup, schema_version=OPENROUTER_SETUP_SCHEMA_VERSION,
+        routes=None, purpose_consents=None, profile_id="openrouter",
+        model_ids=(route.model_id,), capabilities=route.capabilities,
+        allowed_upstreams=route.allowed_upstreams, temperature=route.temperature,
+        max_output_tokens=route.max_output_tokens, timeout_seconds=route.timeout_seconds,
+        zero_data_retention=route.zero_data_retention,
+        request_cost_bound_microusd=route.request_cost_bound_microusd)
+
+
+def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRouterRoute, *, allow_unconsented: bool = False) -> None:
+    if not isinstance(route, OpenRouterRoute) or type(route.enabled) is not bool or type(route.zero_data_retention) is not bool:
+        raise ValueError("OpenRouter route booleans must be literal")
+    for field in ("max_output_tokens", "request_cost_bound_microusd"):
+        if type(getattr(route, field)) is not int:
+            raise ValueError("OpenRouter route integers must be strict")
+    for field in ("temperature", "timeout_seconds"):
+        if type(getattr(route, field)) not in {float, int}:
+            raise ValueError("OpenRouter route numbers must be finite")
+    if not 0 <= route.temperature <= 2 or not 1 <= route.timeout_seconds <= _MAX_OPENROUTER_TIMEOUT_SECONDS:
+        raise ValueError("OpenRouter route numbers must be within declared bounds")
+    required = {"text": {"text"}, "vision": {"text", "vision"}, "embedding": {"embedding"}}[slot]
+    if not required.issubset(route.capabilities) or slot != "embedding" and "embedding" in route.capabilities or slot == "text" and "vision" in route.capabilities:
+        raise ValueError("OpenRouter route capabilities do not match its purpose")
+    if slot != "text" and route.zero_data_retention is not True:
+        raise ValueError("vision and embedding workloads require zero-data-retention policy")
+    validate_openrouter_setup(_legacy_setup_for_route(setup, route), allow_unconsented=allow_unconsented)
+
+
+def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision: int = 1, allow_unconsented: bool = False) -> OpenRouterSetup:
+    """Pure projection; no publication, provider contact or proof migration."""
+    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        return setup
+    validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
+    route = OpenRouterRoute(model_id=setup.model_ids[0], enabled=True,
+        capabilities=setup.capabilities, allowed_upstreams=setup.allowed_upstreams,
+        temperature=setup.temperature, max_output_tokens=setup.max_output_tokens,
+        timeout_seconds=setup.timeout_seconds, zero_data_retention=setup.zero_data_retention,
+        request_cost_bound_microusd=setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
+    routes = {slot: None for slot in OPENROUTER_ROUTE_SLOTS}
+    consents = {}
+    if setup.capabilities == ("embedding",):
+        routes["embedding"] = route
+        consents["embedding"] = egress_revision
+    else:
+        routes["text"] = route
+        if "vision" in setup.capabilities and setup.cloud_egress_acknowledged and setup.zero_data_retention:
+            routes["vision"] = route
+            consents["vision"] = egress_revision
+    return replace(setup, schema_version=OPENROUTER_SETUP_V2_SCHEMA_VERSION,
+        model_ids=(), capabilities=(), allowed_upstreams=(), routes=routes,
+        purpose_consents=consents)
+
+
+def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[ProviderProfile, ...] = ()) -> tuple[ProviderProfile, ...]:
+    if setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+        return (openrouter_profile_for_setup(setup),)
+    validate_openrouter_setup(setup)
+    profiles = []
+    for slot in OPENROUTER_ROUTE_SLOTS:
+        route = (setup.routes or {}).get(slot)
+        if route is None:
+            continue
+        profile = openrouter_profile_for_setup(_legacy_setup_for_route(setup, route))
+        tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis", "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot)
+        controls = dict(profile.options[OPENROUTER_RUNTIME_CONTROLS_KEY])
+        controls["request_cost_bound_microusd"] = route.request_cost_bound_microusd
+        profile = replace(profile, id=f"openrouter.{slot}", enabled=route.enabled,
+            task_class=tasks[0], task_classes=tasks,
+            options={**profile.options, OPENROUTER_RUNTIME_CONTROLS_KEY: controls})
+        previous = next((item for item in existing if item.id == profile.id), None)
+        if previous is not None and replace(profile, cost_source_updated_at=previous.cost_source_updated_at).contract_hash == previous.contract_hash:
+            profile = replace(profile, cost_source_updated_at=previous.cost_source_updated_at)
+        profiles.append(profile)
+    return tuple(profiles)
+
+
+def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool = False) -> None:
     """Validate the complete user-facing OpenRouter setup contract."""
-    if setup.schema_version != OPENROUTER_SETUP_SCHEMA_VERSION:
+    # A retained revoked OR object is inspectable beside NEAR, never authority.
+    # Only complete dual-provider configuration parsing uses this mode.
+    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION}:
         raise ValueError("unsupported OpenRouter setup schema")
     if setup.profile_id != "openrouter":
         raise ValueError("OpenRouter setup must use the canonical openrouter profile")
-    if not setup.model_ids:
+    v2 = setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    if v2:
+        # Persisted JSON has no Pydantic boundary. Reject malformed shared
+        # shapes before numeric conversion, hashing, or collection operations.
+        for field, lower, upper in (("temperature", 0, 2), ("timeout_seconds", 1, _MAX_OPENROUTER_TIMEOUT_SECONDS)):
+            value = getattr(setup, field)
+            if type(value) not in {int, float} or not lower <= value <= upper:
+                raise ValueError("OpenRouter setup numbers must be within declared bounds")
+        for field, lower, upper in (("max_output_tokens", 1, _MAX_OPENROUTER_OUTPUT_TOKENS),
+            ("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
+            ("max_outstanding_per_owner", 1, _MAX_OPENROUTER_OWNER_OUTSTANDING),
+            ("max_retries", 0, _MAX_OPENROUTER_RETRIES)):
+            value = getattr(setup, field)
+            if type(value) is not int or not lower <= value <= upper:
+                raise ValueError("OpenRouter setup integers must be within declared bounds")
+        if any(type(getattr(setup, field)) is not bool for field in
+            ("allow_fallbacks", "require_parameters", "zero_data_retention", "cloud_egress_acknowledged")):
+            raise ValueError("OpenRouter setup booleans must be literal")
+        if not isinstance(setup.credential_ref, str) or setup.credential_fingerprint is not None and not isinstance(setup.credential_fingerprint, str):
+            raise ValueError("OpenRouter setup credential metadata must be strings")
+        if not isinstance(setup.routes, dict) or set(setup.routes) - set(OPENROUTER_ROUTE_SLOTS):
+            raise ValueError("unsupported OpenRouter route slot")
+        if setup.purpose_consents is not None and (
+            not isinstance(setup.purpose_consents, dict)
+            or set(setup.purpose_consents) - {"vision", "embedding"}
+            or any(type(value) is not int or value < 1 for value in setup.purpose_consents.values())
+        ):
+            raise ValueError("invalid OpenRouter purpose consent")
+        for slot, route in setup.routes.items():
+            if route is not None:
+                _validate_openrouter_route(setup, slot, route, allow_unconsented=allow_unconsented)
+    if not v2 and not setup.model_ids:
         raise ValueError("one OpenRouter model id is required")
     if len(setup.model_ids) > 1:
         raise ValueError("multiple OpenRouter model ids are unsupported until governed model selection exists")
     normalized_models = tuple(normalize_openrouter_model_id(item) for item in setup.model_ids)
     if len(set(normalized_models)) != len(normalized_models):
         raise ValueError("OpenRouter model ids must be unique")
-    if not setup.capabilities:
+    if not v2 and not setup.capabilities:
         raise ValueError("at least one model capability is required")
     if any(item not in _OPENROUTER_CAPABILITIES for item in setup.capabilities):
         raise ValueError("unsupported OpenRouter model capability")
@@ -436,7 +741,7 @@ def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
         raise ValueError("OpenRouter max output tokens must be between 1 and 131072")
     if not math.isfinite(float(setup.timeout_seconds)) or not 1 <= float(setup.timeout_seconds) <= _MAX_OPENROUTER_TIMEOUT_SECONDS:
         raise ValueError("OpenRouter timeout must be between 1 and 120 seconds")
-    if not setup.allowed_upstreams or len(setup.allowed_upstreams) > 32:
+    if not v2 and not setup.allowed_upstreams or len(setup.allowed_upstreams) > 32:
         raise ValueError("an explicit OpenRouter upstream allow-list is required")
     if any(_SAFE_OPENROUTER_UPSTREAM.fullmatch(item) is None for item in setup.allowed_upstreams):
         raise ValueError("OpenRouter upstream ids must be bounded safe identifiers")
@@ -450,10 +755,12 @@ def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
         raise ValueError("OpenRouter data collection and retention must be denied")
     if any(item in {ModelCapability.VISION.value, ModelCapability.EMBEDDING.value} for item in setup.capabilities) and setup.zero_data_retention is not True:
         raise ValueError("vision and embedding workloads require zero-data-retention policy")
-    if setup.egress_class is EgressClass.LOCAL_ONLY or not setup.cloud_egress_acknowledged:
+    if setup.egress_class is EgressClass.LOCAL_ONLY or not setup.cloud_egress_acknowledged and not (allow_unconsented and setup.cloud_egress_acknowledged is False):
         raise ValueError("OpenRouter setup requires explicit cloud egress acknowledgement")
-    if setup.spend_ceiling_microusd is None or not 1 <= int(setup.spend_ceiling_microusd) <= 1_000_000_000:
+    if type(setup.spend_ceiling_microusd) is not int or not 1 <= setup.spend_ceiling_microusd <= 1_000_000_000:
         raise ValueError("OpenRouter setup requires a positive finite spend ceiling")
+    if setup.request_cost_bound_microusd is not None and (type(setup.request_cost_bound_microusd) is not int or not 1 <= setup.request_cost_bound_microusd <= setup.spend_ceiling_microusd):
+        raise ValueError("OpenRouter request cost bound must be a positive integer within the deployment ceiling")
     if setup.max_inflight != 1:
         raise ValueError("OpenRouter admission allows exactly one in-flight request")
     if not 1 <= int(setup.max_queued) <= _MAX_OPENROUTER_QUEUE:
@@ -468,13 +775,36 @@ def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
         raise ValueError("OpenRouter credential fingerprint is invalid")
 
 
-def _openrouter_setup_from_payload(payload: object) -> OpenRouterSetup:
+def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool = False) -> OpenRouterSetup:
     if not isinstance(payload, dict):
         raise ValueError("OpenRouter setup must be an object")
     allowed = set(OpenRouterSetup.__dataclass_fields__)
     if set(payload) - allowed:
         raise ValueError("OpenRouter setup contains unsupported fields")
     values = dict(payload)
+    if values.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        if "credential_ref" in values and not isinstance(values["credential_ref"], str):
+            raise ValueError("OpenRouter setup credential reference must be a string")
+        raw_routes = values.get("routes")
+        if not isinstance(raw_routes, dict):
+            raise ValueError("OpenRouter routes must be an object")
+        routes = {}
+        for slot, raw in raw_routes.items():
+            if slot not in OPENROUTER_ROUTE_SLOTS:
+                raise ValueError("unsupported OpenRouter route slot")
+            if raw is None:
+                routes[slot] = None
+                continue
+            if not isinstance(raw, dict) or set(raw) != set(OpenRouterRoute.__dataclass_fields__):
+                raise ValueError("OpenRouter route must contain exactly the declared fields")
+            raw = dict(raw)
+            for field in ("capabilities", "allowed_upstreams"):
+                if not isinstance(raw[field], (list, tuple)) or any(not isinstance(value, str) for value in raw[field]):
+                    raise ValueError("OpenRouter route collections must contain strings")
+                raw[field] = tuple(raw[field])
+            raw["model_id"] = normalize_openrouter_model_id(raw["model_id"])
+            routes[slot] = OpenRouterRoute(**raw)
+        values["routes"] = routes
     for field_name in ("model_ids", "capabilities", "allowed_upstreams"):
         raw_value = values.get(field_name) or ()
         if not isinstance(raw_value, (list, tuple)):
@@ -487,18 +817,26 @@ def _openrouter_setup_from_payload(payload: object) -> OpenRouterSetup:
     if "model_ids" in values:
         values["model_ids"] = tuple(normalize_openrouter_model_id(item) for item in values["model_ids"])
     setup = OpenRouterSetup(**values)
-    validate_openrouter_setup(setup)
+    validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
     return setup
 
 
 def _openrouter_setup_payload(setup: OpenRouterSetup) -> dict[str, object]:
-    return {
+    payload = {
         **asdict(setup),
         "model_ids": list(setup.model_ids),
         "capabilities": list(setup.capabilities),
         "allowed_upstreams": list(setup.allowed_upstreams),
         "egress_class": setup.egress_class.value,
     }
+    if setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+        payload.pop("routes", None)
+        payload.pop("purpose_consents", None)
+    else:
+        for field in ("model_ids", "capabilities", "temperature", "max_output_tokens", "timeout_seconds", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd"):
+            payload.pop(field, None)
+        payload["routes"] = {slot: asdict(route) if route is not None else None for slot, route in (setup.routes or {}).items()}
+    return payload
 
 
 def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:

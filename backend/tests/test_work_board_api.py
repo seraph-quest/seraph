@@ -228,6 +228,7 @@ def test_board_job_projection_redacts_unsafe_receipt_ids_paths_and_types():
                     "target_path": "artifacts/result.md",
                     "target_digest": "b" * 64,
                     "status": "succeeded",
+                    "details": {"learning": "no_learning"},
                 },
             ]
         ),
@@ -253,6 +254,7 @@ def test_board_job_projection_redacts_unsafe_receipt_ids_paths_and_types():
         b"provider/private/effect"
     ).hexdigest()[:16]
     assert effects[1]["effect_type"] == "board_child_readback"
+    assert effects[1]["learning"] == "no_learning"
 
 
 def test_bound_workflow_lineage_cap_counts_owned_roots_and_descendants_together():
@@ -1184,6 +1186,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                     "summary": "PRIVATE SOURCE BODY",
                     "readback_status": "verified",
                     "verification_status": "passed",
+                    "learning": "no_learning",
                 },
                 {
                     "artifact_id": "artifact/path",
@@ -1194,6 +1197,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                     "effect_type": "effect/type",
                     "file_path": "reports/private.txt",
                     "status": "succeeded",
+                    "learning": "memory_updated",
                 },
             ]
         ),
@@ -1211,6 +1215,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                     "workflow_run_id": "private/run",
                     "file_path": "artifacts/result.txt",
                     "target_path": "reports/result.txt",
+                    "learning": "no_learning",
                     "secret": "DO NOT SERIALIZE",
                     "body": "PRIVATE RESULT BODY",
                 }
@@ -1246,6 +1251,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
             "verified": True,
             "readback_status": "verified",
             "verification_status": "passed",
+            "learning": "no_learning",
         },
         {"status": "succeeded"},
     ]
@@ -1261,6 +1267,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
             "artifact_id": "artifact:1",
             "file_path": "artifacts/result.txt",
             "target_path": "reports/result.txt",
+            "learning": "no_learning",
         }
     ]
     assert task_payload["artifact_refs"] == [

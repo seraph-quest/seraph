@@ -5,9 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   WorkBoardEvent,
   WorkBoardEventPage,
+  WorkBoardAttempt,
   WorkBoardTask,
   WorkBoardTaskDetail,
   WorkBoardTaskPage,
+  OpportunityPlanPreview,
+  OpportunityPlanReference,
 } from "../../types";
 import { WorkBoardPanel } from "./WorkBoardPanel";
 
@@ -140,6 +143,196 @@ describe("WorkBoardPanel integration", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses the existing NEAR Work inspector and withholds unknown-cost answer/retry controls", async () => {
+    const nearTask = boardTask({ title: "NEAR text question", capability_id: "inference.near-text.v1",
+      block_kind: "cost_liability", block_reason: "cost_liability", recovery_action: "retry", readback_status: "unknown" });
+    fetchMock.mockReset();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(nearTask)));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response(page(nearTask, 1)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    const onOpenAccounting = vi.fn();
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" onOpenAccounting={onOpenAccounting} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task NEAR text question" }));
+    await screen.findByRole("region", { name: "NEAR text question" });
+    expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Retry \(new attempt\)/ })).toBeNull();
+    expect(screen.getByRole("region", { name: "Private native memory policy" })).toHaveTextContent("no_learning");
+    fireEvent.click(screen.getByRole("button", { name: "Open existing cost settlement" }));
+    expect(onOpenAccounting).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/near-text/output"))).toBe(false);
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("shows the recovered original task and disables historical actions", async () => {
+    const historical = boardTask({ ownership_access: "recovered_read_only", execution_block_reason: "current_scope_review_required", recovery_action: null });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
+      if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(historical)));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response(page(historical, 1)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="new-current-session" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    expect(await screen.findByText(/Previous approvals, jobs and permissions stay blocked/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add comment" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close task details" })).not.toBeDisabled();
+    expect(screen.getByRole("listitem")).toHaveAttribute("draggable", "false");
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it.each([{ stale: false, report: false, detailOnly: false, foreignCanonical: false }, { stale: true, report: false, detailOnly: false, foreignCanonical: false },
+    { stale: false, report: true, detailOnly: false, foreignCanonical: false }, { stale: false, report: true, detailOnly: true, foreignCanonical: false },
+    { stale: false, report: false, detailOnly: false, foreignCanonical: true },
+    { stale: false, report: true, detailOnly: false, foreignCanonical: false, listFirst: true }])("reviews an opportunity with stale binding=$stale report=$report nested progress=$detailOnly foreign canonical=$foreignCanonical list first=$listFirst through its sole existing accept owner", async ({ stale, report, detailOnly, foreignCanonical, listFirst }) => {
+    fetchMock.mockReset();
+    window.sessionStorage.clear();
+    let currentTask = boardTask({ status: "triage", capability_id: null, goal_revision: 3, block_reason: null });
+    const checks = [{ kind: "url_host" as const, value: "example.com" }, { kind: "url_path_prefix" as const, value: "/source" }];
+    const preview: OpportunityPlanPreview = { opportunity_id: "opportunity-1", opportunity_revision: 3, blueprint_id: "public-browser-check", goal_id: "goal-1", goal_revision: 3,
+      source_id: "source-1", source_digest: "a".repeat(64), watch_id: "watch-1", watch_revision: 2,
+      review_expires_at: "2030-01-01T00:00:00Z", deadline_at: null, no_learning: true,
+      steps: [{ slot: "public_source", capability_id: "browser.public-task.v1", input_materialization: "bound", output_schema: "browser_public_task_result",
+        input: { schema_version: 1, start_url: "https://example.com/source", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/source"],
+          final_expected_checks: checks, actions: [{ kind: "navigate", url: "https://example.com/source", expected_checks: checks }, { kind: "extract", selector: "body", max_chars: 8192, expected_checks: checks }] },
+        permissions: ["browser.public"], native_approvals: ["Current browser approval required"], runtime_seconds: 180, output_bytes: 65536 }] };
+    if (report) {
+      preview.blueprint_id = "public-evidence-report";
+      preview.steps.push({ slot: "evidence_dossier", capability_id: "work.evidence-dossier.v1", input_materialization: "after_verified_producer", output_schema: "evidence_dossier.v1",
+        input: null, permissions: [], native_approvals: [], runtime_seconds: 30, output_bytes: 65536 },
+      { slot: "local_report", capability_id: "work.local-evidence-report.v1", input_materialization: "after_verified_producer", output_schema: "text/plain",
+        input: null, permissions: [], native_approvals: [], runtime_seconds: 30, output_bytes: 65536 });
+    }
+    const ref: OpportunityPlanReference = { proposal_id: "proposal-1", kind: report ? "public-evidence-pipeline.v1" : "opportunity_plan", proposal_revision: 1, parent_task_id: stale ? "foreign-task" : "task-1",
+      parent_revision: 3, proposal_digest: "b".repeat(64), expires_at: preview.review_expires_at, status: "proposed", blueprint_id: preview.blueprint_id };
+    const operation = { operation_id: "proposal-1", revision: 1, parent_revision: 3, plan_version: 1, digest: ref.proposal_digest,
+      status: "proposed", deadline_at: null, no_learning: true, pending_revision: null, reused_output: null,
+      source_scope: { start_url: "https://example.com/source", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/source"] },
+      steps: [{ slot: "public_source", capability_id: "browser.public-task.v1", task_id: "task-1", task_revision: 3, status: "triage", block_reason: null }] };
+    const proposal = { ...ref, parent_task_id: "task-1", opportunity_id: "opportunity-1", opportunity_revision: 3, proposal_ref: ref, plan_preview: preview,
+      proposed_tasks: [], proposed_links: [], estimated_cost: null };
+    const summary = { ...ref, parent_task_id: "task-1", proposed_tasks: [], proposed_links: [], estimated_cost: null,
+      ...(detailOnly ? { kind: "opportunity_plan", status: "pending_inference", proposal_digest: null } : {}) };
+    let resolveDetail!: (value: ReturnType<typeof response>) => void;
+    const delayedDetail = new Promise<ReturnType<typeof response>>((resolve) => { resolveDetail = resolve; });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/pipelines/proposal-1/accept")) return Promise.resolve(response(operation));
+      if (url.endsWith("/pipelines/proposal-1")) return Promise.resolve(response(operation));
+      if (url.endsWith("/proposals/proposal-1/accept")) {
+        currentTask = { ...currentTask, status: "todo", task_revision: 4 };
+        return Promise.resolve(response({ proposal_id: "proposal-1", proposal_revision: 2, status: "accepted", task_ids: ["task-1"] }));
+      }
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: [summary] }));
+      if (url.endsWith("/proposals/proposal-1")) return Promise.resolve(response(foreignCanonical ? { ...proposal, parent_task_id: "foreign-task" }
+        : detailOnly ? { ...summary, opportunity_id: "opportunity-1", opportunity_revision: 3, proposal_ref: null, plan_preview: null } : proposal));
+      if (url.endsWith("/tasks/task-1")) return listFirst ? delayedDetail : Promise.resolve(response(detail({ ...currentTask,
+        proposal_ref: ref, plan_preview: preview, opportunity_id: "opportunity-1", opportunity_revision: 3 })));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(currentTask, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, claims: [], excluded_source_ids: [], blocked_sources: [], memory_status: "no_learning" }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    if (listFirst) {
+      await screen.findByRole("region", { name: "Triage proposal preview" });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/proposal-1"))).toBe(false);
+      await act(async () => resolveDetail(response(detail({ ...currentTask, proposal_ref: ref, plan_preview: preview,
+        opportunity_id: "opportunity-1", opportunity_revision: 3 }))));
+    }
+    if (foreignCanonical) {
+      expect(await screen.findByText("The recovered proposal does not match the selected task. Refresh before accepting.")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Accept and queue this read-only plan" })).not.toBeInTheDocument();
+      expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+      return;
+    }
+    const accept = await screen.findByRole("button", { name: "Accept and queue this read-only plan" });
+    expect(screen.getByLabelText("Exact read-only opportunity plan")).toHaveTextContent("https://example.com/source");
+    expect(screen.getByLabelText("Exact read-only opportunity plan")).toHaveTextContent("Current browser approval required");
+    expect(screen.queryByRole("button", { name: "Accept proposal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Specify for review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decompose for review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve exact pipeline plan" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/proposals/proposal-1") && (!init?.method || init.method === "GET"))).toBe(true);
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+    if (report) {
+      expect(currentTask.pipeline_operation_id).toBeUndefined();
+      expect(screen.getByLabelText("Exact report plan preview")).toHaveTextContent('"input": null');
+      expect(screen.queryByRole("button", { name: "Materialize verified next input" })).not.toBeInTheDocument();
+    }
+    if (stale) expect(accept).toBeDisabled();
+    else {
+      await waitFor(() => expect(accept).toBeEnabled()); fireEvent.click(accept);
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith(report ? "/pipelines/proposal-1/accept" : "/proposals/proposal-1/accept") && init?.method === "POST")).toBe(true));
+      const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(posts).toHaveLength(1);
+      expect(JSON.parse(posts[0][1].body)).toEqual(report ? { expected_revision: 1, expected_parent_revision: 3, expected_digest: "b".repeat(64) }
+        : { expected_proposal_revision: 1, expected_parent_revision: 3 });
+    }
+  });
+
+  it("drops a canonical opportunity response after the current owner changes without posting", async () => {
+    fetchMock.mockReset();
+    const task = boardTask({ status: "triage" });
+    let resolveCanonical!: (value: ReturnType<typeof response>) => void;
+    const canonical = new Promise<ReturnType<typeof response>>((resolve) => { resolveCanonical = resolve; });
+    let listReads = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: ++listReads === 1
+        ? [{ kind: "opportunity_plan", proposal_id: "proposal-1", parent_task_id: "task-1", status: "proposed" }] : [] }));
+      if (url.endsWith("/proposals/proposal-1")) return canonical;
+      if (url.endsWith("/tasks/task-1")) return Promise.resolve(response(detail(task)));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(task, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    const view = render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/proposal-1"))).toBe(true));
+    view.rerender(<WorkBoardPanel ownerPrincipalId="operator:two" ownerSessionId="operator-session-2" />);
+    await act(async () => resolveCanonical(response({ kind: "opportunity_plan", proposal_id: "proposal-1", parent_task_id: "task-1",
+      status: "proposed", proposed_tasks: [], proposed_links: [], estimated_cost: "late original owner preview" })));
+    expect(screen.queryByText(/late original owner preview/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept and queue this read-only plan" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("keeps an ordinary pipeline proposal summary outside opportunity recovery", async () => {
+    fetchMock.mockReset();
+    const task = boardTask({ status: "triage" });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: [{ kind: "public-evidence-pipeline.v1",
+        proposal_id: "ordinary-pipeline", parent_task_id: "task-1", parent_revision: 3, proposal_revision: 1, status: "proposed",
+        expires_at: "2030-01-01T00:00:00Z", proposed_tasks: [], proposed_links: [], estimated_cost: "ordinary pipeline summary" }] }));
+      if (url.endsWith("/tasks/task-1")) return Promise.resolve(response(detail(task)));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(task, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    expect(await screen.findByText("Estimated cost: ordinary pipeline summary")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Exact read-only opportunity plan")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/ordinary-pipeline"))).toBe(false);
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("projects an action receipt through the event cursor and recovers a blocked task", async () => {
     const blocked = boardTask();
     const recovered = boardTask({
@@ -157,6 +350,10 @@ describe("WorkBoardPanel integration", () => {
 
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
         snapshotCalls += 1;
         return Promise.resolve(response(page(currentTask, currentTask === blocked ? 10 : 11)));
@@ -226,5 +423,330 @@ describe("WorkBoardPanel integration", () => {
     act(() => IntegrationBoardSocket.instances[1]?.send(taskEvent(12)));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/events?after=11"))).toBe(true));
     expect(screen.getByText("Current state: Todo")).toBeInTheDocument();
+  });
+
+  it("shows the calendar durable receipt independently from the board task state", async () => {
+    const digest = "a".repeat(64);
+    const calendarAttempt: WorkBoardAttempt = {
+      attempt_id: "attempt-calendar-1",
+      task_id: "task-calendar-1",
+      workflow_run_id: "workflow-calendar-1",
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "calendar-executor",
+      started_at: "2026-09-30T10:00:00Z",
+      ended_at: "2026-09-30T10:00:05Z",
+      outcome: "succeeded",
+      receipt_refs: [],
+      readback_status: "verified",
+      verification_status: "passed",
+      created_at: "2026-09-30T10:00:00Z",
+      updated_at: "2026-09-30T10:00:05Z",
+      calendar_execution: {
+        capability_id: "calendar.meeting-prep.v1",
+        job_id: "job-calendar-1",
+        durable_status: "succeeded",
+        connection_id: "connection-1",
+        connection_revision: 2,
+        consent_id: "consent-1",
+        consent_revision: 1,
+        event_binding_id: "binding-1",
+        event_key: digest,
+        event_revision: digest,
+        calendar_list_revision: digest,
+        read_1: null,
+        read_2: null,
+        effective_route: null,
+        artifact_id: "artifact-calendar-1",
+        file_path: "artifacts/work-board/calendar/result-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        content_sha256: digest,
+        readback_id: "readback-calendar-1",
+        verified_at: "2026-09-30T10:00:05Z",
+        memory_status: "no_learning",
+        failure_code: null,
+        recovery_action: null,
+      },
+    };
+    const calendarTask = boardTask({
+      task_id: "task-calendar-1",
+      title: "Prepare customer meeting",
+      capability_id: "calendar.meeting-prep.v1",
+      status: "done",
+      latest_attempt: calendarAttempt,
+      completed_at: "2026-09-30T10:00:05Z",
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-calendar-1")) return Promise.resolve(response(detail(calendarTask)));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Prepare customer meeting" }));
+    expect(await screen.findByRole("region", { name: "Calendar meeting preparation execution" })).toBeInTheDocument();
+    const calendarRegion = screen.getByRole("region", { name: "Calendar meeting preparation execution" });
+    expect(calendarRegion).toHaveTextContent("Durable job job-calendar-1");
+    expect(calendarRegion).toHaveTextContent("Memory: no_learning");
+  });
+
+  it.each([
+    ["readback", { readback_id: null }],
+    ["artifact path", { file_path: null }],
+    ["content digest", { content_sha256: null }],
+  ] as const)("does not offer calendar inspection without a verified %s", async (_label, missing) => {
+    const digest = "a".repeat(64);
+    const calendarExecution = {
+      capability_id: "calendar.meeting-prep.v1",
+      job_id: "job-calendar-incomplete",
+      durable_status: "succeeded",
+      connection_id: "connection-1",
+      connection_revision: 2,
+      consent_id: "consent-1",
+      consent_revision: 1,
+      event_binding_id: "binding-1",
+      event_key: digest,
+      event_revision: digest,
+      calendar_list_revision: digest,
+      read_1: null,
+      read_2: null,
+      effective_route: null,
+      artifact_id: "artifact-calendar-incomplete",
+      file_path: "artifacts/work-board/calendar/result-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+      content_sha256: digest,
+      readback_id: "readback-calendar-incomplete",
+      verified_at: "2026-09-30T10:00:05Z",
+      memory_status: "no_learning",
+      failure_code: null,
+      recovery_action: null,
+      ...missing,
+    } as unknown as WorkBoardAttempt["calendar_execution"];
+    const calendarAttempt = {
+      attempt_id: "attempt-calendar-incomplete",
+      task_id: "task-calendar-incomplete",
+      workflow_run_id: "workflow-calendar-incomplete",
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "calendar-executor",
+      started_at: "2026-09-30T10:00:00Z",
+      ended_at: "2026-09-30T10:00:05Z",
+      outcome: "succeeded",
+      receipt_refs: [],
+      readback_status: "verified",
+      verification_status: "passed",
+      created_at: "2026-09-30T10:00:00Z",
+      updated_at: "2026-09-30T10:00:05Z",
+      calendar_execution: calendarExecution,
+    } as WorkBoardAttempt;
+    const calendarTask = boardTask({
+      task_id: "task-calendar-incomplete",
+      title: "Incomplete calendar receipt",
+      capability_id: "calendar.meeting-prep.v1",
+      status: "done",
+      latest_attempt: calendarAttempt,
+      completed_at: "2026-09-30T10:00:05Z",
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-calendar-incomplete")) return Promise.resolve(response(detail(calendarTask)));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Incomplete calendar receipt" }));
+    const calendarRegion = await screen.findByRole("region", { name: "Calendar meeting preparation execution" });
+    expect(calendarRegion).toHaveTextContent(/Execution receipt unavailable|Verified artifact\/readback is unavailable/);
+    expect(screen.queryByRole("button", { name: "Inspect verified calendar artifact" })).not.toBeInTheDocument();
+  });
+
+  it("opens the selected repository repair with the exact current owner binding", async () => {
+    const repoTask = boardTask({
+      task_id: "task-repo-1",
+      title: "Repair selected repository",
+      capability_id: "engineering.repo-repair.v1",
+      latest_attempt: {
+        attempt_id: "attempt-repo-1",
+        task_id: "task-repo-1",
+        workflow_run_id: "workflow-repo-1",
+        task_revision_at_claim: 3,
+        lease_owner: null,
+        cancel_requested_at: null,
+        lease_expires_at: null,
+        heartbeat_at: null,
+        fencing_token: 1,
+        executor_id: "repo-repair",
+        started_at: "2026-09-30T10:00:00Z",
+        ended_at: null,
+        outcome: null,
+        receipt_refs: [],
+        readback_status: "not_started",
+        verification_status: "not_started",
+        created_at: "2026-09-30T10:00:00Z",
+        updated_at: "2026-09-30T10:00:00Z",
+      },
+    });
+    const projection = {
+      job_id: "workflow-repo-1",
+      status: "paused",
+      owner_principal_id: "operator:one",
+      operator_session_id: "operator-session-1",
+      task_id: "task-repo-1",
+      attempt_id: "attempt-repo-1",
+      workflow_run_id: "workflow-repo-1",
+      goal_id: "goal-1",
+      goal_revision: 3,
+      revision: 1,
+      authority_digest: "a".repeat(64),
+      input_digest: "b".repeat(64),
+      run_fingerprint: "c".repeat(64),
+      capability_id: "engineering.repo-repair.v1",
+      capability_version: "1",
+      limits: { max_cpu_seconds: 120, max_memory_bytes: 512 * 1024 * 1024, max_pids: 64, max_wall_seconds: 180 },
+      preflight: { ok: false, status: "blocked", reason: "resource_controller_unavailable:cpu" },
+      source_packet: null,
+      egress: null,
+      proposal: null,
+      execution: { artifacts: [], readback: null, memory_status: "no_learning", provider_contacted: false },
+      approval: null,
+      approval_id: null,
+      memory_status: "no_learning",
+      recovery_action: "restore_prerequisite",
+      operator_visible: true,
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(repoTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-repo-1")) return Promise.resolve(response(detail(repoTask)));
+      if (url.endsWith("/api/workflows/repo-repair/workflow-repo-1")) return Promise.resolve(response(projection));
+      if (url.includes("/api/capabilities/routines")) return Promise.resolve(response([]));
+      if (url.includes("/api/capabilities/source-watches")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Repair selected repository" }));
+    expect(await screen.findByRole("region", { name: "Repository repair execution" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/workflows/repo-repair/workflow-repo-1"))).toBe(true);
+  });
+
+  it("opens an accepted Inbox Mail origin through the selected task owner binding", async () => {
+    const mailTask = boardTask({
+      task_id: "task-mail-origin",
+      title: "Review accepted Mail candidate",
+      capability_id: "goal-snapshot-to-file",
+      idempotency_scope: "guardian-inbox:mail-candidate-1",
+    });
+    const candidate = {
+      id: "mail-candidate-1",
+      revision: 2,
+      state: "accepted",
+      source_kind: "mail_watch",
+      source_id: "watch-1",
+      title: "Accepted Mail candidate",
+      summary: "A bounded message is ready",
+      why_now: "The watched source changed",
+      goal_id: "goal-1",
+      goal_revision: 3,
+      watch_id: "watch-1",
+      plan_revision: 1,
+      task_id: "task-mail-origin",
+      expires_at: "2030-01-01T00:00:00Z",
+      allowed_actions: [],
+      mail: { watch_id: "watch-1", message_binding_id: "message-binding-1", message_revision: "sha256:" + "d".repeat(64), status: "present", private: true },
+    };
+    const connection = { connection_id: "connection-1", service: "gmail_readonly", label: "Work Gmail", revision: 3, state: "active", scope_status: "verified", declared_scopes: ["gmail.readonly"], provider_scopes_verified: true, verified_setup_job_id: "setup-1" };
+    const consent = { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 3, goal_id: "goal-1", goal_revision: 3, label_ids: ["INBOX"], window_days: 7, max_messages: 1, source_read_allowed: true, source_revision: 5, model_egress_allowed: false, model_revision: null, allowed_body_fields: [], expires_at: "2030-01-01T00:00:00Z", state: "active", revision: 6 };
+    const watch = { watch_id: "watch-1", scheduled_job_id: "scheduled-watch-1", capability_id: "gmail.scan_metadata.v1", connection_id: "connection-1", connection_revision: 3, mail_consent_id: "consent-1", source_consent_revision: 5, goal_id: "goal-1", goal_revision: 3, label_ids: ["INBOX"], cadence: { kind: "hourly", timezone: "UTC", daily_hour: null, daily_minute: null }, binding_revision: 2, expires_at: "2030-01-01T00:00:00Z", state: "active", watch_state: "baseline_complete", baseline_complete: true, last_observed_at: null, last_completed_occurrence_id: null, skipped_coverage_reason: null, list_page_complete: true, latest_occurrence: null };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(mailTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-mail-origin")) return Promise.resolve(response(detail(mailTask)));
+      if (url.endsWith("/api/guardian/inbox/mail-candidate-1")) return Promise.resolve(response({ item: candidate }));
+      if (url.endsWith("/api/capabilities/mail/connections")) return Promise.resolve(response({ connections: [connection] }));
+      if (url.endsWith("/api/capabilities/mail/read-consents")) return Promise.resolve(response({ consents: [consent], provider_contact: false }));
+      if (url.endsWith("/api/capabilities/mail/watches/watch-1")) return Promise.resolve(response({ watch }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Review accepted Mail candidate" }));
+    expect(await screen.findByText("Created from Inbox candidate")).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Private Mail source review" })).toBeInTheDocument();
+    expect(screen.getByText(/accepted task origin/i)).toBeInTheDocument();
+  });
+
+  it("opens the repository repair producer from the live board without exposing raw artifact fields", async () => {
+    const currentTask = boardTask({
+      task_id: "task-repair-existing",
+      title: "Existing repair task",
+      capability_id: "engineering.repo-repair.v1",
+      status: "todo",
+      typed_input_ref: null,
+      typed_input_digest: null,
+    });
+    const goal = {
+      id: "goal-1",
+      parent_id: null,
+      path: "/goal-1",
+      level: "root",
+      title: "Repair project",
+      description: "A bounded engineering goal",
+      status: "active",
+      domain: "engineering",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 3,
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(currentTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([goal]));
+      if (url.endsWith("/api/work-board/tasks/task-repair-existing")) return Promise.resolve(response(detail(currentTask)));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+
+    fireEvent.click(await screen.findByRole("button", { name: "Repository repair" }));
+    expect(await screen.findByRole("dialog", { name: "Repository repair" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Repair goal")).toHaveDisplayValue(/Repair project/);
+    expect(screen.queryByLabelText("Typed input reference")).not.toBeInTheDocument();
   });
 });

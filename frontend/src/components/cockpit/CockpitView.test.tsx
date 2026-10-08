@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./CockpitView";
+import { procedureV2Api, type ProcedureV2Routine } from "../../lib/procedureV2Api";
 import { useChatStore } from "../../stores/chatStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
@@ -181,6 +182,360 @@ function mockOperatorControlPlaneRuntime(runtime: Record<string, unknown>) {
   };
 }
 
+async function renderLegacyCockpit(ui: Parameters<typeof render>[0]) {
+  let result!: ReturnType<typeof render>;
+  await act(async () => { result = render(ui); });
+  // Navigate only after the initial mocked GETs and auth updates settle.
+  // Each operator action commits before the next control is queried.
+  await act(async () => { fireEvent.click(screen.getByTestId("cockpit-section-work")); });
+  const windowsButton = screen.getByRole("button", { name: "Windows" });
+  await act(async () => { fireEvent.click(windowsButton); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Show all" })); });
+  await act(async () => { fireEvent.click(windowsButton); });
+  return result;
+}
+
+function browserPreviewFixture(options: {
+  browserResult?: Record<string, unknown> | null;
+  browserResultStatus?: "available" | "unavailable";
+} = {}) {
+  const ownerSessionId = "operator-browser-preview-session";
+  const taskId = "task-browser-preview";
+  const workflowRunId = "browser-task:task-browser-preview:attempt-1";
+  const artifactId = "art_browser_preview_1";
+  const readbackId = "readback-browser-preview-1";
+  const contentSha256 = "a".repeat(64);
+  const filePath = `artifacts/work-board/browser/result-${"b".repeat(32)}.json`;
+  const selectorDigest = "c".repeat(64);
+  const expectedDigest = "d".repeat(64);
+  const actualDigest = "e".repeat(64);
+  const defaultBrowserResult = {
+    schema_version: 1,
+    capability_id: "browser.public-task.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    content_sha256: contentSha256,
+    file_path: filePath,
+    extracts: [{
+      action_index: 0,
+      kind: "extract",
+      attribute: null,
+      selector_digest: selectorDigest,
+      value: "This domain is for use in documentation examples.",
+    }],
+    checks: [{
+      action_index: 0,
+      kind: "text_contains",
+      selector_digest: selectorDigest,
+      expected_digest: expectedDigest,
+      actual_digest: actualDigest,
+      passed: true,
+    }],
+    request_count: 1,
+  };
+  const reference = {
+    artifact_id: artifactId,
+    artifact_type: "browser_public_task_result",
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified: true,
+    job_id: workflowRunId,
+  };
+  const execution = {
+    capability_id: "browser.public-task.v1",
+    job_id: workflowRunId,
+    durable_status: "succeeded",
+    action_index: 0,
+    action_count: 1,
+    request_count: 1,
+    cleanup_status: "cleanup_verified",
+    memory_status: "no_learning",
+    readback_id: readbackId,
+    artifact_id: artifactId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+  };
+  const attempt = {
+    attempt_id: "attempt-browser-preview-1",
+    task_id: taskId,
+    workflow_run_id: workflowRunId,
+    task_revision_at_claim: 1,
+    lease_owner: null,
+    cancel_requested_at: null,
+    lease_expires_at: null,
+    heartbeat_at: null,
+    fencing_token: 1,
+    executor_id: "seraph-work-board:browser.public-task.v1",
+    started_at: "2026-09-30T10:00:00Z",
+    ended_at: "2026-09-30T10:00:02Z",
+    outcome: "succeeded",
+    readback_status: "verified",
+    verification_status: "passed",
+    receipt_refs: [],
+    result_refs: [],
+    artifact_refs: [],
+    browser_execution: execution,
+  };
+  const boardTask = {
+    task_id: taskId,
+    creation_sequence: 1,
+    owner_principal_id: "operator:browser-preview",
+    owner_session_id: ownerSessionId,
+    origin_session_id: ownerSessionId,
+    origin_thread_id: null,
+    goal_id: "goal-browser-preview",
+    goal_revision: 1,
+    title: "Browser result preview",
+    body: "Inspect the verified browser extract.",
+    capability_id: "browser.public-task.v1",
+    typed_input_ref: "artifact-input:browser-preview",
+    typed_input_digest: "f".repeat(64),
+    executor_id: "seraph-work-board:browser.public-task.v1",
+    assignee_id: "operator:browser-preview",
+    priority: 50,
+    idempotency_scope: "task",
+    idempotency_key: "task-browser-preview-key",
+    scheduled_at: null,
+    status: "done",
+    block_kind: null,
+    block_reason: null,
+    block_source_status: null,
+    cancel_requested_at: null,
+    requires_review: false,
+    reviewer_id: null,
+    dependency_count: 0,
+    completed_dependency_count: 0,
+    dispatch_rank: null,
+    recovery_action: null,
+    readback_status: "verified",
+    verification_status: "passed",
+    task_revision: 2,
+    result_refs: [reference],
+    artifact_refs: [],
+    latest_attempt: attempt,
+    created_at: "2026-09-30T10:00:00Z",
+    updated_at: "2026-09-30T10:00:02Z",
+    completed_at: "2026-09-30T10:00:02Z",
+    archived_at: null,
+  };
+  const boundJob = {
+    job_id: workflowRunId,
+    parent_job_id: null,
+    status: "succeeded",
+    job_kind: "browser_public_task",
+    artifacts: [{
+      artifact_id: artifactId,
+      artifact_type: "browser_public_task_result",
+      file_path: filePath,
+      content_sha256: contentSha256,
+      readback_id: readbackId,
+      exists: true,
+      verified: true,
+      status: "succeeded",
+    }],
+    effects: [{
+      receipt_kind: "readback",
+      effect_type: "browser_public_task_result",
+      status: "succeeded",
+      artifact_id: artifactId,
+      readback_id: readbackId,
+      target_path: filePath,
+      content_sha256: contentSha256,
+      target_digest: contentSha256,
+      verified: true,
+    }],
+    started_at: "2026-09-30T10:00:00Z",
+    updated_at: "2026-09-30T10:00:02Z",
+    finished_at: "2026-09-30T10:00:02Z",
+    browser_result_status: options.browserResultStatus ?? "available",
+    browser_result: options.browserResult === undefined ? defaultBrowserResult : options.browserResult,
+  };
+  return {
+    ownerSessionId,
+    taskId,
+    workflowRunId,
+    artifactId,
+    readbackId,
+    contentSha256,
+    filePath,
+    boardTask,
+    attempt,
+    boundJob,
+  };
+}
+
+function calendarPreviewFixture() {
+  const base = browserPreviewFixture();
+  const ownerSessionId = "operator-calendar-preview-session";
+  const taskId = "task-calendar-preview";
+  const workflowRunId = "calendar-task:task-calendar-preview:attempt-1";
+  const artifactId = "art_calendar_preview_1";
+  const readbackId = "readback-calendar-preview-1";
+  const contentSha256 = "1".repeat(64);
+  const filePath = `artifacts/work-board/calendar/result-${"2".repeat(32)}.json`;
+  const eventKey = "3".repeat(64);
+  const eventRevision = "4".repeat(64);
+  const preview = {
+    schema_version: 1,
+    capability_id: "calendar.meeting-prep.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+    event_key: eventKey,
+    event_revision: eventRevision,
+    summary: "Prepare a concise customer meeting brief.",
+    agenda: ["Review the open delivery risks."],
+    questions: ["Which decision is needed today?"],
+    risks: ["The launch date may move."],
+    preparation_steps: ["Read the latest project update."],
+  };
+  const reference = {
+    artifact_id: artifactId,
+    artifact_type: "calendar_meeting_prep_result",
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified: true,
+    job_id: workflowRunId,
+  };
+  const execution = {
+    capability_id: "calendar.meeting-prep.v1",
+    job_id: workflowRunId,
+    durable_status: "succeeded",
+    connection_id: "connection-calendar-preview",
+    connection_revision: 1,
+    consent_id: "consent-calendar-preview",
+    consent_revision: 1,
+    event_binding_id: "binding-calendar-preview",
+    event_key: eventKey,
+    event_revision: eventRevision,
+    calendar_list_revision: "5".repeat(64),
+    read_1: null,
+    read_2: null,
+    effective_route: null,
+    artifact_id: artifactId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified_at: "2026-09-30T10:00:02Z",
+    memory_status: "no_learning",
+    failure_code: null,
+    recovery_action: null,
+  };
+  const attempt = {
+    ...base.attempt,
+    task_id: taskId,
+    workflow_run_id: workflowRunId,
+    executor_id: "seraph-work-board:calendar.meeting-prep.v1",
+    calendar_execution: execution,
+    browser_execution: undefined,
+  };
+  const boardTask = {
+    ...base.boardTask,
+    task_id: taskId,
+    owner_principal_id: "operator:calendar-preview",
+    owner_session_id: ownerSessionId,
+    origin_session_id: ownerSessionId,
+    goal_id: "goal-calendar-preview",
+    title: "Calendar result preview",
+    body: "Inspect the verified calendar preparation.",
+    capability_id: "calendar.meeting-prep.v1",
+    typed_input_ref: "workspace-json:artifacts/work-board/calendar/input-calendar-preview.json",
+    executor_id: "seraph-work-board:calendar.meeting-prep.v1",
+    assignee_id: "operator:calendar-preview",
+    idempotency_key: "task-calendar-preview-key",
+    result_refs: [reference],
+    latest_attempt: attempt,
+  };
+  const boundJob = {
+    ...base.boundJob,
+    job_id: workflowRunId,
+    job_kind: "calendar_meeting_prep",
+    artifacts: [{
+      artifact_id: artifactId,
+      artifact_type: "calendar_meeting_prep_result",
+      file_path: filePath,
+      content_sha256: contentSha256,
+      readback_id: readbackId,
+      exists: true,
+      verified: true,
+      status: "succeeded",
+    }],
+    effects: [{
+      receipt_kind: "readback",
+      effect_type: "calendar_meeting_prep_result",
+      status: "succeeded",
+      artifact_id: artifactId,
+      readback_id: readbackId,
+      target_path: filePath,
+      content_sha256: contentSha256,
+      target_digest: contentSha256,
+      verified: true,
+    }],
+    calendar_result_status: "available",
+    calendar_result: preview,
+    browser_result_status: "unavailable",
+    browser_result: null,
+  };
+  return {
+    ...base,
+    ownerSessionId,
+    taskId,
+    workflowRunId,
+    artifactId,
+    readbackId,
+    contentSha256,
+    filePath,
+    boardTask,
+    attempt,
+    boundJob,
+  };
+}
+
+async function renderCalendarPreviewFixture(
+  fetchMock: ReturnType<typeof vi.fn>,
+  fixture: ReturnType<typeof calendarPreviewFixture>,
+) {
+  mockCockpitBaselineFetch(fetchMock, {});
+  const baselineFetch = fetchMock.getMockImplementation() as
+    ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+  fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/api/auth/session")) {
+      return Promise.resolve(mockResponse({
+        authenticated: true,
+        principal_id: "operator:calendar-preview",
+        session_id: fixture.ownerSessionId,
+      }));
+    }
+    if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+      return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+    }
+    if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+    if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+      return Promise.resolve(mockResponse({
+        task: fixture.boardTask,
+        attempts: [fixture.attempt],
+        parents: [],
+        children: [],
+        comments: [],
+        events: [],
+        revision: 2,
+      }));
+    }
+    if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+      return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+    }
+    if (url.includes("/api/work-board/goals/goal-calendar-preview/execution-limits")) {
+      return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+    }
+    return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+  });
+  await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -214,6 +569,9 @@ describe("CockpitView", () => {
       goalLoopAction: null,
     });
     useCockpitLayoutStore.setState({
+      // Existing cockpit behavior tests exercise the legacy panes directly;
+      // the focused navigation test below opts into the summary Home section.
+      activeSection: "work",
       activeLayoutId: "default",
       inspectorVisible: true,
       paneVisibility: getDefaultPaneVisibility("default"),
@@ -266,7 +624,6 @@ describe("CockpitView", () => {
 
     const baselineUrls = fetchMock.mock.calls.map(([input]) => String(input));
     const deniedDeepEndpoints = [
-      "/api/observer/continuity",
       "/api/activity/ledger",
       "/api/operator/control-plane",
       "/api/operator/benchmark-proof",
@@ -285,13 +642,412 @@ describe("CockpitView", () => {
     expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
   });
 
+  it("switches the persisted workspace section without duplicating the inbox owner", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+    render(<CockpitView onSend={() => {}} />);
+
+    expect(screen.getByTestId("cockpit-section-home")).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    const homeUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(homeUrls.some((url) => ["/api/audit/events", "/api/capabilities/overview", "/api/extensions", "/api/workflows/runs", "/api/operator/"].some((endpoint) => url.includes(endpoint)))).toBe(false);
+    fireEvent.click(screen.getByTestId("cockpit-section-inbox"));
+    expect(await screen.findByRole("heading", { name: "Guardian decisions" })).toBeInTheDocument();
+    expect(screen.getAllByTestId("guardian-inbox-panel")).toHaveLength(1);
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("inbox");
+
+    fireEvent.click(screen.getByTestId("cockpit-section-work"));
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("work");
+    expect(await screen.findByLabelText("Work board")).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Desktop shell", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("cockpit-section-goals"));
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("goals");
+    expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("cockpit-section-library"));
+    expect(await screen.findByRole("heading", { name: "Canonical memory" })).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+
+    const homeContinuityCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/observer/continuity")).length;
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    expect(await screen.findByText("Desktop shell", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph presence", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/observer/continuity"))).toHaveLength(homeContinuityCalls + 1));
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+  });
+
+  it("refreshes the selected Guardian inspector when current authority changes without captured revision changes", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    let stale = false;
+    const candidate = { id: "selected-opportunity", revision: 3, state: "proposed", source_kind: "guardian_opportunity",
+      source_id: "selected-opportunity", opportunity_id: "selected-opportunity", opportunity_revision: 3,
+      opportunity_status: "proposed", title: "Selected public opportunity", summary: "Verified public change",
+      why_now: "Current source changed", goal_id: "goal-1", goal_revision: 4, watch_id: "watch-1", plan_revision: 2,
+      expires_at: "2030-01-01T00:00:00Z", evidence_status: "verified", source_status: "succeeded",
+      evidence_refs: [{ artifact_id: "selected-evidence", status: "verified" }], allowed_actions: [],
+      assessment: { schema_version: "seraph.opportunity.assessment.v1", relevance: 3, confidence: "medium",
+        summary: "Verified public change", reason: "A cited change", suggested_blueprint: "public-browser-check",
+        abstain_reason: null, citations: [{ source_id: "source-one", start_line: 1, end_line: 1, span_sha256: "a".repeat(64) }] } };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox")) {
+        const row = stale ? { ...candidate, evidence_status: "unavailable", reason_code: "goal_review_required",
+          policy_reason: "goal_review_required", evidence_refs: [] } : candidate;
+        return Promise.resolve(mockResponse(url.includes("/selected-opportunity")
+          ? { ...row, evidence_previews: stale ? [] : [{ artifact_id: "selected-evidence", source_id: "source-one",
+            text: "Exact public excerpt", line_count: 1 }] } : { items: [row] }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "inbox" });
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    const inspector = screen.getByTestId("guardian-candidate-inspector");
+    await waitFor(() => expect(within(inspector).getByText(/selected-evidence/)).toBeInTheDocument());
+    stale = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(within(inspector).getByText("unavailable", { exact: true })).toBeInTheDocument());
+    expect(within(inspector).queryByText(/selected-evidence/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Exact public excerpt")).not.toBeInTheDocument();
+    expect(within(inspector).getByText(/Policy boundary: goal_review_required/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it.each([
+    { mount: "inbox", authenticated: true }, { mount: "advanced", authenticated: true },
+    { mount: "inbox", authenticated: false }, { mount: "advanced", authenticated: false },
+  ])("binds plan generation in the $mount Inbox to current authenticated owner=$authenticated", async ({ mount, authenticated }) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    const row = { id: "plan-opportunity", revision: 3, state: "proposed", source_kind: "guardian_opportunity", source_id: "plan-opportunity",
+      opportunity_id: "plan-opportunity", opportunity_revision: 3, opportunity_status: "proposed", title: "Plan current evidence", summary: "Current cited evidence",
+      why_now: "A current source changed", goal_id: "goal-1", goal_revision: 4, watch_id: "watch-1", plan_revision: 2,
+      expires_at: "2030-01-01T00:00:00Z", evidence_status: "verified", evidence_refs: [], allowed_actions: [],
+      plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null, can_generate: true, generation_block_reason: null, proposal_ref: null } };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse(authenticated
+        ? { authenticated: true, principal_id: "operator:plan", session_id: "root-plan", absolute_expires_at: "2099-01-01T00:00:00Z" }
+        : { authenticated: false }));
+      if (url.includes("/api/guardian/inbox")) return Promise.resolve(mockResponse({ items: [row] }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    if (mount === "inbox") { useCockpitLayoutStore.setState({ activeSection: "inbox" }); render(<CockpitView onSend={() => {}} />); }
+    else await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    const button = await screen.findByRole("button", { name: "Generate plan" });
+    if (authenticated) await waitFor(() => expect(button).toBeEnabled());
+    else expect(button).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("shows the exact local host approval label in the pending approvals pane", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: "session-1" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([{
+          id: "approval-local-1",
+          tool_name: "engineering.repo-repair.v1",
+          risk_level: "high",
+          status: "pending",
+          summary: "Review the local staged repository tests",
+          created_at: "2026-10-01T08:00:00Z",
+          owner_principal_id: "operator:one",
+          operator_session_id: "session-1",
+          session_id: "session-1",
+          expires_at: "2099-01-01T00:00:00Z",
+          approval_scope: { target: { type: "repository", reference: "digest:repo" } },
+          permissions: { required_permissions: ["local_host_execution"] },
+        }]));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Approve local tests on this host" })).toBeInTheDocument();
+    expect(screen.getByText(/Host permission · no isolation guarantee/i)).toBeInTheDocument();
+  });
+
+  it("does not infer host execution from a local-looking approval summary", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([{
+          id: "approval-summary-only",
+          tool_name: "engineering.repo-repair.v1",
+          extension_action: "repo_repair.resolve",
+          risk_level: "high",
+          status: "pending",
+          summary: "Review the local staged repository tests",
+          created_at: "2026-10-01T08:00:00Z",
+        }]));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.queryByText(/Host permission · no isolation guarantee/i)).not.toBeInTheDocument();
+  });
+
+  it("reads a ninth install approval by exact id instead of substituting the capped list", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    const approvalRows = Array.from({ length: 9 }, (_, index) => ({
+      id: `approval-${index + 1}`,
+      tool_name: "guardian:routine-install",
+      risk_level: "medium",
+      status: "pending",
+      summary: `Install approval ${index + 1}`,
+      created_at: "2026-10-01T08:00:00Z",
+    }));
+    const exactApproval = approvalRows[8];
+    const genericApprovalUrls: string[] = [];
+    const exactApprovalUrls: string[] = [];
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:one",
+          session_id: "session-1",
+        }));
+      }
+      if (url.includes("/api/approvals/pending?approval_id=")) {
+        exactApprovalUrls.push(url);
+        return Promise.resolve(mockResponse([exactApproval]));
+      }
+      if (url.includes("/api/approvals/pending?limit=8")) {
+        genericApprovalUrls.push(url);
+        return Promise.resolve(mockResponse(approvalRows.slice(0, 8)));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    const digest = "a".repeat(64);
+    const routine = {
+      id: "routine-pending",
+      owner_principal_id: "operator:one",
+      state: "prepared",
+      revision: 1,
+      current_version: 1,
+      name: "Pending procedure",
+      versions: [{
+        id: "version-pending",
+        routine_id: "routine-pending",
+        version: 1,
+        workflow_sha256: digest,
+        runbook_sha256: digest,
+        installed_package_digest: null,
+        source_provenance: {},
+        source_repository: null,
+        source_action: null,
+        source_issue_number: null,
+        created_at: "2026-10-01T08:00:00Z",
+        installed_at: null,
+        schema_version: 2,
+        template_id: "public-browser-check",
+        procedure_binding: {
+          binding_id: "binding-pending",
+          state: "prepared",
+          revision: 1,
+          preview_digest: digest,
+          preview_expires_at: "2026-10-02T08:00:00Z",
+          install_job_id: "install-pending",
+          approval_id: exactApproval.id,
+          install_approval_status: "pending",
+          install_approval_expires_at: "2026-10-02T08:00:00Z",
+          install_recovery_action: null,
+        },
+      }],
+      package: { status: "not_installed", digest: null, review_id: null },
+    } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(routine);
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: routine.id,
+      bindingId: "binding-pending",
+      revision: 1,
+      version: 1,
+      installJobId: "install-pending",
+      approvalId: exactApproval.id,
+      installApprovalStatus: "pending",
+      installApprovalExpiresAt: "2026-10-02T08:00:00Z",
+      installRecoveryAction: null,
+    }));
+    useCockpitLayoutStore.setState({ activeSection: "library" });
+
+    try {
+      render(<CockpitView onSend={() => {}} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Review this exact approval in Pending approvals" }));
+
+      await waitFor(() => expect(exactApprovalUrls).toHaveLength(1));
+      expect(genericApprovalUrls.length).toBeGreaterThan(0);
+      expect(exactApprovalUrls[0]).toContain(`approval_id=${encodeURIComponent(exactApproval.id)}`);
+      expect(await screen.findByText("Install approval 9")).toBeInTheDocument();
+      expect(screen.getByText(/9 waiting/)).toBeInTheDocument();
+      expect(screen.getByText("Install approval 1")).toBeInTheDocument();
+    } finally {
+      window.sessionStorage.removeItem("seraph.procedure-v2.prepared:operator%3Aone:session-1");
+    }
+  });
+
+  it.each([
+    ["an empty 200 response", mockResponse({})],
+    ["a failed continuity response", mockResponse({}, false, 503)],
+  ])("keeps the Connections presence pane unknown when continuity metadata is unavailable in %s", async (_label, continuityResponse) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) return Promise.resolve(continuityResponse);
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+
+    await waitFor(() => expect(within(pane).getAllByText("UNKNOWN")).toHaveLength(3));
+    expect(within(pane).queryByText("GOOD")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("CLEAR")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("READY")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("Guardian continuity and proactive guidance are active.")).not.toBeInTheDocument();
+    expect(within(pane).getByText("reach unknown · load presence continuity to confirm")).toBeInTheDocument();
+    expect(screen.getByText("bundle unknown")).toBeInTheDocument();
+    expect(screen.getByText("presence unknown · bundle unknown · recent unknown")).toBeInTheDocument();
+    expect(screen.getByText("Desktop continuity items unknown. Load presence continuity to confirm.")).toBeInTheDocument();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["daemon fields are missing", { daemon: {} }],
+    ["the queued count is negative", { daemon: { connected: false, pending_notification_count: 0 }, queued_insight_count: -1 }],
+  ])("does not confirm continuity when %s", async (_label, malformedFields) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0 },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          summary: {
+            continuity_health: "ready",
+            primary_surface: "presence",
+            actionable_thread_count: 0,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+          },
+          ...malformedFields,
+        }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+
+    await waitFor(() => expect(within(pane).getAllByText("UNKNOWN")).toHaveLength(3));
+    expect(within(pane).queryByText("GOOD")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("CLEAR")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("READY")).not.toBeInTheDocument();
+  });
+
+  it("keeps the last confirmed Connections values visibly stale after a failed refresh", async () => {
+    const confirmedContinuity = {
+      daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+      notifications: [],
+      queued_insights: [],
+      queued_insight_count: 0,
+      recent_interventions: [],
+      reach: { route_statuses: [] },
+      summary: {
+        continuity_health: "ready",
+        primary_surface: "presence",
+        recommended_focus: null,
+        actionable_thread_count: 0,
+        ambient_item_count: 0,
+        pending_notification_count: 0,
+        queued_insight_count: 0,
+        recent_intervention_count: 0,
+        degraded_route_count: 0,
+        degraded_source_adapter_count: 0,
+        attention_family_count: 0,
+        presence_surface_count: 0,
+        attention_presence_surface_count: 0,
+      },
+    };
+    let continuityResponse = mockResponse(confirmedContinuity);
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) return Promise.resolve(continuityResponse);
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "connections" });
+
+    render(<CockpitView onSend={() => {}} />);
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+    await waitFor(() => expect(within(pane).getByText("GOOD")).toBeInTheDocument());
+
+    continuityResponse = mockResponse({}, false, 503);
+    fireEvent.click(screen.getByRole("button", { name: "refresh presence continuity" }));
+
+    await waitFor(() => expect(within(pane).getByText("IDLE · STALE")).toBeInTheDocument());
+    expect(within(pane).getByText("last confirmed · live link")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · clear")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · follow-through 0 · alerts 0 · bundled 0")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · reach ready")).toBeInTheDocument();
+    expect(screen.getByText("bundle 0 queued · last confirmed")).toBeInTheDocument();
+    expect(screen.getByText("desktop last confirmed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /presence continuity/i })).toBeEnabled();
+  });
+
+  it("loads the capability inventory only when Library opens its existing terminal", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(0);
+
+    fireEvent.click(screen.getByTestId("cockpit-section-library"));
+    expect(await screen.findByRole("heading", { name: "Canonical memory" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Capabilities and procedures" }));
+    expect(await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(1));
+  });
+
   it("mounts the authenticated Kanban board in the default cockpit workspace", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
+    fireEvent.click(screen.getByTestId("cockpit-section-work"));
     expect(await screen.findByLabelText("Work board")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Triage column" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Triage column" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Ready column" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create task" })).toBeInTheDocument();
   });
@@ -456,7 +1212,7 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task GoalSnapshot result" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
     expect(await screen.findByText("artifacts/output.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
@@ -476,6 +1232,543 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`))).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(childWorkflowRunId)}`))).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(false);
+  });
+
+  it.each([
+    ["matching effect and content digests", "a".repeat(16), "a".repeat(64), true, {}, {}],
+    ["a mismatched effect digest", "b".repeat(16), "a".repeat(64), false, {}, {}],
+    ["a mismatched content digest", "a".repeat(16), "b".repeat(64), false, {}, {}],
+    ["a mismatched path", "a".repeat(16), "a".repeat(64), false, {}, { target_path: "artifacts/other.md" }],
+    ["an untrusted receipt kind", "a".repeat(16), "a".repeat(64), false, { receipt_kind: "effect" }, {}],
+    ["an unfinished receipt status", "a".repeat(16), "a".repeat(64), false, { status: "failed" }, {}],
+    ["an unrelated effect type", "a".repeat(16), "a".repeat(64), false, { effect_type: "other_effect" }, {}],
+    ["a missing content digest", "a".repeat(16), "", false, {}, {}],
+  ])("routes a parent board_child_readback effect with %s", async (_label, effectDigest, effectContentDigest, shouldOpen, effectOverrides, referenceOverrides) => {
+    const parentWorkflowRunId = "work-board:task-readback-effect:attempt-1";
+    const artifactId = "art_" + "c".repeat(24);
+    const artifactPath = "artifacts/readback-only.md";
+    const expectedContentDigest = "a".repeat(64);
+    const readbackReference = {
+      artifact_id: artifactId,
+      readback_id: artifactId,
+      effect_id_digest: "a".repeat(16),
+      content_sha256: expectedContentDigest,
+      workflow_run_id: parentWorkflowRunId,
+      status: "succeeded",
+      verified: true,
+      ...referenceOverrides,
+    };
+    const attempt = {
+      attempt_id: "attempt-readback-effect",
+      task_id: "task-readback-effect",
+      workflow_run_id: parentWorkflowRunId,
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "executor.local",
+      started_at: "2026-09-24T08:00:00Z",
+      ended_at: "2026-09-24T08:00:01Z",
+      outcome: "succeeded",
+      readback_status: "verified",
+      verification_status: "passed",
+      receipt_refs: [readbackReference],
+      result_refs: [],
+      artifact_refs: [],
+    };
+    const boardTask = {
+      task_id: "task-readback-effect",
+      creation_sequence: 1,
+      owner_principal_id: "operator:one",
+      owner_session_id: "operator-owner-session",
+      origin_session_id: "operator-owner-session",
+      origin_thread_id: null,
+      goal_id: "goal-1",
+      goal_revision: 1,
+      title: "Parent readback effect",
+      body: "Inspect the parent readback receipt.",
+      capability_id: "workflow.goal-snapshot-to-file",
+      typed_input_ref: "workspace-json:inputs/readback.json",
+      typed_input_digest: "b".repeat(64),
+      executor_id: "executor.local",
+      assignee_id: "operator:one",
+      priority: 50,
+      idempotency_scope: "task",
+      idempotency_key: "task-readback-effect-key",
+      scheduled_at: null,
+      status: "done",
+      block_kind: null,
+      block_reason: null,
+      block_source_status: null,
+      cancel_requested_at: null,
+      requires_review: false,
+      reviewer_id: null,
+      dependency_count: 0,
+      completed_dependency_count: 0,
+      dispatch_rank: null,
+      recovery_action: null,
+      readback_status: "verified",
+      verification_status: "passed",
+      task_revision: 2,
+      result_refs: [],
+      artifact_refs: [],
+      latest_attempt: attempt,
+      created_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      completed_at: "2026-09-24T08:00:01Z",
+      archived_at: null,
+    };
+    const boundParentJob = {
+      job_id: parentWorkflowRunId,
+      parent_job_id: null,
+      status: "succeeded",
+      job_kind: "work-board",
+      artifacts: [],
+      effects: [{
+        receipt_kind: "readback",
+        effect_type: "board_child_readback",
+        status: "succeeded",
+        effect_id_digest: effectDigest,
+        target_path: artifactPath,
+        target_digest: effectContentDigest,
+        content_sha256: effectContentDigest,
+        ...effectOverrides,
+      }],
+      started_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      finished_at: "2026-09-24T08:00:01Z",
+    };
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: "operator-owner-session" }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        return Promise.resolve(mockResponse({ tasks: [boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith("/api/work-board/tasks/task-readback-effect")) {
+        return Promise.resolve(mockResponse({ task: boardTask, attempts: [attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: boundParentJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    const openTask = await screen.findByRole("button", { name: "Open task Parent readback effect" });
+    await act(async () => { fireEvent.click(openTask); });
+    const expectedReferenceLabel = "target_path" in referenceOverrides
+      && typeof referenceOverrides.target_path === "string"
+      ? referenceOverrides.target_path
+      : artifactId;
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${expectedReferenceLabel}` }));
+
+    if (shouldOpen) {
+      expect(await screen.findByText("readback receipt")).toBeInTheDocument();
+      expect(screen.getByText(`readback path ${artifactPath}`)).toBeInTheDocument();
+      expect(screen.getByText(`artifact SHA-256 ${expectedContentDigest}`)).toBeInTheDocument();
+    } else {
+      expect(await screen.findByRole("status", {
+        name: "The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.",
+      })).toBeInTheDocument();
+      expect(screen.queryByText("readback receipt")).not.toBeInTheDocument();
+    }
+  });
+
+  it("fetches and renders an owner-bound browser result only after explicit artifact inspection", async () => {
+    const fixture = browserPreviewFixture();
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:browser-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({
+          task: fixture.boardTask,
+          attempts: [fixture.attempt],
+          parents: [],
+          children: [],
+          comments: [],
+          events: [],
+          revision: 2,
+        }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-browser-preview/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 180, hard_max_runtime_seconds: 180, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/tasks?"))).toBe(true));
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    const inspectButton = await screen.findByRole("button", {
+      name: `Inspect execution evidence ${fixture.filePath}`,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+    fireEvent.click(inspectButton);
+
+    const extractValue = "This domain is for use in documentation examples.";
+    expect(await screen.findByText(extractValue, { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByText(/check 1 · text_contains · passed/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Verified browser result extracts" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(
+      `/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}?include_browser_result=true`,
+    ))).toBe(true);
+  });
+
+  it("fetches and renders an owner-bound calendar preparation result only after explicit artifact inspection", async () => {
+    const fixture = calendarPreviewFixture();
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:calendar-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({
+          task: fixture.boardTask,
+          attempts: [fixture.attempt],
+          parents: [],
+          children: [],
+          comments: [],
+          events: [],
+          revision: 2,
+        }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-calendar-preview/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/tasks?"))).toBe(true));
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Calendar result preview" }));
+    const inspectButton = await screen.findByRole("button", {
+      name: `Inspect execution evidence ${fixture.filePath}`,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+    fireEvent.click(inspectButton);
+
+    expect(await screen.findByText("Prepare a concise customer meeting brief.", { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Which decision is needed today?", { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Verified calendar preparation text" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(
+      `/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}?include_calendar_result=true`,
+    ))).toBe(true);
+  });
+
+  it.each([
+    ["artifact binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).artifact_id = "art_foreign_calendar_result";
+    }],
+    ["readback binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).readback_id = "readback-foreign-calendar";
+    }],
+    ["path binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).file_path = "artifacts/work-board/calendar/result-ffffffffffffffffffffffffffffffff.json";
+    }],
+    ["digest binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).content_sha256 = "f".repeat(64);
+    }],
+    ["an available result with no body", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result = null;
+    }],
+    ["an unavailable result", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result_status = "unavailable";
+    }],
+    ["an unknown result status", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result_status = "unknown";
+    }],
+    ["a missing result status", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      delete (fixture.boundJob as Record<string, unknown>).calendar_result_status;
+    }],
+  ] as const)("keeps calendar artifact metadata usable when preview has %s", async (_label, mutate) => {
+    const fixture = calendarPreviewFixture();
+    mutate(fixture);
+    await renderCalendarPreviewFixture(fetchMock, fixture);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Calendar result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+
+    await screen.findByText(fixture.filePath, { selector: ".cockpit-inspector-title" });
+    expect(await screen.findByRole("status", { name: /Calendar result preview unavailable/ })).toBeInTheDocument();
+    expect(screen.getByText(fixture.filePath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText(fixture.contentSha256)).toBeInTheDocument();
+    expect(screen.queryByText("Prepare a concise customer meeting brief.", { selector: "pre" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["a mismatched browser result binding", {
+      ...browserPreviewFixture().boundJob,
+      browser_result: {
+        ...browserPreviewFixture().boundJob.browser_result as Record<string, unknown>,
+        artifact_id: "art_foreign_browser_result",
+      },
+      browser_result_status: "available" as const,
+    }, "unavailable"],
+    ["a missing browser result body", {
+      ...browserPreviewFixture().boundJob,
+      browser_result: null,
+      browser_result_status: "unavailable" as const,
+    }, "unavailable"],
+    ["a missing browser result status", {
+      ...browserPreviewFixture().boundJob,
+      browser_result_status: undefined,
+    }, "unavailable"],
+  ] as const)("keeps browser artifact metadata usable when preview is %s", async (_label, boundJob, expectedStatus) => {
+    const fixture = browserPreviewFixture();
+    fixture.boundJob.browser_result = boundJob.browser_result;
+    (fixture.boundJob as Record<string, unknown>).browser_result_status = boundJob.browser_result_status;
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:browser-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+
+    await screen.findByText(fixture.filePath, { selector: ".cockpit-inspector-title" });
+    expect(await screen.findByRole("status", { name: /Browser result preview unavailable/ })).toBeInTheDocument();
+    expect(screen.getByText(fixture.filePath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText(fixture.contentSha256)).toBeInTheDocument();
+    expect(screen.getByText(expectedStatus)).toBeInTheDocument();
+    expect(screen.queryByText("This domain is for use in documentation examples.", { selector: "pre" })).not.toBeInTheDocument();
+  });
+
+  it("renders browser extraction text as escaped plaintext", async () => {
+    const fixture = browserPreviewFixture();
+    const scriptText = "<script>alert('browser')</script>";
+    (fixture.boundJob.browser_result as Record<string, unknown>).extracts = [{
+      action_index: 0,
+      kind: "extract",
+      attribute: null,
+      selector_digest: "c".repeat(64),
+      value: scriptText,
+    }];
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:browser-preview", session_id: fixture.ownerSessionId }));
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+    expect(await screen.findByText(scriptText, { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(document.querySelectorAll("script")).toHaveLength(0);
+  });
+
+  it("does not include raw browser selectors or final URLs in the preview surface", async () => {
+    const fixture = browserPreviewFixture();
+    const result = fixture.boundJob.browser_result as Record<string, unknown>;
+    (result.extracts as Array<Record<string, unknown>>)[0]!.selector = "body";
+    result.final_url = "https://example.com/private";
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:browser-preview", session_id: fixture.ownerSessionId }));
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 0 }));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 0, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+    expect(await screen.findByText("This domain is for use in documentation examples.", { selector: "pre" })).toBeInTheDocument();
+    expect(screen.queryByText("body")).not.toBeInTheDocument();
+    expect(screen.queryByText("https://example.com/private")).not.toBeInTheDocument();
+  });
+
+  it("opens an owner-checked Guardian dossier preview when the global artifact index is empty", async () => {
+    const artifactId = "art_guardian_dossier_1";
+    const artifactPath = "guardian/source-watches/watch-1/packets/packet-1.md";
+    const contentDigest = "f".repeat(64);
+    const ownerSessionId = "operator-owner-session";
+    const workflowRunId = "source-watch:watch-1:run-1";
+    const evidenceReference = {
+      artifact_id: artifactId,
+      artifact_type: "source_watch_dossier",
+      file_path: artifactPath,
+      sha256: contentDigest,
+      status: "verified",
+      verification: "byte_hash",
+      last_verified_at: "2026-09-24T08:00:00Z",
+      owner_session_id: ownerSessionId,
+      workflow_run_id: workflowRunId,
+    };
+    const guardianItem = {
+      id: "inbox-guardian-artifact",
+      revision: 3,
+      state: "pending",
+      source_kind: "source_packet",
+      source_id: "watch-1",
+      title: "Inspect source watch dossier",
+      summary: "A verified dossier is ready for review.",
+      why_now: "The watched source produced a verified change.",
+      goal_id: "goal-guardian",
+      goal_revision: 2,
+      watch_id: "watch-1",
+      plan_revision: 4,
+      task_id: null,
+      expires_at: "2026-09-25T08:00:00Z",
+      snoozed_until: null,
+      evidence_refs: [evidenceReference],
+      allowed_actions: ["accept_followup", "snooze", "dismiss"],
+      evidence_status: "verified",
+      source_status: "changed",
+      source_freshness: "fresh",
+      verification_status: "byte_hash",
+      memory_status: "not_updated",
+    };
+    const detailItem = {
+      ...guardianItem,
+      job: {
+        id: "job-source-watch-1",
+        status: "succeeded",
+        attempt_count: 1,
+        max_attempts: 3,
+        readbacks: [
+          {
+            target_path: artifactPath,
+            readback_id: "guardian_readback:dossier-1",
+            verified_at: "2026-09-24T08:00:00Z",
+            digest: contentDigest,
+            status: "succeeded",
+          },
+          {
+            target_path: "guardian/source-watches/watch-1/tasks/packet-1.md",
+            readback_id: "guardian_readback:task-1",
+            verified_at: "2026-09-24T08:00:01Z",
+            digest: "e".repeat(64),
+            status: "succeeded",
+          },
+        ],
+      },
+      evidence_previews: [{
+        artifact_id: artifactId,
+        artifact_type: "source_watch_dossier",
+        file_path: artifactPath,
+        sha256: contentDigest,
+        owner_session_id: ownerSessionId,
+        workflow_run_id: workflowRunId,
+        text: "Bounded redacted dossier preview from the authenticated source job.",
+        trust: "untrusted_source_evidence",
+      }],
+    };
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: ownerSessionId }));
+      }
+      if (url.includes("/api/guardian/inbox?") && !url.includes("/api/guardian/inbox/")) {
+        return Promise.resolve(mockResponse({ items: [guardianItem], next_cursor: null, last_confirmed_at: "2026-09-24T08:00:01Z" }));
+      }
+      if (url.endsWith(`/api/guardian/inbox/${encodeURIComponent(guardianItem.id)}`)) {
+        return Promise.resolve(mockResponse({ item: detailItem }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    const hiddenInspectorVisibility = {
+      ...getDefaultPaneVisibility("default"),
+      inspector_pane: false,
+    };
+    useCockpitLayoutStore.setState({
+      inspectorVisible: false,
+      activeSection: "work",
+      paneVisibility: hiddenInspectorVisibility,
+      savedPaneVisibility: { default: hiddenInspectorVisibility },
+    });
+
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    expect(await screen.findByText(new RegExp(`${artifactPath} · guardian_readback:dossier-1 · succeeded`))).toBeInTheDocument();
+    expect(await screen.findByText(/guardian\/source-watches\/watch-1\/tasks\/packet-1\.md · guardian_readback:task-1 · succeeded/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect guardian evidence ${artifactId}` }));
+
+    expect(await screen.findByText(artifactPath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText("Bounded redacted dossier preview from the authenticated source job.")).toBeInTheDocument();
+    expect(screen.getByText(artifactId)).toBeInTheDocument();
+    expect(screen.getByText(contentDigest)).toBeInTheDocument();
+    expect(screen.getByText(ownerSessionId)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
   });
 
   it("hides a nested board artifact when its durable child run names a different parent", async () => {
@@ -565,11 +1858,13 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Parent-bound result" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${artifactPath}` }));
 
-    expect(await screen.findByText("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.")).toBeInTheDocument();
+    expect(await screen.findByRole("status", {
+      name: "Task child workflow evidence is hidden because its parent does not match the task's immutable run link.",
+    })).toBeInTheDocument();
     expect(screen.queryByText(artifactPath, { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
   });
 
@@ -683,7 +1978,7 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Board evidence A" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/task-a.md" }));
     await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(1));
@@ -774,7 +2069,8 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    const view = render(<CockpitView onSend={() => {}} />);
+    useCockpitLayoutStore.setState({ activeSection: "work" });
+    const view = await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(0));
     fireEvent.click(await screen.findByRole("button", { name: "Open task Unmounted evidence" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/unmounted.md" }));
@@ -903,11 +2199,13 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Foreign linked run" }, { timeout: 5_000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/foreign-output.md" }));
 
-    expect(await screen.findByText(/linked workflow evidence is unavailable for the current authenticated session/i)).toBeInTheDocument();
+    expect(await screen.findByRole("status", {
+      name: "The task's linked workflow evidence is unavailable for the current authenticated session. Refresh the task and retry.",
+    })).toBeInTheDocument();
     expect(screen.queryByText("PRIVATE OTHER SESSION OUTPUT", { selector: ".cockpit-inspector-body" })).not.toBeInTheDocument();
     expect(screen.queryByText("goal-snapshot-to-file", { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(reference.workflow_run_id)}`))).toBe(true);
@@ -994,7 +2292,7 @@ describe("CockpitView", () => {
       return baselineImplementation?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const panel = await screen.findByTestId("outcome-cockpit-panel");
     await waitFor(() => {
@@ -1010,7 +2308,7 @@ describe("CockpitView", () => {
   it("loads deep cockpit panes only through their explicit endpoint groups", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "load activity ledger" })).toBeInTheDocument();
@@ -1111,7 +2409,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     expect(await within(consoleRegion).findByText("Atlas Marketplace Pack")).toBeInTheDocument();
@@ -1195,7 +2493,7 @@ describe("CockpitView", () => {
         : Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     fireEvent.click(await within(consoleRegion).findByRole("button", { name: "diagnostics" }));
@@ -1298,7 +2596,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
     await waitFor(() =>
@@ -1376,7 +2674,7 @@ describe("CockpitView", () => {
     useChatStore.setState({ connectionStatus: "disconnected" });
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("DIRECT FALLBACK · BALANCED TOOLS · HIGH_RISK APPROVAL")).toBeInTheDocument());
     expect(screen.getAllByText("disconnected").length).toBeGreaterThan(0);
@@ -1387,11 +2685,14 @@ describe("CockpitView", () => {
   it("keeps last known runtime label when runtime status refresh fails", async () => {
     vi.useFakeTimers();
     let runtimeStatusCalls = 0;
+    let failRuntimeStatus = false;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/runtime/status")) {
         runtimeStatusCalls += 1;
-        if (runtimeStatusCalls === 1) {
+        // Navigation can refresh more than once. Fail only the explicit
+        // periodic refresh after the current label has been observed.
+        if (!failRuntimeStatus) {
           return Promise.resolve(mockResponse({
             version: "test",
             build_id: "SERAPH_TEST",
@@ -1431,13 +2732,14 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("LOCAL GEMMA · LOCAL GEMMA")).toBeInTheDocument();
 
+    failRuntimeStatus = true;
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
@@ -1473,7 +2775,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
     expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
@@ -1509,7 +2811,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
@@ -1558,7 +2860,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.1 FAST")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
@@ -1594,7 +2896,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
   });
@@ -1610,7 +2912,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
     expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
@@ -1645,7 +2947,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
@@ -1686,7 +2988,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
@@ -1729,7 +3031,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
@@ -1771,7 +3073,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
@@ -1823,7 +3125,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -1946,7 +3248,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -2069,7 +3371,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     expect(await within(consoleRegion).findByText("Revoked Device Bridge Pack")).toBeInTheDocument();
@@ -2151,7 +3453,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     fireEvent.click(await within(consoleRegion).findByRole("button", { name: "quarantine" }));
@@ -2560,6 +3862,21 @@ describe("CockpitView", () => {
                 },
               ],
             },
+            summary: {
+              continuity_health: "degraded",
+              primary_surface: "reach",
+              recommended_focus: "Bundle delivery",
+              actionable_thread_count: 0,
+              ambient_item_count: 1,
+              pending_notification_count: 1,
+              queued_insight_count: 1,
+              recent_intervention_count: 1,
+              degraded_route_count: 3,
+              degraded_source_adapter_count: 0,
+              attention_family_count: 0,
+              presence_surface_count: 0,
+              attention_presence_surface_count: 0,
+            },
           }),
         );
       }
@@ -2610,13 +3927,15 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
-    expect(screen.queryByText("Desktop shell")).not.toBeInTheDocument();
+    // renderLegacyCockpit explicitly opts into the advanced Windows workspace;
+    // the desktop shell is therefore part of this test's mounted surface.
+    expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("Operator terminal")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true"),
@@ -2638,13 +3957,13 @@ describe("CockpitView", () => {
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
 
+    // All panes are already visible after renderLegacyCockpit. Close the
+    // launcher drawer without toggling the existing Desktop shell pane.
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
-    const windowsMenu = await screen.findByText("Desktop Shell");
-    fireEvent.click(windowsMenu.closest("button") as HTMLButtonElement);
 
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getByText(/Bundle delivery: unavailable/i)).toBeInTheDocument();
-    expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
+    expect(screen.getAllByText("Run summarize-file").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -2677,7 +3996,7 @@ describe("CockpitView", () => {
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
     expect(screen.getAllByText("Use Output")).not.toHaveLength(0);
-    const runButton = screen.getByRole("button", { name: "Run summarize-file" });
+    const runButton = screen.getAllByRole("button", { name: "Run summarize-file" })[0];
     expect(runButton).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run annotate-image" })).not.toBeInTheDocument();
     fireEvent.click(runButton);
@@ -3459,7 +4778,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -4206,7 +5525,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -4683,7 +6002,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -4941,7 +6260,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5233,7 +6552,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5458,7 +6777,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     await waitFor(
@@ -5581,7 +6900,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5791,7 +7110,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5920,7 +7239,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const starterPackRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6046,7 +7365,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("GitHub sync")).toBeInTheDocument());
     const runbookRow = screen.getByText("GitHub sync").closest(".cockpit-operator-row");
@@ -6073,6 +7392,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -6236,7 +7562,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6367,7 +7693,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6508,7 +7834,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6604,7 +7930,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6736,7 +8062,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6888,7 +8214,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7066,7 +8392,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     expect(await screen.findByText("browser providers")).toBeInTheDocument();
     const operatorPane = screen.getByText("Operator terminal").closest("section");
@@ -7184,7 +8510,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7289,7 +8615,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7388,7 +8714,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "load activity ledger" }));
 
@@ -7455,7 +8781,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Latest response")).toBeInTheDocument());
     expect(
@@ -7516,6 +8842,22 @@ describe("CockpitView", () => {
             queued_insights: [],
             queued_insight_count: 0,
             recent_interventions: [],
+            reach: { route_statuses: [] },
+            summary: {
+              continuity_health: "attention",
+              primary_surface: "notification",
+              recommended_focus: "Resume stale thread",
+              actionable_thread_count: 1,
+              ambient_item_count: 1,
+              pending_notification_count: 1,
+              queued_insight_count: 0,
+              recent_intervention_count: 0,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_family_count: 0,
+              presence_surface_count: 0,
+              attention_presence_surface_count: 0,
+            },
           }),
         );
       }
@@ -7525,13 +8867,13 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
+    // All panes are already visible after renderLegacyCockpit. Close the
+    // launcher drawer without toggling the existing Desktop shell pane.
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
-    const menu = await screen.findByText("Desktop Shell");
-    fireEvent.click(menu.closest("button") as HTMLButtonElement);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -7650,7 +8992,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7708,7 +9050,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getAllByText("Seraph is responding").length).toBeGreaterThan(0));
     expect(screen.getByRole("button", { name: "Working" })).toBeDisabled();
@@ -7746,7 +9088,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -7800,7 +9142,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
 
@@ -8663,7 +10005,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -8780,7 +10122,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -8823,7 +10165,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -8944,7 +10286,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -9061,7 +10403,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -9402,7 +10744,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -9738,7 +11080,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -9894,7 +11236,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10181,7 +11523,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10368,7 +11710,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10516,7 +11858,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10837,7 +12179,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10976,7 +12318,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const githubLabel = await screen.findByText("github");
     const githubRow = githubLabel.closest(".cockpit-operator-row");
@@ -11095,7 +12437,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const packagedLabel = await screen.findByText("github-packaged");
     const packagedRow = packagedLabel.closest(".cockpit-operator-row");
@@ -11201,7 +12543,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const packagedLabel = await screen.findByText("github-packaged");
     const packagedRow = packagedLabel.closest(".cockpit-operator-row");
@@ -11318,7 +12660,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11471,7 +12813,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11648,7 +12990,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11753,7 +13095,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11898,7 +13240,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12011,7 +13353,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12146,7 +13488,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12243,7 +13585,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12345,7 +13687,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12368,6 +13710,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -12465,7 +13814,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12638,7 +13987,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12930,7 +14279,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("extension health")).toBeInTheDocument());
     await waitFor(() => {
@@ -12976,6 +14325,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -13127,7 +14483,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13226,7 +14582,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13398,7 +14754,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13438,6 +14794,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -13613,7 +14976,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13767,7 +15130,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13903,7 +15266,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -14078,7 +15441,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -14186,7 +15549,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -14230,10 +15593,12 @@ describe("CockpitView", () => {
     });
 
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const view = render(<CockpitView onSend={vi.fn()} />);
+    const view = await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    // The baseline refresh now also starts the authenticated work-board snapshot.
-    await waitFor(() => expect(cockpitFetchCount).toBe(5));
+    // The active Work shell owns its bounded baseline reads and the legacy
+    // Guardian owner; all are aborted before any deferred payload resolves.
+    await waitFor(() => expect(cockpitFetchCount).toBeGreaterThanOrEqual(6));
+    const mountedFetchCount = cockpitFetchCount;
     view.unmount();
 
     await act(async () => {
@@ -14248,6 +15613,7 @@ describe("CockpitView", () => {
     });
 
     expect(jsonSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    expect(cockpitFetchCount).toBe(mountedFetchCount);
     expect(consoleError).not.toHaveBeenCalled();
   }, 15000);
 
@@ -14291,7 +15657,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn(async () => false)} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn(async () => false)} />);
 
     const composer = await screen.findByPlaceholderText(/Ask Seraph/i);
     fireEvent.change(composer, { target: { value: "keep me" } });
@@ -14489,7 +15855,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -14666,7 +16032,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 

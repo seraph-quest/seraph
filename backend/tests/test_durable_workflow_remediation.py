@@ -425,6 +425,7 @@ def test_board_child_readback_projection_correlates_real_child_artifact():
                 "file_path": artifact_path,
                 "verified": True,
                 "reason_code": "verified",
+                "learning": "no_learning",
             }
         ],
         "artifact_refs": [
@@ -462,6 +463,7 @@ def test_board_child_readback_projection_correlates_real_child_artifact():
                         "goal_id_read_back": True,
                         "child_job_id": dispatcher_result["child_job_id"],
                         "artifact_id": result_ref["artifact_id"],
+                        "learning": "no_learning",
                         "private_source": "must not be projected",
                     },
                 }
@@ -501,6 +503,7 @@ def test_board_child_readback_projection_correlates_real_child_artifact():
     assert parent_receipt["artifact_id"] == artifact_id
     assert parent_receipt["target_path"] == artifact_path
     assert parent_receipt["content_sha256"] == digest
+    assert parent_receipt["learning"] == "no_learning"
     assert parent_projection["artifact_registry"] == [
         {
             "artifact_id": artifact_id,

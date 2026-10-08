@@ -4,11 +4,13 @@ from typing import Any
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
+from src.db.models import MemoryKind, MemoryStatus
 from src.extensions.capability_execution import CapabilityJournalError
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
@@ -34,6 +36,8 @@ from src.memory.control import (
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
+from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
+from src.guardian.opportunity_preferences import OpportunityPreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
@@ -217,6 +221,54 @@ def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bo
     if str(request.action or "").strip().lower() == "rollback_memory":
         return request.acknowledge_rollback_boundary
     return request.acknowledged or request.acknowledge_rollback_boundary
+
+
+@router.get("/memory/records")
+async def get_memory_records(
+    http_request: Request,
+    limit: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = Query(default=None, max_length=512),
+    q: str | None = Query(default=None, max_length=200),
+    kind: MemoryKind | None = None,
+    status: MemoryStatus = MemoryStatus.active,
+):
+    """Read the authenticated operator's canonical memory library page."""
+
+    context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes
+    try:
+        return await memory_repository.list_memory_records(
+            owner_session_id=context.session_id,
+            limit=limit,
+            cursor=cursor,
+            query=q,
+            kind=kind,
+            status=status,
+            recovered_read_scopes=await selected_read_scopes(http_request.state.operator, "memory"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/memory/records/{memory_id}")
+async def get_memory_record(http_request: Request, memory_id: str):
+    """Read one owner-scoped canonical memory record without an existence hint."""
+
+    context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(http_request.state.operator, "memory")
+    record = await memory_repository.get_memory_record(
+        owner_session_id=recovered.get(memory_id, context.session_id),
+        memory_id=memory_id,
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "memory_record_not_found"},
+        )
+    if memory_id in recovered:
+        record.update(RECOVERED_FIELDS)
+    return record
 
 
 async def list_memory_providers(*, owner_session_id: str | None = None):
@@ -425,6 +477,58 @@ async def get_memory_task_decision_capabilities(http_request: Request):
 
     authenticated_memory_context(http_request)
     return {"capabilities": m5_registered_capability_contracts()}
+
+
+@router.get("/memory/procedure-preferences/{proposal_id}")
+async def get_procedure_preference(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import inspect_preference
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_preference(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/procedure-preferences/{proposal_id}/actions")
+async def act_on_procedure_preference(http_request: Request, proposal_id: str, request: ProcedurePreferenceActionRequest):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import apply_preference_action
+    from src.work_board.repository import BoardError
+    try:
+        return await apply_preference_action(http_request.state.operator, proposal_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.get("/memory/opportunity-preferences/{proposal_id}")
+async def get_opportunity_preference(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.guardian.opportunity_preferences import inspect_preference
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_preference(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
+
+
+@router.post("/memory/opportunity-preferences/{proposal_id}/actions")
+async def act_on_opportunity_preference(http_request: Request, proposal_id: str, request: OpportunityPreferenceActionRequest):
+    authenticated_memory_context(http_request)
+    from src.guardian.opportunity_preferences import apply_preference_action
+    from src.work_board.repository import BoardError
+    try:
+        return await apply_preference_action(http_request.state.operator, proposal_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
 
 
 @router.post("/memory/task-proposals/{proposal_id}/actions")

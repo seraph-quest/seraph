@@ -78,28 +78,48 @@ OPERATOR_REQUIRED_TABLES = (
     "telegram_inbound_updates",
     "telegram_transport_outbox",
     "telegram_delivery_attempts",
+    "telegram_task_callbacks",
     "guardian_interventions",
     "strategy_deltas",
     "guardian_source_watches",
     "guardian_source_baselines",
     "guardian_decision_packets",
+    "guardian_inbox_dispositions",
+    "guardian_inbox_actions",
     "github_followthrough_connections",
     "guardian_routines",
     "guardian_routine_versions",
     "work_board_routine_bindings",
+    "procedure_v2_bindings",
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
     "work_board_tasks",
+    "work_board_input_artifacts",
     "work_board_attempts",
     "work_board_review_intents",
     "work_board_links",
     "work_board_comments",
     "work_board_events",
+    "work_board_evidence_dependencies",
     "work_board_proposals",
     "work_board_handoffs",
     "memory_proposals",
     "work_board_decision_receipts",
+    "google_service_connections",
+    "calendar_read_consents",
+    "calendar_reschedule_consents",
+    "mail_label_bindings",
+    "mail_read_consents",
+    "mail_message_bindings",
+    "mail_watch_states",
+    "calendar_event_bindings",
+    "calendar_prep_receipts",
+    "governed_schedule_bindings",
+    "governed_schedule_occurrences",
+    "repo_repair_source_packets",
+    "repo_repair_proposals",
+    "repo_repair_egress_consents",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -324,6 +344,50 @@ async def _ensure_legacy_columns(conn) -> None:
         "memory_snapshots",
         {"canonical_tombstone_revision": "VARCHAR"},
     )
+    await _add_missing_columns("work_board_input_artifacts", {
+        "document_metadata_json": "VARCHAR",
+        "document_reserved_bytes": "INTEGER DEFAULT 0",
+    })
+    await _add_missing_columns("github_followthrough_connections", {
+        "consent_id": "VARCHAR", "consent_owner_session_id": "VARCHAR",
+        "consent_actions_json": "VARCHAR", "consent_issued_at": "DATETIME",
+        "consent_expires_at": "DATETIME", "consent_connection_revision": "INTEGER",
+        "consent_payload_digest": "VARCHAR", "consent_revoked_at": "DATETIME",
+    })
+
+    await _add_missing_columns(
+        "guardian_decision_packets",
+        {"inbox_pending": "BOOLEAN DEFAULT 0", "opportunity_snapshot_artifact_id": "VARCHAR",
+         "opportunity_snapshot_sha256": "VARCHAR"},
+    )
+    await _add_missing_columns("goals", {
+        "guardian_policy_json": "VARCHAR", "guardian_policy_revision": "INTEGER NOT NULL DEFAULT 0",
+    })
+    await _add_missing_columns("guardian_interventions", {
+        "owner_principal_id": "VARCHAR", "original_root_id": "VARCHAR", "goal_id": "VARCHAR",
+        "goal_revision": "INTEGER", "opportunity_id": "VARCHAR", "delivery_status": "VARCHAR",
+        "outcome_binding_json": "VARCHAR", "feedback_revision": "INTEGER NOT NULL DEFAULT 0",
+        "feedback_history_json": "VARCHAR",
+        # Older intervention tables predate this existing nullable projection.
+        "feedback_at": "DATETIME",
+    })
+    if await _table_columns("guardian_interventions"):
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_guardian_interventions_opportunity_feedback "
+            "ON guardian_interventions (intervention_type, owner_principal_id, original_root_id, goal_id, "
+            "goal_revision, feedback_at, id)")
+    if await _table_columns("guardian_opportunities"):
+        await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_guardian_opportunity_owner_dedupe "
+                                   "ON guardian_opportunities (owner_principal_id, dedupe_key)")
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_guardian_opportunity_owner_goal_created "
+                                   "ON guardian_opportunities (owner_principal_id, goal_id, created_at, id)")
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_guardian_opportunity_status_created "
+                                   "ON guardian_opportunities (status, created_at, id)")
+    if await _table_columns("guardian_decision_packets"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_guardian_decision_packets_inbox_pending_updated "
+            "ON guardian_decision_packets (inbox_pending, updated_at, id)"
+        )
+
 
     session_columns = await _add_missing_columns(
         "sessions",
@@ -339,8 +403,8 @@ async def _ensure_legacy_columns(conn) -> None:
         # persisted user/assistant transcript are provably conversations, so
         # claim those legacy rows for the canonical single operator.  Empty
         # placeholders created by service/job references remain ownerless and
-        # therefore fail closed until an authenticated chat ingress explicitly
-        # binds them.
+        # remain blocked at authenticated ingress. The role label retained on
+        # transcripts is migration metadata, never attributable to a new root.
         message_columns = await _table_columns("messages")
         if (
             message_columns
@@ -583,6 +647,8 @@ async def _ensure_legacy_columns(conn) -> None:
             "goal_revision": "INTEGER",
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
+            "source_task_id": "VARCHAR",
+            "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
             "authority_digest": "VARCHAR",
@@ -605,6 +671,9 @@ async def _ensure_legacy_columns(conn) -> None:
             "checkpoint_receipts_json": "VARCHAR DEFAULT '[]'",
             "artifact_receipts_json": "VARCHAR DEFAULT '[]'",
             "effect_receipts_json": "VARCHAR DEFAULT '[]'",
+            "github_read_revision_json": "VARCHAR",
+            "github_read_observation_history_json": "VARCHAR",
+            "github_capacity_closure_json": "VARCHAR",
             "result_digest": "VARCHAR",
             "result_summary": "VARCHAR",
         },
@@ -615,6 +684,17 @@ async def _ensure_legacy_columns(conn) -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_workflow_run_states_{column} "
                 f"ON workflow_run_states ({column})"
             )
+    if workflow_job_columns:
+        # On a fresh workspace metadata.create_all owns table/index creation.
+        # This pre-create migration only indexes an already existing table.
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_run_states_source_task "
+            "ON workflow_run_states (job_kind, owner_principal_id, operator_session_id, source_task_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_run_states_selected_context_quota "
+            "ON workflow_run_states (job_kind, owner_principal_id, selected_context_reserved_bytes)"
+        )
     if workflow_job_columns and "revision" in await _table_columns("workflow_run_states"):
         await conn.exec_driver_sql(
             "UPDATE workflow_run_states SET revision = 0 "
@@ -726,6 +806,133 @@ async def _ensure_legacy_columns(conn) -> None:
                 },
             )
 
+async def _ensure_operator_session_columns(conn) -> None:
+    """Add the stable-owner bearer tombstone marker before table indexes load.
+
+    Existing SQLite workspaces need an additive non-null server-default column
+    before ``SQLModel.metadata.create_all`` materializes the model index. The
+    information-schema branch keeps the same migration safe for PostgreSQL
+    deployments without changing any existing session rows.
+    """
+
+    dialect = str(getattr(conn.dialect, "name", "")).lower()
+    if dialect == "sqlite":
+        result = await conn.exec_driver_sql("PRAGMA table_info(operator_sessions)")
+        existing = {row[1] for row in result.fetchall()}
+    else:
+        result = await conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'operator_sessions'"
+        )
+        existing = {row[0] for row in result.fetchall()}
+    if not existing:
+        return
+    if "operator_identity_id" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE operator_sessions ADD COLUMN operator_identity_id VARCHAR"
+        )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_operator_identity_id "
+        "ON operator_sessions (operator_identity_id)"
+    )
+    if "is_bearer_tombstone" not in existing:
+        if dialect == "sqlite":
+            await conn.exec_driver_sql(
+                "ALTER TABLE operator_sessions ADD COLUMN "
+                "is_bearer_tombstone BOOLEAN NOT NULL DEFAULT 0"
+            )
+        else:
+            await conn.exec_driver_sql(
+                "ALTER TABLE operator_sessions ADD COLUMN "
+                "is_bearer_tombstone BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+    default_literal = "0" if dialect == "sqlite" else "FALSE"
+    await conn.exec_driver_sql(
+        "UPDATE operator_sessions SET is_bearer_tombstone = "
+        f"{default_literal} WHERE is_bearer_tombstone IS NULL"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_is_bearer_tombstone "
+        "ON operator_sessions (is_bearer_tombstone)"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_replacement_state "
+        "ON operator_sessions (replaced_by_id, is_bearer_tombstone, revoked_at)"
+    )
+
+
+async def _ensure_vault_owner(conn) -> None:
+    columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(secrets)")).fetchall()}
+    if not columns:
+        return
+    if "owner_principal_id" not in columns:
+        await conn.exec_driver_sql("ALTER TABLE secrets ADD COLUMN owner_principal_id VARCHAR")
+    if "revoked_at" not in columns:
+        await conn.exec_driver_sql("ALTER TABLE secrets ADD COLUMN revoked_at DATETIME")
+    await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_secrets_owner_principal_id ON secrets (owner_principal_id)")
+    await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_secrets_revoked_at ON secrets (revoked_at)")
+
+
+OPERATOR_PRINCIPAL_SCHEMA = 900
+
+
+async def _ensure_operator_principals(conn) -> None:
+    """Forward-only owner migration; never transfer old execution envelopes.
+
+    Legacy bearer authority is revoked before the principal-required issuance
+    fence is installed. An old binary therefore cannot authenticate old tokens
+    or insert a new shared-role session into this SQLite workspace.
+    """
+    if conn.dialect.name != "sqlite":
+        raise RuntimeError("operator principal migration requires canonical SQLite")
+    version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar_one()
+    if version > OPERATOR_PRINCIPAL_SCHEMA:
+        raise RuntimeError("workspace requires a newer compatible runtime; restore backup for downgrade")
+    columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(operator_sessions)")).fetchall()}
+    if not columns:
+        return
+    migrating = "principal_id" not in columns
+    if migrating:
+        await conn.exec_driver_sql("ALTER TABLE operator_sessions ADD COLUMN principal_id VARCHAR")
+        await conn.exec_driver_sql("ALTER TABLE operator_sessions ADD COLUMN legacy_owner_principal_id VARCHAR")
+        # These two credential key formats are emitted by paired_edge.py and
+        # telegram_transport.py. Invalidate only exact legacy generations; old
+        # readers ignore revoked_at, so their ciphertext must also be unusable.
+        secret_columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(secrets)")).fetchall()}
+        if {"key", "encrypted_value", "revoked_at", "owner_principal_id"}.issubset(secret_columns):
+            await conn.exec_driver_sql(
+                "UPDATE secrets SET revoked_at = CURRENT_TIMESTAMP, encrypted_value = 'revoked:operator-principal-migration' "
+                "WHERE owner_principal_id IS NULL AND revoked_at IS NULL AND ("
+                "(substr(key,1,20) = 'seraph-node-pairing-' AND length(key) = 60 AND substr(key,21) NOT GLOB '*[^0-9a-f]*') OR "
+                "(substr(key,1,25) = 'telegram.transport.token:' AND length(key) = 89 AND substr(key,26) NOT GLOB '*[^0-9a-f]*'))"
+            )
+        await conn.exec_driver_sql(
+            "UPDATE operator_sessions SET principal_id = 'operator:root:' || id, "
+            "legacy_owner_principal_id = CASE WHEN is_bearer_tombstone = 0 THEN 'operator:single' ELSE NULL END, "
+            "revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)"
+        )
+    invalid = (await conn.exec_driver_sql(
+        "SELECT id FROM operator_sessions WHERE principal_id IS NULL "
+        "OR principal_id NOT LIKE 'operator:root:%' OR length(principal_id) < 20 "
+        "OR length(principal_id) > 128 OR substr(principal_id, 15) GLOB '*[^A-Za-z0-9_-]*' LIMIT 1"
+    )).first()
+    duplicate = (await conn.exec_driver_sql(
+        "SELECT principal_id FROM operator_sessions GROUP BY principal_id HAVING count(*) > 1 LIMIT 1"
+    )).first()
+    if invalid or duplicate:
+        raise RuntimeError("operator_principal_migration_required: malformed or duplicate principal; restore backup")
+    await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_operator_sessions_principal_id ON operator_sessions (principal_id)")
+    for event in ("INSERT", "UPDATE OF principal_id"):
+        trigger = "operator_principal_required_" + ("insert" if event == "INSERT" else "update")
+        await conn.exec_driver_sql(
+            f"CREATE TRIGGER IF NOT EXISTS {trigger} BEFORE {event} ON operator_sessions "
+            "WHEN NEW.principal_id IS NULL OR NEW.principal_id NOT LIKE 'operator:root:%' "
+            "OR length(NEW.principal_id) < 20 OR length(NEW.principal_id) > 128 "
+            "OR substr(NEW.principal_id, 15) GLOB '*[^A-Za-z0-9_-]*' "
+            "BEGIN SELECT RAISE(ABORT, 'operator_principal_migration_required'); END"
+        )
+    await conn.exec_driver_sql(f"PRAGMA user_version = {OPERATOR_PRINCIPAL_SCHEMA}")
+
 
 async def _ensure_telegram_transport_columns(conn) -> None:
     """Add fields introduced after the initial #752 transport migration.
@@ -736,11 +943,17 @@ async def _ensure_telegram_transport_columns(conn) -> None:
     after lease/readback hardening lands.
     """
     definitions = {
+        "telegram_task_callbacks": {
+            "workflow_run_id": "VARCHAR",
+            "workflow_binding_digest": "VARCHAR",
+        },
         "telegram_transport_states": {
             "last_update_at": "DATETIME",
             "last_error": "VARCHAR",
         },
         "telegram_transport_outbox": {
+            "task_control_markup_json": "VARCHAR",
+            "task_control_markup_digest": "VARCHAR",
             "lease_owner": "VARCHAR",
             "lease_expires_at": "DATETIME",
             "fencing_token": "INTEGER DEFAULT 0",
@@ -823,6 +1036,282 @@ async def _ensure_m5_columns(conn) -> None:
     if receipt_columns and "receipt_integrity_mac" not in receipt_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE work_board_decision_receipts ADD COLUMN receipt_integrity_mac VARCHAR"
+        )
+
+
+async def _ensure_repo_repair_columns(conn) -> None:
+    """Install additive repository-repair provenance columns before ``create_all``.
+
+    The repair tables are new on current workspaces, but local Seraph
+    databases are upgraded in place.  Keep this migration additive and
+    fail-closed: existing rows receive only bounded metadata defaults; no
+    source or model content is synthesized during migration.
+    """
+
+    definitions = {
+        "repo_repair_source_packets": {
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "input_digest": "VARCHAR DEFAULT ''",
+            "repository_ref": "VARCHAR DEFAULT ''",
+            "base_snapshot_digest": "VARCHAR DEFAULT ''",
+            "source_manifest_digest": "VARCHAR DEFAULT ''",
+            "artifact_id": "VARCHAR DEFAULT ''",
+            "artifact_sha256": "VARCHAR DEFAULT ''",
+            "manifest_json": "VARCHAR DEFAULT '{}'",
+            "state": "VARCHAR DEFAULT 'inspected'",
+            "revision": "INTEGER DEFAULT 1",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+        "repo_repair_proposals": {
+            "operation_key": "VARCHAR DEFAULT ''",
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "repository_ref": "VARCHAR DEFAULT ''",
+            "base_snapshot_digest": "VARCHAR DEFAULT ''",
+            "source_packet_id": "VARCHAR DEFAULT ''",
+            "source_digest": "VARCHAR DEFAULT ''",
+            "model_runtime_path": "VARCHAR DEFAULT 'strategist_agent'",
+            "model_profile_id": "VARCHAR DEFAULT ''",
+            "model_request_digest": "VARCHAR DEFAULT ''",
+            "model_output_digest": "VARCHAR DEFAULT ''",
+            "model_response_artifact_id": "VARCHAR",
+            "model_response_artifact_sha256": "VARCHAR",
+            "patch_artifact_id": "VARCHAR DEFAULT ''",
+            "patch_sha256": "VARCHAR DEFAULT ''",
+            "allowed_paths_json": "VARCHAR DEFAULT '[]'",
+            "test_args_json": "VARCHAR DEFAULT '[]'",
+            "request_digest": "VARCHAR DEFAULT ''",
+            "authority_digest": "VARCHAR DEFAULT ''",
+            "approval_id": "VARCHAR",
+            "approval_fingerprint": "VARCHAR",
+            "last_receipt_id": "VARCHAR",
+            "status": "VARCHAR DEFAULT 'prepared'",
+            "safe_metadata_json": "VARCHAR DEFAULT '{}'",
+            "expires_at": "DATETIME",
+            "revision": "INTEGER DEFAULT 1",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+        "repo_repair_egress_consents": {
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "source_packet_id": "VARCHAR DEFAULT ''",
+            "source_digest": "VARCHAR DEFAULT ''",
+            "source_manifest_digest": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "input_digest": "VARCHAR DEFAULT ''",
+            "runtime_path": "VARCHAR DEFAULT 'strategist_agent'",
+            "effective_profile_id": "VARCHAR DEFAULT ''",
+            "effective_upstream": "VARCHAR DEFAULT ''",
+            "maximum_input_bytes": "INTEGER DEFAULT 65536",
+            "maximum_output_tokens": "INTEGER DEFAULT 4096",
+            "expires_at": "DATETIME",
+            "state": "VARCHAR DEFAULT 'active'",
+            "revision": "INTEGER DEFAULT 1",
+            "consent_digest": "VARCHAR DEFAULT ''",
+            "request_key": "VARCHAR DEFAULT ''",
+            "request_digest": "VARCHAR DEFAULT ''",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+    }
+    for table_name, columns_to_add in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        existing = {row[1] for row in result.fetchall()}
+        if not existing:
+            continue
+        for column, sql_type in columns_to_add.items():
+            if column not in existing:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"
+                )
+
+
+async def _ensure_repo_repair_indexes(conn) -> None:
+    """Reassert repair provenance indexes on an upgraded SQLite workspace."""
+
+    statements = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_source_packets_job_input "
+        "ON repo_repair_source_packets (workflow_run_id, input_digest)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_source_packets_owner_state "
+        "ON repo_repair_source_packets (owner_principal_id, owner_session_id, state, created_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_proposals_owner_operation "
+        "ON repo_repair_proposals (owner_principal_id, owner_session_id, workflow_run_id, operation_key)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_proposals_owner_status "
+        "ON repo_repair_proposals (owner_principal_id, owner_session_id, status, expires_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_egress_consents_owner_request "
+        "ON repo_repair_egress_consents (owner_principal_id, owner_session_id, request_key)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_egress_consents_job_state "
+        "ON repo_repair_egress_consents (workflow_run_id, state, expires_at)",
+    )
+    for statement in statements:
+        await conn.exec_driver_sql(statement)
+
+
+async def _ensure_calendar_columns(conn) -> None:
+    """Install calendar columns and fences before metadata indexes are created.
+
+    Existing workspaces may predate the consent idempotency columns, and
+    ``create_all`` would try to create the model's partial unique index before
+    an additive migration could inspect legacy rows.  Add the columns and
+    reject an already ambiguous nonempty key explicitly; preserving both
+    authority rows is safer than silently choosing one.
+    """
+
+    consent_result = await conn.exec_driver_sql("PRAGMA table_info(calendar_read_consents)")
+    consent_columns = {row[1] for row in consent_result.fetchall()}
+    if consent_columns:
+        if "creation_idempotency_key" not in consent_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE calendar_read_consents ADD COLUMN creation_idempotency_key VARCHAR DEFAULT ''"
+            )
+        if "creation_request_digest" not in consent_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE calendar_read_consents ADD COLUMN creation_request_digest VARCHAR DEFAULT ''"
+            )
+        duplicate = await conn.exec_driver_sql(
+            "SELECT 1 FROM calendar_read_consents "
+            "WHERE TRIM(COALESCE(creation_idempotency_key, '')) <> '' "
+            "GROUP BY owner_principal_id, owner_session_id, creation_idempotency_key "
+            "HAVING COUNT(*) > 1 LIMIT 1"
+        )
+        if duplicate.fetchone() is not None:
+            raise RuntimeError(
+                "calendar consent creation idempotency collision requires explicit "
+                "owner/session reconciliation before startup"
+            )
+        await conn.exec_driver_sql(
+            "DROP INDEX IF EXISTS ux_calendar_read_consents_creation_idempotency"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX ux_calendar_read_consents_creation_idempotency "
+            "ON calendar_read_consents (owner_principal_id, owner_session_id, creation_idempotency_key) "
+            "WHERE creation_idempotency_key <> ''"
+        )
+
+    connection_result = await conn.exec_driver_sql(
+        "PRAGMA table_info(google_service_connections)"
+    )
+    connection_columns = {row[1] for row in connection_result.fetchall()}
+    if connection_columns and "verified_setup_job_id" not in connection_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE google_service_connections ADD COLUMN verified_setup_job_id VARCHAR"
+        )
+        # Older development snapshots used a broader temporary index name;
+        # remove it before materializing the SQLModel field's canonical index.
+        await conn.exec_driver_sql(
+            "DROP INDEX IF EXISTS ix_google_service_connections_verified_setup_job"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_google_service_connections_verified_setup_job_id "
+            "ON google_service_connections (verified_setup_job_id)"
+        )
+
+
+async def _ensure_mail_columns(conn) -> None:
+    """Install additive Mail columns independently from Calendar migrations.
+
+    Mail and Calendar share the connection table, but their migration helpers
+    must remain separately attributable so a legacy Calendar-only workspace
+    cannot accidentally depend on the Mail source rollout (and vice versa).
+    """
+
+    connection_result = await conn.exec_driver_sql(
+        "PRAGMA table_info(google_service_connections)"
+    )
+    connection_columns = {row[1] for row in connection_result.fetchall()}
+    if connection_columns:
+        for column_name, sql_type in {
+            "declared_scopes_json": "VARCHAR DEFAULT '[]'",
+            "provider_scopes_json": "VARCHAR DEFAULT '[]'",
+            "scope_status": "VARCHAR DEFAULT 'scope_unverified'",
+            "revoke_idempotency_key": "VARCHAR",
+            "revoke_request_digest": "VARCHAR",
+        }.items():
+            if column_name not in connection_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE google_service_connections ADD COLUMN {column_name} {sql_type}"
+                )
+
+    consent_result = await conn.exec_driver_sql("PRAGMA table_info(mail_read_consents)")
+    consent_columns = {row[1] for row in consent_result.fetchall()}
+    if consent_columns:
+        for column_name, sql_type in {
+            "revoke_idempotency_key": "VARCHAR",
+            "revoke_request_digest": "VARCHAR",
+        }.items():
+            if column_name not in consent_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE mail_read_consents ADD COLUMN {column_name} {sql_type}"
+                )
+
+    binding_result = await conn.exec_driver_sql("PRAGMA table_info(mail_message_bindings)")
+    binding_columns = {row[1] for row in binding_result.fetchall()}
+    if binding_columns:
+        for column_name, sql_type in {
+            "source_consent_id": "VARCHAR",
+            "source_consent_revision": "INTEGER",
+            "source_label_scope_digest": "VARCHAR",
+        }.items():
+            if column_name not in binding_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE mail_message_bindings ADD COLUMN {column_name} {sql_type}"
+                )
+
+    # Indexes are intentionally additive and idempotent.  Existing rows may
+    # have NULL source bindings; those remain fail-closed until a new scan
+    # binds them to an explicit consent.  A legacy workspace can lack one or
+    # more Mail tables entirely, so never create an index against a table that
+    # ``create_all`` has not materialized yet.
+    if connection_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_google_service_connections_revoke_idempotency_key "
+            "ON google_service_connections (revoke_idempotency_key)"
+        )
+    if consent_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_read_consents_revoke_idempotency_key "
+            "ON mail_read_consents (revoke_idempotency_key)"
+        )
+    if binding_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_consent_id "
+            "ON mail_message_bindings (source_consent_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_consent_revision "
+            "ON mail_message_bindings (source_consent_revision)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_label_scope_digest "
+            "ON mail_message_bindings (source_label_scope_digest)"
+        )
+
+
+async def _ensure_guardian_inbox_columns(conn) -> None:
+    """Additive columns for durable guardian inbox action history."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(guardian_inbox_actions)")
+    existing = {row[1] for row in result.fetchall()}
+    if existing and "safe_reason" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE guardian_inbox_actions ADD COLUMN safe_reason VARCHAR"
         )
 
 
@@ -1078,6 +1567,31 @@ async def _ensure_work_board_indexes(conn) -> None:
 async def _ensure_work_board_columns(conn) -> None:
     """Additive columns for existing canonical board workspaces."""
 
+    proposal_result = await conn.exec_driver_sql('PRAGMA table_info(work_board_proposals)')
+    proposal_columns = {row[1] for row in proposal_result.fetchall()}
+    for column, sql_type in (("opportunity_id", "VARCHAR"), ("opportunity_revision", "INTEGER")):
+        if proposal_columns and column not in proposal_columns:
+            await conn.exec_driver_sql(f"ALTER TABLE work_board_proposals ADD COLUMN {column} {sql_type}")
+    if proposal_columns:
+        await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_proposals_opportunity ON work_board_proposals (opportunity_id)")
+    if proposal_columns and 'evidence_use_snapshot_json' not in proposal_columns:
+        await conn.exec_driver_sql('ALTER TABLE work_board_proposals ADD COLUMN evidence_use_snapshot_json VARCHAR')
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(work_board_events)")
+    event_columns = {row[1] for row in result.fetchall()}
+    for column in ("mutation_idempotency_key", "mutation_request_digest"):
+        if event_columns and column not in event_columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_events ADD COLUMN {column} VARCHAR"
+            )
+    if event_columns:
+        # create_all does not add indexes to existing tables. NULL ordinary
+        # events remain compatible; explicit owner-scoped keys are unique.
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_events_mutation_key "
+            "ON work_board_events (owner_principal_id, owner_session_id, mutation_idempotency_key)"
+        )
+
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
     columns = {row[1] for row in result.fetchall()}
     attempt_additions = {
@@ -1093,6 +1607,9 @@ async def _ensure_work_board_columns(conn) -> None:
     task_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_tasks)")
     task_columns = {row[1] for row in task_result.fetchall()}
     task_additions = {
+        "input_artifact_id": "VARCHAR",
+        "pipeline_operation_id": "VARCHAR",
+        "pipeline_slot": "VARCHAR",
         "review_expires_at": "DATETIME",
         "review_request_attempt_id": "VARCHAR",
         "review_request_fence": "INTEGER",
@@ -1269,6 +1786,50 @@ async def _ensure_work_board_routine_binding(conn) -> None:
         )
 
 
+async def _ensure_procedure_v2_binding(conn) -> None:
+    """Keep the v2 preparation fence additive on existing workspaces."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(procedure_v2_bindings)")
+    existing = {row[1] for row in result.fetchall()}
+    additions = {
+        "request_digest": "VARCHAR DEFAULT ''",
+        "source_refs_json": "VARCHAR DEFAULT '{}'",
+        "routine_name": "VARCHAR DEFAULT ''",
+        "template_id": "VARCHAR DEFAULT ''",
+        "version_id": "VARCHAR",
+        "preview_digest": "VARCHAR DEFAULT ''",
+        "preview_expires_at": "DATETIME",
+        "state": "VARCHAR DEFAULT 'preparing'",
+        "recovery_reason": "VARCHAR",
+        "revision": "INTEGER DEFAULT 1",
+        "updated_at": "DATETIME",
+    }
+    for column, sql_type in additions.items():
+        if existing and column not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE procedure_v2_bindings ADD COLUMN {column} {sql_type}"
+            )
+    if existing:
+        await conn.exec_driver_sql(
+            "UPDATE procedure_v2_bindings SET state = 'preparing' "
+            "WHERE state IS NULL OR state = ''"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE procedure_v2_bindings SET revision = 1 "
+            "WHERE revision IS NULL OR revision < 1"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_procedure_v2_bindings_idempotency ON procedure_v2_bindings "
+            "(owner_principal_id, owner_session_id, idempotency_key)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_procedure_v2_bindings_deterministic_routine "
+            "ON procedure_v2_bindings (deterministic_routine_id)"
+        )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -1281,21 +1842,35 @@ async def init_db() -> None:
 
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
+        if conn.dialect.name == "sqlite":
+            await conn.exec_driver_sql("BEGIN IMMEDIATE")
         # Migrate an existing workflow table before SQLModel creates its
         # conditional unique idempotency index.  ``create_all`` attempts to
         # create model indexes for existing tables too; running it first would
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_operator_session_columns(conn)
+        await _ensure_vault_owner(conn)
+        await _ensure_operator_principals(conn)
         await _ensure_telegram_transport_columns(conn)
         await _ensure_work_board_columns(conn)
         # Existing routine-binding tables need their additive columns before
         # metadata creates the conditional indexes declared by SQLModel.
         await _ensure_work_board_routine_binding(conn)
+        await _ensure_procedure_v2_binding(conn)
+        # Calendar additive columns and the consent partial unique index must
+        # inspect legacy rows before ``create_all`` materializes model indexes.
+        await _ensure_calendar_columns(conn)
+        await _ensure_repo_repair_columns(conn)
+        await _ensure_mail_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_operator_principals(conn)
+        await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)
         await _ensure_m5_indexes(conn)
+        await _ensure_repo_repair_indexes(conn)
         await conn.exec_driver_sql(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_workflow_run

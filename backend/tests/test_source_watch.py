@@ -668,6 +668,95 @@ async def test_board_attempt_admission_reuses_its_original_deadline(async_db):
 
 
 @pytest.mark.asyncio
+async def test_source_watch_claim_is_capped_by_persisted_parent_deadline(async_db, monkeypatch):
+    """The repository caps the requested lease at the immutable job deadline."""
+
+    from src.goals.repository import deserialize_admission_budget
+
+    goal = Goal(
+        id="goal-source-watch-lease-cap",
+        title="Read a bounded local source",
+        status="active",
+        proactive_enabled=True,
+        revision=1,
+        owner_principal_id="operator-source-watch-lease-cap",
+        owner_session_id="session-source-watch-lease-cap",
+        admission_budget_json=(
+            '{"reviewed_grant":true,"grant_id":"budget-source-watch-lease-cap",'
+            '"max_outstanding_jobs":2,"max_attempts":1,"max_runtime_seconds":300}'
+        ),
+    )
+    watch = GuardianSourceWatch(
+        id="watch-source-watch-lease-cap",
+        goal_id=goal.id,
+        owner_principal_id=goal.owner_principal_id,
+        owner_session_id=goal.owner_session_id,
+        goal_revision=goal.revision,
+        plan_revision=1,
+        scheduled_job_id="scheduled-source-watch-lease-cap",
+        sources_json=json.dumps(
+            [
+                {
+                    "source_key": "local",
+                    "kind": "workspace_text",
+                    "target": "m6/lease-cap.md",
+                    "priority": 1,
+                }
+            ]
+        ),
+        source_set_digest="source-set-lease-cap",
+        criteria_digest="criteria-lease-cap",
+        read_authority_json='{"grant_id":"read-source-watch-lease-cap"}',
+    )
+    async with async_db() as db:
+        db.add(Session(id=goal.owner_session_id, owner_principal_id=goal.owner_principal_id))
+        db.add(goal)
+        db.add(watch)
+
+    requested_leases: list[int] = []
+    original_claim = source_watch_module.durable_job_repository.claim_job
+
+    async def capture_claim(*args, **kwargs):
+        requested_leases.append(int(kwargs["lease_seconds"]))
+        return await original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(source_watch_module.durable_job_repository, "claim_job", capture_claim)
+    service = SourceWatchService()
+    budget = deserialize_admission_budget(goal)
+    parent_deadline = datetime.now(timezone.utc) + timedelta(seconds=8)
+    admitted = await service._admit_job(
+        watch,
+        "occurrence-lease-cap",
+        budget=budget,
+        routine_parent_deadline_at=parent_deadline,
+    )
+    persisted = await source_watch_module.durable_job_repository.get_job(admitted["job_id"])
+
+    assert admitted["status"] == "running"
+    assert requested_leases == [source_watch_module.JOB_DEADLINE_SECONDS]
+    assert persisted is not None
+    persisted_deadline = datetime.fromisoformat(persisted["deadline_at"].replace("Z", "+00:00"))
+    lease_expires = datetime.fromisoformat(persisted["lease"]["expires_at"].replace("Z", "+00:00"))
+    assert lease_expires <= persisted_deadline
+    assert (persisted_deadline - lease_expires).total_seconds() < 1
+
+    with pytest.raises(SourceWatchError, match="routine_parent_deadline_expired"):
+        await service._admit_job(
+            watch,
+            "occurrence-expired-before-claim",
+            budget=budget,
+            routine_parent_deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+    assert requested_leases == [source_watch_module.JOB_DEADLINE_SECONDS]
+    assert (
+        await source_watch_module.durable_job_repository.get_job(
+            "source-watch:watch-source-watch-lease-cap:occurrence-expired-before-claim"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_optional_completion_notification_failure_preserves_verified_packet(async_db, monkeypatch):
     packet = GuardianDecisionPacket(
         id="packet-notification-unavailable",

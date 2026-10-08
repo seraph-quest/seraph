@@ -9,18 +9,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 
-class RepoSandboxSettings(BaseModel):
-    """Operator-owned configuration for the one supported repository profile.
+RepoSandboxExecutorKind = Literal["local", "docker_rootless", "docker_rootful"]
 
-    The worker receives none of these values.  They are only consumed by the
-    trusted backend Docker runner, and an empty socket/image deliberately keeps
-    the capability blocked until the operator provisions the prerequisite.
+
+class RepoSandboxSettings(BaseModel):
+    """Operator-owned configuration for the governed repository executor.
+
+    The worker receives none of these values. They are consumed only by the
+    trusted backend executor. Local is the usable CPU-host default; Docker
+    selectors remain blocked until their daemon/image prerequisites are proven.
     """
 
+    executor_kind: RepoSandboxExecutorKind = "local"
     enabled: bool = False
     docker_socket: str = ""
     worker_image_digest: str = ""
-    profile: Literal["repo-python-pytest-v1"] = "repo-python-pytest-v1"
+    profile: Literal["repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"] = "repo-python-pytest-v1"
+    node_runtime_path: str = ""
     max_files: int = 2000
     max_directories: int = 500
     max_depth: int = 16

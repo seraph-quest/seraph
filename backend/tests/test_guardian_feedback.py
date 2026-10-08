@@ -107,6 +107,51 @@ async def test_record_feedback_returns_none_for_missing_id(async_db):
     assert result is None
 
 
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_list_recent_opportunities_require_exact_owner_root_before_limit(async_db):
+    stamp = datetime.now(timezone.utc)
+    # Metadata-only producer-shaped privacy fixtures; no executed assessments.
+    own = GuardianIntervention(
+        id="opportunity:own", intervention_type="opportunity", session_id=None,
+        owner_principal_id="owner-a", original_root_id="root-a", goal_id="goal-a",
+        goal_revision=1, opportunity_id="own", content_excerpt="PRIVATE_OWN",
+        delivery_status="not_requested", transport="guardian_inbox", updated_at=stamp,
+    )
+    legacy = GuardianIntervention(id="legacy-ambient", content_excerpt="Legacy ambient",
+        updated_at=stamp - timedelta(seconds=1))
+    threaded = GuardianIntervention(id="legacy-thread", session_id="owned-thread",
+        content_excerpt="Legacy thread", updated_at=stamp - timedelta(seconds=2))
+    foreign = [GuardianIntervention(
+        id=f"opportunity:foreign-{index}", intervention_type="opportunity",
+        owner_principal_id="owner-b", original_root_id="root-b", goal_id="goal-b",
+        goal_revision=1, opportunity_id=f"foreign-{index}", content_excerpt="PRIVATE_FOREIGN",
+        delivery_status="not_requested", transport="guardian_inbox",
+        updated_at=stamp + timedelta(seconds=index + 1),
+    ) for index in range(8)]
+    old_root = GuardianIntervention(id="opportunity:old-root", intervention_type="opportunity",
+        owner_principal_id="owner-a", original_root_id="old-root", updated_at=stamp + timedelta(seconds=10))
+    unbound = GuardianIntervention(id="opportunity:unbound", intervention_type="opportunity",
+        updated_at=stamp + timedelta(seconds=11))
+    async with async_db() as db:
+        from src.db.models import Session
+        db.add(Session(id="owned-thread"))
+        await db.flush()
+        db.add_all([own, legacy, threaded, old_root, unbound, *foreign])
+
+    scoped = await guardian_feedback_repository.list_recent(
+        limit=8, owner_principal_id="owner-a", original_root_id="root-a")
+    assert {item.id for item in scoped} == {own.id, legacy.id, threaded.id}
+    assert [item.id for item in await guardian_feedback_repository.list_recent(
+        limit=1, owner_principal_id="owner-a", original_root_id="root-a")] == [own.id]
+    for scope in ({}, {"owner_principal_id": "owner-a"}, {"original_root_id": "root-a"},
+                  {"owner_principal_id": "owner-a", "original_root_id": "new-root"}):
+        assert {item.id for item in await guardian_feedback_repository.list_recent(**scope)} == {
+            legacy.id, threaded.id}
+    assert [item.id for item in await guardian_feedback_repository.list_recent(
+        session_id="owned-thread", owner_principal_id="owner-a", original_root_id="root-a")] == [threaded.id]
+    assert "PRIVATE_" not in await guardian_feedback_repository.summarize_recent(limit=20)
+
+
 async def test_update_outcome_refreshes_learning_memories_for_delivery_success(async_db):
     for _ in range(2):
         intervention = await guardian_feedback_repository.create_intervention(

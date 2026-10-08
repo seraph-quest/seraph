@@ -118,9 +118,15 @@ def test_valid_ingress_advances_replay_ledger_and_duplicate_is_safe():
 
 
 @pytest.mark.asyncio
-async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monkeypatch):
+async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monkeypatch, async_db):
     """A valid paired request must build an owner-bound envelope."""
 
+    from src.db.models import OperatorSession
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(OperatorSession(principal_id="operator:root:test-edge",token_hash="edge-owner-token",
+            idle_expires_at=now+timedelta(hours=1),absolute_expires_at=now+timedelta(hours=1)))
     extension_id = "seraph.test-edge"
     reference = "connectors/nodes/device.yaml"
     name = "test-edge"
@@ -142,20 +148,20 @@ async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monk
     credential_key = paired_edge._credential_key(extension_id, reference, PAIRING_ID, credential)
     entry = paired_edge.pairing_entry_from_state(
         state,
-        base_entry={"name": name, "reference": reference},
+        base_entry={"name": name, "reference": reference,
+            "credential_owner_scope_version": "owner-v1", "credential_vault_key": credential_key},
         credential_ref=(
             f"{paired_edge.PAIRING_CREDENTIAL_PREFIX}"
             f"{hashlib.sha256(credential_key.encode()).hexdigest()[:24]}"
         ),
         credential_scope=scope,
-        owner_principal_id="operator:test-edge",
+        owner_principal_id="operator:root:test-edge",
     )
     payload = {"revision": 7, "extensions": {extension_id: {"node_pairings": {reference: entry}}}}
 
-    async def get_credential(key: str) -> str | None:
-        return credential if key == credential_key else None
-
-    monkeypatch.setattr(paired_edge.vault_repository, "get", get_credential)
+    await paired_edge.vault_repository.store(
+        credential_key, credential, owner_principal_id="operator:root:test-edge"
+    )
     authenticated = await paired_edge.authenticate_edge_request(
         payload,
         extension_id=extension_id,
@@ -175,7 +181,7 @@ async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monk
         presented_credential=credential,
     )
 
-    assert authenticated.owner_principal_id == "operator:test-edge"
+    assert authenticated.owner_principal_id == "operator:root:test-edge"
     assert authenticated.request.request_id == "edge-request-1"
 
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { InferenceAccountingPanel } from "./InferenceAccountingPanel";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import {
@@ -8,12 +9,14 @@ import {
   normalizeModelFabricCanary,
   normalizeModelFabricRuntime,
   normalizeModelFabricSettings,
+  NEAR_TEXT_PROFILE,
   retainModelFabricSettings,
   type ModelFabricCanaryResult,
   type ModelFabricRuntimeStatus,
   type ModelFabricSettingsStatus,
 } from "../../lib/modelFabric";
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
+import { NearTextPanel } from "./NearTextPanel";
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -334,21 +337,35 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
   throw lastError ?? new Error("Request failed.");
 }
 
-async function postModelFabricCanary(path: string, body: Record<string, unknown>): Promise<unknown> {
+async function mutateJsonWithTimeout(path: string, timeoutMs: number, init: RequestInit): Promise<unknown> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 35_000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await apiFetch(`${API_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Canary request failed: ${response.status}`);
+    // Mutations belong to the configured backend. A conflict or uncertain
+    // transport result must never retry a different workspace/backend.
+    const response = await apiFetch(`${API_URL}${path}`, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const detail: unknown = payload?.detail;
+      const description = typeof detail === "string" ? detail
+        : detail && typeof detail === "object" ? [
+          "code" in detail && typeof detail.code === "string" ? detail.code : null,
+          "message" in detail && typeof detail.message === "string" ? detail.message : null,
+        ].filter(Boolean).join(" · ") : "";
+      throw new Error(`Request failed: ${response.status}${description ? " · " + description : ""}`);
+    }
     return await response.json();
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+async function postModelFabricCanary(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return mutateJsonWithTimeout(path, 35_000, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactStorageSettings {
@@ -676,7 +693,7 @@ export function ArtifactStoragePanel() {
       setModelFabricRuntime(nextRuntime);
       setModelFabricStale(false);
       setModelFabricError(nextRuntime ? null : "Runtime route receipts are unavailable; configuration remains usable.");
-      setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+      setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     } catch {
       if (isCancelled()) return;
       setModelFabricStale(true);
@@ -685,7 +702,7 @@ export function ArtifactStoragePanel() {
   }
 
   async function runModelFabricCanary() {
-    if (!modelFabric || !canaryProfile || canaryRunning) return;
+    if (!modelFabric || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || canaryRunning) return;
     setCanaryRunning(true);
     setCanaryResult(null);
     setCanaryError(null);
@@ -712,19 +729,19 @@ export function ArtifactStoragePanel() {
   }
 
   async function saveOpenRouterSetup(payload: Record<string, unknown>): Promise<ModelFabricSettingsStatus> {
-    const response = await fetchJsonWithTimeout("/api/settings/model-fabric", 20_000, {
+    const response = await mutateJsonWithTimeout("/api/settings/model-fabric", 20_000, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const nextSettings = normalizeModelFabricSettings(response);
-    if (!nextSettings) throw new Error("OpenRouter setup response is invalid.");
+    if (!nextSettings) throw new Error("Model-fabric settings response is invalid.");
     if (!mountedRef.current) return nextSettings;
     retainModelFabricSettings(nextSettings);
     setModelFabric(nextSettings);
     setModelFabricStale(false);
     setModelFabricError(null);
-    setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+    setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     return nextSettings;
   }
   useEffect(() => {
@@ -1282,7 +1299,19 @@ export function ArtifactStoragePanel() {
                 setup={modelFabric?.openrouter_setup}
                 stale={modelFabricStale}
                 onSave={saveOpenRouterSetup}
+                policyRevision={modelFabric?.egress_revision}
+                policyRevoked={modelFabric?.egress_revoked}
               />
+              <NearTextPanel
+                setup={modelFabric?.near_text}
+                stale={modelFabricStale || Boolean(modelFabric?.near_text_metadata_unavailable)}
+                onSave={saveOpenRouterSetup}
+                policyRevision={modelFabric?.egress_revision}
+                policyRevoked={modelFabric?.egress_revoked}
+                sharedCeilingMicrousd={modelFabric?.openrouter_setup?.spend_ceiling_microusd ?? modelFabric?.near_text?.spend_ceiling_microusd ?? modelFabric?.inference_accounting?.ceiling_microusd}
+                sharedCeilingLocked={Boolean(modelFabric?.openrouter_setup)}
+              />
+              <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
                 <div className="text-[9px] text-retro-text/50 mb-1">
                   Manual exact-route canary. This runs inference only when you press Run; status refreshes never probe.
@@ -1298,7 +1327,7 @@ export function ArtifactStoragePanel() {
                     className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[9px] text-retro-text disabled:opacity-40"
                   >
                     <option value="">choose profile</option>
-                    {modelFabric?.profiles.map((profile) => (
+                    {modelFabric?.profiles.filter((profile) => profile.id !== NEAR_TEXT_PROFILE).map((profile) => (
                       <option key={profile.id} value={profile.id}>
                         {profile.id} · {profile.transport_adapter}
                       </option>
@@ -1319,7 +1348,7 @@ export function ArtifactStoragePanel() {
                   </select>
                   <button
                     type="button"
-                    disabled={canaryRunning || !canaryProfile || modelFabricStale}
+                    disabled={canaryRunning || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || modelFabricStale}
                     onClick={() => void runModelFabricCanary()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >

@@ -202,7 +202,7 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         else str(settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "") or "").strip()
     )
     allowed_upstreams = (
-        tuple(setup.allowed_upstreams)
+        (tuple(setup.routes["text"].allowed_upstreams) if setup.routes and setup.routes.get("text") else tuple(setup.allowed_upstreams))
         if setup is not None
         else tuple(
             item.strip()
@@ -492,13 +492,25 @@ def create_app() -> FastAPI:
     validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.4.11",
+        version="2026.10.7",
         debug=settings.debug,
         lifespan=lifespan,
     )
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    from src.extensions.state import ExtensionStateBusy
+    from fastapi.responses import JSONResponse
+    async def extension_state_busy(_request, _error):
+        return JSONResponse(status_code=503, content={"detail": {
+            "code": "extension_state_busy", "message": "Extension state is busy; explicitly retry after the current operation closes",
+            "recovery_action": "explicit_retry", "automatic_retry": False}})
+    app.add_exception_handler(ExtensionStateBusy, extension_state_busy)
+    from src.workflows.selected_context_contract import SelectedContextError
+    async def selected_context_failure(_request, error):
+        return JSONResponse(status_code=error.status, content={"detail": {
+            "code": error.code, "automatic_retry": False, "recovery_action": "explicit_review_or_discard"}})
+    app.add_exception_handler(SelectedContextError, selected_context_failure)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket

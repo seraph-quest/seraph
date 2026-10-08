@@ -25,7 +25,7 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import sqlite3
 import stat
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 
 
@@ -112,6 +112,22 @@ class WorkspaceStateClass(str, Enum):
 # workspace inventory boundary so backup/restore and production receipts can
 # name the exact SQLite object without exposing rows or procedure content.
 WORK_BOARD_ROUTINE_BINDING_TABLE = "work_board_routine_bindings"
+PROCEDURE_V2_BINDING_TABLE = "procedure_v2_bindings"
+WORK_BOARD_INPUT_ARTIFACT_TABLE = "work_board_input_artifacts"
+WORK_BOARD_INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
+CALENDAR_PREP_RECEIPT_TABLE = "calendar_prep_receipts"
+CALENDAR_RESULT_ARTIFACT_ROOT = "artifacts/work-board/calendar"
+REPO_REPAIR_SOURCE_PACKET_TABLE = "repo_repair_source_packets"
+REPO_REPAIR_PROPOSAL_TABLE = "repo_repair_proposals"
+REPO_REPAIR_EGRESS_CONSENT_TABLE = "repo_repair_egress_consents"
+REPO_REPAIR_SOURCE_ARTIFACT_ROOT = "artifacts/repo-repair/source"
+REPO_REPAIR_MODEL_ARTIFACT_ROOT = "artifacts/repo-repair/model"
+REPO_REPAIR_PATCH_ARTIFACT_ROOT = "artifacts/repo-repair/patch"
+MAIL_LABEL_BINDING_TABLE = "mail_label_bindings"
+MAIL_READ_CONSENT_TABLE = "mail_read_consents"
+MAIL_MESSAGE_BINDING_TABLE = "mail_message_bindings"
+MAIL_WATCH_STATE_TABLE = "mail_watch_states"
+MAIL_PRIVATE_ARTIFACT_ROOT = "artifacts/mail/private"
 
 
 def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, Any]:
@@ -122,6 +138,97 @@ def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, An
         "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
         "state_class": WorkspaceStateClass.CANONICAL.value,
         "backup_scope": "canonical_sqlite",
+        "present": None if present is None else bool(present),
+    }
+
+
+def procedure_v2_binding_contract(*, present: bool | None) -> dict[str, Any]:
+    """Return the redacted inventory contract for reviewed procedure fences."""
+
+    return {
+        "schema_version": "seraph.procedure-v2-binding.v1",
+        "table_name": PROCEDURE_V2_BINDING_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "metadata_only": True,
+        "source_content_included": False,
+        "present": None if present is None else bool(present),
+    }
+
+
+def work_board_input_artifact_contract(*, present: bool | None) -> dict[str, Any]:
+    """Return the redacted inventory contract for typed board inputs."""
+
+    return {
+        "schema_version": "seraph.work-board-input-artifact.v1",
+        "table_name": WORK_BOARD_INPUT_ARTIFACT_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "payload_root": WORK_BOARD_INPUT_ARTIFACT_ROOT,
+        "secret_like_capabilities_rejected": True,
+        "present": None if present is None else bool(present),
+    }
+
+
+def calendar_prep_receipt_contract(*, present: bool | None) -> dict[str, Any]:
+    """Describe Calendar prep metadata without exporting provider content."""
+
+    return {
+        "schema_version": "seraph.calendar-prep-receipt.v1",
+        "table_name": CALENDAR_PREP_RECEIPT_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "result_root": CALENDAR_RESULT_ARTIFACT_ROOT,
+        "provider_identity_encrypted": True,
+        "memory_status_required": "no_learning",
+        "present": None if present is None else bool(present),
+    }
+
+
+def repo_repair_contract(*, present: Mapping[str, bool | None] | None) -> dict[str, Any]:
+    """Describe private repository-repair provenance without exporting source."""
+
+    values = dict(present or {})
+    return {
+        "schema_version": "seraph.repo-repair.v1",
+        "tables": {
+            REPO_REPAIR_SOURCE_PACKET_TABLE: values.get(REPO_REPAIR_SOURCE_PACKET_TABLE),
+            REPO_REPAIR_PROPOSAL_TABLE: values.get(REPO_REPAIR_PROPOSAL_TABLE),
+            REPO_REPAIR_EGRESS_CONSENT_TABLE: values.get(REPO_REPAIR_EGRESS_CONSENT_TABLE),
+        },
+        "artifact_roots": [
+            REPO_REPAIR_SOURCE_ARTIFACT_ROOT,
+            REPO_REPAIR_MODEL_ARTIFACT_ROOT,
+            REPO_REPAIR_PATCH_ARTIFACT_ROOT,
+        ],
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "data_class": "private_code",
+        "backup_scope": "canonical_sqlite_and_owner_artifacts",
+        "generic_projection": "metadata_only",
+        "owner_bound": True,
+        "remote_egress_requires_explicit_consent": True,
+        "memory_status_required": "no_learning",
+        "present": all(value is True for value in values.values()) if values else None,
+    }
+
+
+def mail_source_contract(*, present: bool | None) -> dict[str, Any]:
+    """Describe owner-private Mail source metadata without exporting content."""
+
+    return {
+        "schema_version": "seraph.mail-source.v1",
+        "tables": [
+            MAIL_LABEL_BINDING_TABLE,
+            MAIL_READ_CONSENT_TABLE,
+            MAIL_MESSAGE_BINDING_TABLE,
+            MAIL_WATCH_STATE_TABLE,
+        ],
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "private_artifact_root": MAIL_PRIVATE_ARTIFACT_ROOT,
+        "provider_identity_encrypted": True,
+        "body_cache": False,
+        "generic_diagnostics_redact_content": True,
         "present": None if present is None else bool(present),
     }
 
@@ -1226,6 +1333,15 @@ class WorkspaceStateRegistry:
             item.get("name") == WORK_BOARD_ROUTINE_BINDING_TABLE
             for item in tables
         )
+        repair_table_names = {
+            REPO_REPAIR_SOURCE_PACKET_TABLE,
+            REPO_REPAIR_PROPOSAL_TABLE,
+            REPO_REPAIR_EGRESS_CONSENT_TABLE,
+        }
+        repair_present = {
+            name: any(item.get("name") == name for item in tables)
+            for name in repair_table_names
+        }
         return {
             "logical_path": self.config.database_path,
             "schema_fingerprint": _sha256_json(schema_objects),
@@ -1236,7 +1352,37 @@ class WorkspaceStateRegistry:
             "operator_contracts": {
                 "work_board_routine_binding": work_board_routine_binding_contract(
                     present=binding_present
-                )
+                ),
+                "procedure_v2_binding": procedure_v2_binding_contract(
+                    present=any(
+                        item.get("name") == PROCEDURE_V2_BINDING_TABLE
+                        for item in tables
+                    )
+                ),
+                "work_board_input_artifact": work_board_input_artifact_contract(
+                    present=any(
+                        item.get("name") == WORK_BOARD_INPUT_ARTIFACT_TABLE
+                        for item in tables
+                    )
+                ),
+                "calendar_prep_receipt": calendar_prep_receipt_contract(
+                    present=any(
+                        item.get("name") == CALENDAR_PREP_RECEIPT_TABLE
+                        for item in tables
+                    )
+                ),
+                "repo_repair": repo_repair_contract(present=repair_present),
+                "mail_source": mail_source_contract(
+                    present=all(
+                        any(item.get("name") == table_name for item in tables)
+                        for table_name in (
+                            MAIL_LABEL_BINDING_TABLE,
+                            MAIL_READ_CONSENT_TABLE,
+                            MAIL_MESSAGE_BINDING_TABLE,
+                            MAIL_WATCH_STATE_TABLE,
+                        )
+                    )
+                ),
             },
         }
 
@@ -1261,6 +1407,15 @@ __all__ = [
     "WorkspaceStateError",
     "WorkspaceStateRegistry",
     "WORK_BOARD_ROUTINE_BINDING_TABLE",
+    "PROCEDURE_V2_BINDING_TABLE",
+    "WORK_BOARD_INPUT_ARTIFACT_TABLE",
+    "WORK_BOARD_INPUT_ARTIFACT_ROOT",
+    "REPO_REPAIR_SOURCE_PACKET_TABLE",
+    "REPO_REPAIR_PROPOSAL_TABLE",
+    "REPO_REPAIR_EGRESS_CONSENT_TABLE",
+    "REPO_REPAIR_SOURCE_ARTIFACT_ROOT",
+    "REPO_REPAIR_MODEL_ARTIFACT_ROOT",
+    "REPO_REPAIR_PATCH_ARTIFACT_ROOT",
     "DEFAULT_MAX_INVENTORY_ENTRIES",
     "DEFAULT_MAX_INVENTORY_DEPTH",
     "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
@@ -1273,6 +1428,16 @@ __all__ = [
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
     "work_board_routine_binding_contract",
+    "procedure_v2_binding_contract",
+    "work_board_input_artifact_contract",
+    "calendar_prep_receipt_contract",
+    "repo_repair_contract",
+    "MAIL_LABEL_BINDING_TABLE",
+    "MAIL_READ_CONSENT_TABLE",
+    "MAIL_MESSAGE_BINDING_TABLE",
+    "MAIL_WATCH_STATE_TABLE",
+    "MAIL_PRIVATE_ARTIFACT_ROOT",
+    "mail_source_contract",
 ]
 
 

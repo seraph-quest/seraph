@@ -1504,6 +1504,218 @@ This section records the landed Batch C slices and their validation and review r
     - corrected the new guardian-learning regression to use the real feedback repository API and durable timestamps instead of an over-simplified fixture shape
     - aligned the long-horizon eval detail expectation in `backend/tests/test_eval_harness.py` with the shipped stronger receptivity downgrade (`low`) once multi-day negative trends and contradictory support line up
 
+## Reviewed goals and the source-change inbox
+
+The goal form exposes the existing structured success criterion, proactive
+toggle, and finite `GoalAdmissionBudget`. The operator reviews the budget,
+notification limit, quiet hours, timezone, and expiry explicitly. The generated
+budget-review reference identifies that review; it does not issue a new runtime
+permission. Existing goals can still be edited without enabling proactive work.
+
+Source watches remain `GuardianSourceWatch` records attached to the current
+goal revision. Supported sources are public HTTPS text and bounded workspace
+text. Cadence choices are hourly, every six hours, or daily in the selected
+timezone. Per-run approval is the default. Reviewed standing authority permits
+only the existing local dossier and task-file effects within the reviewed goal
+budget; it grants no external publication, account access, or cloud upload.
+
+`GET /api/guardian/inbox` projects owner-and-session-bound dispositions over
+verified material source packets. Baseline initialization and unchanged sources
+remain quiet. A candidate requires a completed durable source-watch job and
+both identified, timestamped artifact readbacks. List reads use receipt metadata
+and do not execute a source fetch, inference, job, notification, or memory write.
+Selected detail exposes the bound job status and safe readback identities without
+exposing service-owned job inputs or broadening workflow API ownership.
+Opening evidence or accepting a follow-up verifies the actual local bytes.
+Selected evidence can be read as a bounded, secret-redacted plain-text preview
+in the existing inspector. It is labeled untrusted source evidence and cannot
+grant permissions or automatically become executable instructions. Projection
+redaction is read-only; it does not create a nested audit writer inside the
+acceptance transaction.
+The candidate expires at the earlier of seven days after packet creation and
+the goal-budget expiry. Recovery and expiry maintenance are bounded within the
+existing dispatcher; opening the inbox does not scan historical packets.
+
+`Accept follow-up` atomically records a revision-checked disposition, append-only
+action receipt, and one goal-linked Work Board task in **Triage**. It grants no
+execution authority. The existing Specify/Decompose and task execution controls
+own subsequent work. `Snooze` and `Dismiss` persist decisions without creating
+tasks or learning. Retrying an unknown action uses the same idempotency key and
+payload; conflicting or stale decisions require reconciliation. Source prose
+cannot supply task instructions or permissions through the candidate summary.
+The existing GoalSnapshot follow-through retains its explicit `no_learning`
+result in durable effect, task, and authenticated job receipts. A missing result
+is not inferred to mean no learning, and this projection creates no memory write.
+Notification budget zero keeps candidates visible in the inbox while preserving
+the existing outbox's delivery policy and quiet hours.
+
+### Reviewed public opportunity assessments
+
+A Goal may separately opt into a finite Guardian assessment policy. The Goal
+loop selects one to three current public HTTPS watches, a review expiry,
+one to four assessments per UTC day and a minimum thirty-minute gap. The server
+binds the policy to the current Goal revision, finite reviewed grant and original
+Root. Saving it admits no work. A Goal edit or expired permission requires
+explicit watch review and policy confirmation; neither renews automatically.
+Existing Goals have no policy and assessments remain disabled.
+
+Only a new verified material public packet publishes an opportunity. Its
+immutable private evidence contains at most two already-redacted public excerpts,
+two hundred whole LF lines per source and four KiB of aggregate text. Exact
+packet/checkpoint/source bindings and excerpt hashes survive restart; old packets
+without this snapshot are not fetched again or reconstructed for assessment.
+Private workspace sources cannot enter this model input.
+
+The existing native job owner admits one bounded strategist request through the
+governed OpenRouter route at reports/research priority. Canonical Goal fields and
+untrusted public evidence retain separate provenance and no instruction
+authority. Execution has no tools, streaming, fallback or corrective call. The
+closed output requires exact excerpt-line SHA256 citations. Current Root, Goal,
+policy, source permission, artifact and native lease fences gate contact and
+adoption. One pending assessment per Goal, two per owner and sixteen per host
+bound admission; each recovery tick examines at most twenty indexed rows.
+
+A valid relevant judgment creates one lineage-bound opportunity intervention
+and literal cited Inbox card. Weak judgments remain visible silent history;
+invalid citations, unavailable proof or changed authority remain blocked history.
+Neither has a feedback intervention. Accepting a current card creates a Triage
+task for operator review. Snooze and dismissal persist existing dispositions.
+Judgment, delivery and feedback do not enter legacy learning weights or refresh
+canonical memory; downstream execution and learning require separate reviews.
+
+Opportunity judgments and optional notification metadata retain their exact
+operator and original Root lineage.
+Continuity shows them only for that authenticated binding; generic activity and
+summary queries omit them when the binding is absent. A missing chat session is
+not permission to expose Goal-derived text as ambient history.
+
+Delivery is Inbox-only by default. Separately acknowledged notification opt-in
+uses the existing quiet-hours policy and durable outbox, capped at two owner
+intents per UTC day, one per Goal and a thirty-minute owner gap. Unknown delivery
+consumes its slot and is not retried. Cancellation uses revision CAS and confirms
+actual native transfer quiescence before reporting closure. Contacted Unknown
+cost remains visible and is never automatically replayed; proven never-contacted
+recovery reuses the original job and bounds, with at most two attempts and any
+stricter Goal limit.
+
+A restart may adopt an already persisted, physically verified judgment once
+while the original native lease, fence and assessment authority remain current.
+This finalizes the original job without another provider call, claim, attempt or
+lease extension. Expired authority or missing readback leaves blocked or Unknown
+history available for review.
+Corrupt source-proof metadata remains unavailable without preventing other ready
+Goals from being examined.
+
+Recovery views preserve the recorded assessment outcome separately from current
+authority and evidence failures. A current abstention is a judgment, not a policy
+restriction. Independent review findings required finite source-proof bounds,
+exact original-Root notification checks, once-only persisted-result adoption and
+this history/current-state separation; those corrections were accepted.
+
+Provider-intercepted native and managed UI receipts establish the bounded
+execution path. Neither establishes live provider usefulness. Secret,
+email/phone and invented reference checks are conservative filters, not complete
+PII detection or semantic
+truth verification. Public excerpts can contain misleading material; citations
+prove byte attribution. The broader proactive learning loop remains **Partial**.
+
+### Reviewed read-only opportunity plans
+
+A current cited opportunity may offer two fixed blueprints: **Public browser
+check** and **Public evidence report**. `Generate read-only plan` admits one
+governed strategist request using only the offered immutable public evidence.
+The server retains the original Root, Goal, source, revision, request and native
+cost bindings. At most two contacted plan generations per Goal per UTC day are
+allowed; reaching that limit leaves the offers visible without creating another
+task, proposal, reservation or grant.
+
+Generation stages one non-executable **Triage** card. Separately acknowledged
+automatic staging may do the same after a valid assessment, but does not accept
+or execute it. The operator reviews the exact typed plan in Work and explicitly
+accepts it. Existing Todo/Ready, native approval and dispatcher rules then own
+execution. The browser blueprint reads the exact approved public HTTPS source;
+the report blueprint follows that browser readback with automatic CPU dossier
+and local report steps. Physical artifacts and native receipts retain distinct
+identities and explicit `no_learning`; neither blueprint updates canonical
+memory or grants general browsing authority.
+
+Reload does not generate or accept a plan. Authenticated Work proposal reads
+may locally adopt an already persisted, verified original native result while
+its original authority, cost, source and deadline remain current. Proven
+never-contacted recovery reuses the original request and native lineage;
+contacted uncertainty retains Unknown liability and cannot resend. Cancellation
+uses the existing durable Work control and reports closure only after the
+original transport and Chromium context have verified quiescence. Restart
+preserves the original liability, proposal and finite bounds without renewal.
+
+Independent review corrections were accepted for exact Goal/source/revision
+checks at contact and result writes, original native-output integrity, finite
+tokenless Root proof for automatic staging, canonical Work detail recovery,
+and cancellation cleanup receipt CAS after native checkpoints. Managed UI
+receipts cover both blueprints, silent Triage staging, real cancellation and
+Unknown readback after a same-workspace restart. Named external transports were
+intercepted; live public-source and provider usefulness remain
+**external-unverified**, and the broader proactive learning loop remains
+**Partial**.
+
+This is a bounded local source-change loop, with an explicit `no_learning`
+result. It does not establish general autonomous operation or live provider
+quality. On an open feature branch this section describes the intended
+post-merge behavior; the PR carries current validation and review receipts.
+
+### Reviewed opportunity feedback and reversible preferences
+
+The Inbox records explicit **Helpful** or **Not helpful** judgments separately
+from delivery, acknowledgment, plan acceptance and task success. Helpful requires
+a completed matching plan with current verified native output; Not helpful may
+judge an unwanted opportunity without executing a plan. Unjudged work supplies
+no vote. Corrections append to the original intervention history with exact UUID
+replay and revision checks; history is bounded to 100 events and 32 KiB. Legacy
+feedback and manual procedure recommendations retain their separate populations.
+
+`Recommend opportunity preference` publishes one provider-free private CPU task:
+30 seconds, one attempt, JSON output at most 64 KiB. It considers the complete
+eligible feedback population for the exact owner, original Root and Goal
+revision whose current eligible feedback-tip timestamps fall within the latest
+30 days, with at most 100 opportunities. All append-only history of each included
+opportunity counts toward the 100-event cap, with no second age window.
+Unjudged work and out-of-window tips supply no vote.
+Empty or insufficient evidence returns `no_learning`. Two distinct verified
+Helpful outcomes and no current Not helpful judgment for a blueprint may propose
+`prefer_blueprint`; two Not helpful judgments for the exact watch and no Helpful
+may propose `suppress_watch`. Conflicting or incomplete evidence cannot authorize
+an active preference. Task success itself never adopts memory.
+
+The existing memory review shows the literal preview and exact population. A
+separate initially unchecked acknowledgment authorizes only this opportunity
+preference. Adoption requires the original five-minute review window. At adoption and each
+later use, the current Root, source, outcome and full population are rechecked.
+An adopted effect can remain valid beyond that preview window. Historical
+rollback requires the current original Root and does not renew the preview. An exact
+recommendation UUID retains its original task, attempt and preview; authenticated
+GET inspection cannot publish another CPU task or renew authority.
+
+An adopted preference only orders currently eligible blueprint offers for
+**display**, or suppresses optional candidates from the matching watch before
+assessment admission. Source-watch reads continue. It changes no blueprint
+selection, model advice, cadence, urgency, budget, capability permission or
+execution authority, and cannot suppress security, recovery or retained history.
+A new unjudged opportunity supplies no vote and does not invalidate the existing
+population. Changed eligible feedback, aging, changed Goal/source/outcome or
+deleted evidence does invalidate it. Rollback restores ordinary suggestions and
+retains signed terminal history; it never restores grants.
+
+Private preference memory is excluded from ordinary model retrieval and task
+model evidence; canonical inspection, export and deletion retain their existing
+ownership. Complete cutoff/currentness checks, malformed-history rejection and
+typed authority/error mapping were accepted independent review corrections.
+These mechanisms do not establish measured usefulness, generalized learning or
+live provider quality. Named external transports in local proof do not establish
+live public-source or provider usefulness, which remains **external-unverified**.
+On an open feature branch this is intended post-merge behavior; the aggregate PR
+owns exact current runtime and review receipts. The broader capability remains
+**Partial**.
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

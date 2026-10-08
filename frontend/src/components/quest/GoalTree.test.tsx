@@ -12,6 +12,20 @@ describe("GoalTree", () => {
     });
   });
 
+  it("shows recovered original goals while disabling historical mutation controls", () => {
+    const edit = vi.fn();
+    render(<GoalTree depth={0} onEdit={edit} goals={[{
+      id: "old-goal", parent_id: null, path: "/", title: "Original recovered priority", description: null,
+      level: "daily", domain: "productivity", status: "active", start_date: null, due_date: null, sort_order: 0,
+      ownership_access: "recovered_read_only",
+    }]} />);
+    expect(screen.getByText(/Recovered original/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "[ ]" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "x" })).toBeDisabled();
+    expect(screen.queryByTitle("Edit priority")).not.toBeInTheDocument();
+    expect(edit).not.toHaveBeenCalled();
+  });
+
   it("shows the bounded success criterion and evidence count", () => {
     render(
       <GoalTree

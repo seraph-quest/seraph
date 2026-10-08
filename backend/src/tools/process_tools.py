@@ -6,7 +6,6 @@ import contextvars
 import json
 import logging
 import os
-import resource
 import shlex
 import signal
 import subprocess
@@ -956,34 +955,15 @@ def _tail_text(path: Path, *, max_chars: int) -> tuple[str, bool]:
     return "...[truncated]...\n" + data[-max_chars:], True
 
 
-def _apply_process_limits() -> None:
-    """Apply the local process profile in the child before it executes."""
-    # The runtime is currently POSIX-only. Keep the import/module guard so a
-    # future non-POSIX test can still import the process tool module.
+def _process_launch_argv(executable: str, args: list[str]) -> list[str]:
+    """Apply the fixed profile after exec, never in a threaded fork child."""
+    argv = [executable, *args]
     if os.name != "posix":
-        return
-    for limit_name, requested in (
-        (resource.RLIMIT_CPU, _PROCESS_CPU_SECONDS),
-        (resource.RLIMIT_AS, _PROCESS_MEMORY_BYTES),
-        (resource.RLIMIT_NPROC, _PROCESS_PID_LIMIT),
-        (resource.RLIMIT_FSIZE, _PROCESS_OUTPUT_BYTES),
-    ):
-        try:
-            current_soft, current_hard = resource.getrlimit(limit_name)
-            if limit_name == resource.RLIMIT_NPROC:
-                # Preserve an existing finite host limit. Linux may account
-                # the runner's threads toward RLIMIT_NPROC, so replacing a
-                # higher inherited limit with 64 can make a child unable to
-                # fork its own bounded helper. An unlimited host profile gets
-                # a finite fallback instead of losing the process ceiling.
-                requested = max(requested, current_soft) if current_soft != resource.RLIM_INFINITY else 1024
-            hard = current_hard if current_hard != resource.RLIM_INFINITY else requested
-            soft = min(requested, hard)
-            resource.setrlimit(limit_name, (soft, hard))
-        except (AttributeError, OSError, ValueError):
-            # A container may disallow one profile limit. The caller still
-            # retains the explicit timeout/output/process-tree safeguards.
-            logger.debug("Unable to apply child resource limit", exc_info=True)
+        return argv
+    bootstrap = Path(__file__).absolute().with_name("process_limit_bootstrap.py")
+    return [sys.executable, "-I", "-S", "-B", str(bootstrap),
+            str(_PROCESS_CPU_SECONDS), str(_PROCESS_MEMORY_BYTES),
+            str(_PROCESS_PID_LIMIT), str(_PROCESS_OUTPUT_BYTES), "--", *argv]
 
 
 def _display_command(argv: list[str]) -> str:
@@ -1880,7 +1860,7 @@ class ProcessRuntimeManager:
                     "timeout_seconds": timeout,
                 }
             process = subprocess.Popen(
-                [executable, *args],
+                _process_launch_argv(executable, args),
                 cwd=str(resolved_cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1888,7 +1868,6 @@ class ProcessRuntimeManager:
                 shell=False,
                 env=_command_env(worker_root=worker_root),
                 start_new_session=True,
-                preexec_fn=_apply_process_limits if os.name == "posix" else None,
             )
             # start_new_session makes the child PID the process-group leader.
             # Retain its start time and PGID so a later timeout cannot signal a
@@ -2023,7 +2002,7 @@ class ProcessRuntimeManager:
             output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(output_fd, "w", encoding="utf-8", errors="replace") as output_stream:
                 popen = subprocess.Popen(
-                    [executable, *args],
+                    _process_launch_argv(executable, args),
                     cwd=str(resolved_cwd),
                     stdout=output_stream,
                     stderr=subprocess.STDOUT,
@@ -2032,7 +2011,6 @@ class ProcessRuntimeManager:
                     shell=False,
                     env=_command_env(worker_root=worker_root),
                     start_new_session=True,
-                    preexec_fn=_apply_process_limits if os.name == "posix" else None,
                 )
             leader_identity = _capture_process_identity(popen)
             descendant_identities = _snapshot_process_descendants(popen, leader_identity)

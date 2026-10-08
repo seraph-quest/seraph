@@ -108,6 +108,7 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     goal_revision: int = Field(ge=1)
     status: WorkBoardStatus = WorkBoardStatus.triage
     capability_id: str | None = Field(default=None, min_length=1, max_length=128)
+    input_artifact_id: str | None = Field(default=None, min_length=1, max_length=512)
     typed_input_ref: str | None = Field(default=None, min_length=1, max_length=512)
     typed_input_digest: str | None = Field(default=None, min_length=64, max_length=64)
     executor_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -120,6 +121,19 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     reviewer_id: str | None = Field(default=None, min_length=1, max_length=128)
     origin_thread_id: str | None = Field(default=None, min_length=1, max_length=256)
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_near_canonical_uuid(cls,value):
+        if isinstance(value,dict) and str(value.get('capability_id','')).strip()=='inference.near-text.v1':
+            from uuid import UUID
+            key=value.get('idempotency_key')
+            try:
+                if not isinstance(key,str) or str(UUID(key))!=key:
+                    raise ValueError('near_idempotency_invalid: canonical UUID required')
+            except (TypeError,ValueError,AttributeError):
+                raise ValueError('near_idempotency_invalid: canonical UUID required') from None
+        return value
+
     @field_validator("scheduled_at")
     @classmethod
     def normalize_scheduled_at(cls, value: datetime | None) -> datetime | None:
@@ -127,6 +141,7 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
 
     @field_validator(
         "capability_id",
+        "input_artifact_id",
         "executor_id",
         "assignee_id",
         "reviewer_id",
@@ -158,13 +173,83 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
         if self.status is WorkBoardStatus.todo:
             if not self.capability_id:
                 raise ValueError("todo tasks require a registered capability")
-            if not self.typed_input_ref or not self.typed_input_digest:
+            if self.input_artifact_id:
+                if self.typed_input_ref or self.typed_input_digest:
+                    raise ValueError("input_artifact_id cannot be combined with a typed input reference or digest")
+            elif not self.typed_input_ref or not self.typed_input_digest:
                 raise ValueError("todo tasks require a typed input reference and digest")
+        elif self.input_artifact_id:
+            raise ValueError("input_artifact_id is accepted only for executable todo tasks")
+        if self.input_artifact_id and (self.typed_input_ref or self.typed_input_digest):
+            raise ValueError("input_artifact_id cannot be combined with a typed input reference or digest")
         if self.typed_input_ref and not self.typed_input_digest:
             raise ValueError("typed_input_ref requires typed_input_digest")
         if self.typed_input_digest and not self.typed_input_ref:
             raise ValueError("typed_input_digest requires typed_input_ref")
         return self
+
+
+class WorkBoardInputArtifactCreate(BaseModel):
+    """Strict owner-bound typed-input reservation request."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    schema_version: Literal[1]
+    capability_id: str = Field(min_length=1, max_length=128)
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(gt=0)
+    input: dict[str, Any]
+    idempotency_key: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_near_canonical_uuid(cls,value):
+        if isinstance(value,dict) and str(value.get('capability_id','')).strip()=='inference.near-text.v1':
+            from uuid import UUID
+            key=value.get('idempotency_key')
+            try:
+                if not isinstance(key,str) or str(UUID(key))!=key:
+                    raise ValueError('near_idempotency_invalid: canonical UUID required')
+            except (TypeError,ValueError,AttributeError):
+                raise ValueError('near_idempotency_invalid: canonical UUID required') from None
+        return value
+
+    @field_validator("capability_id", "idempotency_key")
+    @classmethod
+    def validate_opaque_fields(cls, value: str, info) -> str:
+        return _safe_opaque_identifier(value, field_name=str(info.field_name)) or ""
+
+    @field_validator("goal_id")
+    @classmethod
+    def validate_goal_id(cls, value: str) -> str:
+        return _safe_reference(value, field_name="goal_id") or ""
+
+
+class WorkBoardInputArtifactMetadata(WorkBoardBaseModel):
+    """Safe metadata returned for an owner-bound typed input artifact."""
+
+    artifact_id: str
+    typed_input_ref: str
+    typed_input_digest: str
+    capability_id: str
+    goal_id: str
+    goal_revision: int
+    expires_at: datetime
+    state: str | None = None
+    size_bytes: int | None = None
+    bound_task_id: str | None = None
+    bound_task_revision: int | None = None
+    revision: int | None = None
+
+
+class WorkBoardInputArtifactDelete(WorkBoardBaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+# Backward-compatible descriptive aliases for API/test callers that use the
+# shorter ``Response``/``DeleteRequest`` vocabulary.
+WorkBoardInputArtifactResponse = WorkBoardInputArtifactMetadata
+WorkBoardInputArtifactDeleteRequest = WorkBoardInputArtifactDelete
 
 
 class WorkBoardTaskPatch(WorkBoardBaseModel):
@@ -304,9 +389,24 @@ class WorkBoardProposalRequest(WorkBoardBaseModel):
         return _safe_opaque_identifier(value, field_name="idempotency_key") or ""
 
 
+class WorkBoardSpecificationEvidenceReplacement(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_packet_revision: int = Field(ge=1)
+    expected_packet_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    acknowledge_execution_use: bool
+
+    @field_validator("acknowledge_execution_use")
+    @classmethod
+    def require_explicit_execution_use(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("Explicit execution-use acknowledgment is required")
+        return value
+
+
 class WorkBoardProposalAccept(WorkBoardBaseModel):
     expected_proposal_revision: int = Field(ge=1)
     expected_parent_revision: int = Field(ge=1)
+    execution_replacement: WorkBoardSpecificationEvidenceReplacement | None = None
 
 
 class WorkBoardProposalReject(WorkBoardBaseModel):
@@ -370,6 +470,11 @@ __all__ = [
     "WorkBoardCommentCreate",
     "WorkBoardContractError",
     "WorkBoardEventPage",
+    "WorkBoardInputArtifactCreate",
+    "WorkBoardInputArtifactDelete",
+    "WorkBoardInputArtifactDeleteRequest",
+    "WorkBoardInputArtifactMetadata",
+    "WorkBoardInputArtifactResponse",
     "WorkBoardLinkCreate",
     "WorkBoardLinkDelete",
     "WorkBoardOwner",

@@ -26,6 +26,7 @@ from src.security.trust_contract import (
 
 
 PERSISTED_PROFILE_ID = "persisted-openrouter"
+CANONICAL_LEGACY_PROBE_ID = "openrouter"
 PERSISTED_MODEL = "anthropic/claude-sonnet-4"
 _OPENROUTER_OPTIONS = {
     "provider": {
@@ -91,6 +92,9 @@ def model_fabric_workspace(tmp_path, monkeypatch):
 
     clear_receipt_persistence_observations()
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / f"{tmp_path.name}-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
     monkeypatch.setattr(settings, "openrouter_provider_only", True)
     monkeypatch.setattr(settings, "openrouter_api_key", "test-openrouter-key")
     monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
@@ -110,6 +114,33 @@ def model_fabric_workspace(tmp_path, monkeypatch):
         yield tmp_path
     finally:
         reset_runtime_context(tokens)
+
+
+async def _prepare_legacy_canary_accounting(monkeypatch, *, client=None):
+    """Run canonical legacy probes through real policy/accounting/auth owners."""
+    from dataclasses import replace
+    from src.auth.service import create_session
+    from src.model_fabric.configuration import OpenRouterSetup, write_model_fabric_configuration
+    from src.workflows.job_runtime import durable_job_repository
+    configured = read_model_fabric_configuration()
+    # The canonical profile retains the original model/options/capabilities.
+    # This shared setup supplies the existing ceiling/witness; it is not a
+    # generated capability proof or an admitted provider fixture.
+    profile = next(item for item in configured.profiles if item.id == CANONICAL_LEGACY_PROBE_ID)
+    setup = OpenRouterSetup(model_ids=("openrouter/" + profile.model,), capabilities=profile.capabilities,
+        zero_data_retention=True,
+        allowed_upstreams=("anthropic",), egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True, spend_ceiling_microusd=5000,
+        request_cost_bound_microusd=500, credential_ref="env:OPENROUTER_API_KEY")
+    write_model_fabric_configuration(replace(configured, openrouter_setup=setup))
+    await durable_job_repository.configure_inference_accounting(5000)
+    monkeypatch.setattr(settings, "operator_auth_secret", "fixture-canary-password")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    token, operator = await create_session()
+    set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+    if client is not None:
+        client.cookies.set(settings.operator_auth_cookie_name, token)
+        client.headers["origin"] = "http://localhost:3001"
 
 
 @pytest.mark.asyncio
@@ -264,11 +295,12 @@ async def test_cloud_widening_requires_cost_ceiling_and_binds_redaction_evidence
 async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_status(
     client,
     model_fabric_workspace,
+    monkeypatch,
 ):
     configured = await client.put(
         "/api/settings/model-fabric",
         json={
-            "profiles": [_profile_payload()],
+            "profiles": [_profile_payload(profile_id=CANONICAL_LEGACY_PROBE_ID)],
             "workload_policies": [
                 _capability_probe_policy(),
             ],
@@ -277,6 +309,7 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
     assert configured.status_code == 200
 
     from src.api.model_fabric_settings import _canary_fixture
+    await _prepare_legacy_canary_accounting(monkeypatch, client=client)
     from src.model_fabric.probe import run_capability_probe as real_run_capability_probe
 
     captured_contexts = []
@@ -293,7 +326,7 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
         response = await client.post(
             "/api/settings/model-fabric/canary",
             json={
-                "profile_id": PERSISTED_PROFILE_ID,
+                "profile_id": CANONICAL_LEGACY_PROBE_ID,
                 "capability": "text",
                 "timeout_seconds": 2,
                 "proof_ttl_seconds": 120,
@@ -304,20 +337,21 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
     assert payload["outcome"] == "passed"
     assert payload["receipt_persistence"] == "persisted"
     assert payload["proof_persistence"] == "persisted"
-    assert payload["proof"]["profile_id"] == PERSISTED_PROFILE_ID
+    assert payload["proof"]["profile_id"] == CANONICAL_LEGACY_PROBE_ID
     assert isinstance(payload["proof"]["checked_at"], str)
     assert isinstance(payload["proof"]["expires_at"], str)
     assert "output" not in payload
     assert transport.await_count == 1
     candidate = transport.await_args.args[0]
-    assert candidate.id == PERSISTED_PROFILE_ID
+    assert candidate.id == CANONICAL_LEGACY_PROBE_ID
     assert transport.await_args.kwargs["timeout_seconds"] == 2
-    fixture = _canary_fixture(provider_profiles()[PERSISTED_PROFILE_ID], "text")
+    fixture = _canary_fixture(provider_profiles()[CANONICAL_LEGACY_PROBE_ID], "text")
     assert captured_contexts[0].data_digest == canonical_digest(fixture["digest_payload"])
     assert fixture["json"] == {
         "model": PERSISTED_MODEL,
         "messages": [{"role": "user", "content": "Reply with CANARY_OK only."}],
         "max_tokens": 64,
+        "provider": _OPENROUTER_OPTIONS["provider"],
     }
 
     runtime = await client.get("/api/runtime/status")
@@ -327,14 +361,14 @@ async def test_manual_canary_is_exact_bounded_sanitized_and_visible_in_runtime_s
     assert "orchestrator_agent" in fabric["topology"]["text"]
     assert fabric["topology"]["vlm"] == ["screenshot_image_analysis"]
     probe = fabric["workloads"]["capability_probe"]
-    assert probe["selected"]["profile_id"] == PERSISTED_PROFILE_ID
+    assert probe["selected"]["profile_id"] == CANONICAL_LEGACY_PROBE_ID
     assert probe["attempted"]["outcome"] == "succeeded"
-    assert probe["succeeded"]["profile_id"] == PERSISTED_PROFILE_ID
+    assert probe["succeeded"]["profile_id"] == CANONICAL_LEGACY_PROBE_ID
     assert probe["fallback_used"] is False
     assert probe["degradation_codes"] == []
     proof_status = next(
         item for item in fabric["proofs"]
-        if item["profile_id"] == PERSISTED_PROFILE_ID and item["capability"] == "text"
+        if item["profile_id"] == CANONICAL_LEGACY_PROBE_ID and item["capability"] == "text"
     )
     assert proof_status["status"] == "fresh"
 
@@ -433,6 +467,7 @@ def test_openrouter_vision_canary_digest_payload_is_exact_transport_json():
 )
 async def test_health_and_latency_canary_api_use_real_transport_and_persist_proof(
     model_fabric_workspace,
+    async_db,
     capability,
     expected_value,
     monkeypatch,
@@ -451,7 +486,7 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
     )
     from src.model_fabric.repository import ProofPersistenceResult
 
-    profile = ProviderProfile(**_profile_payload())
+    profile = ProviderProfile(**_profile_payload(profile_id=CANONICAL_LEGACY_PROBE_ID))
     write_model_fabric_configuration(
         ModelFabricConfiguration(
             profiles=(profile,),
@@ -469,6 +504,7 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
         )
     )
     calls = []
+    await _prepare_legacy_canary_accounting(monkeypatch)
     persisted = {}
 
     class FakeResponse:
@@ -522,7 +558,7 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
     )
     payload = await run_model_fabric_canary(
         CapabilityCanaryRequest(
-            profile_id=PERSISTED_PROFILE_ID,
+            profile_id=CANONICAL_LEGACY_PROBE_ID,
             capability=capability,
             timeout_seconds=2,
             proof_ttl_seconds=120,
@@ -559,6 +595,7 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
                 "model": PERSISTED_MODEL,
                 "messages": [{"role": "user", "content": "Reply with CANARY_OK only."}],
                 "max_tokens": 64,
+                "provider": _OPENROUTER_OPTIONS["provider"],
             },
         )
     ]
@@ -568,10 +605,10 @@ async def test_health_and_latency_canary_api_use_real_transport_and_persist_proo
 async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable_and_status_visible(
     client,
     model_fabric_workspace,
+    monkeypatch,
 ):
-    from src.vlm_runtime import SCREENSHOT_VLM_PROFILE_ID
 
-    vision_profile = _profile_payload(profile_id=SCREENSHOT_VLM_PROFILE_ID)
+    vision_profile = _profile_payload(profile_id=CANONICAL_LEGACY_PROBE_ID)
     vision_profile.update(
         {
             "capabilities": ["text", "vision", "structured_output"],
@@ -584,12 +621,13 @@ async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable
         "/api/settings/model-fabric",
         json={
             "profiles": [vision_profile],
-            "workload_policies": [_capability_probe_policy(profile_id=SCREENSHOT_VLM_PROFILE_ID)],
+            "workload_policies": [_capability_probe_policy(profile_id=CANONICAL_LEGACY_PROBE_ID)],
         },
     )
     assert configured_response.status_code == 200, configured_response.text
+    await _prepare_legacy_canary_accounting(monkeypatch, client=client)
 
-    configured = provider_profiles()[SCREENSHOT_VLM_PROFILE_ID]
+    configured = provider_profiles()[CANONICAL_LEGACY_PROBE_ID]
     assert configured.provider_kind == "openrouter"
     assert configured.transport_adapter == "openai_compatible_chat"
     assert configured.api_base == OPENROUTER_API_BASE
@@ -601,7 +639,7 @@ async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable
     assert settings_response.status_code == 200
     status_profile = next(
         item for item in settings_response.json()["profiles"]
-        if item["id"] == SCREENSHOT_VLM_PROFILE_ID
+        if item["id"] == CANONICAL_LEGACY_PROBE_ID
     )
     assert status_profile["provider_kind"] == "openrouter"
     assert status_profile["transport_adapter"] == "openai_compatible_chat"
@@ -615,7 +653,7 @@ async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable
         canary = await client.post(
             "/api/settings/model-fabric/canary",
             json={
-                "profile_id": SCREENSHOT_VLM_PROFILE_ID,
+                "profile_id": CANONICAL_LEGACY_PROBE_ID,
                 "capability": "vision",
                 "timeout_seconds": 2,
                 "proof_ttl_seconds": 120,
@@ -623,12 +661,12 @@ async def test_canonical_openrouter_screenshot_profile_is_configurable_probeable
         )
     assert canary.status_code == 200, canary.text
     assert canary.json()["outcome"] == "passed"
-    assert transport.await_args.args[0].id == SCREENSHOT_VLM_PROFILE_ID
+    assert transport.await_args.args[0].id == CANONICAL_LEGACY_PROBE_ID
 
     runtime = await client.get("/api/runtime/status")
     proof_status = next(
         item for item in runtime.json()["model_fabric"]["proofs"]
-        if item["profile_id"] == SCREENSHOT_VLM_PROFILE_ID
+        if item["profile_id"] == CANONICAL_LEGACY_PROBE_ID
         and item["capability"] == "vision"
     )
     assert proof_status["status"] == "fresh"
@@ -701,7 +739,7 @@ async def test_static_guardrails_are_not_exposed_as_fake_canaries(
 
 
 @pytest.mark.asyncio
-async def test_unauthenticated_canary_is_zero_transport(client, model_fabric_workspace):
+async def test_unauthenticated_canary_is_zero_transport(client, model_fabric_workspace, monkeypatch):
     configured = await client.put(
         "/api/settings/model-fabric",
         json={
@@ -710,6 +748,9 @@ async def test_unauthenticated_canary_is_zero_transport(client, model_fabric_wor
         },
     )
     assert configured.status_code == 200
+    monkeypatch.setattr(settings, "operator_auth_secret", "fixture-canary-password")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    client.headers["origin"] = "http://localhost:3001"
     transport = AsyncMock(return_value=CapabilityProbeObservation(True, proven_value="verified"))
     tokens = set_runtime_context("", "high_risk", trust_principal=None)
     try:

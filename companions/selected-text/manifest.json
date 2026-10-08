@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Seraph deliberate selected text",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2wJODzDM4gJMy+GD91sxp9aDGSpfQh76c+CeBudYGH4MThmRGn39rL+VXuD7QInx4Lbl8QVDa4lXp2J6eGz4EHbkrxJnYs+tivhTiVG/l604ZYBHipqMOU6tRXo5k61WgwHw7DfoHMCap/yaBzG0mKwLERplO7cfeSaDADNdsHRpSumtkiYMndSJDiqzXkFHDmUFaDomCIkYaVz9antSTvWjMyHlRuykXlk5pqDWf1axo/HXQXw1yGCm9yzc2Nzi1i/JEx2NpgLKvZZH7N/5UbX7Lg5h+KsB3iikSPHXk6F1LDpYGF3Ym+fSEHhwWz+m9BFpRd/Lv4nfKi/R8Xi0BQIDAQAB",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8004/*"
+  ],
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "action": {
+    "default_title": "Review selected text privately"
+  },
+  "commands": {
+    "review-selected-text": {
+      "description": "Review selected ordinary DOM text",
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      }
+    }
+  },
+  "incognito": "not_allowed"
+}

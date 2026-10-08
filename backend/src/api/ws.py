@@ -42,6 +42,7 @@ from src.api.chat import (
     chat_assistant_metadata,
     chat_ingress_metadata,
     log_chat_ingress_event,
+    _approval_transport_metadata,
     validate_chat_ingress_identity,
     validate_chat_message,
 )
@@ -50,7 +51,7 @@ from src.auth.middleware import authenticate_websocket
 from src.auth.service import (
     AuthFailure,
     auth_enabled,
-    authenticate_session,
+    authenticate_websocket_session,
     bind_operator_principal,
 )
 from src.db.engine import get_session
@@ -175,7 +176,7 @@ async def watch_operator_session(
     while True:
         await asyncio.sleep(poll_seconds)
         try:
-            await authenticate_session(session_id, touch=False)
+            await authenticate_websocket_session(session_id, touch=False)
         except AuthFailure as exc:
             revoked_event.set()
             revocation_guard.set()
@@ -593,7 +594,7 @@ async def websocket_chat(websocket: WebSocket):
             raw = await websocket.receive_text()
             if auth_session_id:
                 try:
-                    operator = await authenticate_session(operator.session_id, touch=True)
+                    operator = await authenticate_websocket_session(operator.session_id, touch=True)
                 except AuthFailure:
                     auth_revoked.set()
                     revocation_guard.set()
@@ -1308,6 +1309,11 @@ async def websocket_chat(websocket: WebSocket):
                     exc.approval_id,
                     {"resume_message": ws_msg.message},
                 )
+                try:
+                    approval_row = await approval_repository.get(exc.approval_id)
+                except Exception:
+                    approval_row = None
+                approval_metadata = _approval_transport_metadata(exc, approval_row)
                 await audit_repository.log_event(
                     session_id=exc.session_id,
                     actor="agent",
@@ -1336,6 +1342,7 @@ async def websocket_chat(websocket: WebSocket):
                         approval_id=exc.approval_id,
                         tool_name=exc.tool_name,
                         risk_level=exc.risk_level,
+                        **approval_metadata,
                     ).model_dump_json()
                 )
                 continue

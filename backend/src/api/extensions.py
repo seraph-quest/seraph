@@ -50,12 +50,16 @@ from src.extensions.lifecycle import (
     disable_extension,
     enable_extension,
     extension_lifecycle_status,
+    extension_lifecycle_from_payload,
+    extension_connectors_from_payload,
     get_extension,
     get_extension_connector,
     get_extension_source,
     install_extension_path,
     list_extension_connectors,
     list_extensions,
+    prepare_extension_metadata,
+    project_extension_metadata,
     quarantine_extension,
     record_extension_review,
     reenter_extension,
@@ -711,9 +715,12 @@ def _sanitize_extension_diagnostic_value(value: Any, *, key: str | None = None) 
     return value
 
 
-def _safe_extension_diagnostics_payload(extension_id: str) -> dict[str, Any]:
-    extension = get_extension(extension_id)
-    lifecycle = extension_lifecycle_status(extension_id)
+def _safe_extension_diagnostics_payload(extension_id: str, *, extension: dict[str, Any] | None = None) -> dict[str, Any]:
+    if extension is None:
+        extension = get_extension(extension_id)
+        lifecycle = extension_lifecycle_status(extension_id)
+    else:
+        lifecycle = extension_lifecycle_from_payload(extension)
     lifecycle_state = lifecycle.get("lifecycle")
     lifecycle_state = lifecycle_state if isinstance(lifecycle_state, dict) else {}
     rollback = lifecycle.get("rollback")
@@ -1505,12 +1512,25 @@ async def scaffold_extension_package_in_workspace(
 
 @router.get("/extensions")
 async def list_extension_packages():
-    return _redact_lifecycle_api_value(list_extensions())
+    return _redact_lifecycle_api_value(await _optional_extension_metadata())
+
+
+async def _optional_extension_metadata():
+    from src.api.extension_metadata import bounded_extension_metadata
+    return await bounded_extension_metadata(project_extension_metadata, prepare=prepare_extension_metadata)
+
+
+async def _optional_extension(extension_id: str):
+    payload = await _optional_extension_metadata()
+    for item in payload.get("extensions", []):
+        if isinstance(item, dict) and item.get("id") == extension_id:
+            return item
+    raise KeyError(extension_id)
 
 
 @router.get("/extensions/diagnostics")
 async def get_extension_diagnostics():
-    payload = list_extensions()
+    payload = await _optional_extension_metadata()
     extensions = payload.get("extensions", []) if isinstance(payload, dict) else []
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
     return {
@@ -1538,7 +1558,7 @@ async def get_extension_diagnostics():
 @router.get("/extensions/{extension_id}/diagnostics")
 async def get_extension_package_diagnostics(extension_id: str):
     try:
-        return _safe_extension_diagnostics_payload(extension_id)
+        return _safe_extension_diagnostics_payload(extension_id, extension=await _optional_extension(extension_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1581,10 +1601,26 @@ async def update_channel_routing(req: ChannelRoutingUpdateRequest, request: Requ
         reset_runtime_context(tokens)
 
 
+
+
+@router.get("/extensions/effective-grants")
+async def effective_grants(request: Request):
+    from src.extensions.effective_grants import inventory
+    return await inventory(request)
+
+
+from src.extensions.effective_grants import RevokeRequest
+
+@router.post("/extensions/effective-grants/revoke")
+async def revoke_effective_grant(body: RevokeRequest, request: Request):
+    from src.extensions.effective_grants import revoke
+    return await revoke(request,body)
+
+
 @router.get("/extensions/{extension_id}")
 async def get_extension_package(extension_id: str):
     try:
-        return {"extension": _redact_lifecycle_api_value(get_extension(extension_id))}
+        return {"extension": _redact_lifecycle_api_value(await _optional_extension(extension_id))}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1592,7 +1628,7 @@ async def get_extension_package(extension_id: str):
 @router.get("/extensions/{extension_id}/lifecycle")
 async def get_extension_package_lifecycle(extension_id: str):
     try:
-        return _redact_lifecycle_api_value(extension_lifecycle_status(extension_id))
+        return _redact_lifecycle_api_value(extension_lifecycle_from_payload(await _optional_extension(extension_id)))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
@@ -1912,7 +1948,7 @@ async def rollback_extension_package(
 @router.get("/extensions/{extension_id}/connectors")
 async def list_extension_package_connectors(extension_id: str):
     try:
-        return _redact_lifecycle_api_value(list_extension_connectors(extension_id))
+        return _redact_lifecycle_api_value(extension_connectors_from_payload(await _optional_extension(extension_id)))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 

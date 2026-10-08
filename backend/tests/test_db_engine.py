@@ -1,29 +1,99 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import sqlite3
 import threading
 
 import pytest
+from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlmodel import SQLModel
 
 from config.settings import settings
 import src.db.engine as db_engine
 from src.db.engine import (
     _configure_sqlite_connection,
+    _ensure_calendar_columns,
     _ensure_legacy_columns,
+    _ensure_guardian_inbox_columns,
     _ensure_m5_columns,
     _ensure_search_indexes,
     engine as production_engine,
 )
 from src.db.models import (
+    GuardianDecisionPacket,
+    GuardianInboxAction,
     ModelCapabilityProofRecord,
     ModelRouteAttemptReceiptRecord,
     ModelRouteReceiptRecord,
     OperatorSession,
 )
+
+
+async def test_guardian_inbox_pending_index_shape_is_stable_for_fresh_and_legacy_databases(tmp_path):
+    expected_columns = ["inbox_pending", "updated_at", "id"]
+
+    fresh_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-guardian-packet.db'}")
+    event.listen(fresh_engine.sync_engine, "connect", _configure_sqlite_connection)
+    try:
+        async with fresh_engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync: SQLModel.metadata.create_all(
+                    sync,
+                    tables=[GuardianDecisionPacket.__table__],
+                )
+            )
+            fresh_columns = [
+                row[2]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_info(ix_guardian_decision_packets_inbox_pending_updated)"
+                    )
+                ).fetchall()
+            ]
+        assert fresh_columns == expected_columns
+    finally:
+        await fresh_engine.dispose()
+
+    legacy_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy-guardian-packet.db'}")
+    event.listen(legacy_engine.sync_engine, "connect", _configure_sqlite_connection)
+    try:
+        async with legacy_engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE TABLE guardian_decision_packets (id VARCHAR PRIMARY KEY, updated_at DATETIME)"
+            )
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+            await conn.exec_driver_sql(
+                "DROP INDEX ix_guardian_decision_packets_inbox_pending_updated"
+            )
+            # A workspace may already have the additive column from an older
+            # startup but have missed the bounded-repair index.  Re-running
+            # migration must restore the exact composite shape.
+            await _ensure_legacy_columns(conn)
+            legacy_columns = [
+                row[2]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_info(ix_guardian_decision_packets_inbox_pending_updated)"
+                    )
+                ).fetchall()
+            ]
+            inbox_pending_column = [
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(guardian_decision_packets)"
+                    )
+                ).fetchall()
+            ]
+        assert legacy_columns == expected_columns
+        assert "inbox_pending" in inbox_pending_column
+    finally:
+        await legacy_engine.dispose()
 
 
 async def test_session_factory_override_is_task_local(monkeypatch):
@@ -107,6 +177,229 @@ async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):
         assert "receipt_integrity_mac" in receipt_columns
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ensure_calendar_columns_precedes_metadata_indexes_and_is_idempotent(tmp_path):
+    db_path = tmp_path / "legacy-calendar.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE calendar_read_consents (
+                    consent_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL,
+                    creation_request_digest VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE google_service_connections (
+                    connection_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL
+                )
+                """
+            )
+
+            await _ensure_calendar_columns(conn)
+            await _ensure_calendar_columns(conn)
+
+            consent_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(calendar_read_consents)"
+                    )
+                ).fetchall()
+            }
+            connection_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(google_service_connections)"
+                    )
+                ).fetchall()
+            }
+            consent_indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_list(calendar_read_consents)"
+                    )
+                ).fetchall()
+            }
+            connection_indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_list(google_service_connections)"
+                    )
+                ).fetchall()
+            }
+        assert {
+            "creation_idempotency_key",
+            "creation_request_digest",
+        }.issubset(consent_columns)
+        assert "verified_setup_job_id" in connection_columns
+        assert "ux_calendar_read_consents_creation_idempotency" in consent_indexes
+        assert "ix_google_service_connections_verified_setup_job_id" in connection_indexes
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ensure_calendar_columns_rejects_ambiguous_legacy_consent_keys(tmp_path):
+    db_path = tmp_path / "ambiguous-calendar.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE calendar_read_consents (
+                    consent_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL,
+                    creation_idempotency_key VARCHAR NOT NULL,
+                    creation_request_digest VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO calendar_read_consents (
+                    consent_id, owner_principal_id, owner_session_id,
+                    creation_idempotency_key
+                ) VALUES
+                    ('consent-a', 'operator:legacy', 'session:legacy', 'same-key'),
+                    ('consent-b', 'operator:legacy', 'session:legacy', 'same-key')
+                """
+            )
+            with pytest.raises(RuntimeError, match="idempotency collision"):
+                await _ensure_calendar_columns(conn)
+    finally:
+        await engine.dispose()
+
+
+async def test_ensure_guardian_inbox_columns_adds_nullable_safe_reason(tmp_path):
+    db_path = tmp_path / "legacy-guardian-inbox.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE guardian_inbox_actions (
+                    id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL,
+                    item_id VARCHAR NOT NULL,
+                    idempotency_key VARCHAR NOT NULL,
+                    payload_digest VARCHAR NOT NULL,
+                    action VARCHAR NOT NULL,
+                    prior_revision INTEGER NOT NULL,
+                    result_revision INTEGER NOT NULL,
+                    task_id VARCHAR,
+                    safe_result_json VARCHAR NOT NULL,
+                    created_at DATETIME
+                )
+                """
+            )
+            await _ensure_guardian_inbox_columns(conn)
+            await _ensure_guardian_inbox_columns(conn)
+            columns = {
+                row[1]: row[3]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(guardian_inbox_actions)"
+                    )
+                ).fetchall()
+            }
+        assert columns["safe_reason"] == 0
+    finally:
+        await engine.dispose()
+
+
+async def test_init_db_upgrades_legacy_guardian_inbox_action_table(tmp_path, monkeypatch):
+    root = tmp_path / "legacy-inbox-startup"
+    root.mkdir()
+    database_path = root / "seraph.db"
+    sync_engine = create_sync_engine(f"sqlite:///{database_path}")
+    with sync_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE guardian_inbox_actions (
+                id VARCHAR PRIMARY KEY,
+                owner_principal_id VARCHAR NOT NULL,
+                owner_session_id VARCHAR NOT NULL,
+                item_id VARCHAR NOT NULL,
+                idempotency_key VARCHAR NOT NULL,
+                payload_digest VARCHAR NOT NULL,
+                action VARCHAR NOT NULL,
+                prior_revision INTEGER NOT NULL,
+                result_revision INTEGER NOT NULL,
+                task_id VARCHAR,
+                safe_result_json VARCHAR NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO guardian_inbox_actions (
+                id, owner_principal_id, owner_session_id, item_id,
+                idempotency_key, payload_digest, action, prior_revision,
+                result_revision, task_id, safe_result_json, created_at
+            ) VALUES (
+                'legacy-action', 'operator:legacy', 'legacy-session',
+                'legacy-item', 'legacy-key', 'a', 'dismiss', 1, 2, NULL,
+                '{"state":"dismissed"}', '2026-09-30T00:00:00Z'
+            )
+            """
+        )
+    sync_engine.dispose()
+
+    async_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    monkeypatch.setattr(db_engine, "engine", async_engine)
+    monkeypatch.setattr(db_engine, "_db_path", str(database_path))
+
+    async def _noop(_connection):
+        return None
+
+    monkeypatch.setattr(db_engine, "_ensure_legacy_columns", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_telegram_transport_columns", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_memory_indexes", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_search_indexes", _noop)
+
+    try:
+        await db_engine.init_db()
+    finally:
+        await async_engine.dispose()
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                f"PRAGMA table_info({GuardianInboxAction.__tablename__})"
+            )
+        }
+        legacy_row = connection.execute(
+            "SELECT id, safe_reason FROM guardian_inbox_actions WHERE id = 'legacy-action'"
+        ).fetchone()
+    assert "safe_reason" in columns
+    assert legacy_row == ("legacy-action", None)
 
 
 async def test_ensure_legacy_columns_backfills_kind_from_category(tmp_path):

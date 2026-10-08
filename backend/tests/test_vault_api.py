@@ -34,8 +34,8 @@ class TestListVaultKeys:
         assert res.json() == []
 
     async def test_returns_metadata(self, client, async_db, repo):
-        await repo.store("key_a", "val_a", description="A")
-        await repo.store("key_b", "val_b", description="B")
+        await repo.store("key_a", "val_a", description="A", owner_principal_id="operator:test-bypass")
+        await repo.store("key_b", "val_b", description="B", owner_principal_id="operator:test-bypass")
         res = await client.get("/api/vault/keys")
         assert res.status_code == 200
         data = res.json()
@@ -50,7 +50,7 @@ class TestListVaultKeys:
 
 class TestDeleteVaultKey:
     async def test_success(self, client, async_db, repo):
-        await repo.store("to_delete", "val")
+        await repo.store("to_delete", "val", owner_principal_id="operator:test-bypass")
         res = await client.delete("/api/vault/keys/to_delete")
         assert res.status_code == 200
         assert res.json()["status"] == "ok"

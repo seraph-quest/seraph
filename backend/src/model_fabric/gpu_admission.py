@@ -10,6 +10,13 @@ available and the request identity otherwise.
 
 from __future__ import annotations
 
+
+def _callback_error_uncertain(error: BaseException, uncertain_on_error: bool, request) -> bool:
+    # Only the canonical accounting transaction can prove that the provider
+    # callback never began. Provider failures retain the usual Unknown fence.
+    from src.workflows.inference_accounting import proven_contact_denial_for_request
+    return uncertain_on_error and not proven_contact_denial_for_request(error, request)
+
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -163,6 +170,9 @@ class GpuAdmissionRequest:
     estimated_cost_microusd: int | None = None
     owner_budget_microusd: int | None = None
     uncertain_on_error: bool | None = None
+    # Immutable payload binding for the durable accounting boundary. Model
+    # contents remain outside both the broker and the accounting ledger.
+    data_digest: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "job_id", "owner_id"):
@@ -238,6 +248,7 @@ class GpuAdmissionRequest:
                 if uncertain_on_error is not None
                 else getattr(context, "uncertain_on_error", None)
             ),
+            data_digest=str(getattr(context, "data_digest", "") or ""),
         )
 
 
@@ -944,16 +955,17 @@ class GpuAdmissionBroker(Generic[T]):
             raise
         except BaseException as error:
             self._mark_callback_completed(lease)
+            uncertain = _callback_error_uncertain(error, uncertain_on_error, request)
             receipt = await asyncio.shield(
                 self.release(
                     lease,
                     outcome="failed",
                     reason_code=(
                         "provider_result_uncertain"
-                        if uncertain_on_error
+                        if uncertain
                         else "provider_failed"
                     ),
-                    uncertain=uncertain_on_error,
+                    uncertain=uncertain,
                 )
             )
             if receipt.status == "blocked":
@@ -1034,15 +1046,16 @@ class GpuAdmissionBroker(Generic[T]):
             result = operation()
         except BaseException as error:
             self._mark_callback_completed(lease)
+            uncertain = _callback_error_uncertain(error, uncertain_on_error, request)
             receipt = self._release_sync(
                 lease,
                 outcome="failed",
                 reason_code=(
                     "provider_result_uncertain"
-                    if uncertain_on_error
+                    if uncertain
                     else "provider_failed"
                 ),
-                uncertain=uncertain_on_error,
+                uncertain=uncertain,
             )
             if receipt.status == "blocked":
                 raise GpuAdmissionUncertainError(
@@ -1496,6 +1509,7 @@ class GpuAdmissionBroker(Generic[T]):
         except BaseException as error:
             await self._close_stream_iterator(stream_iterator)
             self._mark_callback_completed(lease)
+            uncertain = _callback_error_uncertain(error, uncertain_on_error, request)
             if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
                 receipt = await asyncio.shield(
                     self.release(
@@ -1512,10 +1526,10 @@ class GpuAdmissionBroker(Generic[T]):
                         outcome="failed",
                         reason_code=(
                             "provider_result_uncertain"
-                            if uncertain_on_error
+                            if uncertain
                             else "provider_failed"
                         ),
-                        uncertain=uncertain_on_error,
+                        uncertain=uncertain,
                     )
                 )
             if receipt.status == "blocked":

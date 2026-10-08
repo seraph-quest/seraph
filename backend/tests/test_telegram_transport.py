@@ -7,6 +7,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 
 from config.settings import settings
 from src.extensions.telegram_transport import (
@@ -21,7 +22,17 @@ from src.extensions.telegram_ingress import (
     TelegramUpdate,
     ingest_telegram_update,
 )
-from src.db.models import TelegramTransportState
+from src.db.models import TelegramTransportState, OperatorSession
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def current_operator_roots(async_db):
+    """Transport tests establish durable server roots before exercising effects."""
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        for suffix, root_id in [("test", "operator-session-1"), ("owner-a", "operator-session-a"), ("owner-b", "operator-session-b")]:
+            db.add(OperatorSession(id=root_id, principal_id="operator:root:telegram-"+suffix,
+                token_hash="telegram-test-"+suffix, idle_expires_at=now+timedelta(hours=1), absolute_expires_at=now+timedelta(hours=1)))
 
 
 def _update(update_id: int = 1, *, operator_id: int = 42, chat_id: int = 77, sequence: int | None = None):
@@ -97,26 +108,26 @@ async def test_text_ingress_is_durable_and_duplicate_after_restart(async_db, mon
     transport = RecordingTelegramTransport()
     adapter = TelegramTransportAdapter(transport=transport)
     await adapter.pair(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         operator_id=42,
         chat_id=77,
         token="synthetic-secret",
     )
     await adapter.grant_consent(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         boundary="telegram_transit",
     )
     await adapter.grant_consent(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         boundary="openrouter_inference",
     )
 
     first = await adapter.ingest_update(
         _update(sequence=1),
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
     )
     assert first["status"] == "accepted"
@@ -128,7 +139,7 @@ async def test_text_ingress_is_durable_and_duplicate_after_restart(async_db, mon
     restarted = TelegramTransportAdapter(transport=transport)
     duplicate = await restarted.ingest_update(
         _update(sequence=1),
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
     )
     assert duplicate["idempotency_key"] == first["idempotency_key"]
@@ -139,30 +150,30 @@ async def test_text_ingress_is_durable_and_duplicate_after_restart(async_db, mon
 async def test_cross_owner_and_chat_are_denied_before_ingress(async_db):
     adapter = TelegramTransportAdapter()
     await adapter.pair(
-        owner_principal_id="operator:owner-a",
+        owner_principal_id="operator:root:telegram-owner-a",
         operator_session_id="operator-session-a",
         operator_id=42,
         chat_id=77,
     )
     await adapter.grant_consent(
-        owner_principal_id="operator:owner-a",
+        owner_principal_id="operator:root:telegram-owner-a",
         operator_session_id="operator-session-a",
         boundary="telegram_transit",
     )
     await adapter.grant_consent(
-        owner_principal_id="operator:owner-a",
+        owner_principal_id="operator:root:telegram-owner-a",
         operator_session_id="operator-session-a",
         boundary="openrouter_inference",
     )
     with pytest.raises(TelegramTransportError, match="another operator"):
         await adapter.ingest_update(
             _update(sequence=1),
-            owner_principal_id="operator:owner-b",
+            owner_principal_id="operator:root:telegram-owner-b",
             operator_session_id="operator-session-b",
         )
     blocked = await adapter.ingest_update(
         _update(sequence=1, chat_id=78),
-        owner_principal_id="operator:owner-a",
+        owner_principal_id="operator:root:telegram-owner-a",
         operator_session_id="operator-session-a",
     )
     assert blocked["status"] == "blocked"
@@ -175,14 +186,14 @@ async def test_voice_is_quarantined_and_delivery_rechecks_revoke(async_db, monke
     transport = RecordingTelegramTransport()
     adapter = TelegramTransportAdapter(transport=transport)
     await adapter.pair(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         operator_id=42,
         chat_id=77,
     )
     for boundary in ("telegram_transit", "openrouter_inference"):
         await adapter.grant_consent(
-            owner_principal_id="operator:test",
+            owner_principal_id="operator:root:telegram-test",
             operator_session_id="operator-session-1",
             boundary=boundary,
         )
@@ -203,7 +214,7 @@ async def test_voice_is_quarantined_and_delivery_rechecks_revoke(async_db, monke
                 },
             },
         },
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
     )
     assert result["status"] == "degraded"
@@ -212,14 +223,14 @@ async def test_voice_is_quarantined_and_delivery_rechecks_revoke(async_db, monke
 
     outbox = await adapter.enqueue_outbound(
         "reply",
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         idempotency_key="telegram-outbound-1",
     )
-    await adapter.revoke(owner_principal_id="operator:test", operator_session_id="operator-session-1")
+    await adapter.revoke(owner_principal_id="operator:root:telegram-test", operator_session_id="operator-session-1")
     delivered = await adapter.deliver(
         outbox["id"],
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
     )
     assert delivered["status"] == "cancelled"
@@ -231,30 +242,30 @@ async def test_outbox_retry_and_idempotency_conflict(async_db):
     transport = RecordingTelegramTransport(responses=[{"status_code": 503}, {"status_code": 200, "message_id": "m-1"}])
     adapter = TelegramTransportAdapter(transport=transport)
     await adapter.pair(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         operator_id=42,
         chat_id=77,
     )
     await adapter.grant_consent(
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         boundary="telegram_transit",
     )
     outbox = await adapter.enqueue_outbound(
         "reply",
-        owner_principal_id="operator:test",
+        owner_principal_id="operator:root:telegram-test",
         operator_session_id="operator-session-1",
         idempotency_key="telegram-outbound-1",
     )
-    retry = await adapter.deliver(outbox["id"], owner_principal_id="operator:test", operator_session_id="operator-session-1")
+    retry = await adapter.deliver(outbox["id"], owner_principal_id="operator:root:telegram-test", operator_session_id="operator-session-1")
     assert retry["status"] == "queued"
-    done = await adapter.deliver(outbox["id"], owner_principal_id="operator:test", operator_session_id="operator-session-1")
+    done = await adapter.deliver(outbox["id"], owner_principal_id="operator:root:telegram-test", operator_session_id="operator-session-1")
     assert done["status"] == "delivered"
     with pytest.raises(TelegramTransportError, match="another payload"):
         await adapter.enqueue_outbound(
             "changed",
-            owner_principal_id="operator:test",
+            owner_principal_id="operator:root:telegram-test",
             operator_session_id="operator-session-1",
             idempotency_key="telegram-outbound-1",
         )

@@ -670,9 +670,24 @@ def test_durable_receipts_redact_secret_key_variants_and_error_payloads():
     assert safe["details"]["original_error"] == "[redacted]"
     assert safe["details"]["safe_reason"] == "provider_timeout"
 
+    fencing = _safe_structure(
+        {
+            "parent_fencing_token": 7,
+            "board_fencing_token": 11,
+            "board_fencing_token_string": "11",
+            "board_fencing_token_negative": -1,
+        }
+    )
+    assert fencing["parent_fencing_token"] == 7
+    assert fencing["board_fencing_token"] == 11
+    assert fencing["board_fencing_token_string"] == "[redacted]"
+    assert fencing["board_fencing_token_negative"] == "[redacted]"
+
 
 @pytest.mark.asyncio
-async def test_remote_receipt_adapter_maps_status_without_mutating_job_lifecycle():
+async def test_remote_receipt_adapter_maps_status_without_mutating_job_lifecycle(async_db):
+    # The adapter consults canonical cost reservations even when the effect
+    # recorder is isolated below; use the complete local accounting schema.
     class RecordingRepository(DurableJobRepository):
         async def get_job(self, job_id):
             return {"job_id": job_id, "owner": {"principal_id": "service:strategist"}}

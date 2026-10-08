@@ -9,6 +9,7 @@ and never trust reviewer, run, or evidence identities supplied by a browser.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 import hashlib
 import json
 import re
@@ -35,6 +36,7 @@ from src.work_board.repository import (
     BoardMutation,
     BoardRevisionConflict,
     WorkBoardRepository,
+    effective_browser_limits,
     _SAFE_RESTORABLE_PHASES,
     _begin_sqlite_immediate,
     _safe_receipt_refs,
@@ -64,6 +66,91 @@ _LEGACY_HANDOFF_RECONCILIATION_REASON = (
 _LEGACY_HANDOFF_MISSING_REASON = (
     "Every completed parent must have a verified handoff before dispatch"
 )
+
+
+@dataclass(frozen=True)
+class PipelineProducerWitness:
+    owner_principal_id: str
+    original_root_id: str
+    task_id: str
+    task_token: str
+    attempt_id: str
+    attempt_token: str
+    run_identity: str
+    run_token: str
+    input_artifact_id: str
+    input_artifact_token: str
+    proof_bytes: bytes
+    output_bytes: bytes
+    output_reference: str
+    content_sha256: str
+
+
+async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProducerWitness:
+    from src.work_board.pipelines import row_token
+    from src.work_board.pipeline_cpu import read_output
+    from src.work_board.pipeline_contracts import canonical_bytes, MAX_QUOTED_BYTES, REPORT
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == producer.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    proof = await _verified_workflow_readback(db, producer, attempt) if attempt else None
+    if (producer.status != WorkBoardStatus.done or producer.owner_principal_id != owner.principal_id
+        or producer.owner_session_id != owner.session_id or proof is None):
+        raise BoardError("pipeline_output_unverified", "The real producer readback is required", status_code=409)
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+    artifacts = _decode_list(run.artifact_receipts_json)
+    matching = [item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
+        and item.get("content_sha256") == proof["content_sha256"]]
+    if len(matching) != 1:
+        raise BoardError("pipeline_output_unverified", "The producer artifact is ambiguous", status_code=409)
+    reference = matching[0]["file_path"]
+    raw = read_output(reference, proof["content_sha256"])
+    if producer.capability_id != REPORT and len(raw) > MAX_QUOTED_BYTES:
+        raise BoardError("pipeline_output_too_large", "The producer exceeds the input allowance", status_code=409)
+    from src.db.models import WorkBoardInputArtifact
+    input_artifact = await db.get(WorkBoardInputArtifact, producer.input_artifact_id)
+    if input_artifact is None:
+        raise BoardError("pipeline_input_changed", "The producer input binding is unavailable", status_code=409)
+    return PipelineProducerWitness(owner.principal_id, owner.session_id, producer.task_id, row_token(producer),
+        attempt.attempt_id, row_token(attempt), run.run_identity, row_token(run), input_artifact.artifact_id,
+        row_token(input_artifact), canonical_bytes(proof),
+        raw, reference, proof["content_sha256"])
+
+
+async def recheck_pipeline_producer_readback(db, owner, *, witness: PipelineProducerWitness):
+    from src.work_board.pipelines import row_token
+    if not isinstance(witness, PipelineProducerWitness) or (witness.owner_principal_id, witness.original_root_id) != (owner.principal_id, owner.session_id):
+        raise BoardError("pipeline_producer_changed", "Staged producer proof is required", status_code=409)
+    producer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == witness.task_id).execution_options(populate_existing=True))
+    attempt = await db.get(WorkBoardAttempt, witness.attempt_id, populate_existing=True)
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == witness.run_identity).execution_options(populate_existing=True))
+    from src.db.models import WorkBoardInputArtifact
+    input_artifact = await db.get(WorkBoardInputArtifact, witness.input_artifact_id, populate_existing=True)
+    latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == witness.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    if (producer is None or attempt is None or run is None or latest != witness.attempt_id
+        or row_token(producer) != witness.task_token or row_token(attempt) != witness.attempt_token
+        or row_token(run) != witness.run_token or run.status != "succeeded"
+        or producer.status != WorkBoardStatus.done or attempt.ended_at is None
+        or input_artifact is None or row_token(input_artifact) != witness.input_artifact_token
+        or hashlib.sha256(witness.output_bytes).hexdigest() != witness.content_sha256):
+        raise BoardError("pipeline_producer_changed", "The staged producer binding changed", status_code=409)
+    return {"file_path": witness.output_reference, "content_sha256": witness.content_sha256,
+        "attempt_id": witness.attempt_id, "quoted_source_data": witness.output_bytes.decode("utf-8")}
+
+
+async def _materialize_pipeline_handoff_locked(db, owner, parent, child, link, *, witness: PipelineProducerWitness):
+    await recheck_pipeline_producer_readback(db, owner, witness=witness)
+    existing = await db.scalar(select(WorkBoardHandoff).where(WorkBoardHandoff.link_id == link.link_id,
+        WorkBoardHandoff.source_attempt_id == witness.attempt_id,
+        WorkBoardHandoff.source_task_revision == parent.task_revision))
+    if existing is None:
+        attempt = await db.get(WorkBoardAttempt, witness.attempt_id)
+        existing = await _persist_one_handoff(db, owner, parent, child, attempt,
+            proof=json.loads(witness.proof_bytes), link=link)
+    elif link.current_handoff_id != existing.handoff_id:
+        link.current_handoff_id = existing.handoff_id
+        await db.flush()
+    return existing
 _HANDOFF_RECONCILIATION_REASONS = (
     _HANDOFF_RECONCILIATION_REASON,
     _LEGACY_HANDOFF_RECONCILIATION_REASON,
@@ -297,6 +384,65 @@ async def _verified_workflow_readback(
         return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
+    if task.capability_id == "memory.opportunity-preference.v1":
+        from src.work_board.opportunity_preference_native import stage_output_source, recheck_done_source
+        try:
+            staged = db.info.get("opportunity_preference_done_source")
+            if staged is None:
+                staged = await stage_output_source(db,task,attempt)
+            else:
+                await recheck_done_source(db,witness=staged)
+            if staged.output_sha256 != proof["content_sha256"]:
+                return None
+        except (BoardError,ValueError,TypeError,KeyError,OSError):
+            return None
+    if task.capability_id == "work.research-dossier.v1":
+        try:
+            from src.work_board.research_readback import verified_dossier
+            dossier, _raw = await verified_dossier(db, task, attempt, run)
+            if dossier["content_sha256"] != proof["content_sha256"]:
+                return None
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
+            return None
+    if task.capability_id == "inference.near-text.v1":
+        from src.work_board.near_text_native import read_output
+        try:
+            read_output(task,attempt,run)
+        except (OSError,ValueError,TypeError,KeyError,BoardError):
+            return None
+    if task.capability_id == "work.json-format.v1":
+        try:
+            from src.work_board.tool_package_native import verified_output
+            staged=db.info.get("formatter_review_readback")
+            if db.info.get("formatter_review_writer") and staged is None:return None
+            artifact,_raw=verified_output(task,attempt,run,staged=staged)
+            if artifact["content_sha256"]!=proof["content_sha256"]:
+                return None
+        except (ValueError,TypeError,KeyError,OSError,BoardError):
+            return None
+    if task.capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        # A stored Succeeded label cannot authorize a downstream consumer.
+        # Reopen the exact private output and correlate its settled effect.
+        from src.work_board.pipeline_cpu import read_output
+        artifacts = _decode_list(run.artifact_receipts_json)
+        effects = _decode_list(run.effect_receipts_json)
+        if task.capability_id == "browser.public-task.v1":
+            from src.work_board.dispatcher import _browser_cleanup_receipt_proven
+            if not _browser_cleanup_receipt_proven({"effects": effects}):
+                return None
+        matching = [item for item in artifacts if isinstance(item, Mapping)
+            and item.get("content_sha256") == proof["content_sha256"] and item.get("exists") is True]
+        if len(matching) != 1:
+            return None
+        artifact = matching[0]
+        if not any(isinstance(effect, Mapping) and effect.get("receipt_kind") == "readback"
+            and effect.get("status") == "succeeded" and effect.get("target_path") == artifact.get("file_path")
+            and effect.get("content_sha256") == proof["content_sha256"] for effect in effects):
+            return None
+        try:
+            read_output(artifact["file_path"], proof["content_sha256"])
+        except (ValueError, TypeError, OSError, BoardError):
+            return None
     # Review and handoff both consume the same bounded evidence contract.  A
     # digest alone is insufficient: the durable readback ID and the verifier's
     # recorded timestamp must survive projection so an operator can inspect
@@ -343,6 +489,58 @@ def _workflow_run_binds_board_attempt(
     arguments = _decode_object(run.arguments_json)
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
 
+    capability_id = str(task.capability_id or "").strip()
+    if capability_id == "inference.near-text.v1":
+        from src.work_board.near_text_native import binds
+        return binds(task,attempt,run)
+    if capability_id == "memory.opportunity-preference.v1":
+        from src.work_board.opportunity_preference_native import binds
+        return binds(task,attempt,run)
+    if capability_id == "work.json-format.v1":
+        from src.work_board.tool_package_native import binds
+        return binds(task,attempt,run)
+    if capability_id == "work.research-dossier.v1":
+        from src.work_board.research_readback import binds
+        return binds(task, attempt, run)
+    if capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        try:
+            from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
+            inputs = _parse_typed_input(task)
+            if capability_id == "browser.public-task.v1":
+                authority = _decode_object(run.declared_authority_json)
+                limits = authority.get("limits", {})
+                if (run.owner_kind != "service" or run.owner_principal_id != "service:browser-task"
+                    or run.service_id != "service:browser-task" or run.job_kind != "browser_public_task"
+                    or type(limits.get("runtime_seconds")) is not int or not 1 <= limits["runtime_seconds"] <= 180
+                    or type(limits.get("max_attempts")) is not int or not 1 <= limits["max_attempts"] <= 2
+                    or type(limits.get("max_outstanding_jobs")) is not int or not 1 <= limits["max_outstanding_jobs"] <= 16
+                    or (task.pipeline_operation_id and limits["max_outstanding_jobs"] != 1)):
+                    return False
+                immutable_task = task.model_copy(update={"task_revision": attempt.task_revision_at_claim + 1})
+                projection = {"owner": {"principal_id": run.owner_principal_id, "kind": run.owner_kind, "service_id": run.service_id},
+                    "job_kind": run.job_kind, "capability_version": run.capability_version,
+                    "declared_authority": authority, "job_id": run.run_identity,
+                    "session_id": run.session_id, "operator_session_id": run.operator_session_id,
+                    "goal_id": run.goal_id, "goal_revision": run.goal_revision}
+                expected = WorkBoardDispatcher._browser_expected_identity(immutable_task, attempt, inputs, projection,
+                    limits["runtime_seconds"], limits["max_attempts"], limits["max_outstanding_jobs"])
+                return (run.run_identity == expected["job_id"] and run.input_digest == expected["input_digest"]
+                    and run.run_fingerprint == expected["run_fingerprint"]
+                    and _safe_digest(authority) == expected["authority_digest"]
+                    and run.idempotency_scope == "work-board-attempt"
+                    and run.idempotency_key == f"{task.task_id}:{attempt.attempt_id}")
+            from src.work_board.pipeline_cpu import spec_for
+            spec = spec_for(task, attempt, inputs, deadline=_now())
+            return (run.owner_kind == "user" and run.owner_principal_id == task.owner_principal_id
+                and not run.service_id and run.job_kind == capability_id and run.capability_version == "1"
+                and run.run_identity == spec.identity.job_id and run.input_digest == _safe_digest(spec.inputs)
+                and run.run_fingerprint == spec.run_fingerprint
+                and _decode_object(run.declared_authority_json) == spec.declared_authority
+                and run.idempotency_scope == "work-board-attempt"
+                and run.idempotency_key == f"{task.task_id}:{attempt.attempt_id}")
+        except (ValueError, TypeError, KeyError, BoardError):
+            return False
+
     if str(run.owner_kind or "") == "user":
         if str(run.owner_principal_id or "") != str(task.owner_principal_id or ""):
             return False
@@ -361,8 +559,11 @@ def _workflow_run_binds_board_attempt(
             capability = None
         if capability is None:
             return False
+        # The registered GitHub adapter owns its established native durable
+        # kind; retain every board identity/digest fence below for that alias.
+        expected_job_kind = "github_followthrough_v1" if capability_id == "work.github-followthrough.v1" else capability_id
         if (
-            str(run.job_kind or "") != capability_id
+            str(run.job_kind or "") != expected_job_kind
             or str(run.capability_version or "") != str(capability.version)
             or str(run.session_id or "") != str(task.owner_session_id or "")
             or str(run.idempotency_scope or "") != "work-board-attempt"
@@ -662,6 +863,34 @@ async def _finish_event(
     return BoardMutation(task, event)
 
 
+def _formatter_readback_writer(function):
+    # Formatter physical/package readback is staged before these existing
+    # review writers. The final read checks only the exact canonical rows.
+    from functools import wraps
+    @wraps(function)
+    async def wrapped(db,owner,task_id,*args,**kwargs):
+        from src.work_board.tool_package_native import stage_readback
+        repository=kwargs.get("repository") or WorkBoardRepository()
+        task=await repository._owned_task(db,owner,task_id)
+        prior=db.info.get("formatter_review_writer",False)
+        cached=db.info.get("formatter_review_readback")
+        try:
+            if task.capability_id=="work.json-format.v1" and not kwargs.get("transaction_locked"):
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                    .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+                if run is not None and run.status=="succeeded":
+                    db.info["formatter_review_readback"]=stage_readback(task,attempt,run)
+            db.info["formatter_review_writer"]=True
+            return await function(db,owner,task_id,*args,**kwargs)
+        finally:
+            db.info["formatter_review_writer"]=prior
+            if cached is None:db.info.pop("formatter_review_readback",None)
+            else:db.info["formatter_review_readback"]=cached
+    return wrapped
+
+
+@_formatter_readback_writer
 async def request_review(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -865,6 +1094,7 @@ async def request_review(
     return BoardMutation(task, event)
 
 
+@_formatter_readback_writer
 async def request_changes(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -913,7 +1143,7 @@ async def request_changes(
     # Re-run every current readiness gate, including scheduled_at, before
     # reopening it; failure returns the card to Todo so M2 performs fresh
     # admission after the task is eligible.
-    await repository.validate_task_goal(db, owner, task)
+    live_goal = await repository.validate_task_goal(db, owner, task)
     from src.work_board.dispatcher import MAX_ATTEMPTS_PER_TASK, _dispatcher
 
     readiness_error, _readiness_reason = await _dispatcher._current_readiness(task)
@@ -940,7 +1170,10 @@ async def request_changes(
         )
         or 0
     )
-    attempt_exhausted = attempt_count >= MAX_ATTEMPTS_PER_TASK
+    max_attempts = MAX_ATTEMPTS_PER_TASK
+    if task.capability_id == "browser.public-task.v1":
+        max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
+    attempt_exhausted = attempt_count >= max_attempts
     reopened = (
         WorkBoardStatus.blocked
         if attempt_exhausted
@@ -1000,6 +1233,7 @@ async def request_changes(
     return mutation
 
 
+@_formatter_readback_writer
 async def complete_review(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -1175,6 +1409,7 @@ async def unblock_task(
     # cancellation or pending-admission reconciliation path.
     await _begin_sqlite_immediate(db)
     task = await repository._owned_task(db, owner, task_id)
+    await repository.require_generic_recovery_allowed(db, task)
     if task.status is not WorkBoardStatus.blocked:
         raise BoardError("illegal_transition", "Only blocked tasks can be unblocked", status_code=409)
     if not str(resolution or "").strip():
@@ -1328,6 +1563,7 @@ async def unblock_task(
     )
 
 
+@_formatter_readback_writer
 async def renew_review(
     db: AsyncSession,
     owner: WorkBoardOwner,

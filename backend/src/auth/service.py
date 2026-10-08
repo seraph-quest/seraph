@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import base64
+import re
 import hashlib
 import hmac
 import secrets
@@ -30,6 +31,19 @@ class AuthenticatedOperator:
     principal: TrustPrincipal
     idle_expires_at: datetime
     absolute_expires_at: datetime
+    # Captured from the authenticated request only.  It is deliberately
+    # private, excluded from repr/equality, and never serialized into an
+    # operator principal, response, audit event, or authority envelope.
+    _token_hash: str | None = field(default=None, repr=False, compare=False)
+    ownership_continuity: str = field(default="stable", compare=False)
+    ownership_recovery_action: str | None = field(default=None, compare=False)
+    operator_identity_id: str | None = field(default=None, compare=False)
+    _continuity_token: str | None = field(default=None, repr=False, compare=False)
+
+
+_OWNERSHIP_STABLE = "stable"
+_OWNERSHIP_LEGACY = "legacy_rebind_required"
+_OWNERSHIP_RECOVERY_ACTION = "review_and_recreate_work_in_current_scope"
 
 
 def auth_enabled() -> bool:
@@ -130,9 +144,11 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
-def _principal(session_id: str) -> TrustPrincipal:
+def _principal(session_id: str, principal_id: str) -> TrustPrincipal:
+    if not principal_id or not re.fullmatch(r"operator:root:[A-Za-z0-9_-]{7,114}", principal_id):
+        raise AuthFailure("principal_migration_required")
     return TrustPrincipal(
-        principal_id="operator:single",
+        principal_id=principal_id,
         principal_type=PrincipalType.OPERATOR,
         authenticated=True,
         grants=(
@@ -191,38 +207,112 @@ def test_bypass_operator() -> AuthenticatedOperator:
     )
 
 
-async def create_session(*, replace_session_id: str | None = None) -> tuple[str, AuthenticatedOperator]:
+async def create_session(
+    *,
+    replace_session_id: str | None = None,
+    expected_token_hash: str | None = None,
+    continuity_token: str | None = None,
+    recovery_code: str | None = None,
+) -> tuple[str, AuthenticatedOperator]:
+    """Create a root session or atomically rotate its bearer in place.
+
+    Refresh is intentionally a credential CAS, not an owner-id replacement.
+    The retired hash is kept in a revoked tombstone row so a late old bearer
+    remains distinguishable from an unknown credential without becoming a
+    durable owner authority.
+    """
+
     require_auth_configured()
     now = datetime.now(timezone.utc)
     token = secrets.token_urlsafe(32)
+    token_hash = _token_hash(token)
+    if replace_session_id and not expected_token_hash:
+        raise AuthFailure("authentication_required")
+
     async with get_session() as db:
         absolute_expires_at = now + timedelta(seconds=settings.operator_auth_absolute_seconds)
-        if replace_session_id:
-            old = await db.get(OperatorSession, replace_session_id)
-            if old is None or old.revoked_at is not None:
+        if not replace_session_id:
+            identity_id = None
+            rotated_continuity = None
+            if continuity_token or recovery_code:
+                from src.auth.ownership import bind_login_identity
+                identity_id, rotated_continuity = await bind_login_identity(
+                    db, continuity_token=continuity_token, recovery_code=recovery_code,
+                )
+            record = OperatorSession(
+                token_hash=token_hash,
+                idle_expires_at=min(
+                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                    absolute_expires_at,
+                ),
+                absolute_expires_at=absolute_expires_at,
+                is_bearer_tombstone=False,
+                operator_identity_id=identity_id,
+            )
+            db.add(record)
+            await db.flush()
+        else:
+            current = await db.get(OperatorSession, replace_session_id)
+            if current is None or current.is_bearer_tombstone is not False or current.revoked_at is not None:
                 raise AuthFailure("session_revoked")
-            absolute_expires_at = _aware(old.absolute_expires_at)
-            if now >= absolute_expires_at:
+            absolute_expires_at = _aware(current.absolute_expires_at)
+            if now >= absolute_expires_at or now >= _aware(current.idle_expires_at):
                 raise AuthFailure("session_expired")
-        record = OperatorSession(
-            token_hash=_token_hash(token),
-            idle_expires_at=min(
-                now + timedelta(seconds=settings.operator_auth_idle_seconds), absolute_expires_at
-            ),
-            absolute_expires_at=absolute_expires_at,
-        )
-        if replace_session_id:
             claimed = await db.execute(
                 update(OperatorSession)
-                .where(OperatorSession.id == replace_session_id, OperatorSession.revoked_at.is_(None))
-                .values(revoked_at=now, replaced_by_id=record.id)
+                .where(
+                    OperatorSession.id == replace_session_id,
+                    OperatorSession.token_hash == expected_token_hash,
+                    OperatorSession.revoked_at.is_(None),
+                    OperatorSession.is_bearer_tombstone.is_(False),
+                    OperatorSession.idle_expires_at > now,
+                    OperatorSession.absolute_expires_at > now,
+                )
+                .values(
+                    token_hash=token_hash,
+                    last_seen_at=now,
+                    idle_expires_at=min(
+                        now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                        absolute_expires_at,
+                    ),
+                )
+                .execution_options(synchronize_session=False)
             )
             if claimed.rowcount != 1:
                 raise AuthFailure("session_revoked")
-        db.add(record)
-    return token, AuthenticatedOperator(
-        record.id, _principal(record.id), record.idle_expires_at, record.absolute_expires_at
-    )
+            # Force the new unique hash into the active row before inserting
+            # the retired hash.  This makes a failed tombstone insert roll
+            # back both changes instead of committing a partial rotation.
+            await db.flush()
+            tombstone = OperatorSession(
+                token_hash=expected_token_hash,
+                idle_expires_at=_aware(current.idle_expires_at),
+                absolute_expires_at=absolute_expires_at,
+                revoked_at=now,
+                replaced_by_id=replace_session_id,
+                is_bearer_tombstone=True,
+            )
+            db.add(tombstone)
+            await db.flush()
+            current.token_hash = token_hash
+            current.last_seen_at = now
+            current.idle_expires_at = min(
+                now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                absolute_expires_at,
+            )
+            record = current
+
+        continuity, recovery_action = await _ownership_metadata(db, record)
+        operator = _operator_for_record(
+            record,
+            token_hash=token_hash,
+            ownership_continuity=continuity,
+            ownership_recovery_action=recovery_action,
+        )
+        if not replace_session_id and rotated_continuity:
+            from dataclasses import replace
+            operator = replace(operator, _continuity_token=rotated_continuity)
+    return token, operator
 
 
 def _touch_is_due(record: OperatorSession, now: datetime) -> bool:
@@ -235,12 +325,92 @@ def _touch_is_due(record: OperatorSession, now: datetime) -> bool:
     return now - last_seen_at >= interval
 
 
-def _operator_for_record(record: OperatorSession) -> AuthenticatedOperator:
+def _operator_for_record(
+    record: OperatorSession,
+    *,
+    token_hash: str | None = None,
+    ownership_continuity: str = _OWNERSHIP_STABLE,
+    ownership_recovery_action: str | None = None,
+) -> AuthenticatedOperator:
     return AuthenticatedOperator(
         record.id,
-        _principal(record.id),
+        _principal(record.id, record.principal_id),
         _aware(record.idle_expires_at),
         _aware(record.absolute_expires_at),
+        token_hash,
+        ownership_continuity,
+        ownership_recovery_action,
+        record.operator_identity_id,
+    )
+
+
+async def _ownership_metadata(
+    db,
+    record: OperatorSession,
+) -> tuple[str, str | None]:
+    """Classify one active root with bounded, reverse-link lookups.
+
+    New refreshes create revoked tombstone predecessors and keep the active id
+    stable. A non-tombstone predecessor is legacy ownership metadata and an
+    unrevoked tombstone is an impossible durable state; both require explicit
+    recovery. The queries deliberately inspect only rows pointing at this
+    root, so unrelated malformed or high-volume session history cannot affect
+    a healthy owner request.
+    """
+
+    # ``False`` and ``None`` are intentionally distinct. A null marker is an
+    # incomplete/legacy migration state, and even an empty replacement string
+    # is malformed metadata rather than an active root.
+    if record.is_bearer_tombstone is not False or record.replaced_by_id is not None:
+        return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
+    try:
+        non_tombstone_predecessors = (
+            await db.execute(
+                select(OperatorSession.id)
+                .where(
+                    OperatorSession.replaced_by_id == record.id,
+                    OperatorSession.is_bearer_tombstone.is_(False),
+                )
+                .limit(2)
+            )
+        ).scalars().all()
+        if non_tombstone_predecessors:
+            return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
+
+        # A tombstone must be revoked. Keep this second lookup bounded and
+        # separate so ordinary, correctly-revoked refresh tombstones preserve
+        # stable ownership while impossible rows fail closed.
+        impossible_tombstone = (
+            await db.execute(
+                select(OperatorSession.id)
+                .where(
+                    OperatorSession.replaced_by_id == record.id,
+                    OperatorSession.is_bearer_tombstone.is_(True),
+                    OperatorSession.revoked_at.is_(None),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if impossible_tombstone is not None:
+            return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
+    except Exception:
+        return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
+
+    return _OWNERSHIP_STABLE, None
+
+
+async def _operator_from_record(
+    db,
+    record: OperatorSession,
+    *,
+    token_hash: str | None = None,
+) -> AuthenticatedOperator:
+    continuity, recovery_action = await _ownership_metadata(db, record)
+    return _operator_for_record(
+        record,
+        token_hash=token_hash,
+        ownership_continuity=continuity,
+        ownership_recovery_action=recovery_action,
     )
 
 
@@ -255,7 +425,11 @@ async def _find_token_record(
     record = result.scalar_one_or_none()
     if record is None:
         return None, "authentication_required"
-    if record.revoked_at is not None:
+    if (
+        record.is_bearer_tombstone is not False
+        or record.revoked_at is not None
+        or record.replaced_by_id is not None
+    ):
         return None, "session_revoked"
     idle_expires_at = _aware(record.idle_expires_at)
     absolute_expires_at = _aware(record.absolute_expires_at)
@@ -272,6 +446,8 @@ async def _find_session_record(
     db,
     session_id: str,
     now: datetime,
+    *,
+    follow_replacements: bool = False,
 ) -> tuple[OperatorSession | None, str | None]:
     current_id = session_id
     visited: set[str] = set()
@@ -282,8 +458,14 @@ async def _find_session_record(
         record = await db.get(OperatorSession, current_id)
         if record is None:
             return None, "authentication_required"
+        # Tombstones hold retired bearer hashes only.  They are never owner
+        # authorities, including for the narrow WebSocket continuity path.
+        if record.is_bearer_tombstone is not False:
+            return None, "session_revoked"
+        if record.replaced_by_id is not None and record.revoked_at is None:
+            return None, "session_revoked"
         if record.revoked_at is not None:
-            if record.replaced_by_id:
+            if follow_replacements and record.replaced_by_id:
                 current_id = record.replaced_by_id
                 continue
             return None, "session_revoked"
@@ -312,7 +494,11 @@ async def _touch_token(token_hash: str) -> AuthenticatedOperator:
                     absolute_expires_at,
                 )
                 db.add(record)
-            operator = _operator_for_record(record) if record is not None else None
+            operator = (
+                await _operator_from_record(db, record, token_hash=token_hash)
+                if record is not None
+                else None
+            )
         if error:
             raise AuthFailure(error)
         assert operator is not None
@@ -326,7 +512,11 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
     now = datetime.now(timezone.utc)
     async with get_session() as db:
         record, error = await _find_token_record(db, token_hash, now)
-        operator = _operator_for_record(record) if record is not None else None
+        operator = (
+            await _operator_from_record(db, record, token_hash=token_hash)
+            if record is not None
+            else None
+        )
         touch_due = bool(record is not None and touch and _touch_is_due(record, now))
     if error:
         raise AuthFailure(error)
@@ -341,34 +531,70 @@ async def authenticate_session(
     *,
     touch: bool = True,
 ) -> AuthenticatedOperator:
-    """Validate a live session, following refresh replacements for WS continuity.
+    """Validate the exact active, non-tombstone owner session.
 
-    A rotated bearer token remains revoked when presented to ``authenticate_token``.
-    An already-authenticated WebSocket, however, is bound to the server-issued
-    session identity rather than retaining the old token forever.  Following the
-    bounded replacement chain lets that socket survive the normal refresh
-    rotation while explicit logout/revocation still closes it.
+    Durable callers must never follow replacement aliases.  WebSocket
+    continuity uses the separately named ``authenticate_websocket_session``
+    helper below and is deliberately kept out of this owner-validation path.
     """
+    return await _authenticate_session(session_id, touch=touch, follow_replacements=False)
+
+
+async def authenticate_websocket_session(
+    session_id: str | None,
+    *,
+    touch: bool = True,
+) -> AuthenticatedOperator:
+    """Validate an accepted WebSocket's bounded replacement continuity.
+
+    This helper is only for the two existing WebSocket validation sites.  It
+    may follow a legacy revoked row to its server-recorded replacement so an
+    already accepted socket survives bearer rotation; it cannot authenticate
+    tombstones and must not be used for durable owner checks.
+    """
+    return await _authenticate_session(session_id, touch=touch, follow_replacements=True)
+
+
+async def _authenticate_session(
+    session_id: str | None,
+    *,
+    touch: bool,
+    follow_replacements: bool,
+) -> AuthenticatedOperator:
     if not session_id:
         raise AuthFailure("authentication_required")
     now = datetime.now(timezone.utc)
     async with get_session() as db:
-        record, error = await _find_session_record(db, session_id, now)
-        operator = _operator_for_record(record) if record is not None else None
+        record, error = await _find_session_record(
+            db,
+            session_id,
+            now,
+            follow_replacements=follow_replacements,
+        )
+        operator = await _operator_from_record(db, record) if record is not None else None
         touch_due = bool(record is not None and touch and _touch_is_due(record, now))
     if error:
         raise AuthFailure(error)
     assert operator is not None
     if touch_due:
-        return await _touch_session(session_id)
+        return await _touch_session(session_id, follow_replacements=follow_replacements)
     return operator
 
 
-async def _touch_session(session_id: str) -> AuthenticatedOperator:
+async def _touch_session(
+    session_id: str,
+    *,
+    follow_replacements: bool = False,
+) -> AuthenticatedOperator:
     async with _auth_touch_lock():
         now = datetime.now(timezone.utc)
         async with get_session() as db:
-            record, error = await _find_session_record(db, session_id, now)
+            record, error = await _find_session_record(
+                db,
+                session_id,
+                now,
+                follow_replacements=follow_replacements,
+            )
             if record is not None and _touch_is_due(record, now):
                 absolute_expires_at = _aware(record.absolute_expires_at)
                 record.last_seen_at = now
@@ -377,7 +603,7 @@ async def _touch_session(session_id: str) -> AuthenticatedOperator:
                     absolute_expires_at,
                 )
                 db.add(record)
-            operator = _operator_for_record(record) if record is not None else None
+            operator = await _operator_from_record(db, record) if record is not None else None
         if error:
             raise AuthFailure(error)
         assert operator is not None
@@ -387,6 +613,26 @@ async def _touch_session(session_id: str) -> AuthenticatedOperator:
 async def revoke_session(session_id: str) -> None:
     async with get_session() as db:
         record = await db.get(OperatorSession, session_id)
-        if record and record.revoked_at is None:
+        if record and record.is_bearer_tombstone is False and record.revoked_at is None:
             record.revoked_at = datetime.now(timezone.utc)
             db.add(record)
+
+async def authenticate_principal(principal_id: str, *, db=None) -> AuthenticatedOperator:
+    """Recheck server-bound device authority without adopting role metadata.
+
+    Device credentials are separate ingress proofs. They may act only while
+    their exact persisted operator root is live; this lookup is no login alias.
+    """
+    if principal_id == 'operator:test-bypass':
+        return test_bypass_operator()
+    if db is None:
+        async with get_session() as session:
+            return await authenticate_principal(principal_id, db=session)
+    record = (await db.execute(select(OperatorSession).where(
+        OperatorSession.principal_id == principal_id,
+        OperatorSession.is_bearer_tombstone.is_(False),
+    ).execution_options(populate_existing=True))).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if record is None or record.revoked_at is not None or now >= _aware(record.idle_expires_at) or now >= _aware(record.absolute_expires_at):
+        raise AuthFailure('session_revoked')
+    return await _operator_from_record(db, record)

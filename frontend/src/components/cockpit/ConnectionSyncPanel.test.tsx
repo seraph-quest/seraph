@@ -9,6 +9,7 @@ const sha = "a".repeat(64), item = { provider: "gmail" as const, opaque_id: sha,
 const props = { provider: "gmail" as const, ownerPrincipalId: "owner", ownerSessionId: "session", connectionId: "connection", connectionRevision: 2, connectionState: "active", labelIds: ["label-opaque"],
   consent: { id: "grant", revision: 3, goalId: "goal", goalRevision: 4, state: "active", expiresAt: future, metadataLimit: 50, privateLimit: 10 } };
 const state = { connection_id: "connection", state: "ready", active_job_id: null, active_job_revision: null, cursor_revision: 1, scope_digest: sha,
+  reservation_state: "available", external_effect_state: "none", unresolved_jobs: [],
   items: [item], coverage: { pages_read: 1, returned: 1, max_items: 50, partial: true, more_available: true }, freshness: { last_complete_at: new Date().toISOString(), expires_at: future }, recovery_action: null };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
@@ -34,15 +35,21 @@ it("private read is explicit, exact revision-bound and literal with no generic s
   expect(document.body.textContent).not.toContain("secret"); expect(document.querySelector("script")).toBeNull();
   expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ acknowledge_private_read: true });
 });
-it("holds unknown contact without replay and reconciles only exact original job revision", async () => {
-  const unknown = { ...state, state: "unknown_external_effect", active_job_id: "old-job", active_job_revision: 7, recovery_action: "reconcile_existing_sync" };
-  vi.mocked(apiFetch).mockResolvedValueOnce(response(unknown)).mockResolvedValueOnce(response({ job_id: "old-job", status: "failed", provider_contacts: 0 })).mockResolvedValueOnce(response(state));
+it("releases exact physical capacity while retaining running unknown contact history without replay", async () => {
+  const history = [{ job_id: "old-job", revision: 7, status: "running", external_effect_state: "unknown", failure_reason: null }];
+  const unknown = { ...state, state: "blocked", reservation_state: "held", external_effect_state: "unknown", unresolved_jobs: history, active_job_id: "old-job", active_job_revision: 7, recovery_action: "release_physical_slot" };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(unknown)).mockResolvedValueOnce(response({ job_id: "old-job", status: "running", physical_slot_released: true, provider_contacts: 0, memory_status: "no_learning" })).mockResolvedValueOnce(response({ ...state, unresolved_jobs: history }));
   render(<ConnectionSyncPanel {...props} />); await screen.findByText(/Existing sync old-job/);
   expect(screen.getByRole("button", { name: "Sync selected context" })).toBeDisabled();
-  fireEvent.click(screen.getByText(/I acknowledge reconciliation/)); fireEvent.click(screen.getByRole("button", { name: "Reconcile existing read-only sync" }));
+  fireEvent.click(screen.getByText(/I acknowledge physical slot release/)); fireEvent.click(screen.getByRole("button", { name: "Release physical sync slot" }));
   await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(3));
   expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/sync/old-job/reconcile");
-  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ expected_job_revision: 7, acknowledge_read_only_reconciliation: true });
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ expected_job_revision: 7, expected_cursor_revision: 1, acknowledge_physical_slot_release: true });
+  expect(screen.getByLabelText("Unresolved sync contact")).toHaveTextContent("stored status: running · external effect: unknown");
+  expect(screen.getByText(/Physical reservation: available/)).toHaveTextContent("active external effect: none");
+  expect(screen.queryByText(/Existing sync old-job/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sync selected context" })).toBeDisabled();
+  expect(screen.queryByLabelText("Private synchronized source")).not.toBeInTheDocument();
 });
 it("preserves usable state but marks failed refresh stale and blocks private read/new contacts", async () => {
   vi.mocked(apiFetch).mockResolvedValueOnce(response(state)).mockResolvedValueOnce(response({ detail: { code: "connection_sync_scope_missing" } }, 403));
@@ -72,7 +79,7 @@ it.each(["expired", "revoked"])("blocks a %s source grant while keeping refresh 
   expect(screen.getByRole("button", { name: /Refresh sync state/ })).toBeEnabled();
 });
 it("shows a bounded cooldown without admitting another provider read", async () => {
-  vi.mocked(apiFetch).mockResolvedValue(response({ ...state, state: "waiting", active_job_id: "rate-job", active_job_revision: 9,
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...state, state: "waiting", reservation_state: "held", active_job_id: "rate-job", active_job_revision: 9,
     cooldown: { retry_at: future, retry_count: 1, original_deadline: future }, last_error_code: "connection_sync_rate_limited" }));
   render(<ConnectionSyncPanel {...props} />);
   await screen.findByText(/Rate limit: bounded retry/);
@@ -93,6 +100,34 @@ it("fences late private content when owner or scope changes", async () => {
 it("rejects wrong connection and stale private revisions", () => {
   expect(() => syncProjection({ ...state, connection_id: "foreign" }, "gmail", "connection")).toThrow();
   expect(() => privateSyncItem({ item: { ref: { ...item, revision: "b".repeat(64) }, content: {} }, memory_status: "no_learning" }, item)).toThrow(/revision changed/);
+});
+it.each(["none", "settled"])("keeps the %s ledger state distinct from unknown", async external_effect_state => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...state, external_effect_state }));
+  render(<ConnectionSyncPanel {...props} />);
+  expect(await screen.findByText(/Physical reservation: available/)).toHaveTextContent(`active external effect: ${external_effect_state}`);
+  expect(screen.queryByLabelText("Unresolved sync contact")).not.toBeInTheDocument();
+});
+it("allows explicit physical cleanup with a revoked grant but blocks new work and preserves callback-active uncertainty", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...state, state: "revoked", reservation_state: "held", external_effect_state: "unknown", active_job_id: "old-job", active_job_revision: 7, recovery_action: "release_physical_slot",
+    unresolved_jobs: [{ job_id: "old-job", revision: 7, status: "running", external_effect_state: "unknown", failure_reason: null }] }))
+    .mockResolvedValueOnce(response({ detail: { code: "connection_sync_callback_active" } }, 409));
+  render(<ConnectionSyncPanel {...props} consent={{ ...props.consent, state: "revoked" }} />);
+  fireEvent.click(await screen.findByText(/I acknowledge physical slot release/));
+  fireEvent.click(screen.getByRole("button", { name: "Release physical sync slot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("connection_sync_callback_active");
+  expect(screen.getByLabelText("Unresolved sync contact")).toHaveTextContent("stored status: running");
+  expect(screen.getByRole("button", { name: "Sync selected context" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});
+it("fails closed on missing ledger metadata and malformed unresolved history", () => {
+  expect(() => syncProjection({ ...state, reservation_state: undefined }, "gmail", "connection")).toThrow(/reservation/);
+  expect(() => syncProjection({ ...state, unresolved_jobs: [{ job_id: "old", revision: 1, status: "running", external_effect_state: "settled", failure_reason: null }] }, "gmail", "connection")).toThrow(/history/);
+});
+it("requires existing explicit operator enrollment without making an enrollment or provider call", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ detail: { code: "source_sync_operator_continuity_required", recovery_action: "enroll_operator_ownership" } }, 403));
+  render(<ConnectionSyncPanel {...props} />);
+  expect(await screen.findByText(/Open “Operator ownership and recovery”/)).toBeInTheDocument();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
 });
 it("recovers original calendar scope from authoritative status after reload without restoring acknowledgements", async () => {
   const selection = { goal_ref: { id: "original-goal", revision: 6 }, connection_ref: { id: "connection", revision: 2 },

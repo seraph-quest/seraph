@@ -25,7 +25,7 @@ async def handle(request: Request, connection_id: str, provider: str, operation:
     try:
         if operation == "reconcile":
             body = await mail._json_body(request, SyncRecovery)
-            return await service.reconcile(owner, connection_id, str(job_id), body.expected_job_revision, expected_cursor_revision=body.expected_cursor_revision, authenticated_token_hash=operator._token_hash)
+            return await service.reconcile(owner, connection_id, str(job_id), body.expected_job_revision, expected_cursor_revision=body.expected_cursor_revision, authenticated_token_hash=operator._token_hash, expected_provider=provider)
         from src.db import engine
         async with engine.get_session() as db:
             if provider == "gmail":
@@ -38,7 +38,7 @@ async def handle(request: Request, connection_id: str, provider: str, operation:
             body = await mail._json_body(request, SyncRequest)
             if body.input.connection_ref.id != connection_id or body.input.source_scope.provider != provider:
                 raise SyncError("connection_sync_selection_invalid", "The sync input does not match this source connection", status_code=422)
-            return await service.synchronize(owner, body)
+            return await service.synchronize(owner, body, authenticated_token_hash=operator._token_hash)
         if operation == "status":
             return await service.status(owner, connection_id)
         if operation == "read":

@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from config.settings import settings
 from src.api import mail
-from src.db.models import CalendarEventBinding, CalendarReadConsent, GoogleServiceConnection, Goal, MailLabelBinding, MailMessageBinding, MailReadConsent, OperatorSession, Session, WorkflowRunState
+from src.db.models import CalendarEventBinding, CalendarReadConsent, GoogleServiceConnection, Goal, MailLabelBinding, MailMessageBinding, MailReadConsent, OperatorIdentity, OperatorSession, Session, WorkflowRunState
 from src.integrations import connection_sync as sync
 from src.integrations.gmail_read import GMAIL_READONLY_SCOPE, GoogleGmailReadonlyAdapter, message_key
 from src.integrations.google_calendar import GoogleCalendarReadonlyAdapter, canonical_event_key
@@ -44,7 +44,13 @@ async def source(async_db, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "deployment_environment", "test")
     monkeypatch.setattr(crypto, "_fernet", None)
     timestamp = datetime.now(timezone.utc)
+    from dataclasses import replace
+    from src.auth.service import test_bypass_operator
+    original_operator = test_bypass_operator()
+    fixture_operator = replace(original_operator, _token_hash="fixture-only", operator_identity_id="fixture-stable-operator")
+    monkeypatch.setattr("src.auth.middleware.test_bypass_operator", lambda: fixture_operator)
     async with async_db() as db:
+        db.add(OperatorIdentity(id="fixture-stable-operator"))
         db.add(OperatorSession(id=OWNER.session_id, principal_id=OWNER.principal_id, operator_identity_id="fixture-stable-operator", token_hash="fixture-only", last_seen_at=timestamp, idle_expires_at=timestamp + timedelta(hours=1), absolute_expires_at=timestamp + timedelta(hours=1)))
         db.add(Session(id=OWNER.session_id))
         db.add(Goal(id="goal", title="Connected source task", owner_principal_id=OWNER.principal_id, owner_session_id=OWNER.session_id, revision=1))
@@ -55,6 +61,11 @@ async def source(async_db, monkeypatch, tmp_path):
     await vault_repository.store("fixture-google", json.dumps({"client_id": "fixture-client", "refresh_token": "fixture-refresh"}))
     runtime = sync.ConnectionSyncService()
     await runtime.start()
+    original_synchronize = runtime.synchronize
+    async def fixture_synchronize(owner, value, **kwargs):
+        kwargs.setdefault("authenticated_token_hash", "fixture-only")
+        return await original_synchronize(owner, value, **kwargs)
+    monkeypatch.setattr(runtime, "synchronize", fixture_synchronize)
     yield runtime, timestamp, async_db, tmp_path
     await runtime.stop()
 
@@ -331,7 +342,7 @@ async def test_same_connection_precontact_reservation_serializes_two_runtime_ins
     await asyncio.wait_for(entered.wait(), timeout=5)
     contacts = len(provider.calls)
     with pytest.raises(sync.SyncError, match="Another source"):
-        await second.synchronize(OWNER, request(timestamp, uuid="second"))
+        await second.synchronize(OWNER, request(timestamp, uuid="second"), authenticated_token_hash="fixture-only")
     assert len(provider.calls) == contacts
     release.set()
     assert (await first_task)["status"] == "succeeded"
@@ -423,7 +434,7 @@ async def test_deleted_selected_item_is_tombstoned_without_omission_inference(so
 
 
 @pytest.mark.asyncio
-async def test_calendar_selected_details_and_explicit_canceled_tombstone(source, monkeypatch):
+async def test_calendar_selected_details_and_explicit_canceled_tombstone(source, monkeypatch, app, client):
     runtime, timestamp, db_factory, workspace = source
     async with db_factory() as db:
         connection = await db.get(GoogleServiceConnection, "connection")
@@ -437,6 +448,8 @@ async def test_calendar_selected_details_and_explicit_canceled_tombstone(source,
         calls.append(req)
         if req.url.path == "/token":
             return httpx.Response(200, json={"access_token": "fixture-access", "scope": "https://www.googleapis.com/auth/calendar.readonly"})
+        if req.url.path.endswith("/calendarList"):
+            return httpx.Response(200, json={"items": [{"id": "calendar", "summary": "Selected calendar"}]})
         if req.url.path.endswith("/present"):
             return httpx.Response(200, json=events[1])
         assert "description" not in req.url.params["fields"]
@@ -456,6 +469,35 @@ async def test_calendar_selected_details_and_explicit_canceled_tombstone(source,
         assert {row.state for row in rows} == {"selected", "deleted"}
         assert all(row.consent_id == "calendar-grant" for row in rows)
     assert all(b"private-calendar-details" not in path.read_bytes() for path in workspace.rglob("*.enc"))
+    old_revision = read["item"]["ref"]["revision"]
+    async with db_factory() as db:
+        (await db.get(Goal, "goal")).revision = 2
+        old_grant = (await db.get(CalendarReadConsent, "calendar-grant")).model_dump()
+    from src.api import calendar as calendar_api
+    monkeypatch.setattr(calendar_api, "GoogleCalendarReadonlyAdapter", lambda connection, **kwargs: GoogleCalendarReadonlyAdapter(connection, transport=httpx.MockTransport(respond), resolver=lambda *_: ["8.8.8.8"], **kwargs))
+    verified = await client.post("/api/calendar/connections/connection/verify", json={"expected_revision": 1, "idempotency_key": "calendar-new-grant-membership"})
+    assert verified.status_code == 200, verified.text
+    renewed = await client.post("/api/calendar/read-consents", json={
+        "schema_version": 1, "connection_id": "connection", "calendar_id": "calendar",
+        "goal_id": "goal", "goal_revision": 2,
+        "allowed_fields": ["summary", "start", "end", "description", "attendees"],
+        "window_minutes": 10080, "max_events": 50, "allow_remote_model": False,
+        "acknowledge_sync_metadata": True,
+        "expires_at": (timestamp + timedelta(minutes=30)).isoformat(), "idempotency_key": "calendar-new-grant"})
+    assert renewed.status_code == 201, renewed.text
+    new_id = renewed.json()["consent"]["consent_id"]
+    body["request_uuid"] = "calendar-new-generation"
+    new_start = datetime.now(timezone.utc)
+    body["input"]["window"] = {"start": new_start.isoformat(), "end": (new_start + timedelta(days=6)).isoformat()}
+    body["input"]["goal_ref"]["revision"] = 2
+    body["input"]["source_scope"]["consents"] = [{"id": new_id, "revision": 1}]
+    body["input"]["source_scope"]["reset_cursor"] = True
+    await runtime.synchronize(OWNER, sync.SyncRequest.model_validate(body))
+    assert (await runtime.read_item(OWNER, "connection", key))["item"]["ref"]["revision"] != old_revision
+    async with db_factory() as db:
+        assert (await db.get(CalendarReadConsent, "calendar-grant")).model_dump() == old_grant
+        row = (await db.execute(select(CalendarEventBinding).where(CalendarEventBinding.event_key == key))).scalar_one()
+        assert row.consent_id == new_id and row.revision == 2
 
 
 @pytest.mark.asyncio
@@ -750,3 +792,314 @@ async def test_physical_cleanup_rejects_mismatched_original_proof(source, monkey
     unchanged = await durable_job_repository.get_job(job_id)
     assert unchanged["revision"] == root["revision"] and unchanged["effects"] == root["effects"]
     assert len(provider.calls) == contacts
+
+
+@pytest.mark.asyncio
+async def test_actual_login_enrollment_is_required_before_sync_job_and_contact(source, monkeypatch, client, app):
+    runtime, timestamp, db_factory, _ = source
+    app.state.connection_sync_runtime = runtime
+    monkeypatch.setattr(settings, "operator_auth_secret", "sync-enrollment-fixture-password")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    headers = {"origin": "http://localhost:3001"}
+    from src.api.auth import _reset_login_throttle_for_tests
+    _reset_login_throttle_for_tests()
+    login = await client.post("/api/auth/login", json={"password": "sync-enrollment-fixture-password"}, headers=headers)
+    assert login.status_code == 200, login.text
+    actor = login.json()
+    async with db_factory() as db:
+        root = await db.get(OperatorSession, actor["session_id"])
+        assert root.operator_identity_id is None
+        db.add(Session(id=actor["session_id"]))
+        for model, key in ((Goal, "goal"), (GoogleServiceConnection, "connection"), (MailReadConsent, "grant"), (MailLabelBinding, "label")):
+            row = await db.get(model, key)
+            row.owner_principal_id = actor["principal_id"]
+            row.owner_session_id = actor["session_id"]
+    provider = Provider(timestamp, count=1)
+    install_provider(monkeypatch, provider)
+    route = "/api/capabilities/mail/connections/connection/sync"
+    body = request(timestamp).model_dump(mode="json")
+    blocked = await client.post(route, json=body, headers=headers)
+    assert blocked.status_code == 403 and blocked.json()["detail"]["code"] == "source_sync_operator_continuity_required"
+    assert provider.calls == []
+    async with db_factory() as db:
+        assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+    enrolled = await client.post("/api/auth/ownership/enroll", headers=headers)
+    assert enrolled.status_code == 200, enrolled.text
+    accepted = await client.post(route, json=body, headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    assert len(accepted.json()["items"]) == 1
+    contacts = len(provider.calls)
+    async with db_factory() as db:
+        root = await db.get(OperatorSession, actor["session_id"])
+        identity = await db.get(OperatorIdentity, root.operator_identity_id)
+        identity.revoked_at = datetime.now(timezone.utc)
+    revoked = await client.post(route, json={**body, "request_uuid": "revoked-identity"}, headers=headers)
+    assert revoked.status_code == 403 and len(provider.calls) == contacts
+    _reset_login_throttle_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["before_journal", "after_journal"])
+async def test_failure_around_physical_journal_never_strands_connection_pointer(source, monkeypatch, boundary):
+    runtime, timestamp, db_factory, _ = source
+    original = durable_job_repository.reserve_native_physical_resource
+    async def interrupted(*args, **kwargs):
+        if boundary == "after_journal":
+            await original(*args, **kwargs)
+        raise RuntimeError("fixture process interruption before pointer")
+    monkeypatch.setattr(durable_job_repository, "reserve_native_physical_resource", interrupted)
+    provider = Provider(timestamp)
+    install_provider(monkeypatch, provider)
+    with pytest.raises(RuntimeError, match="before pointer"):
+        await runtime.synchronize(OWNER, request(timestamp, reset=True))
+    assert provider.calls == []
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        assert connection.sync_active_job_id is None and connection.sync_scope_digest == "" and connection.sync_cursor_revision == 0
+        roots = (await db.execute(select(WorkflowRunState))).scalars().all()
+        assert len(roots) == 1
+        reservations = [item for item in json.loads(roots[0].checkpoint_receipts_json) if item.get("checkpoint_id") == "native-physical-resource-reservation"]
+        assert len(reservations) == (boundary == "after_journal")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_process_identity_is_typed_before_admission(source, monkeypatch, app, client):
+    runtime, timestamp, db_factory, _ = source
+    app.state.connection_sync_runtime = runtime
+    def unsupported():
+        raise FileNotFoundError("fixture macOS host has no /proc")
+    monkeypatch.setattr(sync, "process_identity", unsupported)
+    provider = Provider(timestamp)
+    install_provider(monkeypatch, provider)
+    response = await client.post("/api/capabilities/mail/connections/connection/sync", json=request(timestamp).model_dump(mode="json"), headers={"origin": "http://localhost:3001"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "connection_sync_platform_unsupported"
+    assert "/proc" not in response.text and provider.calls == []
+    async with db_factory() as db:
+        assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+        assert (await db.get(GoogleServiceConnection, "connection")).sync_active_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_physical_reservation_is_durable_before_first_provider_contact(source, monkeypatch):
+    runtime, timestamp, db_factory, _ = source
+    provider = Provider(timestamp, count=1)
+    async def respond(req):
+        if req.url.path == "/token":
+            async with db_factory() as db:
+                connection = await db.get(GoogleServiceConnection, "connection")
+                assert connection.sync_active_job_id is not None
+                root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == connection.sync_active_job_id))).scalar_one()
+                reservations = [item for item in json.loads(root.checkpoint_receipts_json) if item.get("checkpoint_id") == "native-physical-resource-reservation"]
+                assert len(reservations) == 1 and reservations[0]["payload"]["witness"]["scope_digest"] == connection.sync_scope_digest
+        return provider.response(req)
+    install_provider(monkeypatch, provider, transport=httpx.MockTransport(respond))
+    result = await runtime.synchronize(OWNER, request(timestamp))
+    assert result["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_dead_original_process_positive_identity_releases_only_physical_slot(source, async_db):
+    runtime, timestamp, db_factory, workspace = source
+    async with db_factory() as db:
+        database_url = str(db.bind.url)
+    input_path = workspace / "owned-process-request.json"
+    input_path.write_text(request(timestamp, uuid="old-process").model_dump_json())
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, str(Path(__file__).parent / "fixtures" / "connection_sync_process.py"), database_url, str(workspace), str(input_path), "unknown-owner"], capture_output=True, text=True, timeout=30, env=environment)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1])["external_contacts"] == 0
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        job_id = connection.sync_active_job_id
+    root = await durable_job_repository.get_job(job_id)
+    assert root["status"] == "unknown_external_effect" and job_id not in runtime._physical_owners.callbacks
+    released = await runtime.reconcile(OWNER, "connection", job_id, root["revision"], expected_cursor_revision=0, authenticated_token_hash="fixture-only")
+    assert released["provider_contacts"] == 0 and released["physical_slot_released"]
+    unchanged = await durable_job_repository.get_job(job_id)
+    assert unchanged["status"] == "unknown_external_effect" and unchanged["effects"] == root["effects"]
+    receipts = [item for item in unchanged["checkpoints"] if item.get("checkpoint_id") == "native-physical-resource-cleanup"]
+    assert receipts[0]["payload"]["proof_kind"] == "positive_process_death"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_process_crash_before_first_effect_preserves_none_and_releases_capacity(source, async_db):
+    runtime, timestamp, db_factory, workspace = source
+    async with db_factory() as db:
+        database_url = str(db.bind.url)
+    input_path = workspace / "owned-pre-effect-request.json"
+    input_path.write_text(request(timestamp, uuid="pre-effect-process").model_dump_json())
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, str(Path(__file__).parent / "fixtures" / "connection_sync_process.py"), database_url, str(workspace), str(input_path), "crash-before-effect"], capture_output=True, text=True, timeout=30, env=dict(os.environ))
+    assert result.returncode == 17, result.stderr
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        job_id = connection.sync_active_job_id
+    root = await durable_job_repository.get_job(job_id)
+    assert root["status"] == "running" and root["effects"] == []
+    released = await runtime.reconcile(OWNER, "connection", job_id, root["revision"], expected_cursor_revision=0, authenticated_token_hash="fixture-only")
+    assert released["status"] == "running" and released["provider_contacts"] == 0
+    unchanged = await durable_job_repository.get_job(job_id)
+    assert unchanged["effects"] == [] and unchanged["status"] == "running"
+    status = await runtime.status(OWNER, "connection")
+    assert status["reservation_state"] == "available" and status["external_effect_state"] == "none"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "succeeded"])
+async def test_transition_before_pointer_clear_remains_physically_recoverable(source, monkeypatch, status):
+    runtime, timestamp, db_factory, _ = source
+    provider = Provider(timestamp, count=1)
+    install_provider(monkeypatch, provider)
+    async def interrupt_release(*args, **kwargs):
+        raise RuntimeError("fixture transition committed before pointer clear")
+    monkeypatch.setattr(runtime, "_release", interrupt_release)
+    if status == "failed":
+        original_ready = runtime._ready
+        ready_calls = 0
+        def fail_after_pointer():
+            nonlocal ready_calls
+            ready_calls += 1
+            if ready_calls > 1:
+                raise sync.SyncError("fixture_no_contact", "fixture pre-contact failure")
+            original_ready()
+        monkeypatch.setattr(runtime, "_ready", fail_after_pointer)
+    with pytest.raises((RuntimeError, sync.SyncError)):
+        await runtime.synchronize(OWNER, request(timestamp))
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        job_id, cursor_revision = connection.sync_active_job_id, connection.sync_cursor_revision
+    root = await durable_job_repository.get_job(job_id)
+    assert root["status"] == status
+    if status == "failed":
+        monkeypatch.delattr(runtime, "_ready")
+    contacts = len(provider.calls)
+    monkeypatch.setattr(runtime, "_page", lambda *_: (_ for _ in ()).throw(AssertionError("cleanup must not read artifacts")))
+    released = await runtime.reconcile(OWNER, "connection", job_id, root["revision"], expected_cursor_revision=cursor_revision, authenticated_token_hash="fixture-only")
+    assert released["status"] == status and released["physical_slot_released"]
+    assert len(provider.calls) == contacts
+    unchanged = await durable_job_repository.get_job(job_id)
+    assert unchanged["effects"] == root["effects"] and unchanged["lease"] == {**root["lease"], "revision": unchanged["revision"]}
+    replay = await runtime.reconcile(OWNER, "connection", job_id, unchanged["revision"], expected_cursor_revision=cursor_revision, authenticated_token_hash="fixture-only")
+    assert replay["physical_slot_released"] and (await durable_job_repository.get_job(job_id))["revision"] == unchanged["revision"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_goal_and_api_grant_reset_rebinds_current_item_without_renewing_unknown(source, monkeypatch, app, client):
+    runtime, timestamp, db_factory, _ = source
+    provider = Provider(timestamp, fail_page=2)
+    install_provider(monkeypatch, provider)
+    key = message_key(OWNER.principal_id, "connection", "m0")
+    with pytest.raises(sync.GmailReadError):
+        await runtime.synchronize(OWNER, request(timestamp, private=[key]))
+    old_read = await runtime.read_item(OWNER, "connection", key)
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        old_id, cursor_revision = connection.sync_active_job_id, connection.sync_cursor_revision
+        old_grant = await db.get(MailReadConsent, "grant")
+        original_grant = old_grant.model_dump()
+        goal = await db.get(Goal, "goal")
+        goal.revision = 2
+    old_root = await durable_job_repository.get_job(old_id)
+    await runtime.reconcile(OWNER, "connection", old_id, old_root["revision"], expected_cursor_revision=cursor_revision, authenticated_token_hash="fixture-only")
+    old_after_release = await durable_job_repository.get_job(old_id)
+    with pytest.raises((BoardError, HTTPException, sync.SyncError)):
+        await runtime.read_item(OWNER, "connection", key)
+    response = await client.post("/api/capabilities/mail/read-consents", json={
+        "connection_id": "connection", "expected_connection_revision": 1,
+        "goal_id": "goal", "expected_goal_revision": 2, "label_ids": ["label"],
+        "expires_at": (timestamp + timedelta(minutes=30)).isoformat(),
+        "acknowledge_source_read": True, "acknowledge_sync_metadata": True,
+        "allowed_body_fields": ["plainbody"], "idempotency_key": "new-grant"})
+    assert response.status_code == 201, response.text
+    new_grant_id = response.json()["consent"]["consent_id"]
+    body = request(timestamp, uuid="new-goal-new-root", private=[key], reset=True).model_dump(mode="json")
+    body["input"]["goal_ref"]["revision"] = 2
+    body["input"]["source_scope"]["consents"] = [{"id": new_grant_id, "revision": 1}]
+    provider.fail_page = None
+    new_result = await runtime.synchronize(OWNER, sync.SyncRequest.model_validate(body))
+    new_read = await runtime.read_item(OWNER, "connection", key)
+    assert new_read["item"]["content"]["body"] == "private-body"
+    assert new_read["item"]["ref"]["revision"] != old_read["item"]["ref"]["revision"]
+    assert new_result["job_id"] != old_id
+    unchanged = await durable_job_repository.get_job(old_id)
+    assert unchanged == old_after_release
+    assert unchanged["status"] == "unknown_external_effect"
+    async with db_factory() as db:
+        assert (await db.get(MailReadConsent, "grant")).model_dump() == original_grant
+        row = (await db.execute(select(MailMessageBinding).where(MailMessageBinding.message_key == key))).scalar_one()
+        assert row.source_consent_id == new_grant_id and row.revision == 2
+    from src.extensions.source_operations import collect_connected_source_items
+    with pytest.raises(sync.SyncError, match="citation changed"):
+        await collect_connected_source_items(runtime, OWNER, "connection", [old_read["item"]["ref"]])
+
+
+@pytest.mark.asyncio
+async def test_darwin_fixture_same_process_unknown_cleanup_without_proc(source, monkeypatch):
+    """Darwin ABI fixture on this host; not a native macOS execution receipt."""
+    from src.integrations import native_physical_owner as native
+    runtime, timestamp, db_factory, _ = source
+    monkeypatch.setattr(native, "_host_platform", lambda: "darwin")
+    monkeypatch.setattr(native, "_darwin_boot_id", lambda: "12345678-1234-4234-8234-123456789abc")
+    monkeypatch.setattr(native, "_darwin_start", lambda pid: (1700000000, 42))
+    provider = Provider(timestamp, fail_page=2)
+    install_provider(monkeypatch, provider)
+    with pytest.raises(sync.GmailReadError):
+        await runtime.synchronize(OWNER, request(timestamp))
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        job_id, cursor_revision = connection.sync_active_job_id, connection.sync_cursor_revision
+    root = await durable_job_repository.get_job(job_id)
+    reservation = next(item for item in root["checkpoints"] if item["checkpoint_id"] == "native-physical-resource-reservation")
+    assert reservation["payload"]["witness"]["platform"] == "darwin"
+    assert "pid_namespace" not in reservation["payload"]["witness"]
+    contacts = len(provider.calls)
+    released = await runtime.reconcile(OWNER, "connection", job_id, root["revision"], expected_cursor_revision=cursor_revision, authenticated_token_hash="fixture-only")
+    assert released["physical_slot_released"]
+    assert len(provider.calls) == contacts
+    assert (await durable_job_repository.get_job(job_id))["effects"] == root["effects"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["checkpoint_sha", "readback_page", "unresolved_effect", "readback_target", "unverified_detail"])
+async def test_succeeded_cleanup_rejects_changed_final_readback_tuple(source, monkeypatch, mismatch):
+    runtime, timestamp, db_factory, _ = source
+    provider = Provider(timestamp, count=1)
+    install_provider(monkeypatch, provider)
+    async def interrupt_release(*args, **kwargs):
+        raise RuntimeError("fixture transition before pointer clear")
+    monkeypatch.setattr(runtime, "_release", interrupt_release)
+    with pytest.raises(RuntimeError):
+        await runtime.synchronize(OWNER, request(timestamp))
+    async with db_factory() as db:
+        connection = await db.get(GoogleServiceConnection, "connection")
+        job_id, cursor_revision = connection.sync_active_job_id, connection.sync_cursor_revision
+        row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one()
+        if mismatch == "checkpoint_sha":
+            checkpoints = json.loads(row.checkpoint_receipts_json)
+            next(item for item in checkpoints if item["checkpoint_id"] == "connection-sync-page-1")["payload"]["artifact_sha256"] = "0" * 64
+            row.checkpoint_receipts_json = json.dumps(checkpoints)
+        else:
+            effects = json.loads(row.effect_receipts_json)
+            readback = next(item for item in effects if item.get("receipt_kind") == "readback")
+            if mismatch == "readback_page":
+                readback["details"]["page"] = 2
+            elif mismatch == "readback_target":
+                readback["target_digest"] = "0" * 64
+            elif mismatch == "unverified_detail":
+                readback["details"]["verified"] = False
+            else:
+                effects.remove(readback)
+            row.effect_receipts_json = json.dumps(effects)
+    root = await durable_job_repository.get_job(job_id)
+    contacts = len(provider.calls)
+    with pytest.raises(sync.SyncError):
+        await runtime.reconcile(OWNER, "connection", job_id, root["revision"], expected_cursor_revision=cursor_revision, authenticated_token_hash="fixture-only")
+    assert len(provider.calls) == contacts
+    async with db_factory() as db:
+        assert (await db.get(GoogleServiceConnection, "connection")).sync_active_job_id == job_id

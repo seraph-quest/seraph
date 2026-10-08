@@ -1136,6 +1136,14 @@ Scoped Gmail and Calendar synchronization is **Planned** until reviewed
 integration. Its bounded Python contract extends the existing connection,
 finite source-consent, vault, canonical durable-job and private-artifact owners.
 It introduces no second queue, credential-fetch surface, store or bridge.
+New sync admission requires explicit enrollment through the existing operator
+ownership flow (`POST /api/auth/ownership/enroll`). An unenrolled or revoked
+identity returns `source_sync_operator_continuity_required` before creating a
+job or contacting a provider. Native sync uses a fixed Linux boot/PID/start/namespace
+witness or Darwin boot-session UUID and native PID/start-time witness. Unsupported
+ABI or unavailable lifetime evidence returns `connection_sync_platform_unsupported`
+before admission. Darwin parser and recovery fixtures run on Linux; native macOS
+execution remains unverified. Existing source read-consents remain unchanged.
 
 The existing Mail and Calendar connection routes own `POST /sync` and
 `GET /sync`. `ConnectionSyncInput` contains only `goal_ref`, `connection_ref`,
@@ -1151,8 +1159,9 @@ selects at most ten bodies/details, with Gmail's existing ten-item body grant
 unchanged. No sync operation admits inference, send or reschedule work.
 
 Each connection has one fixed provider/scope digest. Changing it requires an
-explicit cursor reset after the old active root has positively settled or been
-reconciled. Before vault/provider contact, a serialized reservation mirrors
+explicit cursor reset after the old reservation has been released through normal
+completion or verified physical-only cleanup. Old unresolved effects remain
+visible and unchanged. Before vault/provider contact, a serialized reservation mirrors
 the existing claimed durable root; every contact, adoption and private read
 revalidates the original owner/session, goal, connection, consent and vaulted
 credential binding. The reservation grants no authority independently of the
@@ -1180,6 +1189,13 @@ cleanup validates the authenticated stable operator identity and exact original
 root/session/attempt/fence/reservation while preserving all Goal and output
 fences. A changed or revoked Goal never authorizes private readback or output
 adoption; old Unknown roots remain separately visible after a slot is released.
+The fixed cleanup states are running, Unknown, cost liability, failed and succeeded.
+An absent effect remains absent. Succeeded cleanup requires the final adopted
+job/page/cursor revision, exact checkpoint artifact hash and successful readback,
+and a settled ledger; cleanup never reads or adopts the private artifact.
+A fresh Goal and explicit new source grant with acknowledged scope reset can
+rebind a current versioned item. The new citation invalidates old task evidence
+while original jobs, page artifacts, grants and effects remain immutable audit.
 
 Generic citations are `SourceItemRef` values: provider, opaque local identity,
 revision, content digest, privacy and expiry. Public discovery, API status and

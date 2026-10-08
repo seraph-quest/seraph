@@ -14,10 +14,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from src.db.engine import get_session
-from src.db.models import CalendarEventBinding, GoogleServiceConnection, MailMessageBinding, MailReadConsent, Secret, WorkflowRunState
+from src.db.models import CalendarEventBinding, GoogleServiceConnection, MailMessageBinding, MailReadConsent, OperatorIdentity, OperatorSession, Secret, WorkflowRunState
 from src.integrations import gmail_controls
 from src.integrations.gmail_controls import MailSourceLease
 from src.integrations.gmail_read import GmailReadError, GoogleGmailReadonlyAdapter, digest, message_key, thread_key
@@ -27,7 +27,7 @@ from src.vault import decrypt, encrypt
 from src.vault.repository import secret_binding_digest
 from src.work_board.contracts import WorkBoardOwner
 from src.scheduler.governed_schedules import _begin_serialized
-from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, NativePhysicalCleanupBinding, NativePhysicalCleanupProof, native_physical_cleanup_binding_payload, durable_job_repository
+from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, NativePhysicalCleanupBinding, NativePhysicalCleanupProof, ConnectedSourcePhysicalCleanupOwner, native_external_effect_state, durable_job_repository
 
 SYNC_SECONDS = 120
 MAX_PAGES = 3
@@ -160,6 +160,10 @@ def scope_digest(value: ConnectionSyncInput) -> str:
     return digest({"provider": value.source_scope.provider, "connection": value.connection_ref.model_dump(), "goal": value.goal_ref.model_dump(), "grants": [ref.model_dump() for ref in value.source_scope.consents], "labels": sorted(value.source_scope.label_ids), "threads": sorted(value.source_scope.thread_keys)})
 
 
+def citation_revision(provider_revision: str, binding_revision: int, grant_id: str, grant_revision: int, scope: str) -> str:
+    return "sha256:" + digest({"provider_revision": provider_revision, "binding_revision": binding_revision, "grant_id": grant_id, "grant_revision": grant_revision, "scope_digest": scope})
+
+
 def page_identity(job_id: str, page: int) -> str:
     return f"{job_id}:page:{page}"
 
@@ -194,6 +198,10 @@ class ConnectionSyncService:
     async def _authority(self, db, owner: WorkBoardOwner, value: ConnectionSyncInput, *, original: Authority | None = None, lease: MailSourceLease | None = None) -> Authority:
         from src.api import calendar, mail
         await mail._assert_live_session(db, owner)
+        operator_session = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+        identity = await db.get(OperatorIdentity, operator_session.operator_identity_id) if operator_session and operator_session.operator_identity_id else None
+        if operator_session is None or operator_session.principal_id != owner.principal_id or identity is None or identity.revoked_at is not None:
+            raise SyncError("source_sync_operator_continuity_required", "Enroll current operator ownership before starting recoverable source synchronization", status_code=403, recovery_action="enroll_operator_ownership")
         if lease is not None:
             await mail._assert_durable_lease_in_transaction(db, lease)
         connection = (await db.execute(select(GoogleServiceConnection).where(GoogleServiceConnection.connection_id == value.connection_ref.id, GoogleServiceConnection.owner_principal_id == owner.principal_id, GoogleServiceConnection.owner_session_id == owner.session_id).execution_options(populate_existing=True))).scalar_one_or_none()
@@ -232,7 +240,7 @@ class ConnectionSyncService:
                 raise SyncError("connection_sync_grant_changed", "The source grant does not match the original goal and connection")
             consents.append(consent)
             snapshots.append(snapshot)
-        result = Authority(connection, tuple(consents), credential_digest, digest({"grants": snapshots, "credential": credential_digest, "scope": scope_digest(value)}), min(aware(consent.expires_at) for consent in consents))
+        result = Authority(connection, tuple(consents), credential_digest, digest({"operator_identity_id": identity.id, "grants": snapshots, "credential": credential_digest, "scope": scope_digest(value)}), min(aware(consent.expires_at) for consent in consents))
         if original is not None and (result.snapshot_digest != original.snapshot_digest or result.credential_fingerprint != original.credential_fingerprint):
             raise SyncError("connection_sync_grant_changed", "The original synchronization authority changed", recovery_action="create_new_work")
         return result
@@ -262,11 +270,11 @@ class ConnectionSyncService:
             raise SyncError("connection_sync_cursor_invalid", "The source cursor requires reconciliation", recovery_action="reconcile_existing_sync")
         return payload
 
-    async def synchronize(self, owner: WorkBoardOwner, request: SyncRequest) -> dict[str, Any]:
+    async def synchronize(self, owner: WorkBoardOwner, request: SyncRequest, *, authenticated_token_hash: str | None = None) -> dict[str, Any]:
         self._ready()
         async def callback():
             async with asyncio.timeout(SYNC_SECONDS):
-                return await self._synchronize(owner, request)
+                return await self._synchronize(owner, request, authenticated_token_hash=authenticated_token_hash)
         task = asyncio.create_task(callback())
         self._tasks.add(task)
         try:
@@ -279,10 +287,16 @@ class ConnectionSyncService:
                 self._physical_owners.awaited.add(task)
             self._tasks.discard(task)
 
-    async def _synchronize(self, owner: WorkBoardOwner, request: SyncRequest) -> dict[str, Any]:
+    async def _synchronize(self, owner: WorkBoardOwner, request: SyncRequest, *, authenticated_token_hash: str | None) -> dict[str, Any]:
         value = request.input
+        try:
+            physical_identity = process_identity()
+        except (OSError, ValueError, IndexError) as exc:
+            raise SyncError("connection_sync_platform_unsupported", "Native process identity is unavailable on this backend host", status_code=503, recovery_action="use_supported_backend_host") from exc
         async with get_session() as db:
             original = await self._authority(db, owner, value)
+            expected_cursor_revision = original.connection.sync_cursor_revision
+            expected_scope = original.connection.sync_scope_digest
         # The original authority, not a later grant refresh, defines this root.
         job_id = "connection-sync:" + uuid.uuid5(uuid.NAMESPACE_URL, f"{owner.principal_id}|{owner.session_id}|{value.connection_ref.id}|{request.request_uuid}").hex
         exact_digest = digest({"request": request.model_dump(mode="json"), "authority": original.snapshot_digest})
@@ -320,12 +334,19 @@ class ConnectionSyncService:
                 await self._authority(db, owner, value, original=original, lease=lease)
 
         try:
+            witness = {**physical_identity, "runtime_nonce": self._physical_owners.nonce, "connection_id": value.connection_ref.id, "scope_digest": scope_digest(value), "original_cursor_revision": expected_cursor_revision + int(value.source_scope.reset_cursor)}
+            binding = NativePhysicalCleanupBinding(job_id=job_id, expected_revision=current_revision, original_owner_principal_id=owner.principal_id, original_operator_session_id=owner.session_id, original_session_id=owner.session_id, input_digest=claimed["input_digest"], authority_digest=claimed["authority_digest"], run_fingerprint=claimed["run_fingerprint"], attempt_count=claimed["attempt_count"], lease_owner=lease_owner, fencing_token=fence, resource_claim="connection-sync:" + value.connection_ref.id, witness_digest=digest(witness))
+            recorded = await durable_job_repository.reserve_native_physical_resource(binding, witness=witness, current_owner=owner, authenticated_token_hash=authenticated_token_hash)
+            current_revision = recorded["revision"]
+            self._physical_owners.bind(job_id, witness)
             async with get_session() as db:
                 await _begin_serialized(db)
                 from src.api import mail
                 await mail._assert_durable_lease_in_transaction(db, lease)
                 fresh = await self._authority(db, owner, value, original=original)
                 connection = fresh.connection
+                if connection.sync_cursor_revision != expected_cursor_revision or connection.sync_scope_digest != expected_scope:
+                    raise SyncError("connection_sync_cursor_conflict", "The original source cursor changed before reservation")
                 if connection.sync_active_job_id and connection.sync_active_job_id != job_id:
                     raise SyncError("connection_sync_busy", "Another source synchronization requires settlement", recovery_action="reconcile_existing_sync")
                 desired_scope = scope_digest(value)
@@ -341,12 +362,6 @@ class ConnectionSyncService:
                 reserved = True
                 cursor_revision = connection.sync_cursor_revision
                 previous = await self._current_page(connection)
-            witness = {**process_identity(), "runtime_nonce": self._physical_owners.nonce, "connection_id": value.connection_ref.id, "scope_digest": scope_digest(value), "original_cursor_revision": cursor_revision}
-            binding = NativePhysicalCleanupBinding(job_id=job_id, expected_revision=current_revision, original_owner_principal_id=owner.principal_id, original_operator_session_id=owner.session_id, original_session_id=owner.session_id, input_digest=claimed["input_digest"], authority_digest=claimed["authority_digest"], run_fingerprint=claimed["run_fingerprint"], attempt_count=claimed["attempt_count"], lease_owner=lease_owner, fencing_token=fence, resource_claim="connection-sync:" + value.connection_ref.id, witness_digest=digest(witness))
-            reservation = {"binding": native_physical_cleanup_binding_payload(binding), "witness": witness}
-            recorded = await durable_job_repository.record_checkpoint(job_id, checkpoint_id="native-physical-resource-reservation", state=reservation, checkpoint_payload=reservation, safe=True, owner=lease_owner, fencing_token=fence, expected_revision=current_revision)
-            current_revision = recorded["revision"]
-            self._physical_owners.bind(job_id, witness)
             token = previous["cursor"]["provider_cursor"] if previous else None
             # Continuation is tied to the exact original window; a later
             # request may start a fresh bounded scan only once coverage ended.
@@ -464,7 +479,7 @@ class ConnectionSyncService:
                 path, ciphertext, sha = await asyncio.to_thread(gmail_controls._write_artifact, artifact_identity, payload)
                 artifact = await durable_job_repository.record_artifact(job_id, file_path=path, artifact_type="connected_source_page", content=ciphertext, owner=lease_owner, fencing_token=fence, expected_revision=current_revision)
                 readback = await durable_job_repository.record_readback(job_id, target_path=path, status="succeeded", effect_id=effect_id, effect_type=SYNC_KIND, target_digest=exact_digest, content_sha256=sha, readback_id=effect_id + ":readback", verified_at=completed_at, details={"verified": True, "memory_status": "no_learning", "page": page_count}, owner=lease_owner, fencing_token=fence, expected_revision=artifact["revision"])
-                checkpoint = await durable_job_repository.record_checkpoint(job_id, checkpoint_id=f"connection-sync-page-{page_count}", state={"page": page_count, "cursor_revision": cursor_revision, "artifact_sha256": sha}, checkpoint_payload={"page": page_count, "cursor_revision": cursor_revision}, safe=True, owner=lease_owner, fencing_token=fence, expected_revision=readback["revision"])
+                checkpoint = await durable_job_repository.record_checkpoint(job_id, checkpoint_id=f"connection-sync-page-{page_count}", state={"page": page_count, "cursor_revision": cursor_revision, "artifact_sha256": sha}, checkpoint_payload={"job_id": job_id, "page": page_count, "cursor_revision": cursor_revision, "scope_digest": scope_digest(value), "artifact_sha256": sha, "artifact_path": path, "effect_id": effect_id, "readback_id": effect_id + ":readback", "target_digest": exact_digest}, safe=True, owner=lease_owner, fencing_token=fence, expected_revision=readback["revision"])
                 current_revision = checkpoint["revision"]
                 async with get_session() as db:
                     await _begin_serialized(db)
@@ -502,14 +517,25 @@ class ConnectionSyncService:
         for provider_id, metadata, body in records:
             key = message_key(owner.principal_id, value.connection_ref.id, provider_id)
             row = (await db.execute(select(MailMessageBinding).where(MailMessageBinding.owner_principal_id == owner.principal_id, MailMessageBinding.owner_session_id == owner.session_id, MailMessageBinding.connection_id == value.connection_ref.id, MailMessageBinding.message_key == key))).scalar_one_or_none()
-            if row is not None and (row.connection_revision != value.connection_ref.revision or row.source_consent_id != consent.consent_id or row.source_consent_revision != consent.source_revision):
-                raise SyncError("connection_sync_original_grant_conflict", "The message belongs to a different original source grant", recovery_action="select_original_grant")
             if metadata is None and body == "out_of_scope":
                 continue
+            from src.api.mail import _source_label_scope_digest
+            label_digest = _source_label_scope_digest(authority.connection, consent, value.source_scope.label_ids)
+            authority_changed = row is not None and (row.connection_revision != value.connection_ref.revision or row.source_consent_id != consent.consent_id or row.source_consent_revision != consent.source_revision or row.source_label_scope_digest != label_digest)
+            if authority_changed and not value.source_scope.reset_cursor:
+                raise SyncError("connection_sync_original_grant_conflict", "A fresh item binding requires an explicit new scope generation", recovery_action="reset_cursor")
+            if row is not None:
+                changed = await db.execute(update(MailMessageBinding).where(MailMessageBinding.message_binding_id == row.message_binding_id, MailMessageBinding.revision == row.revision).values(revision=row.revision).execution_options(synchronize_session=False))
+                if changed.rowcount != 1:
+                    raise SyncError("connection_sync_item_conflict", "The current source item revision changed")
+                row.connection_revision = value.connection_ref.revision
+                row.source_consent_id = consent.consent_id
+                row.source_consent_revision = consent.source_revision
+                row.source_label_scope_digest = label_digest
             if metadata is None:
                 if row is None:
                     continue
-                if row.status != "deleted":
+                if row.status != "deleted" or authority_changed:
                     row.status = "deleted"
                     row.revision += 1
                 content = {"status": "deleted"}
@@ -519,16 +545,19 @@ class ConnectionSyncService:
                     from src.api.mail import _source_label_scope_digest
                     row = MailMessageBinding(owner_principal_id=owner.principal_id, owner_session_id=owner.session_id, connection_id=value.connection_ref.id, connection_revision=value.connection_ref.revision, source_consent_id=consent.consent_id, source_consent_revision=consent.source_revision, source_label_scope_digest=_source_label_scope_digest(authority.connection, consent, value.source_scope.label_ids), provider_message_id_ciphertext=encrypt(provider_id), provider_thread_id_ciphertext=encrypt(metadata.provider_thread_id), message_key=key, thread_key=thread_key(owner.principal_id, value.connection_ref.id, metadata.provider_thread_id), message_revision=metadata.message_revision, received_at=metadata.received_at)
                     db.add(row)
-                elif row.message_revision != metadata.message_revision or row.status != "present":
+                elif row.message_revision != metadata.message_revision or row.status != "present" or authority_changed:
                     row.revision += 1
                 row.message_revision = metadata.message_revision
+                row.provider_message_id_ciphertext = encrypt(provider_id)
+                row.provider_thread_id_ciphertext = encrypt(metadata.provider_thread_id)
+                row.received_at = metadata.received_at
                 row.status = "present"
                 row.fetched_at = now()
                 revision = metadata.message_revision
                 content = {"status": "present", "subject": metadata.subject, "preview": metadata.preview, "read_status": metadata.read_status, "received_at": metadata.received_at.isoformat() if metadata.received_at else None}
                 if body is not None:
                     content["body"] = body
-            result.append({"ref": SourceItemRef(provider="gmail", opaque_id=key, revision=revision, content_digest=digest(content), expires_at=authority.expires_at.isoformat()).model_dump(), "content": content})
+            result.append({"ref": SourceItemRef(provider="gmail", opaque_id=key, revision=citation_revision(revision, row.revision, consent.consent_id, consent.source_revision, scope_digest(value)), content_digest=digest(content), expires_at=authority.expires_at.isoformat()).model_dump(), "content": content})
         await db.flush()
         return result
 
@@ -537,12 +566,17 @@ class ConnectionSyncService:
         result = []
         for snapshot in records:
             old = (await db.execute(select(CalendarEventBinding).where(CalendarEventBinding.owner_principal_id == owner.principal_id, CalendarEventBinding.owner_session_id == owner.session_id, CalendarEventBinding.connection_id == value.connection_ref.id, CalendarEventBinding.event_key == snapshot.event_key))).scalar_one_or_none()
-            if old is not None and (old.connection_revision != value.connection_ref.revision or old.consent_id != consent.consent_id or old.consent_revision != consent.revision):
-                raise SyncError("connection_sync_original_grant_conflict", "The event belongs to a different original source grant", recovery_action="select_original_grant")
+            if old is not None:
+                authority_changed = old.connection_revision != value.connection_ref.revision or old.consent_id != consent.consent_id or old.consent_revision != consent.revision
+                if authority_changed and not value.source_scope.reset_cursor:
+                    raise SyncError("connection_sync_original_grant_conflict", "A fresh event binding requires an explicit new scope generation", recovery_action="reset_cursor")
+                changed = await db.execute(update(CalendarEventBinding).where(CalendarEventBinding.event_binding_id == old.event_binding_id, CalendarEventBinding.revision == old.revision).values(revision=old.revision).execution_options(synchronize_session=False))
+                if changed.rowcount != 1:
+                    raise SyncError("connection_sync_item_conflict", "The current event binding revision changed")
             row = await persist_calendar_event_binding(db, owner_principal_id=owner.principal_id, owner_session_id=owner.session_id, connection=authority.connection, consent=consent, snapshot=snapshot)
             row.state = "deleted" if snapshot.fields.get("status") == "cancelled" else "selected"
             content = {key: val for key, val in snapshot.fields.items() if key not in {"etag"}}
-            result.append({"ref": SourceItemRef(provider="calendar", opaque_id=snapshot.event_key, revision=snapshot.event_revision, content_digest=digest(content), expires_at=authority.expires_at.isoformat()).model_dump(), "content": content})
+            result.append({"ref": SourceItemRef(provider="calendar", opaque_id=snapshot.event_key, revision=citation_revision(snapshot.event_revision, row.revision, consent.consent_id, consent.revision, scope_digest(value)), content_digest=digest(content), expires_at=authority.expires_at.isoformat()).model_dump(), "content": content})
         return result
 
     async def _release(self, owner: WorkBoardOwner, connection_id: str, job_id: str, *, known: bool) -> None:
@@ -574,12 +608,17 @@ class ConnectionSyncService:
             if connection is None:
                 raise SyncError("connection_sync_not_found", "The source connection is unavailable", status_code=404)
             root_id = connection.sync_active_job_id
-            candidates = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == SYNC_KIND, WorkflowRunState.owner_principal_id == owner.principal_id, WorkflowRunState.operator_session_id == owner.session_id, WorkflowRunState.status == "unknown_external_effect"))).scalars().all()
+            candidates = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == SYNC_KIND, WorkflowRunState.owner_principal_id == owner.principal_id, WorkflowRunState.operator_session_id == owner.session_id))).scalars().all()
             unresolved = []
             for candidate in candidates:
                 authority = json.loads(candidate.declared_authority_json or "{}")
-                if authority.get("connection_id") == connection_id:
-                    unresolved.append({"job_id": candidate.run_identity, "revision": candidate.revision, "status": candidate.status, "failure_reason": candidate.failure_reason})
+                if authority.get("connection_id") == connection_id and native_external_effect_state(candidate) == "unknown":
+                    unresolved.append({"job_id": candidate.run_identity, "revision": candidate.revision, "status": candidate.status, "external_effect_state": "unknown", "failure_reason": candidate.failure_reason})
+            active_external_state = "none"
+            if root_id:
+                active_row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == root_id))).scalar_one_or_none()
+                if active_row is not None:
+                    active_external_state = native_external_effect_state(active_row)
             page = await self._current_page(connection)
         root = await durable_job_repository.get_job(root_id) if root_id else None
         state = "not_started" if not page else "ready"
@@ -587,13 +626,13 @@ class ConnectionSyncService:
             state = "revoked"
         elif root:
             state = str(root.get("status") or "blocked")
-        result = {"connection_id": connection_id, "state": state, "reservation_state": "held" if root_id else "available", "unresolved_jobs": unresolved, "active_job_id": root_id, "active_job_revision": root.get("revision") if root else None, "last_error_code": root.get("failure_reason") if root else None, "cursor_revision": connection.sync_cursor_revision, "scope_digest": connection.sync_scope_digest, "selection": None, "coverage": {}, "freshness": {}, "items": [], "recovery_action": "release_physical_slot" if root and root.get("status") == "unknown_external_effect" else None}
+        result = {"connection_id": connection_id, "state": state, "reservation_state": "held" if root_id else "available", "external_effect_state": active_external_state, "unresolved_jobs": unresolved, "active_job_id": root_id, "active_job_revision": root.get("revision") if root else None, "last_error_code": root.get("failure_reason") if root else None, "cursor_revision": connection.sync_cursor_revision, "scope_digest": connection.sync_scope_digest, "selection": None, "coverage": {}, "freshness": {}, "items": [], "recovery_action": "release_physical_slot" if root and root.get("status") in {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"} else None}
         if page:
             try:
                 await self._assert_payload_authority(owner, page)
             except Exception:
                 result["state"] = "blocked" if connection.state == "active" else "revoked"
-                result["recovery_action"] = "restore_original_grant"
+                result["recovery_action"] = "release_physical_slot" if root and root.get("status") in {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"} else "restore_original_grant"
             else:
                 result.update(public_page(page))
                 selection = ConnectionSyncInput.model_validate(page["input"]).model_dump(mode="json")
@@ -620,11 +659,23 @@ class ConnectionSyncService:
         item = next((item for item in payload["items"] if item["ref"]["opaque_id"] == opaque_id), None)
         if item is None:
             raise SyncError("connection_sync_item_unavailable", "The item is outside the synchronized source selection", status_code=404)
+        # Current binding revisions invalidate old task citations; immutable
+        # historical pages/grants remain audit, never renewed authority.
+        async with get_session() as db:
+            if item["ref"]["provider"] == "gmail":
+                row = (await db.execute(select(MailMessageBinding).where(MailMessageBinding.owner_principal_id == owner.principal_id, MailMessageBinding.owner_session_id == owner.session_id, MailMessageBinding.connection_id == connection_id, MailMessageBinding.message_key == opaque_id))).scalar_one_or_none()
+                provider_revision = "sha256:" + digest({"message": opaque_id, "status": "deleted"}) if row and row.status == "deleted" else row.message_revision if row else ""
+                current_revision = citation_revision(provider_revision, row.revision, row.source_consent_id, row.source_consent_revision, payload["cursor"]["scope_digest"]) if row else None
+            else:
+                row = (await db.execute(select(CalendarEventBinding).where(CalendarEventBinding.owner_principal_id == owner.principal_id, CalendarEventBinding.owner_session_id == owner.session_id, CalendarEventBinding.connection_id == connection_id, CalendarEventBinding.event_key == opaque_id))).scalar_one_or_none()
+                current_revision = citation_revision(row.event_revision, row.revision, row.consent_id, row.consent_revision, payload["cursor"]["scope_digest"]) if row else None
+            if current_revision != item["ref"]["revision"]:
+                raise SyncError("connection_sync_item_changed", "The current connected item binding changed", recovery_action="refresh_current_sync")
         # Recheck after decryption before private content crosses the owner API.
         await self._assert_payload_authority(owner, payload)
         return {"item": item, "coverage": payload["coverage"], "freshness": payload["freshness"], "memory_status": "no_learning"}
 
-    async def reconcile(self, owner: WorkBoardOwner, connection_id: str, job_id: str, expected_revision: int, *, expected_cursor_revision: int, authenticated_token_hash: str) -> dict[str, Any]:
+    async def reconcile(self, owner: WorkBoardOwner, connection_id: str, job_id: str, expected_revision: int, *, expected_cursor_revision: int, authenticated_token_hash: str, expected_provider: str | None = None) -> dict[str, Any]:
         """Negative physical cleanup only; never settles a provider effect."""
         self._ready()
         root = await durable_job_repository.get_job(job_id)
@@ -634,28 +685,52 @@ class ConnectionSyncService:
         if len(reservations) != 1:
             raise SyncError("connection_sync_recovery_blocked", "The original callback reservation is unavailable")
         payload = reservations[0].get("payload", {})
-        binding = NativePhysicalCleanupBinding(**payload["binding"], expected_revision=expected_revision)
-        witness = payload["witness"]
+        try:
+            binding = NativePhysicalCleanupBinding(**payload["binding"], expected_revision=expected_revision)
+            witness = payload["witness"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SyncError("connection_sync_recovery_blocked", "The original physical reservation is invalid") from exc
+        if expected_provider is not None and root.get("declared_authority", {}).get("capability_id") != ("mail.messages.read" if expected_provider == "gmail" else "calendar.events.read"):
+            raise SyncError("connection_sync_recovery_mismatch", "The selected source provider differs from the original root")
         if witness.get("connection_id") != connection_id:
             raise SyncError("connection_sync_recovery_mismatch", "The original source reservation changed")
 
+        previous_cleanup = [item for item in root.get("checkpoints", []) if item.get("checkpoint_id") == "native-physical-resource-cleanup"]
+        proof_kind = previous_cleanup[0].get("payload", {}).get("proof_kind") if len(previous_cleanup) == 1 else self._physical_owners.proof(job_id, witness)
+        if proof_kind is None:
+            raise SyncError("connection_sync_callback_active", "Positive original callback quiescence is not proven")
+
         async def verify(db, run, reservation):
-            if run.status != "unknown_external_effect":
-                raise SyncError("connection_sync_recovery_blocked", "The original Unknown root requires canonical recovery")
+            if run.status not in {"unknown_external_effect", "running", "cost_liability", "failed", "succeeded"}:
+                raise SyncError("connection_sync_recovery_blocked", "The original native root requires canonical recovery")
+            native_external_effect_state(run)  # Strict ledger validation; none remains none.
             connection = (await db.execute(select(GoogleServiceConnection).where(GoogleServiceConnection.connection_id == connection_id).execution_options(populate_existing=True))).scalar_one_or_none()
+            if expected_provider is not None and connection is not None and connection.service != ("gmail_readonly" if expected_provider == "gmail" else "calendar_readonly"):
+                raise SyncError("connection_sync_recovery_mismatch", "The selected source provider differs from the original root")
             if connection is None or connection.owner_principal_id != binding.original_owner_principal_id or connection.owner_session_id != binding.original_operator_session_id or connection.sync_active_job_id != job_id or connection.sync_cursor_revision != expected_cursor_revision or connection.sync_scope_digest != witness.get("scope_digest") or json.loads(run.declared_authority_json or "{}").get("scope_digest") != witness.get("scope_digest"):
                 raise SyncError("connection_sync_recovery_mismatch", "The exact physical source pointer changed")
-            proof_kind = self._physical_owners.proof(job_id, reservation["witness"])
-            if proof_kind is None:
+            if run.status == "succeeded":
+                pages = [item for item in json.loads(run.checkpoint_receipts_json) if str(item.get("checkpoint_id", "")).startswith("connection-sync-page-")]
+                final = max(pages, key=lambda item: int(item.get("payload", {}).get("page", 0))) if pages else None
+                if final is None or native_external_effect_state(run) != "settled" or final["payload"].get("job_id") != job_id or final["payload"].get("scope_digest") != witness.get("scope_digest") or connection.sync_cursor_job_id != job_id or connection.sync_cursor_page != final["payload"].get("page") or connection.sync_cursor_revision != final["payload"].get("cursor_revision"):
+                    raise SyncError("connection_sync_recovery_mismatch", "The final adopted page pointer changed")
+                path = gmail_controls._artifact_path(page_identity(job_id, connection.sync_cursor_page))
+                artifacts = [item for item in json.loads(run.artifact_receipts_json) if item.get("file_path") == path]
+                sha = final["payload"].get("artifact_sha256")
+                effect_id = f"connection-sync-page:{job_id}:{connection.sync_cursor_page}"
+                if (not sha or final["payload"].get("artifact_path") != path or final["payload"].get("effect_id") != effect_id or final["payload"].get("readback_id") != effect_id + ":readback" or final["payload"].get("target_digest") != run.run_fingerprint or not any(item.get("content_sha256") == sha for item in artifacts) or not any(item.get("receipt_kind") == "readback" and item.get("status") == "succeeded" and item.get("effect_id") == effect_id and item.get("readback_id") == effect_id + ":readback" and item.get("target_path") == path and item.get("target_digest") == run.run_fingerprint and item.get("content_sha256") == sha and item.get("details", {}).get("verified") is True and item.get("details", {}).get("memory_status") == "no_learning" and item.get("details", {}).get("page") == connection.sync_cursor_page for item in json.loads(run.effect_receipts_json))):
+                    raise SyncError("connection_sync_recovery_blocked", "The final canonical page readback is unavailable")
+            rechecked = self._physical_owners.proof(job_id, reservation["witness"])
+            if rechecked != proof_kind:
                 raise SyncError("connection_sync_callback_active", "Positive original callback quiescence is not proven")
-            return NativePhysicalCleanupProof(binding.witness_digest, proof_kind)
+            return NativePhysicalCleanupProof(binding.witness_digest, proof_kind, succeeded_adoption_verified=run.status == "succeeded")
 
         async def release_pointer(db, run):
             connection = await db.get(GoogleServiceConnection, connection_id)
             connection.sync_active_job_id = None
             await db.flush()
 
-        released = await durable_job_repository.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash=authenticated_token_hash, verify_cleanup=verify, release_pointer=release_pointer)
+        released = await durable_job_repository.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash=authenticated_token_hash, proof_kind=proof_kind, cleanup_owner=ConnectedSourcePhysicalCleanupOwner(verify, release_pointer))
         original_callback = self._physical_owners.callbacks.pop(job_id, None)
         if original_callback is not None:
             self._physical_owners.awaited.discard(original_callback[0])

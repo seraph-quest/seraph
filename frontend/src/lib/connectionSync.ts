@@ -10,6 +10,9 @@ export interface SyncSelection {
   window: { start: string; end: string }; max_items: number;
 }
 export interface SyncProjection {
+  reservation_state?: "held" | "available";
+  external_effect_state?: "none" | "unknown" | "settled";
+  unresolved_jobs: { job_id: string; revision: number; status: string; external_effect_state: "unknown"; failure_reason: string | null }[];
   connection_id?: string; state?: string; status?: string; active_job_id?: string | null; active_job_revision?: number | null;
   job_id?: string; cursor_revision?: number; scope_digest?: string | null; items: SourceItemRef[];
   coverage: { partial?: boolean; more_available?: boolean; pages_read?: number; returned?: number; max_items?: number; window?: { start: string; end: string } };
@@ -34,6 +37,16 @@ export function syncProjection(value: unknown, provider: SyncProvider, connectio
     || (value.state !== undefined && (value.connection_id !== connectionId || !text(value.state) || !(value.active_job_id === null || text(value.active_job_id))
       || !Number.isSafeInteger(value.cursor_revision) || Number(value.cursor_revision) < 0))) throw Error("Sync receipt is unconfirmed; refresh the original connection before another provider read.");
   const coverage = value.coverage, freshness = value.freshness;
+  const unresolved: SyncProjection["unresolved_jobs"] = [];
+  if (value.state !== undefined) {
+    if (!["held", "available"].includes(String(value.reservation_state)) || !["none", "unknown", "settled"].includes(String(value.external_effect_state))
+      || !Array.isArray(value.unresolved_jobs) || (value.reservation_state === "held") !== Boolean(value.active_job_id)) throw Error("Physical reservation or external effect state is unconfirmed; refresh sync state.");
+    for (const job of value.unresolved_jobs) {
+      if (!record(job) || !text(job.job_id) || !Number.isSafeInteger(job.revision) || Number(job.revision) < 1 || !text(job.status)
+        || job.external_effect_state !== "unknown" || !(job.failure_reason === null || text(job.failure_reason))) throw Error("Unresolved source history is invalid; refresh sync state.");
+      unresolved.push({ job_id: job.job_id, revision: Number(job.revision), status: job.status, external_effect_state: "unknown", failure_reason: job.failure_reason });
+    }
+  }
   const selection = value.selection;
   const ref = (v: unknown): v is { id: string; revision: number } => record(v) && text(v.id) && Number.isSafeInteger(v.revision) && Number(v.revision) >= 1;
   const ids = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length <= max && v.every(text) && new Set(v).size === v.length;
@@ -55,6 +68,7 @@ export function syncProjection(value: unknown, provider: SyncProvider, connectio
     || (freshness.last_complete_at != null && !timestamp(freshness.last_complete_at)) || (freshness.expires_at !== undefined && !timestamp(freshness.expires_at))
     || (value.active_job_revision != null && (!Number.isSafeInteger(value.active_job_revision) || Number(value.active_job_revision) < 1))) throw Error("Sync coverage or recovery metadata is invalid.");
   return { connection_id: connectionId, state: text(value.state) ? value.state : undefined, status: text(value.status) ? value.status : undefined,
+    reservation_state: value.reservation_state as SyncProjection["reservation_state"], external_effect_state: value.external_effect_state as SyncProjection["external_effect_state"], unresolved_jobs: unresolved,
     active_job_id: text(value.active_job_id) ? value.active_job_id : null, active_job_revision: typeof value.active_job_revision === "number" ? value.active_job_revision : null,
     job_id: text(value.job_id) ? value.job_id : undefined, cursor_revision: Number.isSafeInteger(value.cursor_revision) ? Number(value.cursor_revision) : undefined,
     scope_digest: sha(value.scope_digest) ? value.scope_digest as string : null,

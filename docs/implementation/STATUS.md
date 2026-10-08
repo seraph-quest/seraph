@@ -26,6 +26,16 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Finite public goal programmes: Planned on `develop`.** The branch-local
+[#1003](https://github.com/seraph-quest/seraph/issues/1003) implementation adds
+operator-supplied public-brief review, finite stable-owner service authority,
+pause/revoke and passive correction/expiry recovery under
+[ADR-027](./decisions/027-standing-public-goal-programmes.md). It does not yet
+execute discovery or digest delivery. Canonical Goal storage and native
+job/artifact/accounting owners remain unchanged in responsibility. Branch
+mechanical checks cannot establish Shipped availability or model usefulness;
+independent authority review and the reviewed implementation merge are required.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

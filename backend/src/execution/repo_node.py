@@ -626,6 +626,8 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
             if marker is None or marker.get("profile")!=PROFILE:
                 return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
+            if not isinstance(marker.get("status"),str):
+                return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
             for key in ("authority_digest","attempt_id","fencing_token"):
                 if key in supplied and supplied[key]!=marker.get(key):
                     return {"status":"unknown_external_effect","reason":"node_supervisor_authority_changed","cleanup_proven":False}

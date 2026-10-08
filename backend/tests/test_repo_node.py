@@ -189,7 +189,7 @@ def test_late_cancel_preserves_committed_node_echild_terminal(tmp_path,monkeypat
 
 @pytest.mark.parametrize("boundary",["authority","attempt","fence","bool_fence","stage_binding","stage_path",
     "stage_present","stage_symlink","oracle","cleanup","terminal_hash","terminal_status","supervisor_source",
-    "pid","executor_kind","valid_success","unknown_terminal","malformed","nonmapping","oversize","mode","hardlink","symlink","fifo","read_failure","named_identity"])
+    "pid","executor_kind","valid_success","unknown_terminal","array_status","object_status","malformed","nonmapping","oversize","mode","hardlink","symlink","fifo","read_failure","named_identity"])
 def test_late_node_cancel_rejects_unproven_terminal_without_write_or_signal(tmp_path,monkeypatch,boundary):
     """Synthetic invalid receipts exercise guards, not actual cleanup acceptance."""
     workspace=tmp_path/"workspace";workspace.mkdir(mode=0o700)
@@ -218,6 +218,8 @@ def test_late_node_cancel_rejects_unproven_terminal_without_write_or_signal(tmp_
     elif boundary=="cleanup":marker["cleanup_proven"]=False
     elif boundary=="terminal_hash":marker["terminal_receipt"]["readback_sha256"]="d"*64
     elif boundary=="terminal_status":marker["status"]="succeeded"
+    elif boundary=="array_status":marker["status"]=[]
+    elif boundary=="object_status":marker["status"]={}
     elif boundary=="supervisor_source":marker["supervisor_source_sha256"]="e"*64
     elif boundary=="pid":marker["pid"]=True
     elif boundary=="executor_kind":marker["executor_kind"]="foreign"

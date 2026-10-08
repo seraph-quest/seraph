@@ -2,12 +2,142 @@
 from dataclasses import dataclass
 import hashlib
 import json
+from weakref import WeakKeyDictionary
 
 from src.work_board.contracts import (GeneralTaskArtifactRef, GeneralTaskEnvelope,
     GeneralTaskPlanRevisionV1, GeneralTaskStepReceiptV1, GeneralTaskToolInputV1, WorkBoardOwner)
 from src.work_board.repository import BoardError
 
 _STAGING_SEAL = object()
+_CANCEL_OUTPUT_SEAL = object()
+_CANCEL_OUTPUT_WITNESSES = WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class NativeCancelOutputWitness:
+    """Private original invocation metadata; never execution authority."""
+    root_path: str
+    root_identity_json: str
+    binding_digest: str
+    fencing_token: int
+    original_intent_json: str
+    seal: object
+
+
+def capture_native_cancel_output_witness(binding, *, fencing_token, intent):
+    from config.settings import settings
+    from src.workspace import canonical_workspace_root, canonical_workspace_root_identity
+    from src.work_board.general_task import digest
+    root = canonical_workspace_root(settings.workspace_dir)
+    identity = canonical_workspace_root_identity(root)
+    if digest(identity) != binding.live_root_digest:
+        raise BoardError("general_task_native_binding_changed", "Original output root required", status_code=409)
+    witness = NativeCancelOutputWitness(str(root), json.dumps(identity, sort_keys=True),
+        digest(binding.model_dump(mode="json")), fencing_token,
+        json.dumps(intent, sort_keys=True), _CANCEL_OUTPUT_SEAL)
+    # Identity registration prevents copied/replaced dataclasses from carrying
+    # a source seal onto caller supplied root or intent metadata.
+    _CANCEL_OUTPUT_WITNESSES[witness] = (witness.root_path, witness.root_identity_json,
+        witness.binding_digest, witness.fencing_token, witness.original_intent_json)
+    return witness
+
+
+def release_native_cancel_output_witness(witness):
+    if witness is not None:
+        _CANCEL_OUTPUT_WITNESSES.pop(witness, None)
+
+
+def verify_native_cancel_output_witness(witness, *, binding, fencing_token):
+    from pathlib import Path
+    from src.workspace import canonical_workspace_root_identity
+    from src.work_board.general_task import digest
+    if (type(witness) is not NativeCancelOutputWitness
+        or witness.seal is not _CANCEL_OUTPUT_SEAL
+        or _CANCEL_OUTPUT_WITNESSES.get(witness) != (witness.root_path,
+            witness.root_identity_json, witness.binding_digest, witness.fencing_token,
+            witness.original_intent_json)
+        or witness.binding_digest != digest(binding.model_dump(mode="json"))
+        or witness.fencing_token != fencing_token):
+        raise BoardError("general_task_native_binding_changed", "Original output producer required", status_code=409)
+    identity = json.loads(witness.root_identity_json)
+    root = Path(witness.root_path)
+    if digest(identity) != binding.live_root_digest or canonical_workspace_root_identity(root) != identity:
+        raise BoardError("general_task_native_binding_changed", "Original physical output root changed", status_code=409)
+    return root, json.loads(witness.original_intent_json)
+
+
+def read_native_cancel_output_bytes(witness, *, binding, fencing_token,
+                                   file_path, expected_digest, expected_size):
+    """Read only a cancelled invocation's exact private original output."""
+    import os
+    import stat
+    from src.work_board.general_task import digest
+    from src.workspace import canonical_workspace_root_identity
+    root, _intent = verify_native_cancel_output_witness(witness,
+        binding=binding, fencing_token=fencing_token)
+    key = digest([binding.invocation_id, binding.plan_digest, binding.step_id])
+    if (type(expected_digest) is not str or len(expected_digest) != 64
+        or any(c not in "0123456789abcdef" for c in expected_digest)
+        or type(expected_size) is not int or not 0 < expected_size <= 65536
+        or file_path != f"artifacts/work-board/general-tasks/{key}-{expected_digest}.json"):
+        raise BoardError("general_task_artifact_changed", "Exact original output required", status_code=409)
+    identity = json.loads(witness.root_identity_json)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    descriptors, edges = [], []
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    def same(left, right):
+        return all(getattr(left, field) == getattr(right, field) for field in fields)
+    def deny():
+        raise BoardError("general_task_artifact_changed", "Original physical output changed", status_code=409)
+    try:
+        root_fd = os.open(root, flags | os.O_DIRECTORY)
+        descriptors.append(root_fd)
+        root_stat = os.fstat(root_fd)
+        if (not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid not in {0, os.getuid()}
+            or root_stat.st_dev != identity["device"] or root_stat.st_ino != identity["inode"]
+            or hashlib.sha256(str(root).encode()).hexdigest() != identity["path_digest"]):
+            deny()
+        parent_fd = root_fd
+        components = file_path.split("/")
+        for component in components[:-1]:
+            child_fd = os.open(component, flags | os.O_DIRECTORY, dir_fd=parent_fd)
+            descriptors.append(child_fd)
+            metadata = os.fstat(child_fd)
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                deny()
+            edges.append((parent_fd, component, child_fd, metadata))
+            parent_fd = child_fd
+        leaf = components[-1]
+        descriptor = os.open(leaf, flags, dir_fd=parent_fd)
+        descriptors.append(descriptor)
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077 or metadata.st_nlink != 1 or metadata.st_size != expected_size):
+            deny()
+        chunks, remaining = [], expected_size + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if (len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_digest
+            or not same(metadata, os.fstat(descriptor))
+            or not same(metadata, os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False))):
+            deny()
+        for parent_fd, component, child_fd, original in edges:
+            if (not same(original, os.fstat(child_fd))
+                or not same(original, os.stat(component, dir_fd=parent_fd, follow_symlinks=False))):
+                deny()
+        if (not same(root_stat, os.fstat(root_fd))
+            or not same(root_stat, os.stat(root, follow_symlinks=False))
+            or canonical_workspace_root_identity(root) != identity):
+            deny()
+        return raw
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 _ARTIFACT_MODELS = {"GeneralTaskPlanRevision.v1": GeneralTaskPlanRevisionV1,
     "StepReceipt.v1": GeneralTaskStepReceiptV1, "GeneralTaskToolInput.v1": GeneralTaskToolInputV1}
 _ARTIFACT_KINDS = {"GeneralTaskPlanRevision.v1": "general_task_plan_revision",

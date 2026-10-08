@@ -202,6 +202,7 @@ class GeneralTaskService:
         # remain inspectable after waiter cancellation until the callback exits.
         self._native_invocations = {}
         self._native_invocation_bindings = {}
+        self._native_output_root_witnesses = {}
         self._native_cancel_observers = set()
 
     def start(self):
@@ -227,19 +228,21 @@ class GeneralTaskService:
                     continue
             try:
                 result = await jobs.observe_general_task_native_cancel_closure(child_id,
-                    producer_witness=handle.witness)
+                    producer_witness=handle.witness,
+                    output_root_witness=self._native_output_root_witnesses.get(child_id))
             except (BoardError, DurableJobError):
                 # Invalid/corrupt canonical cancellation remains debt. Keep
                 # the original closed producer available for reconciliation.
                 continue
-            self._native_invocations.pop(child_id, None)
-            self._native_invocation_bindings.pop(child_id, None)
+            if result.get("cancellation", {}).get("state") == "fully_cancelled":
+                self.release_native_invocation(child_id)
         return result
 
-    def retain_native_invocation(self, jobs, binding, invocation):
+    def retain_native_invocation(self, jobs, binding, invocation, *, output_root_witness=None):
         import asyncio
         self._native_invocations[binding.invocation_id] = invocation
         self._native_invocation_bindings[binding.invocation_id] = binding
+        self._native_output_root_witnesses[binding.invocation_id] = output_root_witness
         def closed(_original):
             async def observe():
                 try:
@@ -255,6 +258,8 @@ class GeneralTaskService:
         invocation.on_closed(closed)
 
     def release_native_invocation(self, child_id):
+        from src.work_board.general_task_runtime_artifacts import release_native_cancel_output_witness
+        release_native_cancel_output_witness(self._native_output_root_witnesses.pop(child_id, None))
         self._native_invocations.pop(child_id, None)
         self._native_invocation_bindings.pop(child_id, None)
 

@@ -152,8 +152,14 @@ current policy and connection identity.
 Cancellation fences late adoption immediately, but unresolved original callbacks
 remain `pending`; actual closure with uncertain effects becomes
 `callback_closed_outcome_debt`. Only positive closure without debt establishes
-`fully_cancelled`. Missing or corrupt closure evidence stays Unknown and cannot
-authorize replay. Fixed protected-history capacity is reserved before contact;
+`fully_cancelled`. After the original Future physically returned and output was
+verified, cleanup can settle debt from the same source-retained original root,
+exact original intent, canonical call and artifact readbacks, and literal private
+output bytes, without parent output adoption or new execution. Workspace settings
+may have moved; that read still requires the original source witness and root
+identity. Missing, foreign or tampered evidence, a changed original-root inode,
+or uncertain callback closure retains debt and cannot authorize replay.
+Fixed protected-history capacity is reserved before contact;
 capacity exhaustion rejects admission early. Isolated Linux API/file/stock-MCP
 and UI receipts cover private physical readback, approval of the same child,
 restart boundaries, full-capacity cancellation and `no_learning`; macOS execution

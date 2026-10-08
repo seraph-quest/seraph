@@ -407,3 +407,161 @@ async def test_native_cancel_api_fences_held_original_file_callback(accounting_d
         if worker is not None and not worker.done():
             await asyncio.wait_for(worker, timeout=10)
         service.stop(); registry.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", ["verified", "original_root", "missing_output", "tampered_output", "foreign_witness", "symlink_output", "hardlink_output"])
+async def test_authenticated_cancel_after_original_readback_before_closure(accounting_db, monkeypatch, proof):
+    import asyncio
+    from dataclasses import replace
+    import httpx
+    from fastapi import FastAPI
+    from sqlalchemy import select
+    from config.settings import settings
+    from src.api import work_board as api
+    from src.auth.service import authenticate_session
+    from src.db.models import WorkBoardAttempt, WorkflowRunState
+    from src.native_tools.registry import ToolRegistry
+    from src.tools.filesystem_tool import read_file
+    from src.work_board.general_task import GeneralTaskService
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from tests.test_general_task_planner import prepare
+    from tests.test_work_board_m6_provider_free_journey import _goal
+
+    jobs, owner = await prepare(accounting_db, monkeypatch)
+    workspace, _engine, factory = accounting_db
+    sessions = factory.accounting_sessions
+    (workspace / "readback-source.txt").write_text("Original physical output only")
+    calls = []
+    actual_read = read_file.forward
+    def counted_read(file_path):
+        calls.append(file_path)
+        return actual_read(file_path)
+    monkeypatch.setattr(read_file, "forward", counted_read)
+    registry = ToolRegistry(); registry.start()
+    service = GeneralTaskService(registry); service.start()
+    dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+    monkeypatch.setattr(api, "dispatcher", dispatcher)
+    goal = _goal("goal-readback-cancel", "Cancel after original physical readback")
+    goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
+    async with sessions() as db:
+        db.add(goal)
+    descriptor = next(item for item in registry.descriptors() if item.tool_id == "read_file")
+    _descriptors, tool_digest = service.snapshot()
+    entered, release = asyncio.Event(), asyncio.Event()
+    actual_publish = dispatcher.jobs.publish_general_task_tool_closure
+    async def after_readback(child_id, **kwargs):
+        entered.set()
+        await release.wait()
+        return await actual_publish(child_id, **kwargs)
+    monkeypatch.setattr(dispatcher.jobs, "publish_general_task_tool_closure", after_readback)
+    observation_entered, observation_release = asyncio.Event(), asyncio.Event()
+    actual_observe = service.observe_native_cancellation
+    if proof == "original_root":
+        async def before_original_output_observation(*args, **kwargs):
+            # Hold the actual cleanup consumer after fixed Cancel has committed.
+            # Move current configuration before the original-root physical read.
+            async with sessions() as db:
+                cancelled_attempt = await db.scalar(select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.workflow_run_id == args[1]))
+                if cancelled_attempt is None or cancelled_attempt.cancel_requested_at is None:
+                    return await actual_observe(*args, **kwargs)
+            observation_entered.set()
+            await observation_release.wait()
+            return await actual_observe(*args, **kwargs)
+        monkeypatch.setattr(service, "observe_native_cancellation", before_original_output_observation)
+    app = FastAPI()
+    @app.middleware("http")
+    async def authenticated(req, call_next):
+        req.state.operator = await authenticate_session(owner.session_id, touch=False)
+        return await call_next(req)
+    app.include_router(api.router, prefix="/api")
+    worker = None
+    original_workspace = settings.workspace_dir
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            created = await client.post("/api/work-board/general-tasks", json={"goal_revision": 1,
+                "idempotency_key": "original-readback-cancel", "accept": True, "expected_plan_revision": 1,
+                "input": {"goal_ref": goal.id, "intent": "Read readback-source.txt",
+                    "requested_output": descriptor.output_schema, "tool_set_digest": tool_digest},
+                "plan": {"revision": 1, "steps": [{"step_id": "original", "tool_id": "read_file",
+                    "input": {"file_path": "readback-source.txt"}, "output_contract": descriptor.output_schema}]}})
+            assert created.status_code == 200, created.text
+            task_id = created.json()["task"]["task_id"]
+            worker = asyncio.create_task(dispatcher.run_pass())
+            await asyncio.wait_for(entered.wait(), 10)
+            async with sessions() as db:
+                attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id))
+                child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == attempt.workflow_run_id))
+            parent_id, child_id = attempt.workflow_run_id, child.run_identity
+            handle = service._native_invocations[child_id]
+            assert handle.closed and handle.witness.outcome == "returned"
+            original_parent, original_child = await jobs.get_job(parent_id), await jobs.get_job(child_id)
+            artifact = next(item for item in original_child["artifacts"] if item["artifact_type"] == "general_task_step")
+            output_path = workspace / artifact["file_path"]
+            assert output_path.read_bytes() and calls == ["readback-source.txt"]
+            assert any(item.get("effect_type") == "general_tool_call" and item.get("receipt_kind") == "readback"
+                and item.get("status") == "succeeded" for item in original_child["effects"])
+            if proof == "missing_output":
+                output_path.unlink()
+            elif proof == "tampered_output":
+                output_path.write_bytes(b'{"foreign":true}')
+            elif proof == "symlink_output":
+                saved = output_path.with_suffix(".held-original")
+                output_path.rename(saved)
+                output_path.symlink_to(saved.name)
+            elif proof == "hardlink_output":
+                import os
+                os.link(output_path, output_path.with_suffix(".foreign-link"))
+            elif proof == "foreign_witness":
+                source = service._native_output_root_witnesses[child_id]
+                service._native_output_root_witnesses[child_id] = replace(source, root_path=str(workspace / "foreign-root"))
+            waiting = (await client.get(f"/api/work-board/tasks/{task_id}/plan")).json()
+            endpoint = f"/api/work-board/tasks/{task_id}/actions"
+            cancel_body = {"action": "cancel", "expected_revision": waiting["task_revision"]}
+            if proof == "original_root":
+                cancel_request = asyncio.create_task(client.post(endpoint, json=cancel_body))
+                await asyncio.wait_for(observation_entered.wait(), 10)
+                moved = workspace / "moved-current-root"; moved.mkdir()
+                monkeypatch.setattr(settings, "workspace_dir", str(moved))
+                observation_release.set()
+                cancelled = await asyncio.wait_for(cancel_request, 10)
+            else:
+                cancelled = await client.post(endpoint, json=cancel_body)
+            assert cancelled.status_code == 200, cancelled.text
+            fenced_child, fenced_parent = await jobs.get_job(child_id), await jobs.get_job(parent_id)
+            release.set()
+            await asyncio.wait_for(worker, 10)
+            monkeypatch.setattr(settings, "workspace_dir", original_workspace)
+            closed_response = await client.get(f"/api/work-board/tasks/{task_id}/plan")
+            assert closed_response.status_code == 200, closed_response.text
+            closed = closed_response.json()
+            expected = "fully_cancelled" if proof in {"verified", "original_root"} else "callback_closed_outcome_debt"
+            cancellation = closed["native_execution"]["cancellation"]
+            assert cancellation["state"] == expected and cancellation["callback_closed"]
+            assert cancellation["effect_debt"] == (expected != "fully_cancelled")
+            assert closed["native_execution"]["partial_output_refs"] == []
+            assert await jobs.get_job(child_id) == fenced_child
+            parent = await jobs.get_job(parent_id)
+            assert parent["artifacts"] == original_parent["artifacts"]
+            assert parent["status"] == ("cancelled" if expected == "fully_cancelled" else "blocked")
+            assert parent["deadline_at"] == original_parent["deadline_at"]
+            assert parent["attempt_count"] == original_parent["attempt_count"] == 1
+            assert parent["lease"]["fencing_token"] == fenced_parent["lease"]["fencing_token"]
+            assert fenced_child["attempt_count"] == 1 and fenced_child["deadline_at"] == original_child["deadline_at"]
+            assert (await client.post(endpoint, json={"action": "resume", "expected_revision": closed["task_revision"]})).status_code == 409
+            restarted = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+            await restarted.reconcile_linked_attempts()
+            assert (await restarted.run_pass())["completed"] == 0
+            assert await jobs.get_job(child_id) == fenced_child
+            assert calls == ["readback-source.txt"]
+            async with sessions() as db:
+                rows = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent_id))).scalars())
+                assert len(rows) == 1
+    finally:
+        observation_release.set()
+        release.set()
+        monkeypatch.setattr(settings, "workspace_dir", original_workspace)
+        if worker is not None and not worker.done():
+            await asyncio.wait_for(worker, 10)
+        service.stop(); registry.stop()

@@ -183,74 +183,95 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         compiler = getattr(service.registry, "compile_capacity", None)
         capacity_witness = compiler(descriptor) if callable(compiler) else None
         assert_native_callback_capacity(parent, binding, fence, capacity_witness=capacity_witness)
+        from src.work_board.general_task_runtime_artifacts import capture_native_cancel_output_witness
+        from src.workflows.job_runtime import _effect_ledger_or_raise
+        intents = [item for item in _effect_ledger_or_raise(authorized.effect_receipts_json)
+            if item.get("effect_id") == effect_id and item.get("effect_type") == "general_tool_call"
+            and item.get("receipt_kind") == "effect" and item.get("status") == "intent"
+            and item.get("fencing_token") == fence]
+        if len(intents) != 1:
+            raise BoardError("general_task_native_binding_changed", "Original invocation intent required", status_code=409)
+        output_root_witness = capture_native_cancel_output_witness(binding,
+            fencing_token=fence, intent=intents[0])
     invocation = service.registry.begin_invocation(descriptor, private.inputs,
         principal=replace(principal, job_id=binding.invocation_id), job_id=binding.invocation_id,
         fencing_token=fence)
-    service.retain_native_invocation(jobs, binding, invocation)
+    service.retain_native_invocation(jobs, binding, invocation, output_root_witness=output_root_witness)
     try:
-        output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
-    except TaskToolApprovalRequired:
-        metadata = service.registry.approval_context(descriptor, private.inputs, job_id=binding.invocation_id)
+        try:
+            output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
+        except TaskToolApprovalRequired:
+            metadata = service.registry.approval_context(descriptor, private.inputs, job_id=binding.invocation_id)
+            parent = await jobs.get_job(binding.parent_job_id)
+            waiting = await jobs.wait_general_task_native_approval(binding.invocation_id,
+                owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
+                producer_witness=invocation.witness, tool_name=metadata["tool_name"],
+                approval_context=metadata["approval_context"])
+            service.release_native_invocation(binding.invocation_id)
+            return {"awaiting_approval": True, "approval_id": waiting["transition"]["approval_id"],
+                "child_id": binding.invocation_id}, None, None
+        validate_schema(descriptor.output_schema, output)
+        validate_schema(step.output_contract, output)
+        document_authority = None
+        if descriptor.tool_id == "document_prepare":
+            from src.work_board.document_preparation import invocation as document_invocation
+            async def document_authority(db, run):
+                await document_invocation(db, replace(principal, job_id=binding.invocation_id),
+                    binding.invocation_id, fence)
+        artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
+            owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id,
+            output=output, authority_check=document_authority)
+        await jobs.record_readback(binding.invocation_id, effect_type="general_tool_call", effect_id=effect_id,
+            status="succeeded", target_path="general-step:" + digest([binding.invocation_id, binding.step_id]),
+            content_sha256=artifact["content_sha256"], readback_id="general-step-readback:" + digest([binding.invocation_id, binding.step_id])[:32],
+            verified_at=datetime.now(timezone.utc).isoformat(), details={"step_id": binding.step_id,
+                "tool_id": private.tool_id, "verified": True, "output_exists": True,
+                "file_path": artifact["file_path"], "no_learning": True,
+                "input_digest": binding.input_digest, "original_intent_digest": _digest(intents[0])}, owner=child_owner, fencing_token=fence,
+            **({"readback_authority_check": document_authority} if document_authority is not None else {}))
+        current = await jobs.get_job(binding.invocation_id)
+        matching = [item for item in current["artifacts"] if item["file_path"] == artifact["file_path"]
+            and item["content_sha256"] == artifact["content_sha256"]]
+        if len(matching) != 1:
+            raise BoardError("general_task_artifact_changed", "Canonical child output adoption required", status_code=409)
+        reference = GeneralTaskArtifactRef(artifact_id=matching[0]["artifact_id"],
+            digest=artifact["content_sha256"], schema_version="GeneralTaskOutput.v1")
         parent = await jobs.get_job(binding.parent_job_id)
-        waiting = await jobs.wait_general_task_native_approval(binding.invocation_id,
+        cleanup = await jobs.publish_general_task_tool_closure(binding.invocation_id,
             owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
-            producer_witness=invocation.witness, tool_name=metadata["tool_name"],
-            approval_context=metadata["approval_context"])
+            producer_witness=invocation.witness)
+        async with jobs._session() as db:
+            canonical_child = await jobs._fetch(db, binding.invocation_id)
+            effect_digest = _digest(json.loads(canonical_child.effect_receipts_json))
+            effective = await effective_child_phase(db, canonical_child)
+        staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
+            payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
+                invocation_id=binding.invocation_id, input_digest=binding.input_digest, contact_state="settled", status="verified",
+                descriptor_digest=binding.descriptor_digest, selected_grant_digest=binding.selected_grant_digest,
+                task_id=binding.task_id, attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
+                child_attempt_count=current["attempt_count"], child_fence=fence,
+                parent_creation_digest=binding.creation_digest, phase_digest=effective.phase_digest,
+                approval_binding_digest=effective.approval_binding_digest,
+                artifact_refs=[reference], effect_receipt_digest=effect_digest,
+                cleanup_receipt_digest=digest(cleanup["closure"])))
+        parent = await jobs.get_job(binding.parent_job_id)
+        await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
+            child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
+            expected_parent_revision=parent["revision"])
+        await jobs.transition_job(binding.invocation_id, "succeeded", owner=child_owner, fencing_token=fence,
+            result={"verified": True, "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True},
+            result_summary="Native tool output physically read back")
         service.release_native_invocation(binding.invocation_id)
-        return {"awaiting_approval": True, "approval_id": waiting["transition"]["approval_id"],
-            "child_id": binding.invocation_id}, None, None
-    validate_schema(descriptor.output_schema, output)
-    validate_schema(step.output_contract, output)
-    document_authority = None
-    if descriptor.tool_id == "document_prepare":
-        from src.work_board.document_preparation import invocation as document_invocation
-        async def document_authority(db, run):
-            await document_invocation(db, replace(principal, job_id=binding.invocation_id),
-                binding.invocation_id, fence)
-    artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
-        owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id,
-        output=output, authority_check=document_authority)
-    await jobs.record_readback(binding.invocation_id, effect_type="general_tool_call", effect_id=effect_id,
-        status="succeeded", target_path="general-step:" + digest([binding.invocation_id, binding.step_id]),
-        content_sha256=artifact["content_sha256"], readback_id="general-step-readback:" + digest([binding.invocation_id, binding.step_id])[:32],
-        verified_at=datetime.now(timezone.utc).isoformat(), details={"step_id": binding.step_id,
-            "tool_id": private.tool_id, "verified": True, "output_exists": True,
-            "file_path": artifact["file_path"], "no_learning": True}, owner=child_owner, fencing_token=fence,
-        **({"readback_authority_check": document_authority} if document_authority is not None else {}))
-    current = await jobs.get_job(binding.invocation_id)
-    matching = [item for item in current["artifacts"] if item["file_path"] == artifact["file_path"]
-        and item["content_sha256"] == artifact["content_sha256"]]
-    if len(matching) != 1:
-        raise BoardError("general_task_artifact_changed", "Canonical child output adoption required", status_code=409)
-    reference = GeneralTaskArtifactRef(artifact_id=matching[0]["artifact_id"],
-        digest=artifact["content_sha256"], schema_version="GeneralTaskOutput.v1")
-    parent = await jobs.get_job(binding.parent_job_id)
-    cleanup = await jobs.publish_general_task_tool_closure(binding.invocation_id,
-        owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
-        producer_witness=invocation.witness)
-    async with jobs._session() as db:
-        canonical_child = await jobs._fetch(db, binding.invocation_id)
-        effect_digest = _digest(json.loads(canonical_child.effect_receipts_json))
-        effective = await effective_child_phase(db, canonical_child)
-    staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
-        payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
-            invocation_id=binding.invocation_id, input_digest=binding.input_digest, contact_state="settled", status="verified",
-            descriptor_digest=binding.descriptor_digest, selected_grant_digest=binding.selected_grant_digest,
-            task_id=binding.task_id, attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
-            child_attempt_count=current["attempt_count"], child_fence=fence,
-            parent_creation_digest=binding.creation_digest, phase_digest=effective.phase_digest,
-            approval_binding_digest=effective.approval_binding_digest,
-            artifact_refs=[reference], effect_receipt_digest=effect_digest,
-            cleanup_receipt_digest=digest(cleanup["closure"])))
-    parent = await jobs.get_job(binding.parent_job_id)
-    await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
-        child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
-        expected_parent_revision=parent["revision"])
-    await jobs.transition_job(binding.invocation_id, "succeeded", owner=child_owner, fencing_token=fence,
-        result={"verified": True, "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True},
-        result_summary="Native tool output physically read back")
-    service.release_native_invocation(binding.invocation_id)
-    return verified, artifact, reference
+        return verified, artifact, reference
+    finally:
+        # The original close notification may precede cancellation. Observe
+        # once more after readback/publication exits, without executing again.
+        try:
+            await service.observe_native_cancellation(jobs, binding.parent_job_id)
+        except Exception:
+            # Keep the source producer for a later explicit reconciliation.
+            pass
+
 
 
 def current_plan(manifest, envelope):

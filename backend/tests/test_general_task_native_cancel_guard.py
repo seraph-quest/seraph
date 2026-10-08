@@ -195,3 +195,138 @@ async def test_late_child_journal_change_rolls_back_entire_paired_cancel(task_ru
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
         assert attempt.cancel_requested_at is None and attempt.ended_at is None
         assert task.task_revision == manifest.task_revision
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('evidence', ['verified', 'verified_original_root', 'missing_output',
+    'tampered_output', 'missing_readback', 'foreign_artifact', 'foreign_intent',
+    'missing_source_witness', 'foreign_source_witness'])
+async def test_original_readback_before_closure_cancel_is_observational(task_runtime, monkeypatch, evidence):
+    """Real filesystem callback/readback; cancellation wins closure publication."""
+    import asyncio
+    from config.settings import settings
+    from src.auth.service import authenticate_session
+    from src.native_tools.registry import ToolRegistry
+    from src.tools.filesystem_tool import read_file
+    from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec
+    from src.work_board.general_task import digest
+    from src.work_board.general_task_native import run_native_step
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import DurableJobError
+
+    workspace = task_runtime[1]
+    (workspace / 'original-readback.txt').write_text('Original physical callback bytes')
+    physical_reads = []
+    original_read = read_file.forward
+    def counted_read(file_path):
+        physical_reads.append(file_path)
+        return original_read(file_path)
+    monkeypatch.setattr(read_file, 'forward', counted_read)
+    registry = ToolRegistry(); registry.start()
+    descriptors = registry.descriptors()
+    descriptor = next(item for item in descriptors if item.tool_id == 'read_file')
+    creation = GeneralTaskCreate(goal_revision=1, idempotency_key='original-readback-cancel',
+        expected_plan_revision=1, input=GeneralTaskInput(goal_ref='goal-1', intent='Read original physical file',
+            requested_output=descriptor.output_schema, tool_set_digest=digest([
+                item.model_dump(mode='json') for item in descriptors])),
+        plan=PlanSpec(revision=1, steps=[{'step_id': 'original', 'tool_id': descriptor.tool_id,
+            'input': {'file_path': 'original-readback.txt'}, 'output_contract': descriptor.output_schema}]))
+    entered, release = asyncio.Event(), asyncio.Event()
+    worker = None
+    try:
+        sessions, dispatcher, service, envelope, current = await running_task(task_runtime,
+            creation_request=creation, registry_override=registry)
+        jobs = dispatcher.jobs
+        binding, _ = await admit_native_step(jobs, current['job']['job_id'],
+            owner=current['job']['lease']['owner'], fence=current['job']['lease']['fencing_token'],
+            step=envelope.plan.steps[0], descriptor=descriptor, inputs=envelope.plan.steps[0].input, service=service)
+        original_publish = jobs.publish_general_task_tool_closure
+        async def after_actual_readback(child_id, **proof):
+            entered.set()
+            await release.wait()
+            return await original_publish(child_id, **proof)
+        monkeypatch.setattr(jobs, 'publish_general_task_tool_closure', after_actual_readback)
+        operator = await authenticate_session(binding.original_root_id, touch=False)
+        worker = asyncio.create_task(run_native_step(service, jobs, binding,
+            child_owner='original-readback-native', principal=operator.principal))
+        await asyncio.wait_for(entered.wait(), 10)
+        handle = service._native_invocations[binding.invocation_id]
+        assert handle.closed and handle.witness.outcome == 'returned'
+        assert physical_reads == ['original-readback.txt']
+        before_child = await jobs.get_job(binding.invocation_id)
+        output_record = next(item for item in before_child['artifacts'] if item['artifact_type'] == 'general_task_step')
+        output_path = workspace / output_record['file_path']
+        assert output_path.read_bytes()
+        assert any(item.get('effect_type') == 'general_tool_call' and item.get('status') == 'succeeded'
+            and item.get('receipt_kind') == 'readback' for item in before_child['effects'])
+        assert not any(item.get('payload', {}).get('schema_version') == 'general_task.tool_closure.v1'
+            for item in (await jobs.get_job(binding.parent_job_id))['checkpoints'])
+        if evidence == 'missing_output':
+            output_path.unlink()
+        elif evidence == 'tampered_output':
+            output_path.write_bytes(b'{"step_id":"original","output":{"foreign":true}}')
+        elif evidence in {'missing_readback', 'foreign_artifact', 'foreign_intent'}:
+            async with sessions() as db:
+                row = await jobs._fetch(db, binding.invocation_id)
+                if evidence == 'foreign_artifact':
+                    artifacts = json.loads(row.artifact_receipts_json)
+                    next(item for item in artifacts if item.get('artifact_type') == 'general_task_step')['artifact_id'] = 'foreign-artifact'
+                    row.artifact_receipts_json = json.dumps(artifacts)
+                else:
+                    effects = json.loads(row.effect_receipts_json)
+                    if evidence == 'missing_readback':
+                        effects = [item for item in effects if item.get('effect_type') != 'general_tool_call']
+                    else:
+                        next(item for item in effects if item.get('effect_type') == 'general_tool_call')['details']['original_intent_digest'] = '0' * 64
+                    row.effect_receipts_json = json.dumps(effects)
+                db.add(row)
+        elif evidence == 'missing_source_witness':
+            service._native_output_root_witnesses.pop(binding.invocation_id)
+        elif evidence == 'foreign_source_witness':
+            from dataclasses import replace
+            witness = service._native_output_root_witnesses[binding.invocation_id]
+            service._native_output_root_witnesses[binding.invocation_id] = replace(witness, root_path=str(workspace / 'foreign'))
+        async with sessions() as db:
+            manifest = read_manifest(await jobs._fetch(db, binding.parent_job_id))
+        cancelled = await jobs.cancel_general_task_native_parent(binding.parent_job_id,
+            operator_owner=WorkBoardOwner(principal_id=operator.principal.principal_id,
+                session_id=operator.principal.operator_session_id), expected_task_revision=manifest.task_revision)
+        assert cancelled['cancellation']['state'] == 'pending'
+        fenced_child = await jobs.get_job(binding.invocation_id)
+        fenced_parent = await jobs.get_job(binding.parent_job_id)
+        if evidence == 'verified_original_root':
+            moved = workspace / 'current-root-moved'; moved.mkdir()
+            monkeypatch.setattr(settings, 'workspace_dir', str(moved))
+        release.set()
+        with pytest.raises((DurableJobError, BoardError)):
+            await worker
+        after_child = await jobs.get_job(binding.invocation_id)
+        after_parent = await jobs.get_job(binding.parent_job_id)
+        assert after_child == fenced_child  # no child success, lease/history/fence rewrite
+        assert after_parent['attempt_count'] == fenced_parent['attempt_count']
+        assert after_parent['deadline_at'] == fenced_parent['deadline_at']
+        assert after_parent['lease']['fencing_token'] == fenced_parent['lease']['fencing_token']
+        assert after_parent['artifacts'] == fenced_parent['artifacts']
+        async with sessions() as db:
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+            projection = read_general_task_native_cancel(parent, task, attempt)
+            assert projection['state'] == ('fully_cancelled' if evidence.startswith('verified') else 'callback_closed_outcome_debt')
+            assert projection['callback_closed']
+            final_manifest = read_manifest(parent)
+            for field in ('step_ids', 'step_receipt_artifact_ids', 'step_receipt_digests', 'step_receipt_schemas'):
+                assert getattr(final_manifest, field) == getattr(manifest, field)
+            assert bool(attempt.ended_at) == evidence.startswith('verified')
+        assert physical_reads == ['original-readback.txt']
+        with pytest.raises(DurableJobLeaseError, match='original general task native claim is exhausted'):
+            await jobs.claim_job(binding.invocation_id, owner='forbidden-replay')
+        assert await jobs.get_job(binding.invocation_id) == after_child
+    finally:
+        release.set()
+        if worker is not None and not worker.done():
+            try:
+                await worker
+            except (DurableJobError, BoardError):
+                pass
+        registry.stop()

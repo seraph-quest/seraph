@@ -937,9 +937,16 @@ verified outputs. Running or Unknown effects cannot be replayed.
 Cancel fences further admission and late output adoption immediately. The card
 shows `pending` while the original callback remains unresolved, then
 `callback_closed_outcome_debt` if its actual closure leaves an uncertain effect.
-`fully_cancelled` requires positive original closure and no effect debt. Lease
-expiry, process absence and missing or corrupt closure evidence do not establish
-safe cancellation; they retain visible Unknown recovery. A repeated cancellation
+`fully_cancelled` requires positive original closure and no effect debt. When
+the original Future physically returned and its output was already verified,
+cleanup can settle debt using the same source-retained original root, exact
+original intent, canonical call and artifact readbacks, and literal private
+output bytes. This grants no new execution and adopts no parent output. A
+settings change can still permit that cleanup read from the original root only
+with its source witness. Missing, foreign or tampered evidence, a changed
+original-root inode, or uncertain callback closure retains debt. Lease expiry
+and process absence do not establish safe cancellation; they retain visible
+Unknown recovery. A repeated cancellation
 returns its original action receipt without renewing execution. Protected
 history has fixed capacity reserved before contact; exhausted history rejects
 admission early rather than losing space for cancellation and closure receipts.
@@ -953,6 +960,7 @@ exercises actual file read/write, stock MCP JSON-RPC discovery and one approved
 operation through an owned local HTTP transport, with physical private output
 readback. [API recovery tests](../../backend/tests/test_general_task_native_dispatch_api.py)
 cover paused full-Plan edits, original-child restart, held-callback cancellation,
+original returned-readback cleanup after a workspace settings change,
 full reserved history and corrupt-evidence recovery;
 [UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.test.tsx)
 cover exact control bindings and truthful cancellation states. These isolated

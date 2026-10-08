@@ -1425,7 +1425,85 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
         return await _cancel_result(jobs, db, parent_id, task.task_id, attempt.attempt_id, event)
 
 
-async def observe_native_cancel_closure(jobs, child_id, *, producer_witness):
+def _cancel_returned_output_verified(child, entry, closure, output_root_witness):
+    """Observe only the original output/readback; never authorize execution."""
+    from src.workflows.job_runtime import _digest, _effect_ledger_or_raise, _job_has_unsafe_effects
+    from src.work_board.general_task import digest
+    from src.work_board.repository import BoardError
+    if closure.outcome != "returned" or closure.output_digest is None or output_root_witness is None:
+        return False
+    try:
+        from src.work_board.general_task_runtime_artifacts import (verify_native_cancel_output_witness,
+            read_native_cancel_output_bytes)
+        from src.artifacts.registry import artifact_id_for
+        _original_root, intent = verify_native_cancel_output_witness(output_root_witness,
+            binding=entry.original_binding, fencing_token=entry.original_claim_fence)
+        binding, fence = entry.original_binding, entry.original_claim_fence
+        effect_id = "general:" + binding.step_id + ":" + str(fence)
+        target = "general-step:" + digest([binding.invocation_id, binding.step_id])
+        if (intent.get("effect_id") != effect_id or intent.get("receipt_kind") != "effect"
+            or intent.get("effect_type") != "general_tool_call" or intent.get("status") != "intent"
+            or intent.get("fencing_token") != fence or intent.get("target_path") != target
+            or intent.get("details", {}).get("step_id") != binding.step_id
+            or intent.get("details", {}).get("input_digest") != binding.input_digest
+            or intent.get("details", {}).get("no_learning") is not True):
+            return False
+        records = [item for item in _history(child) if item.get("checkpoint_id") == "general:artifact:" + binding.step_id]
+        if len(records) != 1 or records[0].get("safe") is not True or records[0].get("fencing_token") != fence:
+            return False
+        artifact_binding = records[0].get("payload")
+        if (type(artifact_binding) is not dict or records[0].get("state_digest") != _digest(artifact_binding)
+            or set(artifact_binding) != {"schema_version", "producer_ref", "step_id", "plan_digest", "producer_fence",
+                "file_path", "content_sha256", "size_bytes", "no_learning"}
+            or artifact_binding["schema_version"] != 1 or artifact_binding["producer_ref"] != child.run_identity
+            or artifact_binding["step_id"] != binding.step_id or artifact_binding["plan_digest"] != binding.plan_digest
+            or artifact_binding["producer_fence"] != fence or artifact_binding["no_learning"] is not True):
+            return False
+        sha, size = artifact_binding["content_sha256"], artifact_binding["size_bytes"]
+        key = digest([child.run_identity, binding.plan_digest, binding.step_id])
+        path = f"artifacts/work-board/general-tasks/{key}-{sha}.json"
+        if (type(sha) is not str or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)
+            or type(size) is not int or not 0 < size <= 65536 or artifact_binding["file_path"] != path):
+            return False
+        artifacts = [item for item in json.loads(child.artifact_receipts_json) if item.get("file_path") == path]
+        expected_id = artifact_id_for(file_path=path, artifact_type="general_task_step", producer=child.job_kind,
+            run_id=child.run_identity, content_sha256=sha)
+        if (len(artifacts) != 1 or any(artifacts[0].get(field) != expected for field, expected in {
+            "artifact_id": expected_id, "artifact_type": "general_task_step", "producer": child.job_kind,
+            "file_path": path, "content_sha256": sha, "size_bytes": size}.items())):
+            return False
+        effects = _effect_ledger_or_raise(child.effect_receipts_json)
+        if _job_has_unsafe_effects(effects):
+            return False
+        calls = [item for item in effects if item.get("effect_id") == effect_id]
+        if (len(calls) != 1 or any(calls[0].get(field) != expected for field, expected in {
+            "receipt_kind": "readback", "effect_type": "general_tool_call", "status": "succeeded",
+            "target_path": target, "content_sha256": sha, "fencing_token": fence,
+            "readback_id": "general-step-readback:" + digest([binding.invocation_id, binding.step_id])[:32],
+            "reconciled": True, "reconciliation_status": "resolved"}.items())
+            or any(calls[0].get("details", {}).get(field) != expected for field, expected in {
+                "step_id": binding.step_id, "tool_id": intent["details"].get("tool_id"),
+                "input_digest": binding.input_digest, "original_intent_digest": _digest(intent),
+                "verified": True, "output_exists": True, "file_path": path, "no_learning": True}.items())):
+            return False
+        artifact_reads = [item for item in effects if item.get("readback_id") == "general-artifact:" + key[:32]]
+        if (len(artifact_reads) != 1 or any(artifact_reads[0].get(field) != expected for field, expected in {
+            "receipt_kind": "readback", "effect_type": "general_task_artifact_readback", "status": "succeeded",
+            "target_path": path, "target_digest": sha, "content_sha256": sha, "fencing_token": fence,
+            "reconciled": True, "reconciliation_status": "resolved"}.items())
+            or artifact_reads[0].get("details", {}).get("verified") is not True
+            or artifact_reads[0].get("details", {}).get("output_exists") is not True):
+            return False
+        body = json.loads(read_native_cancel_output_bytes(output_root_witness, binding=binding,
+            fencing_token=fence, file_path=path, expected_digest=sha, expected_size=size))
+        return (type(body) is dict and set(body) == {"step_id", "output"}
+            and body["step_id"] == binding.step_id and digest(body["output"]) == closure.output_digest)
+    except (BoardError, ValueError, TypeError, KeyError, PermissionError, OSError):
+        # Physical closure is still real; unavailable outcome evidence remains debt.
+        return False
+
+
+async def observe_native_cancel_closure(jobs, child_id, *, producer_witness, output_root_witness=None):
     from src.native_tools.task_adapters import verify_task_tool_closure
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _digest
@@ -1447,13 +1525,16 @@ async def observe_native_cancel_closure(jobs, child_id, *, producer_witness):
                 raise DurableJobLeaseError("cancelled native child current fence/journal changed")
         closure = verify_task_tool_closure(producer_witness, binding=entry.original_binding,
             fencing_token=entry.original_claim_fence)
+        output_verified = _cancel_returned_output_verified(child, entry, closure, output_root_witness)
         if entry.closure is not None:
             if entry.closure != closure:
                 raise DurableJobLeaseError("original cancellation closure collision")
-            return await _cancel_result(jobs, db, parent.run_identity, task.task_id, attempt.attempt_id)
+            if not entry.effect_debt or not output_verified:
+                return await _cancel_result(jobs, db, parent.run_identity, task.task_id, attempt.attempt_id)
         _require_callback_reservation(parent, binding, entry.original_claim_fence)
         updated = entry.model_copy(update={"closure": closure,
-            "effect_debt": closure.outcome != "approval_precontact" or closure.approval_fingerprint is None})
+            "effect_debt": not (output_verified or
+                (closure.outcome == "approval_precontact" and closure.approval_fingerprint is not None))})
         entries = [updated if item.original_binding.invocation_id == child_id else item for item in witness.children]
         state = _cancel_state(entries)
         proposed = _phase_successor(previous, phase="cancelled" if state == "fully_cancelled" else "unknown_recovery",
@@ -1462,9 +1543,10 @@ async def observe_native_cancel_closure(jobs, child_id, *, producer_witness):
             field: getattr(proposed, field) for field in ("task_revision", "manifest_revision", "phase_revision",
                 "phase_digest", "board_fence", "job_fence", "phase")} | {"state": state,
             "children": [item.model_dump(mode="json") for item in entries]})
-        _, values = _published_proofs(parent, proposed, (), (
-            (cleanup_checkpoint_id(binding, entry.original_claim_fence), closure),
-            (cancel_checkpoint_id(parent.run_identity, attempt.attempt_id), updated_witness)))
+        proofs = [(cancel_checkpoint_id(parent.run_identity, attempt.attempt_id), updated_witness)]
+        if entry.closure is None:
+            proofs.insert(0, (cleanup_checkpoint_id(binding, entry.original_claim_fence), closure))
+        _, values = _published_proofs(parent, proposed, (), tuple(proofs))
         await _cancel_cas_board(db, task, attempt, artifact, goal, state=state, first=False)
         await _cancel_cas_job(db, parent, {**values, "status": "cancelled" if state == "fully_cancelled" else "blocked",
             "failure_reason": "general_task_native_cancel_" + state}, child_entries=entries, child_rows=children)

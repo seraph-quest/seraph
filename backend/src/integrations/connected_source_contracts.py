@@ -50,4 +50,3 @@ class ConnectedSourceTaskInput(ContractModel):
                 if expiry.tzinfo is None or len(ref.expires_at) > 64:
                     raise ValueError("Related source expiry requires an explicit timezone")
         return self
-

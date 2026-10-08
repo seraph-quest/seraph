@@ -625,3 +625,113 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     assert goal_programme_service.stop.await_count == 2
     assert contacts == ([] if host_failure == "cancel" else [("GET", "/forms/post"), ("GET", "/forms/post")]) and denied == []
     (tmp_path / "cordis-app-lifecycle-proof.json").write_text(json.dumps({"authenticated":True, "cycles":receipts}, indent=2))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["source_create", "source_start", "source_cancel", "soul", "mcp_config", "goal_start", "scheduled_jobs"])
+async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db, monkeypatch, tmp_path, failure):
+    """Actual native owners close after failures before the app can yield."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import src.app as application
+    import src.integrations.connection_sync as sources
+    import src.guardian.goal_programmes as programmes
+    from src.work_board.dispatcher import _dispatcher
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+        monkeypatch.setattr(application, name, AsyncMock())
+    for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
+        monkeypatch.setattr(application, name, Mock())
+    for manager, methods in [(application.mcp_manager, ("load_config", "disconnect_all")),
+                             (application.skill_manager, ("init",)), (application.runbook_manager, ("init",)),
+                             (application.workflow_manager, ("init",)), (application.starter_pack_manager, ("init",))]:
+        for method in methods:
+            monkeypatch.setattr(manager, method, Mock())
+    for target in ("src.model_fabric.configuration.hydrate_openrouter_credential",
+                   "src.observer.manager.context_manager.refresh"):
+        monkeypatch.setattr(target, AsyncMock())
+    for target in ("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs",
+                   "src.workflows.routines.routine_service.recover_pending_installs",
+                   "src.guardian.audio_worker.cleanup_audio_ingress_jobs"):
+        monkeypatch.setattr(target, AsyncMock(return_value=[]))
+    profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
+    monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
+    host = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(application, "cordis_host", host)
+    browser = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr("src.browser.sessions.profiled_interaction_sessions", browser)
+    prior_pointer = object() if failure == "source_create" else None
+    monkeypatch.setattr(_dispatcher, "connection_sync_runtime", prior_pointer)
+    monkeypatch.setattr(_dispatcher, "general_tasks", None)
+    service = programmes.GoalProgrammeService()
+    monkeypatch.setattr(programmes, "goal_programme_service", service)
+    original_goal_start, original_goal_stop = service.start, service.stop
+    original_source_start, original_source_stop = sources.ConnectionSyncService.start, sources.ConnectionSyncService.stop
+    source_owners, task_owners = [], []
+    stops = {"goal": 0, "source": 0}
+
+    def fail():
+        assert _dispatcher.connection_sync_runtime is source_owners[-1]
+        assert source_owners[-1].started
+        if failure == "scheduled_jobs":
+            task = _dispatcher.general_tasks
+            assert task.started and task.registry.started
+            task_owners.append(task)
+        raise RuntimeError("injected early " + failure)
+
+    async def source_start(self):
+        source_owners.append(self)
+        await original_source_start(self)
+        if failure == "source_cancel":
+            raise asyncio.CancelledError("injected source startup cancellation")
+        if failure == "source_start":
+            raise RuntimeError("injected early source_start")
+
+    async def source_stop(self):
+        stops["source"] += 1
+        await original_source_stop(self)
+
+    async def goal_start():
+        await original_goal_start()
+        if failure == "goal_start":
+            fail()
+
+    async def goal_stop():
+        stops["goal"] += 1
+        assert _dispatcher.general_tasks is None
+        if source_owners:
+            assert source_owners[-1].started
+        await original_goal_stop()
+
+    monkeypatch.setattr(sources.ConnectionSyncService, "start", source_start)
+    monkeypatch.setattr(sources.ConnectionSyncService, "stop", source_stop)
+    monkeypatch.setattr(service, "start", goal_start)
+    monkeypatch.setattr(service, "stop", goal_stop)
+    if failure == "source_create":
+        def creation_failure():
+            raise RuntimeError("injected early source_create")
+        monkeypatch.setattr(sources, "ConnectionSyncService", creation_failure)
+    elif failure == "soul":
+        monkeypatch.setattr(application, "ensure_soul_exists", fail)
+    elif failure == "mcp_config":
+        monkeypatch.setattr(application.mcp_manager, "load_config", lambda *_: fail())
+    elif failure == "scheduled_jobs":
+        monkeypatch.setattr(application, "sync_scheduled_jobs", AsyncMock(side_effect=fail))
+    expected = asyncio.CancelledError if failure == "source_cancel" else RuntimeError
+    with pytest.raises(expected, match="injected"):
+        async with application.lifespan(app):
+            pytest.fail("early startup failure must never yield an app")
+    assert not service._running
+    assert stops == {"goal": 1, "source": 0 if failure == "source_create" else 1}
+    assert all(not source.started for source in source_owners)
+    assert _dispatcher.connection_sync_runtime is prior_pointer
+    assert _dispatcher.general_tasks is None
+    assert all(not task.started and not task.registry.started for task in task_owners)
+    application.shutdown_scheduler.assert_called_once()
+    host.start.assert_not_awaited()
+    host.stop.assert_not_awaited()
+    browser.start.assert_not_awaited()
+    browser.stop.assert_not_awaited()

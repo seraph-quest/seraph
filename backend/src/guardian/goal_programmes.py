@@ -262,7 +262,11 @@ class GoalProgrammeService:
 
         Caller owns the short writer transaction and the original durable
         attempt transition. Stage current policy and physical evidence outside
-        that writer, under their existing owner fences. This callable opens no
+        that writer, under their existing owner fences; hold the existing
+        configuration_mutation_lock across policy staging and CAS commit.
+        Bind exact native job/attempt/lease/fence/effect-intent identities, or
+        the original attempt plus staged output artifact reference/digest for
+        adoption, in that owner's transition. This callable opens no
         session and performs no credential, filesystem or network operation.
         Its return is useful only when the caller commits its native CAS in
         this SAME transaction. Output must be staged before adoption validation.

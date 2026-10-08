@@ -5,10 +5,11 @@ title: "ADR-027: Finite standing public goal programmes"
 
 # ADR-027: Finite standing public goal programmes
 
-**Status:** Branch-local proposed accepted target under
-[#1003](https://github.com/seraph-quest/seraph/issues/1003), effective only on
-the independently reviewed implementation merge. This file does not establish
-Shipped availability. [Development Status](../STATUS.md) owns implementation truth.
+**Status:** Accepted target under
+[#1003](https://github.com/seraph-quest/seraph/issues/1003), effective on
+the independently reviewed implementation merge. The source branch describes
+the intended post-merge authority contract; it does not establish Shipped
+availability before that merge. [Development Status](../STATUS.md) owns implementation truth.
 
 **Decision class:** Narrow public service-authority exception to
 [ADR-023](./023-evidence-bound-guardian-opportunities.md).
@@ -87,6 +88,29 @@ No executor may activate before its native contact/adoption integration is
 implemented and independently reviewed. This authority milestone introduces no
 alternative effect ledger or inference queue.
 
+The current Python seam is `GoalProgrammeAuthorityBinding` plus
+`GoalProgrammeService.validate_current_binding(db=..., binding=..., policy=...)`.
+The immutable binding includes exact Goal/programme/grant revisions, stable
+identity and issuer, public-brief digest, capability, route epoch/digest, original
+expiry and cost ceiling. The validator reloads canonical Goal/identity/issuer
+facts in the caller's same native writer; it opens no session and performs no
+physical I/O. Its result has effect only when that owner commits its own original
+contact or adoption CAS in the same transaction. Current policy and physical
+evidence are staged and fenced by their existing owners before the writer;
+neither stale snapshots nor a caller-selected route become authority. Discovery
+executor integration remains required before that executor activates.
+
+The discovery executor holds the existing `configuration_mutation_lock` across
+current policy staging and the native contact/adoption CAS commit, so policy
+revocation cannot interleave with a claimed transition. Read policy before
+opening the database writer; release the lock after that writer commits, before
+physical provider or filesystem I/O. The contact owner binds the exact existing
+job, original attempt, lease/fence and effect-intent identity in its transition.
+Adoption binds the same original attempt plus the staged immutable artifact
+reference/digest, checks current generation authority again and atomically
+publishes only that output. This milestone supplies authority validation and
+controls; it does not supply or claim those discovery execution transitions.
+
 Renewal creates a new immutable generation and pauses its predecessor. It
 cannot extend an old attempt's expiry, route binding, budget, effects or adoption
 permission. Expiry projects one passive review-due state: no automatic renewal,
@@ -134,3 +158,11 @@ implementation PR. This exception adds durable service authority risk; finite
 original clocks, exact generations, current identity/policy fences and explicit
 operator revocation are mandatory. It does not claim that in-process dependency
 injection is isolation or that all future public sources are supported.
+
+The initial independent review identified two holds: a read-return alone cannot
+linearize contacts/adoption, and changed-brief preview must disclose its pause
+effect. Both findings are accepted in this branch contract: the DB-only binding
+validator supports the existing native writer, executor activation remains
+blocked pending its actual integration, and preview explicitly reports paused
+programme IDs. A fresh cumulative review must verify the repaired implementation
+before merge; this disposition alone is not a review-passed claim.

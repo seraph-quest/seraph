@@ -15,6 +15,8 @@ from sqlmodel import select
 from src.goals.contracts import GoalProgrammeAccept, GoalProgrammeControl, GoalProgrammeRequest
 from src.goals.repository import GoalRepository
 from src.guardian.goal_programmes import CAPABILITY_IDS, GoalProgrammeError, GoalProgrammeService
+from src.guardian.goal_programmes import ProgrammePolicySnapshot
+from sqlalchemy import text
 
 
 NOW = datetime.now(timezone.utc)
@@ -310,3 +312,55 @@ async def test_public_brief_correction_pauses_before_new_acceptance(programme_se
         await authority(service, goal, original)
     with pytest.raises(GoalProgrammeError, match="programme_not_found"):
         await authority(service, goal, preview["programme"])
+
+
+async def test_native_writer_binding_is_db_only_and_reloads_cached_facts(programme_setup, async_db, monkeypatch):
+    service, operator, goal, request, _ = programme_setup
+    programme = await accept(service, operator, goal, request)
+    binding = await service.preflight_binding(goal_id=goal.id, programme_id=programme["id"],
+        grant_revision=1, capability_id=CAPABILITY_IDS[0])
+    async with async_db() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        def no_physical_io():
+            raise AssertionError("policy must be staged outside the native writer")
+        monkeypatch.setattr("src.guardian.goal_programmes._policy_binding", no_physical_io)
+        validated = await service.validate_current_binding(db=db, binding=binding,
+            policy=ProgrammePolicySnapshot(3, "route-digest"))
+        assert validated.id == programme["id"]
+        # Same-session identity cache cannot hide a corrected canonical Goal.
+        current_goal = await db.get(Goal, goal.id)
+        current_goal.revision += 1
+        db.add(current_goal)
+        await db.flush()
+        with pytest.raises(GoalProgrammeError, match="programme_goal_review_required"):
+            await service.validate_current_binding(db=db, binding=binding, policy=ProgrammePolicySnapshot(3, "route-digest"))
+
+
+@pytest.mark.parametrize("correction", ["pause", "revoke", "goal", "identity", "brief", "route"])
+async def test_correction_between_preflight_and_native_contact_adoption_cas(programme_setup, async_db, correction):
+    service, operator, goal, request, _ = programme_setup
+    programme = await accept(service, operator, goal, request)
+    binding = await service.preflight_binding(goal_id=goal.id, programme_id=programme["id"],
+        grant_revision=1, capability_id=CAPABILITY_IDS[0])
+    policy = ProgrammePolicySnapshot(3, "route-digest")
+    if correction in {"pause", "revoke"}:
+        await service.control(operator=operator, goal_id=goal.id, programme_id=programme["id"],
+            request=GoalProgrammeControl(expected_grant_revision=1), action=correction)
+    elif correction == "goal":
+        await GoalRepository().update(goal.id, description="correction", expected_revision=1)
+    elif correction == "identity":
+        async with async_db() as db:
+            identity = await db.get(OperatorIdentity, "identity-owned")
+            identity.revoked_at = NOW
+            db.add(identity)
+    elif correction == "brief":
+        await service.preview(operator=operator, goal_id=goal.id,
+            request=request.model_copy(update={"expected_grant_revision": 1, "public_brief": "Different public purpose"}))
+    elif correction == "route":
+        policy = ProgrammePolicySnapshot(4, "changed-route")
+    async with async_db() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        # Both the contact claim and late-output adoption writer consume the
+        # same exact original binding; no transition can be committed here.
+        with pytest.raises(GoalProgrammeError):
+            await service.validate_current_binding(db=db, binding=binding, policy=policy)

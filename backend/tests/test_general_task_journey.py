@@ -166,3 +166,78 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
             "external_provider_contacts": 0, "committed_microusd": 0, "memory_status": "no_learning"}, sort_keys=True))
         restored.stop()
         restored_registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_lesson(accounting_db, monkeypatch):
+    """Actual failed general-task contact remains no-learning under the optional hook."""
+    from uuid import uuid4
+    from src.auth import service as auth_service
+    from src.auth.service import authenticate_token
+    from src.db.models import MemoryProposal, WorkflowRunState, WorkflowStepState
+    from src.memory import task_lessons
+    from src.native_tools.registry import ToolRegistry
+    from src.work_board.contracts import GeneralTaskCreate
+    from src.work_board.general_task import GeneralTaskService
+    from src.work_board.dispatcher import WorkBoardDispatcher
+
+    issued_tokens = []
+    actual_create_session = auth_service.create_session
+    async def capture_actual_session(*args, **kwargs):
+        issued = await actual_create_session(*args, **kwargs)
+        issued_tokens.append(issued[0])
+        return issued
+    monkeypatch.setattr(auth_service, "create_session", capture_actual_session)
+    jobs, owner = await prepare(accounting_db, monkeypatch)
+    workspace, _engine, factory = accounting_db
+    sessions = factory.accounting_sessions
+    assert len(issued_tokens) == 1
+    operator = await authenticate_token(issued_tokens[0], touch=False)
+    goal = _goal("goal-no-learning", "Read an absent local source")
+    goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
+    async with sessions() as db:
+        db.add(goal)
+    registry = ToolRegistry()
+    registry.start()
+    service = GeneralTaskService(registry)
+    service.start()
+    try:
+        descriptors, tool_digest = service.snapshot()
+        descriptor = next(item for item in descriptors if item.tool_id == "read_file")
+        request = GeneralTaskCreate.model_validate({"goal_revision": 1,
+            "idempotency_key": "actual-missing-source-no-learning", "accept": True, "expected_plan_revision": 1,
+            "input": {"goal_ref": goal.id, "intent": "Read absent.txt",
+                "requested_output": descriptor.output_schema, "tool_set_digest": tool_digest},
+            "plan": {"revision": 1, "steps": [{"step_id": "read-absent", "tool_id": "read_file",
+                "input": {"file_path": "absent.txt"}, "output_contract": descriptor.output_schema}]}})
+        async with sessions() as db:
+            task = (await service.create(db, owner, request)).task
+        source = await task_lessons.eligible_lesson_source(operator, task.task_id)
+        enabled = await task_lessons.set_automatic_lesson_policy(operator, task.task_id,
+            task_lessons.LessonAutoPolicyRequest(enabled=True, expected_revision=task.task_revision,
+                expected_policy_revision=source["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
+        assert enabled["enabled"] is True
+        observed = []
+        actual_hook = task_lessons.maybe_propose_automatic_lesson
+        async def observe_actual_hook(current_task, attempt_id):
+            result = await actual_hook(current_task, attempt_id)
+            observed.append(result)
+            return result
+        monkeypatch.setattr(task_lessons, "maybe_propose_automatic_lesson", observe_actual_hook)
+        dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+        outcome = await dispatcher.run_pass()
+        assert outcome["blocked"] == 1, outcome
+        assert not (workspace / "absent.txt").exists()
+        async with sessions() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == "agent.task.v1"))).scalar_one()
+            assert (await db.execute(select(WorkflowStepState).where(WorkflowStepState.run_identity == run.run_identity))).scalars().all() == []
+            assert (await db.execute(select(MemoryProposal))).scalars().all() == []
+        projection = await jobs.get_job(run.run_identity)
+        assert projection["effects"] and all(item["details"]["no_learning"] is True for item in projection["effects"])
+        assert observed and all(item["result"] == "no_change" for item in observed)
+        source = await task_lessons.eligible_lesson_source(operator, task.task_id)
+        assert source["eligible"] is False
+        assert source["automatic_outcome"]["result"] == "no_change"
+    finally:
+        service.stop()
+        registry.stop()

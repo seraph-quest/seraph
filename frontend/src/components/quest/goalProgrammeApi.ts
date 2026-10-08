@@ -53,6 +53,7 @@ export interface DiscoveryRun {
   outstanding_held: boolean;
   accounting_liability: boolean;
   denial_cause?: string | null;
+  search_blocked_reason?: string | null;
   outcome: null | { state: "findings" | "quiet" | "empty"; coverage: string; freshness: "current"; no_learning: true };
   no_learning: true;
   recovery: string | null;
@@ -75,6 +76,11 @@ export function isDiscoveryRun(value: unknown): value is DiscoveryRun {
       "programme_unclaimed_identity_revoked", "programme_unclaimed_goal_changed",
       "programme_unclaimed_original_expired",
     ].includes(item.denial_cause))
+    && (item.search_blocked_reason === undefined || item.search_blocked_reason === null || [
+      "search_limits_invalid", "search_query_invalid", "search_deadline_expired", "search_timeout",
+      "search_response_byte_cap", "search_response_unsupported", "search_captcha", "search_markup_drift",
+      "search_redirect_wrapper_invalid", "search_result_url_unsupported", "search_title_unsupported",
+    ].includes(item.search_blocked_reason))
     && item.no_learning === true && (item.recovery === null || typeof item.recovery === "string")
     && (item.outcome === null || (Boolean(item.outcome) && ["findings", "quiet", "empty"].includes(item.outcome!.state)
       && typeof item.outcome!.coverage === "string" && item.outcome!.freshness === "current" && item.outcome!.no_learning === true));

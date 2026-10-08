@@ -184,6 +184,23 @@ async def adopt_discovery_artifact(jobs, *, job_id, owner, fence, artifact):
             "kind": artifact.kind, "slot": artifact.slot, "job_id": job_id,
             "programme_id": artifact.programme_id, "byte_count": len(artifact.content),
             "producer_fence": fence, "no_learning": True}
+        from src.workflows.research_guard import current_discovery_witness
+        witness = current_discovery_witness()
+        declared = next((output for step in witness.plan.steps for output in step.output_slots if output.slot == artifact.kind), None)
+        if (declared is not None and len(artifact.content) > min(declared.max_bytes, witness.plan.limits.max_output_bytes)
+                or artifact.kind in {"snapshot", "draft"} and len(artifact.content) > witness.plan.limits.max_output_bytes):
+            raise ValueError("discovery output exceeds its original declared byte cap")
+        if artifact.kind == "manifest":
+            from src.workflows.research_sources import compile_discovery_search_derivation
+            from src.guardian.research_plan_contracts import SearchManifestV1
+            payload["search_derivation"] = compile_discovery_search_derivation(witness.plan, witness.artifacts,
+                _effect_ledger_or_raise(run.effect_receipts_json), SearchManifestV1.model_validate_json(artifact.content),
+                artifact.reference, job_id=job_id)
+        if artifact.kind == "brief":
+            from src.workflows.research_sources import discovery_stage_inputs, is_local_unsupported_discovery_brief
+            value = json.loads(artifact.content)
+            local_negative = is_local_unsupported_discovery_brief(value, witness.artifacts, _effect_ledger_or_raise(run.effect_receipts_json))
+            discovery_stage_inputs(witness.plan, witness.artifacts, "plan_queries" if local_negative else "prepare_brief")
         history = json.loads(run.checkpoint_receipts_json)
         existing = [p.get("payload") for p in history if p.get("checkpoint_id") == identifier]
         if existing:

@@ -176,13 +176,23 @@ immutable generation. The four stages are exactly `plan_queries`,
 `search_public`, `extract_sources`, and `prepare_brief`, with their version-1
 capabilities. Search emits both the immutable manifest and its bound opaque-ID
 selection; extraction never accepts a model-provided URL.
+Only whole-output references in that exact graph are executable: search consumes
+the original query output, extraction consumes its manifest and selection, and
+brief preparation consumes the original snapshots output. Nonempty JSON pointers
+or alternate graphs are rejected. Each executed stage reopens those exact
+original-job artifact identities and bytes. A no-contact unsupported outcome is
+a local negative receipt bound to the accepted plan and complete public brief;
+it does not claim nonexistent producer outputs or successful brief preparation.
 
 One original daily UTC occurrence enters the canonical native job queue. The
 original deadline is at most 300 seconds and is assigned once, intersected with
 the original grant expiry. No queue wait, restart, new plan ID, or renewal grants
 more time. There are at most three queries, fifteen combined deduplicated search
 results, four selected sources, and four total governed inference requests.
-The existing broker remains the single remote lane. Generation spend includes
+The existing broker remains the single remote lane.
+Accepted narrower query/result/source/inference and output-byte limits remain
+binding at their owning stages; the maxima above do not override them.
+Generation spend includes
 all settled charges and reserved, contacted or Unknown liabilities across every
 accounting period. A previous outstanding occurrence for the same canonical Goal
 and stable operator identity retains its hold across new generations. A different
@@ -192,11 +202,21 @@ Public search is a pinned HTTPS POST only to
 `https://html.duckduckgo.com/html/`, with only bounded `q`, empty `b`, and fixed
 locale `kl` form fields. It permits neither credentials/cookies/proxies nor
 redirects, DDGS routing, fallback backends, or retries. Each transfer is bounded
-to twenty seconds and 512 KiB. Recognized no-result markup is distinct from
+to the plan's per-request limits, at most twenty seconds and 512 KiB, intersected
+with the original occurrence deadline. Recognized no-result markup is distinct from
 CAPTCHA, unexpected markup, and response loss. Selected sources additionally
 require current site policy, public address pinning, a 256 KiB raw cap, and
 supported UTF-8 text/plain or text/html. Normalized stored text is at most
 64 KiB; unsupported content is never silently truncated.
+Complete responses retain their exact raw-body SHA-256 in the original HTTP
+readback ledger, even when parsing blocks. The unchanged three-field manifest
+has protected adoption metadata binding its own identity and digest to the
+ordered query and HTTP response receipts; its digest is never presented as an
+HTTP response digest. Normalized source hashes remain distinct artifact evidence.
+Finite safe search-block codes persist in authenticated occurrence history and
+the Goal inspector across lifecycle recovery, without exposing queries or HTML
+or authorizing replay. Incomplete, oversized or timed-out transfers remain
+unresolved rather than acquiring an invented complete-response receipt.
 
 The complete reviewed public brief is staged and physically read back through
 the existing safe artifact owner before admission, then adopted by the original

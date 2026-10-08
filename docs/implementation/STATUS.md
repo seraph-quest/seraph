@@ -189,7 +189,11 @@ programme, native job/artifact/accounting and scheduler owners. Its bounded
 operator journey includes fixed search, exact manifest selection, cited local
 brief/readback, first findings and later quiet outcomes, inert checklist proposals
 and explicit `no_learning`. Original deadlines and cumulative programme ceilings
-remain binding across daily/accounting periods. Untouched invalid queued work can
+remain binding across daily/accounting periods.
+Accepted narrower limits and exact whole-output stage references are enforced;
+manifest derivation binds original physical HTTP response readbacks separately
+from artifact digests. Finite search-block causes survive authenticated history
+recovery without query/HTML exposure or provider replay. Untouched invalid queued work can
 close only through the existing canonical deny-only cancellation writer; claimed
 or uncertain effects and any cost-bearing work remain held. Explicit operator
 inspection/readback is available in the Goal panel. See the

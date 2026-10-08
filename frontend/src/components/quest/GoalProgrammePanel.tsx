@@ -146,6 +146,7 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
       <div>External effect: {run.external_effect_state} · {run.outstanding_held ? "Outstanding occurrence held" : "Occurrence closed"} · no_learning</div>
       {run.accounting_liability && <div>Original accounting liability is unresolved.</div>}
       {run.denial_cause && <div>Untouched occurrence cancelled: {run.denial_cause}. No contact or replay was admitted.</div>}
+      {run.search_blocked_reason && <div role="status">Public search blocked: {run.search_blocked_reason}. Inspect the original occurrence; provider replay is forbidden.</div>}
       {run.outcome && <div>{run.outcome.state} · coverage {run.outcome.coverage} · freshness {run.outcome.freshness}</div>}
       {run.recovery && <p>{run.recovery}</p>}
       <button type="button" disabled={busy || !run.outcome || !["succeeded", "degraded"].includes(run.status) || run.external_effect_state === "unknown"}

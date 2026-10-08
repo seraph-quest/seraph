@@ -1,5 +1,6 @@
 """Real Auth/SQLite/native broker/artifact journey with intercepted HTTP."""
 import json
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -34,12 +35,14 @@ def public_http_fixture():
             assert "Authorization" not in self.headers and "Cookie" not in self.headers
             observed.append(("POST", self.path, fields))
             raw = b'<html><a class="result__a" href="https://example.com/release">Release evidence</a></html>'
-            if controls.get("scenario") in {"active_strategy", "strategy_late_oversize", "strategy_changed_after_query"}:
+            if controls.get("scenario") in {"active_strategy", "strategy_late_oversize", "strategy_changed_after_query", "narrow_sources", "narrow_success"}:
                 raw = b'<html><a class="result__a" href="https://example.com/release">Release evidence</a><a class="result__a" href="https://example.com/official-release">Official dated release</a></html>'
             if controls.get("scenario") == "empty_search":
                 raw = b'<div class="no-results">No results found.</div>'
             elif controls.get("scenario") == "captcha":
                 raw = b'<form id="challenge-form">CAPTCHA</form>'
+            elif controls.get("scenario") == "markup_drift":
+                raw = b'<html><main>Unknown search layout PRIVATE_HTML_CANARY</main></html>'
             self._reply(raw, "text/html")
 
         def do_GET(self):
@@ -79,7 +82,9 @@ def public_http_fixture():
     "cleanup_extra_effect", "cleanup_cost_row", "cleanup_wrong_issuer", "cleanup_cas_race", "expire_untouched",
     "same_goal_unknown_generation", "strategy_malformed", "strategy_secret", "strategy_redaction_unavailable",
     "strategy_oversize", "strategy_authority", "strategy_private_extra", "strategy_task_method", "strategy_normalized",
-    "strategy_late_oversize", "strategy_changed_after_query"])
+    "strategy_late_oversize", "strategy_changed_after_query", "markup_drift", "narrow_queries", "narrow_sources",
+    "narrow_search", "narrow_inference", "narrow_output", "narrow_global_output", "narrow_success", "manifest_receipt_missing",
+    "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"])
 @pytest.mark.asyncio
 async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, monkeypatch, scenario):
     from config.settings import settings
@@ -130,6 +135,9 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                     if method is not None:
                         assert method == {"schema_version": "ResearchStrategy.v1", "query_templates": strategy_data["query_templates"]}
                     answer = json.dumps({"queries": method["query_templates"] if method else ["public product release evidence"]})
+                    if scenario == "narrow_queries":
+                        assert supplied["max_queries"] == 1
+                        answer = json.dumps({"queries": ["first public query", "second public query"]})
                     if scenario == "strategy_changed_after_query":
                         strategy_state["changed"] = True
                     if scenario == "goal_after_query":
@@ -143,6 +151,9 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                         and {"url", "date", "excerpt", "limitation"}.issubset(method["required_evidence_fields"])
                         and r["title"] == "Official dated release"), supplied["results"][0])
                     answer = json.dumps({"selected_result_ids": ["0" * 32 if scenario == "unselected_id" else chosen["result_id"]]})
+                    if scenario == "narrow_sources":
+                        assert supplied["max_sources"] == 1
+                        answer = json.dumps({"selected_result_ids": [r["result_id"] for r in supplied["results"]]})
                 else:
                     if method is not None:
                         assert method == {"schema_version": "ResearchStrategy.v1", "draft_sections": strategy_data["draft_sections"],
@@ -221,6 +232,49 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     service = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport),
         resolver=resolver, transport=transport,
         strategy_resolver=AcceptedStrategy() if scenario == "active_strategy" or scenario.startswith("strategy_") else None)
+    if scenario.startswith("narrow_"):
+        from copy import deepcopy
+        from src.guardian.research_plan_contracts import GoalResearchPlanSpecV1
+        original_validate = GoalResearchPlanSpecV1.model_validate
+        narrower = {"narrow_queries": {"max_queries": 1}, "narrow_sources": {"max_sources": 1},
+            "narrow_search": {"max_search_seconds": 1, "max_search_bytes": 64},
+            "narrow_inference": {"max_inference_requests": 1}, "narrow_output": {}, "narrow_global_output": {"max_output_bytes": 64},
+            "narrow_success": {"max_queries": 1, "max_results": 1, "max_sources": 1, "max_inference_requests": 3,
+                "max_search_seconds": 1, "max_search_bytes": 512, "max_source_bytes": 128}}[scenario]
+        def accepted_narrow_plan(cls, value, *args, **kwargs):
+            value = deepcopy(value)
+            value["limits"].update(narrower)
+            if scenario == "narrow_output":
+                value["steps"][0]["output_slots"][0]["max_bytes"] = 10
+            if scenario == "narrow_global_output":
+                for step in value["steps"]:
+                    for output in step["output_slots"]:
+                        output["max_bytes"] = min(output["max_bytes"], 64)
+            return original_validate(value, *args, **kwargs)
+        monkeypatch.setattr(GoalResearchPlanSpecV1, "model_validate", classmethod(accepted_narrow_plan))
+    if scenario in {"manifest_receipt_missing", "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"}:
+        original_write = service._write
+        async def tampered_stage_write(job_id, owner, fence, kind, value, slot=0):
+            if kind == "manifest" and scenario.startswith("manifest_receipt_"):
+                async with jobs._session() as db:
+                    run = await jobs._fetch(db, job_id)
+                    ledger = json.loads(run.effect_receipts_json)
+                    search = next(item for item in ledger if item["effect_id"].startswith("discovery-search:"))
+                    if scenario == "manifest_receipt_missing":
+                        ledger.remove(search)
+                    else:
+                        search["effect_id"] = "discovery-search:foreign-job:0"
+                    run.effect_receipts_json = json.dumps(ledger)
+            if kind == "manifest" and scenario == "physical_query_tamper":
+                witness = await physical_discovery_inputs(jobs, job_id)
+                current = await jobs.get_job(job_id)
+                checkpoint = next(item["payload"] for item in current["checkpoints"] if item["checkpoint_id"] == "discovery:artifact:queries:0")
+                (root / checkpoint["file_path"]).write_text('{"queries":["foreign physical output"]}')
+            output = await original_write(job_id, owner, fence, kind, value, slot)
+            if kind == "snapshots" and scenario == "physical_snapshots_tamper":
+                (root / output.file_path).write_text('{"snapshots":[],"denied":[]}')
+            return output
+        monkeypatch.setattr(service, "_write", tampered_stage_write)
     monkeypatch.setattr("src.guardian.goal_discovery.goal_discovery_service", service)
     from src.work_board.dispatcher import _dispatcher
     monkeypatch.setattr(_dispatcher, "goal_discovery", service)
@@ -280,6 +334,25 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             job = await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
             assert job["status"] == "queued", job
             deadline = job["deadline_at"]
+            if scenario in {"narrow_queries", "narrow_sources", "narrow_search", "narrow_inference", "narrow_output", "narrow_global_output",
+                    "manifest_receipt_missing", "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"}:
+                from src.work_board.repository import BoardError
+                expected_error = BoardError if scenario in {"physical_query_tamper", "physical_snapshots_tamper"} else ValueError
+                with pytest.raises(expected_error):
+                    await service.run(job["job_id"])
+                expected_calls, expected_contacts = ((2, 2) if scenario == "physical_snapshots_tamper" else
+                    (2, 1) if scenario == "narrow_sources" else (1, 0) if scenario in {"narrow_queries", "narrow_output"} else (1, 1))
+                assert len(calls) == expected_calls and len(contacts) == expected_contacts
+                original = await jobs.get_job(job["job_id"])
+                assert not any(item["checkpoint_id"] == "discovery:outcome" for item in original["checkpoints"])
+                assert not any(item["checkpoint_id"] == "discovery:artifact:brief:0" for item in original["checkpoints"])
+                if scenario in {"manifest_receipt_missing", "manifest_receipt_foreign", "physical_query_tamper", "narrow_global_output"}:
+                    assert not any(item["checkpoint_id"] == "discovery:artifact:manifest:0" for item in original["checkpoints"])
+                if scenario == "narrow_search":
+                    assert original["failure_reason"] == "search_response_byte_cap"
+                assert (await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1))["job_id"] == job["job_id"]
+                assert len(calls) == expected_calls and len(contacts) == expected_contacts
+                return
             if scenario == "strategy_changed_after_query":
                 with pytest.raises(ValueError):
                     await service.run(job["job_id"])
@@ -416,14 +489,39 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert calls == [] and contacts == [] and physical_contacts == []
                 assert (await jobs.get_job(job["job_id"]))["deadline_at"] == deadline
                 return
-            if scenario in {"goal_after_query", "unselected_id", "model_timeout", "captcha", "raw_oversize"}:
+            if scenario in {"goal_after_query", "unselected_id", "model_timeout", "captcha", "markup_drift", "raw_oversize"}:
                 with pytest.raises(Exception):
                     await service.run(job["job_id"])
                 blocked = await jobs.get_job(job["job_id"])
                 assert blocked["status"] in {"running", "blocked"} and blocked["deadline_at"] == deadline
                 expected_calls = 2 if scenario in {"unselected_id", "raw_oversize"} else 1
                 assert len(calls) == expected_calls
-                assert len(contacts) == (2 if scenario == "raw_oversize" else 1 if scenario in {"unselected_id", "captcha"} else 0)
+                assert len(contacts) == (2 if scenario == "raw_oversize" else 1 if scenario in {"unselected_id", "captcha", "markup_drift"} else 0)
+                if scenario in {"captcha", "markup_drift"}:
+                    reason = "search_captcha" if scenario == "captcha" else "search_markup_drift"
+                    assert blocked["failure_reason"] == reason
+                    search = next(item for item in blocked["effects"] if item["effect_id"].startswith("discovery-search:"))
+                    assert search["status"] == "succeeded" and search["receipt_kind"] == "readback"
+                    assert search["content_sha256"] == search["details"]["search_response_receipt"]["response_digest"]
+                    logged = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
+                    assert logged.status_code == 200
+                    assert (await client.get(base + "/discovery")).status_code == 409
+                    selection = {"selections": [{"kind": "goal", "record_id": goal_id}]}
+                    review = await client.post("/api/auth/ownership/recovery/preview", json=selection)
+                    assert review.status_code == 200
+                    confirmed = await client.post("/api/auth/ownership/recovery/confirm", json={**selection,
+                        "preview_digest": review.json()["preview_digest"], "idempotency_key": "search-block-original-selected",
+                        "acknowledge_read_only": True})
+                    assert confirmed.status_code == 200
+                    await service.stop(); await service.start()
+                    history = await client.get(base + "/discovery")
+                    assert history.status_code == 200, history.text
+                    original_run = next(item for item in history.json()["runs"] if item["job_id"] == job["job_id"])
+                    assert original_run["search_blocked_reason"] == reason and original_run["outstanding_held"] is True
+                    assert original_run["external_effect_state"] == "settled"
+                    assert "PRIVATE_HTML_CANARY" not in history.text and "public product release evidence" not in history.text
+                    assert await jobs.get_job(job["job_id"]) == blocked
+                    assert len(calls) == 1 and len(contacts) == 1
                 if scenario != "raw_oversize":
                     assert all(item[0] != "GET" for item in physical_contacts)
                 original_effects = json.dumps(blocked["effects"], sort_keys=True)
@@ -485,12 +583,33 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert len(contacts) == (0 if scenario == "unsupported_brief" else 1 if scenario == "empty_search" else 2)
                 if scenario == "unsupported_brief":
                     assert output["coverage"]["status"] == "unsupported" and output["coverage"]["public_brief_fully_represented"] is False
+                    from src.workflows.research_sources import discovery_stage_inputs, is_local_unsupported_discovery_brief
+                    assert is_local_unsupported_discovery_brief(output, witness.artifacts, done["effects"])
+                    assert not any(a["kind"] in {"queries", "manifest", "selection", "snapshot", "snapshots", "child"} for a in witness.artifacts.values())
+                    with pytest.raises(ValueError, match="no unique original physical output"):
+                        discovery_stage_inputs(witness.plan, witness.artifacts, "prepare_brief")
+                    from copy import deepcopy
+                    positive = deepcopy(output); positive["coverage"]["status"] = "complete"
+                    positive["coverage"]["outcome_state"] = "findings"
+                    assert not is_local_unsupported_discovery_brief(positive, witness.artifacts, done["effects"])
                 if scenario in {"normalized_oversize", "unsupported_pdf"}:
                     assert output["coverage"]["unavailable"] and output["coverage"]["source_spans"] == []
                 return
             assert done["status"] == "succeeded", done
             assert done["deadline_at"] == deadline and done["session_id"] is None
             witness = await physical_discovery_inputs(jobs, job["job_id"])
+            manifest_artifact = next(a for a in witness.artifacts.values() if a["kind"] == "manifest")
+            search_effect = next(item for item in done["effects"] if item["effect_id"].startswith("discovery-search:"))
+            expected_body = (b'<html><a class="result__a" href="https://example.com/release">Release evidence</a><a class="result__a" href="https://example.com/official-release">Official dated release</a></html>'
+                if scenario in {"active_strategy", "narrow_success"} else b'<html><a class="result__a" href="https://example.com/release">Release evidence</a></html>')
+            assert search_effect["content_sha256"] == hashlib.sha256(expected_body).hexdigest()
+            assert search_effect["content_sha256"] != manifest_artifact["reference"].digest
+            assert manifest_artifact["search_derivation"]["manifest_ref"] == manifest_artifact["reference"].model_dump(mode="json")
+            assert manifest_artifact["search_derivation"]["responses"] == [search_effect["details"]["search_response_receipt"]]
+            if scenario == "narrow_success":
+                assert witness.plan.limits.max_results == 1 and len(manifest_artifact["parsed"].results) == 1
+                assert witness.plan.limits.max_queries == witness.plan.limits.max_sources == witness.plan.limits.max_search_seconds == 1
+                assert witness.plan.limits.max_search_bytes == 512 and witness.plan.limits.max_source_bytes == 128
             brief = next(a for a in witness.artifacts.values() if a["kind"] == "brief")["parsed"]
             assert brief["coverage"]["outcome_state"] == "findings" and brief["findings"][0]["evidence_status"] == "mechanically_verified"
             assert brief["coverage"]["no_learning"] is True and brief["coverage"]["semantic_truth_verified"] is False

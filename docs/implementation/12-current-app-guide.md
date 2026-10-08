@@ -222,6 +222,11 @@ items, and prepares a cited local brief and inert checklist. Each occurrence has
 the original deadline of at most 300 seconds and at most four governed inference
 requests. The programme ceiling includes every daily occurrence and accounting
 period, including unresolved reservations and contacted Unknown work.
+Narrower accepted plan limits apply to the actual query, result, source and
+inference counts and declared output bytes. Search uses each plan's per-request
+time and response-byte cap within the original deadline. The fixed four-stage
+graph consumes whole original physical outputs; alternate graphs and JSON
+pointers are unsupported rather than silently ignored.
 
 Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
 held effects and cost liability. Selecting a completed brief performs an explicit
@@ -234,6 +239,13 @@ source limits never silently truncate stored evidence. An unchanged later source
 set produces a quiet brief. Prepared checklists are local proposals requiring
 separate acceptance; discovery records `no_learning` and performs no external
 mutation or digest delivery.
+The inspector retains finite search-block reasons such as `search_captcha` and
+`search_markup_drift` after authenticated owner recovery and lifecycle restart.
+It exposes no raw query or response HTML and offers no provider replay. Complete
+HTTP responses have their own physical body digests, distinct from derived
+manifest and normalized-source digests. A known parser failure can have settled
+readback while the original occurrence remains held for review; a timed-out or
+oversized transfer keeps its unresolved contact evidence.
 
 Explicit revoke, replacement generation, Goal correction or expiry may negatively
 close an occurrence only when it was never claimed, has exactly its two initial

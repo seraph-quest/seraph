@@ -48,6 +48,21 @@ describe("Goal programme cockpit journey", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
   afterEach(() => { vi.unstubAllGlobals(); });
+  it.each(["search_captcha", "search_markup_drift"])("shows persisted %s without private content or replay", async search_blocked_reason => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, runs: [{ job_id: `goal-discovery:${"a".repeat(32)}`,
+        programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-08",
+        status: "blocked", deadline_at: "2026-10-08T12:05:00Z", external_effect_state: "settled",
+        outstanding_held: true, accounting_liability: false, search_blocked_reason,
+        outcome: null, no_learning: true, recovery: "Inspect the original occurrence; provider replay is forbidden." }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    expect(await screen.findByText(new RegExp(`Public search blocked: ${search_blocked_reason}`))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/discovery"))).toHaveLength(1);
+  });
   it("shows the canonical untouched cancellation cause without offering replay or private read", async () => {
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,

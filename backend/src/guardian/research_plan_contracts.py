@@ -43,8 +43,8 @@ class OutputRef(Closed):
     @field_validator("json_pointer")
     @classmethod
     def finite_pointer(cls, value):
-        if value and (not value.startswith("/") or re.search(r"~(?![01])", value)):
-            raise ValueError("output reference requires a literal JSON pointer")
+        if value != "":
+            raise ValueError("fixed research stages consume whole outputs; JSON pointers are unsupported")
         return value
 
 
@@ -131,11 +131,20 @@ class GoalResearchPlanSpecV1(Closed):
         if self.strategy_binding.status == "blocked":
             raise ValueError("blocked strategy cannot create a research plan")
         available = {}
+        graph = {"search_public": [("plan_queries", "queries")],
+            "extract_sources": [("search_public", "manifest"), ("search_public", "selection")],
+            "prepare_brief": [("extract_sources", "snapshots")]}
         for step, (identifier, capability, slots) in zip(self.steps, STAGES, strict=True):
             if step.step_id != identifier or step.capability_id != capability:
                 raise ValueError("research stage order and capability are fixed")
             if [(slot.slot, slot.artifact_type) for slot in step.output_slots] != list(slots):
                 raise ValueError("research stage output slots are fixed")
+            if identifier == "plan_queries":
+                if len(step.input_refs) != 1 or not isinstance(step.input_refs[0], ArtifactRef):
+                    raise ValueError("query planning requires the sole original public brief artifact")
+            elif (any(not isinstance(ref, OutputRef) for ref in step.input_refs)
+                    or [(ref.producer_step_id, ref.output_slot) for ref in step.input_refs] != graph[identifier]):
+                raise ValueError("research stage inputs must match the exact executable four-stage graph")
             for ref in step.input_refs:
                 if isinstance(ref, OutputRef) and ref.output_slot not in available.get(ref.producer_step_id, set()):
                     raise ValueError("forward, cyclic or undeclared output reference")

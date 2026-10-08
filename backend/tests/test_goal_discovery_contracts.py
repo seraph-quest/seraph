@@ -103,6 +103,10 @@ def test_brief_is_closed_six_field_native_coverage_and_inert_proposals():
     lambda p: p["steps"][2].update(input_refs=[{"producer_step_id": "search_public", "output_slot": "manifest", "json_pointer": ""}]),
     lambda p: p["steps"][1]["output_slots"][1].update(slot="other"),
     lambda p: p["steps"][1]["input_refs"][0].update(json_pointer="/bad~escape"),
+    lambda p: p["steps"][1]["input_refs"][0].update(json_pointer="/queries/0"),
+    lambda p: p["steps"][1].update(input_refs=[p["steps"][0]["input_refs"][0]]),
+    lambda p: p["steps"][3].update(input_refs=[{"producer_step_id": "search_public", "output_slot": "manifest", "json_pointer": ""}]),
+    lambda p: p["steps"][2]["input_refs"].reverse(),
 ])
 def test_plan_authority_and_graph_mutations_are_rejected(change):
     value = valid_plan()
@@ -130,7 +134,7 @@ async def test_fixed_search_transport_and_manifest_duplicate_provenance():
         return httpx.Response(200, headers={"content-type": "text/html"}, text=f'<a class="result__a" href="//duckduckgo.com/l/?uddg={target}">Public article</a>')
     search = DiscoverySearch(resolver=resolver, transport=httpx.MockTransport(handle))
     result = await search.search(["reviewed public query"] * 3, run_id=uuid4(), authority_check=authority)
-    manifest = SearchManifestV1.model_validate(result)
+    manifest = SearchManifestV1.model_validate(result.manifest)
     assert len(contacts) == 3 and checks
     assert len(manifest.results) == 1 and manifest.results[0].exact_url == "https://example.com/article"
     assert len(manifest.results[0].result_id) == 32

@@ -122,6 +122,14 @@ def _sync_probe(database, lock_path):
         process.close()
 
 
+async def _drive_until_marker(dispatcher, marker):
+    for _ in range(4):
+        await dispatcher.run_pass()
+        if marker:
+            return
+    assert marker, 'target negative fixture did not execute within four normal passes'
+
+
 def _paths(engine):
     from config.settings import settings
     from src.workspace.production import ProductionWorkspace
@@ -254,9 +262,9 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
     monkeypatch.setattr(job_runtime, 'get_session', sessions)
     if failure == 'cancel':
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(drive(dispatcher), 35)
+            await asyncio.wait_for(_drive_until_marker(dispatcher, failures), 35)
     else:
-        await asyncio.wait_for(drive(dispatcher), 35)
+        await asyncio.wait_for(_drive_until_marker(dispatcher, failures), 35)
     assert failures == [failure]
     assert rolled_back == ['busy']
     assert await _probe(database, lock_path) == 'acquired'
@@ -290,13 +298,18 @@ async def test_queue_scope_rejection_does_not_adopt_or_contact(actual_billing_jo
         elif case in {'foreign_job', 'non_near'}:
             target = 'unrelated-native-job'
             async with factory.accounting_sessions() as db:
-                run = await db.get(WorkflowRunState, job_id)
+                run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+                assert run is not None
                 values = run.model_dump()
+                values.pop('id')
                 values.update(run_identity=target, idempotency_binding='foreign-fixture-binding')
                 if case == 'non_near':
                     values['job_kind'] = 'readonly_research_child'
-                db.add(WorkflowRunState(**values))
+                clone = WorkflowRunState(**values)
+                assert clone.id != run.id and clone.run_identity != run.run_identity
+                db.add(clone)
             before_target = await jobs.get_job(target)
+            assert before_target is not None
         elif case == 'foreign_witness':
             bad['near_text_witness'] = replace(witness)
         elif case == 'wrong_phase':
@@ -325,7 +338,7 @@ async def test_queue_scope_rejection_does_not_adopt_or_contact(actual_billing_jo
         raise BoardError('near_policy_scope_invalid', 'fixture denied queue')
 
     monkeypatch.setattr(jobs, 'queue_job', queued)
-    await asyncio.wait_for(drive(dispatcher), 35)
+    await asyncio.wait_for(_drive_until_marker(dispatcher, checked), 35)
     assert checked == [case] and controls['calls'] == []
     async with factory.accounting_sessions() as db:
         runs = list((await db.scalars(select(WorkflowRunState))).all())
@@ -395,7 +408,7 @@ async def test_foreign_process_policy_busy_has_no_phase_adoption(actual_billing_
         raise BoardError('near_policy_changed', 'fixture confirmed foreign contention')
 
     monkeypatch.setattr(jobs, method, busy)
-    await asyncio.wait_for(drive(dispatcher), 35)
+    await asyncio.wait_for(_drive_until_marker(dispatcher, denied), 35)
     assert denied == [phase]
     if phase != 'terminal':
         assert controls['calls'] == []

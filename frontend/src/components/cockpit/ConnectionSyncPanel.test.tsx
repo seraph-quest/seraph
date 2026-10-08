@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
-import { ConnectionSyncPanel } from "./ConnectionSyncPanel";
-import { privateSyncItem, syncProjection } from "../../lib/connectionSync";
+import { ConnectionSyncPanel, RelatedSourcesReview } from "./ConnectionSyncPanel";
+import { connectedTaskInput, connectedSources, normalizeConnectedRequest, privateSyncItem, relatedSources, syncProjection } from "../../lib/connectionSync";
 vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
 const future = new Date(Date.now() + 86400000).toISOString();
 const sha = "a".repeat(64), item = { provider: "gmail" as const, opaque_id: sha, revision: sha, content_digest: sha, privacy: "owner_private" as const, expires_at: future };
@@ -13,6 +13,57 @@ const state = { connection_id: "connection", state: "ready", active_job_id: null
   items: [item], coverage: { pages_read: 1, returned: 1, max_items: 50, partial: true, more_available: true }, freshness: { last_complete_at: new Date().toISOString(), expires_at: future }, recovery_action: null };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
+it("selects exact local task refs only by separate ack and clears them on Goal or revision change", async () => {
+  const change = vi.fn(), selection = { goal_ref: { id: "goal", revision: 4 }, connection_ref: { id: "connection", revision: 2 }, source_scope: { provider: "gmail", consents: [{ id: "grant", revision: 3 }], label_ids: ["label-opaque"], thread_keys: [] }, window: { start: new Date().toISOString(), end: future }, max_items: 50 };
+  vi.mocked(apiFetch).mockImplementation(async () => response({ ...state, selection }));
+  const mounted = render(<ConnectionSyncPanel {...props} relatedGoal={{ id: "goal", revision: 4 }} onRelatedChange={change} />);
+  const useRef = await screen.findByLabelText(/Use local reference/); expect(useRef).not.toBeChecked();
+  fireEvent.click(useRef);
+  await waitFor(() => expect(change.mock.lastCall?.[0]?.acknowledged).toBe(false));
+  expect(() => connectedTaskInput(change.mock.lastCall?.[0])).toThrow(/Acknowledge/);
+  fireEvent.click(screen.getByLabelText(/I acknowledge these exact references/));
+  await waitFor(() => expect(change.mock.lastCall?.[0]?.acknowledged).toBe(true));
+  expect(connectedTaskInput(change.mock.lastCall?.[0])).toEqual({ connected_sources: [{ connection_ref: { id: "connection", revision: 2 }, item_refs: [item] }], acknowledge_connected_sources: true });
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+  mounted.rerender(<ConnectionSyncPanel {...props} relatedGoal={{ id: "goal", revision: 5 }} onRelatedChange={change} />);
+  await waitFor(() => expect(change.mock.lastCall?.[0]).toBeNull());
+  expect(await screen.findByLabelText(/Use local reference/)).not.toBeChecked();
+});
+it("bounds local refs, rejects duplicates and expiry, and omits empty legacy fields", () => {
+  const group = { connection_ref: { id: "connection", revision: 2 }, item_refs: [item] };
+  expect(() => connectedSources([{ ...group, item_refs: [item, item] }])).toThrow(/unique/);
+  expect(() => connectedSources([{ ...group, item_refs: Array.from({ length: 11 }, (_, n) => ({ ...item, opaque_id: String(n) })) }])).toThrow(/ten unique/);
+  expect(() => connectedSources(Array.from({ length: 4 }, (_, n) => ({ ...group, connection_ref: { id: String(n), revision: 1 } })))).toThrow(/limit/);
+  expect(() => connectedTaskInput({ sources: [{ ...group, item_refs: [{ ...item, expires_at: "2020-01-01T00:00:00Z" }] }], acknowledged: true })).toThrow(/expired/);
+  expect(normalizeConnectedRequest({ connected_sources: [], acknowledge_connected_sources: true })).toEqual({});
+});
+it("opens task related cache only by explicit ack and fences late private readback on owner change", async () => {
+  const related = relatedSources({ classification: "local_related_context_not_model_input", memory_status: "no_learning", sources: [{ connection_ref: { id: "connection", revision: 2 }, item_refs: [item], coverage: state.coverage, freshness: state.freshness }] });
+  let finish!: (v: Response) => void;
+  vi.mocked(apiFetch).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const mounted = render(<RelatedSourcesReview related={related} ownerPrincipalId="owner" ownerSessionId="session" />);
+  expect(screen.getByLabelText("Task local related references")).toHaveTextContent("model did not use");
+  expect(apiFetch).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByLabelText(/I acknowledge opening/)); fireEvent.click(screen.getByRole("button", { name: /Open related private item/ }));
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+  expect(String(vi.mocked(apiFetch).mock.calls[0][0])).toContain(`/sync/items/${sha}`);
+  mounted.rerender(<RelatedSourcesReview related={related} ownerPrincipalId="owner" ownerSessionId="new-session" />);
+  finish(response({ item: { ref: item, content: { body: "late private body" } }, memory_status: "no_learning" }));
+  await waitFor(() => expect(screen.queryByLabelText("Private related cache readback")).not.toBeInTheDocument());
+  expect(document.body.textContent).not.toContain("late private body");
+});
+it("renders literal related private cache readback only after the exact explicit local read", async () => {
+  const related = relatedSources({ classification: "local_related_context_not_model_input", memory_status: "no_learning", sources: [{ connection_ref: { id: "connection", revision: 2 }, item_refs: [item], coverage: state.coverage, freshness: state.freshness, content: "must not become a task result" }] });
+  expect(JSON.stringify(related)).not.toContain("must not become");
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ item: { ref: item, content: { body: "<script>literal private context</script>", refresh_token: "not rendered" } }, memory_status: "no_learning" }));
+  render(<RelatedSourcesReview related={related} ownerPrincipalId="owner" ownerSessionId="session" />);
+  expect(apiFetch).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByLabelText(/I acknowledge opening/)); fireEvent.click(screen.getByRole("button", { name: /Open related private item/ }));
+  expect(await screen.findByLabelText("Private related cache readback")).toHaveTextContent("<script>literal private context</script>");
+  expect(document.querySelector("script")).toBeNull(); expect(document.body.textContent).not.toContain("not rendered");
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[0][1]?.body))).toEqual({ acknowledge_private_read: true });
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
 it("loads redacted scope coverage without contacting the provider and syncs only exact acknowledged grants", async () => {
   vi.mocked(apiFetch).mockResolvedValueOnce(response(state)).mockResolvedValueOnce(response({ ...state, state: undefined, job_id: "job", status: "succeeded", replayed: false, memory_status: "no_learning" })).mockResolvedValueOnce(response(state));
   render(<ConnectionSyncPanel {...props} />);

@@ -4,6 +4,46 @@ import { withMailDeadline } from "./mailApi";
 
 export type SyncProvider = "gmail" | "calendar";
 export interface SourceItemRef { provider: SyncProvider; opaque_id: string; revision: string; content_digest: string; privacy: "owner_private"; expires_at: string }
+export interface ConnectedSource { connection_ref: { id: string; revision: number }; item_refs: SourceItemRef[] }
+export interface RelatedSelection { sources: ConnectedSource[]; acknowledged: boolean }
+export function connectedTaskInput(selection: RelatedSelection | null): { connected_sources?: ConnectedSource[]; acknowledge_connected_sources?: true } {
+  if (!selection?.sources.length) return {};
+  if (!selection.acknowledged) throw Error("Acknowledge the exact local related references before creating the task.");
+  const sources = connectedSources(selection.sources);
+  if (sources.some(group => group.item_refs.some(ref => Date.parse(ref.expires_at) <= Date.now()))) throw Error("Related source references expired; refresh and select current references.");
+  return { connected_sources: sources, acknowledge_connected_sources: true };
+}
+export function normalizeConnectedRequest<T extends { connected_sources?: ConnectedSource[]; acknowledge_connected_sources?: true }>(request: T): T {
+  const { connected_sources, acknowledge_connected_sources, ...legacy } = request;
+  return { ...legacy, ...connectedTaskInput(connected_sources?.length ? { sources: connected_sources, acknowledged: acknowledge_connected_sources === true } : null) } as T;
+}
+export interface RelatedSources { classification: "local_related_context_not_model_input"; memory_status: "no_learning"; sources: (ConnectedSource & { coverage: SyncProjection["coverage"]; freshness: SyncProjection["freshness"] })[] }
+export function connectedSources(value: unknown): ConnectedSource[] {
+  if (!Array.isArray(value) || value.length > 3) throw Error("Related sources exceed the connection limit.");
+  const connections = new Set<string>(), refs = new Set<string>();
+  return value.map(group => {
+    if (!record(group) || !record(group.connection_ref) || !text(group.connection_ref.id) || !Number.isSafeInteger(group.connection_ref.revision)
+      || Number(group.connection_ref.revision) < 1 || connections.has(group.connection_ref.id) || !Array.isArray(group.item_refs) || !group.item_refs.length) throw Error("Related source binding is invalid.");
+    connections.add(group.connection_ref.id);
+    const items = group.item_refs.map(item => {
+      if (!record(item) || !["gmail", "calendar"].includes(String(item.provider))) throw Error("Related source provider is invalid.");
+      const ref = sourceItem(item, item.provider as SyncProvider), key = `${ref.provider}:${ref.opaque_id}`;
+      if (refs.has(key) || refs.size >= 10) throw Error("Related sources must contain at most ten unique items.");
+      refs.add(key); return ref;
+    });
+    if (new Set(items.map(item => item.provider)).size !== 1) throw Error("Related connection providers differ.");
+    return { connection_ref: { id: group.connection_ref.id, revision: Number(group.connection_ref.revision) }, item_refs: items };
+  });
+}
+export function relatedSources(value: unknown): RelatedSources {
+  if (!record(value) || value.classification !== "local_related_context_not_model_input" || value.memory_status !== "no_learning") throw Error("Local related-source receipt is invalid.");
+  const groups = connectedSources(value.sources);
+  return { classification: "local_related_context_not_model_input", memory_status: "no_learning", sources: groups.map((group, index) => {
+    const raw = (value.sources as Record<string, unknown>[])[index];
+    const safe = syncProjection({ ...raw, items: group.item_refs, state: "ready", connection_id: group.connection_ref.id, active_job_id: null, cursor_revision: 0, reservation_state: "available", external_effect_state: "none", unresolved_jobs: [] }, group.item_refs[0].provider, group.connection_ref.id);
+    return { ...group, coverage: safe.coverage, freshness: safe.freshness };
+  }) };
+}
 export interface SyncSelection {
   goal_ref: { id: string; revision: number }; connection_ref: { id: string; revision: number };
   source_scope: { provider: SyncProvider; consents: { id: string; revision: number }[]; label_ids: string[]; thread_keys: string[] };

@@ -86,6 +86,7 @@ describe("MailPanel", () => {
       label_ids: ["INBOX"],
       window_days: 7,
       max_messages: 1,
+      sync_metadata_limit: 50,
       source_read_allowed: true,
       source_revision: 5,
       model_egress_allowed: true,
@@ -133,6 +134,8 @@ describe("MailPanel", () => {
       provider_contact: true,
       control_job_id: "mail-control-1",
     };
+    const ref = { provider: "gmail", opaque_id: "a".repeat(64), revision: "b".repeat(64), content_digest: "c".repeat(64), privacy: "owner_private", expires_at: consent.expires_at };
+    const related = { classification: "local_related_context_not_model_input", memory_status: "no_learning", sources: [{ connection_ref: { id: "connection-1", revision: 3 }, item_refs: [ref], coverage: { partial: true, pages_read: 1 }, freshness: { expires_at: consent.expires_at } }] };
     const replyReceipt = {
       status: "accepted",
       task_id: "mail-reply-task-1",
@@ -151,6 +154,7 @@ describe("MailPanel", () => {
     };
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/connections/connection-1/sync")) return Promise.resolve(response({ connection_id: "connection-1", state: "ready", active_job_id: null, cursor_revision: 1, reservation_state: "available", external_effect_state: "none", unresolved_jobs: [], items: [ref], coverage: related.sources[0].coverage, freshness: related.sources[0].freshness, selection: { goal_ref: { id: "goal-1", revision: 4 }, connection_ref: { id: "connection-1", revision: 3 }, source_scope: { provider: "gmail", consents: [{ id: "consent-1", revision: 5 }], label_ids: ["INBOX"], thread_keys: [] }, window: { start: new Date().toISOString(), end: consent.expires_at }, max_items: 50 } }));
       if (url.endsWith("/api/capabilities/mail/connections")) return Promise.resolve(response({ connections: [connection] }));
       if (url.endsWith("/api/capabilities/mail/read-consents")) return Promise.resolve(response({ consents: [consent], provider_contact: false }));
       if (url.endsWith("/api/capabilities/mail/watches/watch-1")) return Promise.resolve(response({ watch }));
@@ -164,12 +168,15 @@ describe("MailPanel", () => {
       if (url.endsWith("/api/capabilities/mail/reply-tasks")) {
         expect(init?.method).toBe("POST");
         const body = JSON.parse(String(init?.body));
+        expect(body.connected_sources).toEqual([{ connection_ref: { id: "connection-1", revision: 3 }, item_refs: [ref] }]);
+        expect(body.acknowledge_connected_sources).toBe(true);
+        expect(JSON.stringify(body)).not.toContain("Private source body");
         expect(body.message_binding_id).toBe("message-binding-1");
         expect(body.expected_model_consent_revision).toBe(6);
         expect(body.reply_intent).toBe("Ask for the next available time.");
         return Promise.resolve(response(replyReceipt));
       }
-      if (url.endsWith("/api/capabilities/mail/reply-tasks/mail-reply-task-1/draft")) return Promise.resolve(response({ ...verifiedDraft, task_id: "mail-reply-task-1" }));
+      if (url.endsWith("/api/capabilities/mail/reply-tasks/mail-reply-task-1/draft")) return Promise.resolve(response({ ...verifiedDraft, task_id: "mail-reply-task-1", related_sources: related }));
       throw new Error(`Unexpected Mail request: ${url}`);
     });
 
@@ -182,9 +189,14 @@ describe("MailPanel", () => {
     await screen.findByText("Private source body");
 
     fireEvent.change(screen.getByLabelText("Reply intent"), { target: { value: "Ask for the next available time." } });
+    fireEvent.click(await screen.findByLabelText(/Use local reference/));
+    fireEvent.click(screen.getByRole("button", { name: "Request local reply draft" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Acknowledge the exact local related references");
+    fireEvent.click(screen.getByLabelText(/I acknowledge these exact references/));
     fireEvent.click(screen.getByRole("button", { name: "Request local reply draft" }));
     await screen.findByDisplayValue("A private draft body");
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true);
+    expect(screen.getByLabelText("Task local related references")).toHaveTextContent("local_related_context_not_model_input");
     expect(screen.getByText(/sent: no · provider draft: no/)).toBeInTheDocument();
   });
 

@@ -1,3 +1,4 @@
+import type { ConnectedSource, RelatedSources } from "../lib/connectionSync";
 export type MessageRole = "user" | "agent" | "step" | "status" | "error" | "proactive" | "approval" | "clarification";
 
 export interface ChatMessage {
@@ -1561,6 +1562,8 @@ export interface CalendarEventListResponse {
 }
 
 export interface CalendarMeetingPrepInput {
+  connected_sources?: ConnectedSource[];
+  acknowledge_connected_sources?: true;
   schema_version: 1;
   consent_id: string;
   event_binding_id: string;
@@ -1706,6 +1709,7 @@ export interface CalendarExecutionProjection {
 }
 
 export interface CalendarResultPreview {
+  related_sources?: RelatedSources;
   schema_version: 1;
   capability_id: "calendar.meeting-prep.v1";
   artifact_id: string;

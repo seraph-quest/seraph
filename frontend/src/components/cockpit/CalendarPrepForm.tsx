@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectionSyncPanel } from "./ConnectionSyncPanel";
+import { connectedTaskInput } from "../../lib/connectionSync";
+import type { RelatedSelection } from "../../lib/connectionSync";
 import { CalendarReschedulePanel } from "./CalendarReschedulePanel";
 
 import {
@@ -175,6 +177,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [title, setTitle] = useState("Prepare for meeting");
+  const [relatedSelection, setRelatedSelection] = useState<RelatedSelection | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cadenceKind, setCadenceKind] = useState<"5min" | "hourly" | "6h" | "daily">("daily");
   const [timezone, setTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
@@ -254,7 +257,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     setCalendarListRevision("");
     setSelectedCalendarId("");
     consentRef.current = null;
-    setConsent(null);
+    setConsent(null); setRelatedSelection(null);
     setEventResponse(null);
     setSelectedEventId("");
     setCalendarError(null);
@@ -387,6 +390,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     return {
       schema_version: 1,
       input: {
+        ...connectedTaskInput(relatedSelection),
         schema_version: 1,
         consent_id: currentConsent.consent_id,
         event_binding_id: selectedEvent.event_binding_id,
@@ -440,7 +444,9 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
 
   const submitPrep = async () => {
     setError(null);
-    const request = buildPrepRequest();
+    let request: CreateCalendarPrepRequest | null;
+    try { request = buildPrepRequest(); }
+    catch (reason) { setError((reason as Error).message); return; }
     if (!request) {
       setError("Choose a current goal, active consent, returned event, and bounded title before preparing.");
       return;
@@ -524,7 +530,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     setPending(null);
     setConfirmedPrep(null);
     setSchedule(null);
-    setConsent(null);
+    setConsent(null); setRelatedSelection(null);
     consentRef.current = null;
     setEventResponse(null);
     setSelectedEventId("");
@@ -580,7 +586,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
           <div className="text-xs opacity-70 sm:self-end">{calendars.length ? `${calendars.length} calendars returned · list revision ${calendarListRevision.slice(0, 18)}…` : "Verify the connection to load a bounded list."}</div>
           <fieldset className="sm:col-span-2 rounded border border-white/10 p-2" disabled={Boolean(pending)}><legend className="px-1 text-xs font-semibold">Finite read consent</legend><div className="grid gap-2 sm:grid-cols-2"><label>Window minutes<input className="cockpit-input mt-1 w-full" type="number" min={5} max={syncAcknowledged ? 10080 : 1440} value={windowMinutes} onChange={(event) => setWindowMinutes(event.currentTarget.value)} /></label><label>Maximum events<input className="cockpit-input mt-1 w-full" type="number" min={1} max={50} value={maxEvents} onChange={(event) => setMaxEvents(event.currentTarget.value)} /></label><label>Expires at (UTC)<input className="cockpit-input mt-1 w-full" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.currentTarget.value)} /></label><label className="flex items-center gap-2 self-end"><input type="checkbox" checked={allowRemoteModel} onChange={(event) => setAllowRemoteModel(event.currentTarget.checked)} />Allow the governed OpenRouter model</label></div><div className="mt-2 flex flex-wrap gap-3 text-xs">{(["summary", "start", "end", "location", "description", "attendees"] as CalendarAllowedField[]).map((field) => <label key={field} className="flex items-center gap-1"><input type="checkbox" checked={allowedFields.includes(field)} disabled={REQUIRED_ALLOWED_FIELDS.includes(field)} onChange={(event) => toggleField(field, event.currentTarget.checked)} />{field}{REQUIRED_ALLOWED_FIELDS.includes(field) ? " (required)" : ""}</label>)}</div><label className="mt-2 flex gap-2 text-xs"><input type="checkbox" checked={syncAcknowledged} onChange={e => setSyncAcknowledged(e.target.checked)} />Also grant bounded metadata sync: up to 50 items per run and an explicitly selected window up to seven days. Private fields stay within this finite consent; no model egress is granted.</label><button type="button" className="cockpit-feedback-button mt-2" onClick={() => void createConsent()} disabled={Boolean(busy) || Boolean(pending) || !hasRequiredAllowedFields || !selectedCalendarIsCurrent}>Create finite consent and read events</button></fieldset>
           {consent && <div className={`sm:col-span-2 rounded border p-2 text-xs ${consent.state === "active" ? "border-emerald-500/30" : "border-amber-500/40"}`} role="status">Consent {consent.consent_id} · {consent.state} · revision {consent.revision} · digest {consent.consent_digest} · expires {new Date(consent.expires_at).toLocaleString()}{consent.state !== "active" ? " · refresh consent before continuing" : ""}</div>}
-          {consent && Boolean(consent.sync_metadata_limit) && selectedConnection && <div className="sm:col-span-2"><ConnectionSyncPanel provider="calendar" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={selectedConnection.connection_id} connectionRevision={selectedConnection.revision} connectionState={selectedConnection.state} consent={{ id: consent.consent_id, revision: consent.revision, goalId: consent.goal_id, goalRevision: consent.goal_revision, state: consent.state, expiresAt: consent.expires_at, metadataLimit: consent.sync_metadata_limit ?? 0, privateLimit: Math.min(10, consent.max_events) }} initialWindow={{ start: consent.created_at, end: new Date(Math.min(Date.parse(consent.created_at) + consent.window_minutes * 60000, Date.parse(consent.expires_at))).toISOString() }} /></div>}
+          {consent && Boolean(consent.sync_metadata_limit) && selectedConnection && <div className="sm:col-span-2"><ConnectionSyncPanel relatedGoal={selectedGoal && goalRevision(selectedGoal) ? { id: selectedGoal.id, revision: goalRevision(selectedGoal)! } : null} onRelatedChange={setRelatedSelection} provider="calendar" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={selectedConnection.connection_id} connectionRevision={selectedConnection.revision} connectionState={selectedConnection.state} consent={{ id: consent.consent_id, revision: consent.revision, goalId: consent.goal_id, goalRevision: consent.goal_revision, state: consent.state, expiresAt: consent.expires_at, metadataLimit: consent.sync_metadata_limit ?? 0, privateLimit: Math.min(10, consent.max_events) }} initialWindow={{ start: consent.created_at, end: new Date(Math.min(Date.parse(consent.created_at) + consent.window_minutes * 60000, Date.parse(consent.expires_at))).toISOString() }} /></div>}
           {eventsError && <div className="sm:col-span-2 text-xs text-amber-200" role="alert">{eventsError}<button type="button" className="ml-2 underline" onClick={() => consent && void loadEvents(consent.connection_id, consent)}>Refresh events</button></div>}
           {eventsLoading && <div className="sm:col-span-2 text-xs opacity-70" role="status">Loading redacted event bindings…</div>}
           {eventResponse && <label className="sm:col-span-2">Event<select aria-label="Event binding" className="cockpit-input mt-1 w-full" value={selectedEventId} onChange={(event) => setSelectedEventId(event.currentTarget.value)} disabled={Boolean(pending)}><option value="">Choose a returned event</option>{eventResponse.events.map((event: CalendarEventOption) => <option key={event.event_binding_id} value={event.event_binding_id}>{event.summary} · {displayEventTime(event.start)} · binding {event.event_binding_id}</option>)}</select><span className="mt-1 block text-[10px] opacity-60">{eventResponse.events.length} events · pages {eventResponse.pages_read} · {eventResponse.truncated ? "more omitted by server" : "bounded list complete"} · returned list revision {eventResponse.calendar_list_revision}{selectedEvent ? ` · selected event revision ${selectedEvent.calendar_list_revision}` : ""}</span></label>}

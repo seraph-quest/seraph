@@ -40,6 +40,23 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Finite public goal programme authority: Shipped** on `develop` revisions
+containing the independently reviewed
+[#1003](https://github.com/seraph-quest/seraph/issues/1003) implementation merge.
+This is the intended post-merge scope; before that merge, it describes only the
+source branch. Supported controls include operator-supplied public-brief review,
+finite stable-owner authority, pause/revoke and passive correction/expiry
+recovery under [ADR-027](./decisions/027-standing-public-goal-programmes.md).
+Discovery and digest execution are not supplied by this authority milestone.
+Canonical Goal storage and native job/artifact/accounting responsibilities remain
+with their existing owners. The isolated Linux SQLite/ASGI receipt covers
+configuration/control, original finite logout/restart clocks, strict review,
+owner recovery, native-writer binding validation and fail-closed corrections;
+external sockets and inference are denied, with zero reservation/spend.
+Executor contact/adoption CAS integration is still required before executor
+activation. macOS execution, provider availability and model usefulness are not
+established by these mechanical checks.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

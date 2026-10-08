@@ -151,7 +151,7 @@ def resolve_input(value, verified_outputs):
     return value
 
 
-async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output):
+async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output, authority_check=None):
     """Task-specific checkpoint fields on the existing private artifact owner."""
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workspace import canonical_workspace_root
@@ -177,7 +177,7 @@ async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_i
         status="succeeded", readback_id="general-artifact:" + key[:32],
         verified_at=datetime.now(timezone.utc).isoformat(),
         details={"verified": True, "output_exists": True, "no_learning": True},
-        owner=owner, fencing_token=fence)
+        owner=owner, fencing_token=fence, **({"readback_authority_check": authority_check} if authority_check is not None else {}))
     return binding, json.loads(actual)["output"]
 
 
@@ -293,10 +293,17 @@ class GeneralTaskService:
         except Exception as exc:
             raise BoardError("general_task_plan_invalid", "Plan violates a registered tool contract", status_code=422) from exc
         strategy = await self.strategy(owner, request.input.goal_ref)
-        return GeneralTaskEnvelope(task_input=request.input, plan=request.plan,
+        envelope = GeneralTaskEnvelope(task_input=request.input, plan=request.plan,
             descriptors=list(selected.values()), strategy=strategy)
+        from src.work_board.document_preparation import check_envelope
+        check_envelope(envelope)
+        if any(step.tool_id == "document_prepare" for step in request.plan.steps) and request.input.document_source is None:
+            raise BoardError("document_local_consent_required", "Explicit source selection is required", status_code=422)
+        return envelope
 
     async def create(self, db, owner, request: GeneralTaskCreate):
+        if request.input.document_source is not None and request.plan is None:
+            raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
         from sqlalchemy import select
         from src.db.models import WorkBoardTask, WorkBoardEvent
@@ -348,6 +355,9 @@ class GeneralTaskService:
         else:
             envelope = await self.validate(owner, request)
         envelope = envelope.model_copy(update={"evidence": evidence})
+        if envelope.task_input.document_source is not None:
+            from src.work_board.document_preparation import resolve
+            await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=CAPABILITY, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision, input=envelope.model_dump(mode="json"),
@@ -624,6 +634,10 @@ class GeneralTaskService:
 
     async def recheck_authority(self, db, owner, envelope):
         self.recheck(envelope)
+        from src.work_board.document_preparation import check_envelope, resolve
+        check_envelope(envelope)
+        if envelope.task_input.document_source is not None:
+            await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
         binding = await self.strategy(owner, envelope.task_input.goal_ref)
         if binding != envelope.strategy:
             raise BoardError("general_task_strategy_changed", "Review the current task method", status_code=409)
@@ -732,9 +746,14 @@ class GeneralTaskService:
             validate_schema(descriptor.output_schema, operator_result)
             validate_schema(step.output_contract, operator_result)
             canonical(operator_result)
+            document_authority = None
+            if descriptor.tool_id == "document_prepare":
+                from src.work_board.document_preparation import invocation
+                async def document_authority(db, run):
+                    await invocation(db, principal, job_id, fence)
             artifact, verified_output = await write_step_artifact(jobs, job_id=job_id,
                 owner=owner, fence=fence, plan_digest=digest(envelope.model_dump(mode="json")),
-                step_id=step.step_id, output=operator_result)
+                step_id=step.step_id, output=operator_result, authority_check=document_authority)
             outputs[step.step_id] = verified_output
             await jobs.record_readback(job_id, effect_type="general_tool_call",
                 effect_id=effect_id, status="succeeded",
@@ -745,7 +764,8 @@ class GeneralTaskService:
                 details={"step_id": step.step_id, "tool_id": descriptor.tool_id,
                          "verified": True, "output_exists": True,
                          "file_path": artifact["file_path"], "no_learning": True},
-                owner=owner, fencing_token=fence)
+                owner=owner, fencing_token=fence,
+                **({"readback_authority_check": document_authority} if document_authority is not None else {}))
             await jobs.record_checkpoint(job_id, checkpoint_id="general:verified:" + step.step_id,
                 state=artifact, checkpoint_payload=artifact, owner=owner, fencing_token=fence)
             remaining.remove(step)

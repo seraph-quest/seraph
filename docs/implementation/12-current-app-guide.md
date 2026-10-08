@@ -349,6 +349,70 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
 
+### Bounded general document reading
+
+**Status:** Partial; availability follows the independently reviewed installed
+revision containing the milestone. [ADR-031](./decisions/031-bounded-general-documents.md) owns the
+separate `document.read.v1` target; invoice comparison above remains unchanged.
+
+The finite local profile selects one PDF, DOCX, XLSX or UTF-8 CSV against a
+current bounded Goal. Reserve its exact byte length/digest, stream the original
+to the authenticated document-source endpoint, seal its encrypted readback, then
+request one explicit bounded selection. The private response includes physical
+PDF page, DOCX paragraph/table or spreadsheet cell references and the immutable
+original digest. Spreadsheet formula literals and cached values remain separate;
+cached freshness is unknown and nothing evaluates a formula or macro.
+Array-formula anchors retain the exact literal text and their inert cached value;
+data-table formulas or formula objects without expression text explicitly block
+the selected extraction, with no object representation returned as evidence.
+Scanned, protected, malformed, external-link and oversized sources show unsupported state
+and recovery instead of invented content. Private evidence never enters generic
+task events, and selection grants no source/model egress or learning authority.
+
+After a successful private read, select at most 16 individual cited paragraphs,
+pages or table cells and acknowledge their local use. “Propose local preparation”
+persists an inert one-step Work task; review and accept it in its existing Work
+card. This path makes no model call and grants no model egress. After execution,
+explicitly open the authenticated private preparation from that same card,
+including after reload. It presents only the exact selected literal excerpts
+with citations and separate inert formula/cached-value fields; cached freshness
+remains unknown. The complete private view is capped at 16 KiB and is never
+truncated. Missing or changed source/Goal/Root, incomplete native execution or
+unverified readback blocks that view. Ordinary artifacts contain references and
+digests, never these excerpts. Response loss offers an explicit retry of the
+same proposal key; selection changes clear it and do not automatically create,
+accept or execute another task.
+
+The source index preserves redacted owned reservations after reload. Explicit
+deletion requires the current revision, tombstones first and frees charged quota
+only after exact private cleanup. It shows whether this host's actual bounded
+cross-process upload-lock proof is ready; an unproved, stopped or changed
+filesystem profile blocks new uploads with a readable recovery state. Restart
+the managed document service to obtain a fresh local proof. That runtime check
+applies on each peer host; this receipt does not establish native macOS execution.
+Interrupted uploads show their upload writer kind and a separate cleanup-only
+reconcile control. Recovery must exclusively acquire the original generation/
+slot/nonce/source/owner-bound private lease inode before releasing the writer;
+it never retries, seals or adopts partial bytes. A held, missing or replaced
+lease remains charged. Unknown parser cleanup holds the host slot
+across new requests and restarts. Original-reader reconciliation accepts only its
+private nonce/job/digest/generation/PID-bound positive wait witness; a reap
+without recorded output does not reconstruct evidence. The same source family
+reuses current canonical input-artifact ownership, encryption and quota owners;
+there is no second store or queue. Independent original deadlines and positive
+supervision bound two lifetime attempts. Local extraction makes no provider call.
+Parser prelaunch filesystem failure does not publish a host slot. After positive
+reap, evidence adoption rechecks current Root and exact active Goal revision in
+the same canonical writer; stale authority releases positively closed parser
+capacity but adopts no evidence. A cancelled or unadopted encrypted candidate
+can remain cleanup-required until exact private deletion, with quota retained.
+
+Linux local format/process receipts establish only their checked mechanics.
+macOS has a named native network-denial adapter but no native execution receipt;
+unavailable resource or network confinement visibly blocks this optional profile
+while the CPU core stays usable. This profile establishes literal extraction,
+not OCR, malware certification, model understanding or general usefulness.
+
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU

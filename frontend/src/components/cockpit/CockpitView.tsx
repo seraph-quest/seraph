@@ -1,6 +1,7 @@
 import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
+import { DocumentReader } from "./DocumentReader";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
@@ -16713,6 +16714,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("outputs_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
+                  <DocumentReader
+                    goals={activeGoalsForCockpit}
+                    ownerPrincipalId={operatorAuth.principalId}
+                    ownerSessionId={operatorAuth.sessionId}
+                    onOpenTask={(taskId) => {
+                      setFocusTaskId(taskId);
+                      selectCockpitSection("work");
+                    }}
+                  />
                   <div className="cockpit-list">
                     {artifacts.map((artifact) => {
                       const lineage = resolveArtifactLineage(artifact);

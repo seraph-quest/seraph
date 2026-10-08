@@ -60,6 +60,54 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Bounded general documents: Partial.**
+Availability follows the independently reviewed installed revision containing
+the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
+owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,
+returns exact citations and immutable original digests, and retains encrypted
+private source/evidence readback. Bounded isolated parsing and a local
+acknowledged preparation through a persisted reviewed Work
+task share the current owners. The static one-step native adapter uses zero
+inference, produces a verified reference-only artifact, and exposes at most 16
+selected leaf citations in a complete authenticated private view capped at 16 KiB.
+Reload uses explicit private readback from the existing task card; late authority
+or fence changes cannot adopt a successful preparation. These local mechanics
+remain Partial: general question answering and model synthesis are outside this
+local-only profile.
+Selected-file cockpit intake, bounded isolated
+parsing, unsupported reasons and positive original-reader cleanup share current
+canonical ownership and quota. Local extraction does not authorize model egress
+or learning. A bounded per-start local cross-process lock proof gates new general
+uploads on the actual filesystem; missing/stale proof blocks admission without
+requiring a new invoice lifecycle service. Interrupted uploads reconcile only
+their exact positively closed private lease, never partial-byte adoption or
+clock-based release. Known prelaunch filesystem failure cannot retain a parser
+slot; late Root/Goal changes or cancellation permit positive cleanup only and
+do not adopt evidence. Unknown private output absence stays charged and visible.
+Ordinary and array-anchor formula expressions remain inert literals;
+data-table formulas and objects without literal expression text are unsupported.
+OCR, protected/macro/external-linked sources and general question
+answering are outside this profile; Linux mechanics do not establish native
+macOS execution or model quality.
+
+## Task conversation continuity
+
+**Shipped** within the bounded
+[#1021](https://github.com/seraph-quest/seraph/issues/1021) milestone contract;
+availability requires installation of the reviewed milestone merge:
+same-task continuation into a new owned chat, bounded current task intent and
+factual references, selected read-only historical recovery, locally readable
+authenticated operator corrections with opaque ID/time-only assistant handoff,
+separate next actions/questions
+and Unknown state. Existing chat paths consume the same bounded current-owner
+factual/reference handoff; selected recovered history stays blocked for assistant
+egress. Guardian transcript context requires the live current chat principal and
+model grant; unscoped service/report callers receive no transcript context.
+Worker/review notes are not operator corrections; correction body hashes stay
+local. No task ownership, execution authority or model egress is renewed.
+The [operator contract](./12-current-app-guide.md#task-conversation-continuity)
+names the isolated authenticated SQLite/local artifact and mocked UI checks.
+
 ## Typed general-task contract
 
 **Shipped** on `develop` revisions containing the independently reviewed
@@ -351,6 +399,28 @@ When this file is updated on an open feature branch, it reflects the intended po
 High-risk strategic wording in this status page remains governed by [19. Strategy Claim Ledger](/research/strategy-claim-ledger).
 
 ## Current Snapshot
+
+Scoped connected-source synchronization is **Partial**: bounded Python source
+synchronization and related-source Mail/Calendar preparation are implemented;
+real-account operation and native macOS execution remain unverified. It requires existing operator
+ownership enrollment and uses explicit metadata grants,
+one fixed scope and canonical root reservation per connection, encrypted page
+cursors with complete-page adoption/readback, fifty metadata items/three pages,
+ten separately selected private reads, and original-grant recovery/revocation.
+Physical-only cleanup preserves OAuth-bearing effect uncertainty and exposes
+old unresolved roots separately from connection capacity. Linux and Darwin
+lifetime witnesses use a closed native ABI contract; Darwin fixtures do not
+establish native macOS execution. Fresh acknowledged scope generations can
+rebind current versioned items without renewing old jobs or citations. Existing
+native Mail reply and Calendar preparation tasks accept explicit related-source
+selection/use acknowledgment (three connections, ten unique citations), require
+the same original Goal, and revalidate source authority before primary contact
+and final adoption. Related private bytes/references stay out of model requests;
+local results contain only classified refs, coverage/freshness and `no_learning`.
+Disposable SQLite,
+local HTTP and separate-process checks establish mechanics;
+they do not establish real-account or production usefulness. See the
+[owning contract](./12-current-app-guide.md#scoped-connected-source-synchronization).
 
 - [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
   native public browser → deterministic CPU dossier → local plain-text report

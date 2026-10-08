@@ -56,6 +56,7 @@ from src.auth.service import (
 )
 from src.db.engine import get_session
 from src.guardian.state import build_guardian_state
+from src.security.trust_contract import TrustPrincipal
 from src.models.schemas import ChatIngressEnvelope, WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.scheduler.connection_manager import ws_manager
@@ -238,6 +239,7 @@ async def _build_agent(
     *,
     owner_principal_id: str | None = None,
     owner_session_id: str | None = None,
+    trust_principal: TrustPrincipal | None = None,
 ):
     """Build the appropriate agent (onboarding vs normal) for this request.
 
@@ -255,6 +257,7 @@ async def _build_agent(
                 user_message=message,
                 owner_principal_id=owner_principal_id,
                 owner_session_id=owner_session_id,
+                trust_principal=trust_principal,
             ),
             timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
         )
@@ -1148,6 +1151,7 @@ async def websocket_chat(websocket: WebSocket):
                 ws_msg.message,
                 owner_principal_id=operator.principal.principal_id,
                 owner_session_id=operator.session_id,
+                trust_principal=chat_principal,
             )
             await websocket.send_text(
                 WSResponse(

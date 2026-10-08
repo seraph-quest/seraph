@@ -12,6 +12,10 @@ const plan = { task_id: task.task_id, task_revision: 2, accepted: false, no_lear
   task_input: { goal_ref: goal.id, intent: "Prepare a local note", limits: { max_steps: 16, max_inference_calls: 12, wall_seconds: 900, depth: 0, max_outstanding_children: 2, max_cost_microusd: 0 } },
   plan: { schema_version: 1, revision: 1, steps: [{ step_id: "note", tool_id: "local.note", input: { text: "<script>untrusted</script>" }, depends_on: [], output_contract: { type: "object" } }] },
   descriptors: [{ tool_id: "local.note", version: "1", input_schema: { type: "object" }, output_schema: { type: "object" }, effects: ["local_artifact"], permissions: ["artifact_write"], deadline: 30, verifier: "artifact_readback" }], strategy: { status: "none", reason: "baseline" } };
+const documentBinding = { artifact_ref: "document-source:11111111-1111-4111-8111-111111111111", source_revision: 7, metadata_digest: "11".repeat(32), citation_refs: ["pdf#page=1"], selection_digest: "22".repeat(32), acknowledge_local_use: true as const };
+const documentPlan = { ...plan, accepted: true, task_input: { ...plan.task_input, limits: { max_steps: 1, max_inference_calls: 0, wall_seconds: 60, depth: 0, max_outstanding_children: 0, max_cost_microusd: 0 }, document_source: documentBinding },
+  plan: { schema_version: 1, revision: 1, steps: [{ step_id: "prepare", tool_id: "document_prepare", input: { selection_digest: documentBinding.selection_digest }, depends_on: [], output_contract: { type: "object" } }] },
+  descriptors: [{ tool_id: "document_prepare", version: "1", input_schema: { type: "object" }, output_schema: { type: "object" }, effects: ["owner_private_read", "local_compute"], permissions: ["capability_execute", "document_local_use"], deadline: 30, verifier: "document_selected_private_readback.v1" }] };
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status }); }
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
 
@@ -51,12 +55,62 @@ it("shows descriptor effects and exact limits, then accepts only the reviewed re
   const changed = vi.fn(); vi.mocked(apiFetch).mockImplementation(async () => response(plan));
   render(<GeneralTaskPanel {...owner} task={task} onChanged={changed} />);
   await screen.findByText("note · local.note v1");
+  expect(screen.queryByRole("button", { name: "Open authenticated private preparation" })).toBeNull();
   expect(screen.getByText(/Effects: local_artifact/)).toHaveTextContent("artifact_write");
   expect(screen.getByRole("button", { name: "Accept reviewed task plan" })).toBeDisabled();
   fireEvent.click(screen.getByText("I reviewed this exact plan, effects, permissions and limits."));
   fireEvent.click(screen.getByRole("button", { name: "Accept reviewed task plan" }));
   await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
   expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ action: "promote", expected_revision: 2 });
+});
+
+it("keeps the authenticated document view closed across reload until an explicit canonical task read", async () => {
+  vi.mocked(apiFetch).mockImplementation(async () => response(documentPlan));
+  const mounted = render(<GeneralTaskPanel {...owner} task={task} />);
+  const open = await screen.findByRole("button", { name: "Open authenticated private preparation" });
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/api/documents/preparations/"))).toBe(false);
+  mounted.unmount();
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  await screen.findByRole("button", { name: "Open authenticated private preparation" });
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+  expect(open).toBeDefined();
+});
+
+it("opens only the canonical task private view and rejects a blocked or stale readback", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(documentPlan)).mockResolvedValueOnce(response({ detail: { code: "document_preparation_not_completed" } }, 409));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open authenticated private preparation" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("not complete");
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/api/documents/preparations/task-one");
+  expect(vi.mocked(apiFetch).mock.calls[1][1]?.body).toBeUndefined();
+  expect(screen.queryByRole("region", { name: "Authenticated private cited preparation" })).toBeNull();
+});
+
+it("surfaces stale source authority as a blocked private readback", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(documentPlan)).mockResolvedValueOnce(response({ detail: { code: "document_preparation_source_changed" } }, 409));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open authenticated private preparation" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("document_preparation_source_changed");
+  expect(screen.queryByRole("region", { name: "Authenticated private cited preparation" })).toBeNull();
+});
+
+it("rejects an unknown provider-contact readback instead of rendering private text", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(documentPlan)).mockResolvedValueOnce(response({ task_id: task.task_id, status: "succeeded", sections: [{ source_ref: "pdf#page=1", text: "must stay hidden" }], no_learning: true, provider_contacts: 1 }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open authenticated private preparation" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("provider contact");
+  expect(screen.queryByText("must stay hidden")).toBeNull();
+});
+
+it("renders the authenticated private cited view only after a successful explicit readback", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(documentPlan)).mockResolvedValueOnce(response({ task_id: task.task_id, status: "succeeded", sections: [{ source_ref: "pdf#page=1", text: "owner private paragraph" }], no_learning: true, provider_contacts: 0 }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open authenticated private preparation" }));
+  const view = await screen.findByRole("region", { name: "Authenticated private cited preparation" });
+  expect(view).toHaveTextContent("owner private paragraph");
+  expect(view).toHaveTextContent("Cached value unavailable; freshness unknown. Formula remains inert.");
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain(encodeURIComponent(task.task_id));
 });
 
 it("rejects stale readbacks and requires refresh after acceptance conflict", async () => {

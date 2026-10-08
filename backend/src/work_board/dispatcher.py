@@ -348,7 +348,10 @@ class _RoutineV2Input(BaseModel):
     invocation_uuid: str = Field(min_length=1, max_length=256)
 
 
-class CalendarMeetingPrepInput(BaseModel):
+from src.integrations.connected_source_contracts import ConnectedSourceTaskInput
+
+
+class CalendarMeetingPrepInput(ConnectedSourceTaskInput):
     """Strict, provider-identity-free input for one bounded prep task."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -420,7 +423,7 @@ class MailWatchInput(BaseModel):
     max_messages: int = Field(..., ge=1, le=10)
 
 
-class MailReplyDraftInput(BaseModel):
+class MailReplyDraftInput(ConnectedSourceTaskInput):
     """Server-produced, body-free input for one reviewed Mail reply draft."""
 
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
@@ -486,21 +489,22 @@ _AUTHORITY_INPUT_KEYS = frozenset(
 )
 
 
-def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
+def _reject_authority_input_keys(value: Any, *, path: str = "input", allow_connected_citations: bool = False) -> None:
     """Reject server-owned authority fields at every input nesting level."""
 
     if isinstance(value, Mapping):
         for key, child in value.items():
             normalized = str(key).strip().casefold().replace("-", "_")
-            if normalized in _AUTHORITY_INPUT_KEYS:
+            citation_expiry = allow_connected_citations and normalized == "expires_at" and re.fullmatch(r"input\.connected_sources\[[0-2]\]\.item_refs\[[0-9]\]", path) is not None
+            if normalized in _AUTHORITY_INPUT_KEYS and not citation_expiry:
                 raise TypedInputError(
                     "typed_input_authority_field",
                     f"{path} contains a server-owned authority field",
                 )
-            _reject_authority_input_keys(child, path=f"{path}.{normalized[:64]}")
+            _reject_authority_input_keys(child, path=f"{path}.{normalized[:64]}", allow_connected_citations=allow_connected_citations)
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value[:64]):
-            _reject_authority_input_keys(child, path=f"{path}[{index}]")
+            _reject_authority_input_keys(child, path=f"{path}[{index}]", allow_connected_citations=allow_connected_citations)
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
@@ -666,7 +670,7 @@ def validate_capability_input(
         raise TypedInputError("typed_input_category_invalid", "the capability is not executable as a task")
     if not isinstance(raw, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must be an object")
-    _reject_authority_input_keys(raw)
+    _reject_authority_input_keys(raw, allow_connected_citations=normalized_capability in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     model_type = _typed_input_model(normalized_capability)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the capability input model is unavailable")
@@ -1480,7 +1484,7 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
     try:
-        _reject_authority_input_keys(raw_input)
+        _reject_authority_input_keys(raw_input, allow_connected_citations=capability_id in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     except TypedInputError as exc:
         # Preserve the legacy workspace-envelope contract.  Older callers and
         # their operator receipts intentionally expose one generic invalid
@@ -1567,6 +1571,14 @@ class WorkBoardDispatcher:
         # is reconciled; no client supplied identifier can reach this map.
         self._active_worker_tasks = _ACTIVE_WORKER_TASKS
         self._pipeline_recovery_after = None
+        self.connection_sync_runtime = None
+
+    async def _related_source_references(self, task, inputs, before_boundary, bindings):
+        from src.extensions.source_operations import collect_connected_task_references
+        return await collect_connected_task_references(self.connection_sync_runtime,
+            WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+            goal_id=task.goal_id, goal_revision=int(task.goal_revision),
+            selections=inputs.get("connected_sources"), before_boundary=before_boundary, bindings=bindings)
 
     async def _advance_linked_pipeline(self, task):
         from src.work_board import pipelines
@@ -7533,6 +7545,15 @@ class WorkBoardDispatcher:
                         raise GmailReadError("mail_message_not_found", "The selected Mail message is unavailable", status_code=409, recovery_action="rescan_messages") from exc
                 return connection, consent, binding, provider_message_id, lease
 
+            original_current_context = current_context
+            related_sources = None
+            related_bindings = []
+            async def current_context():
+                nonlocal related_sources
+                value = await original_current_context()
+                related_sources = await self._related_source_references(task, inputs, original_current_context, related_bindings)
+                return value
+
             connection, consent, binding, provider_message_id, _lease = await current_context()
             adapter = GoogleGmailReadonlyAdapter(
                 connection,
@@ -7556,6 +7577,7 @@ class WorkBoardDispatcher:
 
             async def model_call() -> Any:
                 nonlocal effective_route
+                await current_context()
                 from src.approval.runtime import reset_runtime_context, set_runtime_context
                 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
                 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -7686,6 +7708,7 @@ class WorkBoardDispatcher:
                 "caveats": list(draft.caveats),
                 "memory_status": "no_learning",
                 "source_body_digest": second_body_digest,
+                **({"related_sources": related_sources} if related_sources else {}),
                 "effective_route": effective_route or {},
             }
             artifact_relative, artifact_sha256, encrypted = prepare_private_draft(job_id, private_payload)
@@ -7720,6 +7743,7 @@ class WorkBoardDispatcher:
             # publication look like a stale worker and leave the private file
             # unreconciled.
             expected_revision = int(latest.get("revision") or 0)
+            await current_context()
             publish_private_draft(artifact_relative, encrypted)
             artifact_receipt = await self.jobs.record_artifact(job_id, file_path=artifact_relative, artifact_type="mail_reply_draft", owner=lease_owner, fencing_token=fence, expected_revision=expected_revision)
             latest = artifact_receipt
@@ -7727,7 +7751,11 @@ class WorkBoardDispatcher:
             readback_id = f"mail-reply-readback:{uuid.uuid4().hex}"
             readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="mail_reply_draft", target_digest=artifact_sha256, content_sha256=artifact_sha256, readback_id=readback_id, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
             latest = readback
-            await self.jobs.transition_job(job_id, "succeeded", owner=lease_owner, fencing_token=fence, expected_state="running", expected_revision=int(latest.get("revision") or 0), result={"artifact_type": "mail_reply_draft", "artifact_sha256": artifact_sha256, "message_revision": second.metadata.message_revision, "memory_status": "no_learning"}, result_summary="Private Mail reply draft verified", reason=None)
+            await current_context()
+            async def assert_related_terminal(db, run):
+                if related_bindings:
+                    await self.connection_sync_runtime.assert_task_bindings(db, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), related_bindings)
+            await self.jobs.transition_job(job_id, "succeeded", terminal_authority_check=assert_related_terminal, owner=lease_owner, fencing_token=fence, expected_state="running", expected_revision=int(latest.get("revision") or 0), result={"artifact_type": "mail_reply_draft", "artifact_sha256": artifact_sha256, "message_revision": second.metadata.message_revision, "memory_status": "no_learning"}, result_summary="Private Mail reply draft verified", reason=None)
             finished = await self.jobs.get_job(job_id) or latest
             return {"job_id": job_id, "status": "succeeded", "artifact_refs": finished.get("artifacts", []), "readback": readback, "effective_route": effective_route or {}, "memory_status": "no_learning", "admission_only": False}
         if capability_id == "calendar.meeting-prep.v1":
@@ -7736,6 +7764,7 @@ class WorkBoardDispatcher:
                 GoogleCalendarReadonlyAdapter,
                 MeetingPrepService,
                 calendar_authority,
+                digest as calendar_digest,
                 calendar_artifact_path_for_job,
                 calendar_input_digest,
                 calendar_input_payload,
@@ -7781,6 +7810,8 @@ class WorkBoardDispatcher:
                     recovery_action="reconcile_admission_binding",
                 )
             authority = calendar_authority(task=task, attempt=attempt)
+            if inputs.get("connected_sources"):
+                authority["connected_sources_digest"] = calendar_digest(inputs["connected_sources"])
             if procedure_binding is not None:
                 authority.update(
                     {
@@ -7802,6 +7833,8 @@ class WorkBoardDispatcher:
                 )
             def expected_calendar_authority() -> dict[str, Any]:
                 expected = calendar_authority(task=task, attempt=attempt)
+                if inputs.get("connected_sources"):
+                    expected["connected_sources_digest"] = calendar_digest(inputs["connected_sources"])
                 if procedure_binding is not None:
                     expected.update(
                         {
@@ -8225,6 +8258,15 @@ class WorkBoardDispatcher:
                         ):
                         raise_calendar_guard_error("Calendar authorization or event binding changed")
 
+            original_assert_calendar_current = assert_calendar_current
+            related_sources = None
+            related_bindings = []
+            async def assert_calendar_current():
+                nonlocal related_sources
+                await original_assert_calendar_current()
+                related_sources = await self._related_source_references(task, inputs, original_assert_calendar_current, related_bindings)
+            await assert_calendar_current()
+
             adapter = GoogleCalendarReadonlyAdapter(
                 connection,
                 owner_principal_id=task.owner_principal_id,
@@ -8236,6 +8278,7 @@ class WorkBoardDispatcher:
 
             async def model_call(event_payload: dict[str, Any]) -> Any:
                 nonlocal effective_route
+                await assert_calendar_current()
                 from src.approval.runtime import reset_runtime_context, set_runtime_context
                 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
                 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -8426,7 +8469,8 @@ class WorkBoardDispatcher:
                 model_call=model_call,
             )
             await assert_calendar_current()
-            output = json.dumps(result["output"], ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            local_output = {**result["output"], **({"related_sources": related_sources} if related_sources else {})}
+            output = json.dumps(local_output, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
             artifact_relative = calendar_artifact_path_for_job(job_id)
             write_calendar_result_bytes(artifact_relative, output.encode("utf-8"), workspace_root=settings.workspace_dir)
             verified_bytes = read_calendar_result_bytes(artifact_relative, workspace_root=settings.workspace_dir)
@@ -8731,6 +8775,8 @@ class WorkBoardDispatcher:
                 ):
                     reject()
 
+                if related_bindings:
+                    await self.connection_sync_runtime.assert_task_bindings(terminal_db, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), related_bindings)
                 persisted_receipt = await terminal_db.get(CalendarPrepReceipt, receipt_id)
                 if (
                     persisted_receipt is None
@@ -9328,9 +9374,12 @@ class WorkBoardDispatcher:
             from src.work_board.pipeline_cpu import spec_for
             return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
         if _text(task.capability_id) == "calendar.meeting-prep.v1":
-            from src.integrations.google_calendar import calendar_authority_digest
+            from src.integrations.google_calendar import calendar_authority, digest
 
-            return calendar_authority_digest(task=task, attempt=attempt)
+            authority = calendar_authority(task=task, attempt=attempt)
+            if inputs.get("connected_sources"):
+                authority["connected_sources_digest"] = digest(inputs["connected_sources"])
+            return digest(authority)
         if _text(task.capability_id) == "engineering.repo-repair.v1":
             return _safe_digest(
                 WorkBoardDispatcher._repo_repair_authority_payload(

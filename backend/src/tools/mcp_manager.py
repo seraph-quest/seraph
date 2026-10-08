@@ -311,6 +311,8 @@ class _TaskOutputGuard:
 
 def _check_closed_task_schema(schema, depth=0):
     """Require local, closed typed objects at every task schema boundary."""
+    from src.work_board.general_task_schema import validate_safe_patterns
+    validate_safe_patterns(schema)
     supported = {"type", "properties", "required", "additionalProperties", "items",
         "minItems", "maxItems", "uniqueItems", "minLength", "maxLength", "pattern",
         "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",

@@ -84,6 +84,8 @@ def validate_schema(schema: dict, value: Any = None, *, check_value: bool = True
                 closed(child, depth + 1)
     canonical(schema)
     closed(schema)
+    from src.work_board.general_task_schema import validate_safe_patterns
+    validate_safe_patterns(schema)
     Draft202012Validator.check_schema(schema)
     if check_value:
         Draft202012Validator(schema).validate(value)

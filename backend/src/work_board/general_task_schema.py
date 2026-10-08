@@ -26,6 +26,46 @@ _SUPPORTED = _ANNOTATIONS | _ASSERTIONS | {
 }
 
 
+def validate_safe_patterns(schema):
+    """Reject unsupported matchers without compiling or evaluating regex.
+
+    Inspect schema branches, never const/enum/default/example literal values.
+    Unknown nested schema keywords are traversed conservatively as well.
+    """
+    remaining = [4096]
+    def visit(item, depth=0):
+        remaining[0] -= 1
+        if depth > 32 or remaining[0] < 0:
+            raise ValueError("schema pattern scan limit")
+        if isinstance(item, dict):
+            if "patternProperties" in item:
+                raise ValueError("task patternProperties are excluded")
+            if "pattern" in item and not _safe_pattern(item["pattern"]):
+                raise ValueError("task schema pattern is outside the safe subset")
+            for key, child in item.items():
+                if key in {"const", "enum", "default", "examples"}:
+                    continue
+                if key in {"properties", "$defs", "definitions", "dependentSchemas"} and isinstance(child, dict):
+                    for contract in child.values():
+                        visit(contract, depth + 1)
+                else:
+                    visit(child, depth + 1)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, depth + 1)
+    visit(schema)
+
+
+def _safe_pattern(pattern):
+    if not isinstance(pattern, str):
+        return False
+    if pattern in {"^[a-f0-9]{64}$", "^https?://"}:
+        return True
+    literal = pattern[1:] if pattern.startswith("^") else pattern
+    literal = literal[:-1] if literal.endswith("$") else literal
+    return all(32 <= ord(char) <= 126 and char not in r".^$*+?{}[]\|()" for char in literal)
+
+
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -52,6 +92,7 @@ def _possible(schema, depth=0, *, producer=True):
     nonfinite regex producer has unknown inhabitation and fails closed. Consumer
     patterns may still be proved by validating actual finite producer members.
     """
+    validate_safe_patterns(schema)
     if depth > 32 or schema is False:
         return False
     if schema is True:
@@ -143,6 +184,7 @@ def _domain_capacity(schema):
     An integer lattice unbounded on either side has infinite capacity. No
     enumeration of numeric ranges, string search or caller witness is used.
     """
+    validate_safe_patterns(schema)
     if isinstance(schema, bool):
         return float("inf") if schema else 0
     values = [schema["const"]] if "const" in schema else schema.get("enum")
@@ -177,6 +219,8 @@ def _domain_capacity(schema):
 
 
 def _implies(source, target):
+    validate_safe_patterns(source)
+    validate_safe_patterns(target)
     if _canonical(source) == _canonical(target) or target is True or target == {} or source is False:
         return True
     if target is False or source is True:
@@ -232,6 +276,8 @@ def schema_accepts_output(output_schema: dict, contract_schema: dict) -> bool:
     unsupported nonidentical forms; false means admission must be rejected.
     """
     try:
+        validate_safe_patterns(output_schema)
+        validate_safe_patterns(contract_schema)
         Draft202012Validator.check_schema(output_schema)
         Draft202012Validator.check_schema(contract_schema)
         if not _possible(output_schema) or not _possible(contract_schema, producer=False):

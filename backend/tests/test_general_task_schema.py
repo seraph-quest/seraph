@@ -17,6 +17,7 @@ from src.work_board.general_task_schema import schema_accepts_output
 from src.work_board.repository import BoardError
 from tests.test_general_task_persistence import task_runtime
 from tests.test_general_task_adapters import registry, mcp_registry
+from tests.test_general_task_api import api
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
 
@@ -115,10 +116,10 @@ def test_finite_regex_producer_proves_exact_and_regex_consumer(source):
     assert schema_accepts_output(source, {"type": "string", "maxLength": 8, "pattern": "^safe$"})
 
 
-def test_optional_unknown_regex_property_can_be_omitted():
+def test_optional_unsafe_regex_property_is_rejected_before_output_matching():
     schema = {"type": "object", "properties": {"optional": {
         "type": "string", "maxLength": 8, "pattern": "a^"}}, "additionalProperties": False}
-    assert schema_accepts_output(schema, schema)
+    assert not schema_accepts_output(schema, schema)
 
 
 def test_example_and_default_do_not_prove_regex_producer():
@@ -160,6 +161,128 @@ def test_unique_integer_capacity_respects_exact_lattice_and_bounds(items, minimu
     assert schema_accepts_output(schema, schema) is compatible
 
 
+_UNSAFE_FINITE = {"type": "string", "maxLength": 64,
+                  "enum": ["a" * 30 + "!"], "pattern": "^(a+)+$"}
+
+
+@pytest.mark.parametrize("schema", [
+    _UNSAFE_FINITE,
+    {**_UNSAFE_FINITE, "const": "a" * 30 + "!"},
+    {"type": "object", "properties": {"optional": _UNSAFE_FINITE}},
+    {"type": "array", "maxItems": 1, "items": _UNSAFE_FINITE},
+    {"type": "object", "patternProperties": {"^(a+)+$": {"type": "string"}}},
+    {"allOf": [{"type": "string", "pattern": "^(a+)+$"}]},
+])
+def test_unsafe_patterns_rejected_before_any_json_schema_validation(monkeypatch, schema):
+    from jsonschema import Draft202012Validator
+    from src.work_board.general_task import validate_schema
+    from src.work_board.general_task_schema import _possible, _domain_capacity, _implies
+    from src.tools.mcp_manager import _check_closed_task_schema
+    contacts = []
+    def forbidden(*args, **kwargs):
+        contacts.append(True)
+        raise AssertionError("unsafe schema reached JSON Schema validation")
+    for name in ("check_schema", "validate", "is_valid"):
+        monkeypatch.setattr(Draft202012Validator, name, forbidden)
+    assert not schema_accepts_output(schema, schema)
+    assert not schema_accepts_output({"const": "safe"}, schema)
+    for invoke in (
+        lambda: _possible(schema), lambda: _domain_capacity(schema),
+        lambda: _implies(schema, {}), lambda: _implies({"const": "safe"}, schema),
+        lambda: validate_schema(schema, "a" * 30 + "!"),
+        lambda: validate_schema(schema, check_value=False),
+        lambda: _check_closed_task_schema(schema),
+    ):
+        with pytest.raises(ValueError, match="pattern"):
+            invoke()
+    assert contacts == []
+
+
+@pytest.mark.parametrize("pattern,value", [
+    ("safe", "safe"), ("^safe", "safe suffix"), ("safe$", "prefix safe"),
+    ("^safe$", "safe"), ("^[a-f0-9]{64}$", "0" * 64),
+    ("^https?://", "https://example.invalid"),
+])
+def test_safe_pattern_subset_keeps_value_validation(pattern, value):
+    from src.work_board.general_task import validate_schema
+    schema = {"type": "string", "pattern": pattern, "maxLength": 100}
+    validate_schema(schema, value)
+    assert schema_accepts_output({**schema, "const": value}, schema)
+
+
+def test_pattern_named_property_and_literal_data_do_not_become_matchers():
+    from src.work_board.general_task import validate_schema
+    value = {"pattern": "^(a+)+$"}
+    schema = {"type": "object", "properties": {"pattern": {"type": "string"}},
+              "required": ["pattern"], "additionalProperties": False, "const": value}
+    validate_schema(schema, value)
+    assert schema_accepts_output(schema, schema)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["input", "output"])
+async def test_api_unsafe_pattern_contract_denies_without_match_or_tool_contact(api, monkeypatch, boundary):
+    import httpx
+    from jsonschema import Draft202012Validator
+    from tests.test_general_task_contract import request
+    app, service, planner, dispatcher, sessions = api
+    current = service.registry
+    schema = (_UNSAFE_FINITE if boundary == "output" else {
+        "type": "object", "properties": {"text": _UNSAFE_FINITE},
+        "required": ["text"], "additionalProperties": False})
+    current.entries = [current.entries[0].model_copy(update={boundary + "_schema": schema})]
+    value = request(current)
+    step = value.plan.steps[0].model_copy(update={
+        "input": {"text": "a" * 30 + "!"},
+        "output_contract": schema if boundary == "output" else value.plan.steps[0].output_contract})
+    value = value.model_copy(update={"plan": value.plan.model_copy(update={"steps": [step]}),
+        "input": value.input.model_copy(update={"requested_output": schema}) if boundary == "output" else value.input})
+    contacts = []
+    original = Draft202012Validator.VALIDATORS["pattern"]
+    def guarded(validator, pattern, instance, contract):
+        if pattern == "^(a+)+$":
+            contacts.append(True)
+            raise AssertionError("unsafe pattern reached matcher")
+        yield from original(validator, pattern, instance, contract)
+    monkeypatch.setitem(Draft202012Validator.VALIDATORS, "pattern", guarded)
+    async with sessions() as db:
+        db.add(_goal("goal-1", "Reject unsafe task regex before matching"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+        response = await client.post("/api/work-board/general-tasks", json=value.model_dump(mode="json"))
+    assert response.status_code == 422, response.text
+    assert contacts == []
+    assert current.calls == []
+    async with sessions() as db:
+        assert list((await db.execute(select(WorkBoardTask))).scalars()) == []
+        assert list((await db.execute(select(WorkflowRunState))).scalars()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["input", "output"])
+async def test_mcp_unsafe_finite_pattern_excluded_before_json_validator(mcp_registry, monkeypatch, boundary):
+    from jsonschema import Draft202012Validator
+    current, manager, tool, path, declaration = mcp_registry
+    schema = (_UNSAFE_FINITE if boundary == "output" else {
+        "type": "object", "properties": {"query": _UNSAFE_FINITE},
+        "required": ["query"], "additionalProperties": False})
+    declaration[boundary + "_schema"] = schema
+    if boundary == "output":
+        tool.output_schema = schema
+    payload = json.loads(path.read_text())
+    payload["task_tools"][tool.name] = declaration
+    path.write_text(json.dumps(payload))
+    contacts = []
+    def forbidden(*args, **kwargs):
+        contacts.append(True)
+        raise AssertionError("unsafe MCP schema reached JSON Schema validator")
+    for name in ("check_schema", "validate", "is_valid"):
+        monkeypatch.setattr(Draft202012Validator, name, forbidden)
+    assert not any(item.server_id == "local" for item in current.descriptors())
+    assert any(item["tool_id"] == "mcp:local:repo_read" for item in current.blocked_tools())
+    assert tool.calls == 0
+    assert contacts == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source,compatible", [(source, False) for source in _EMPTY_PRODUCERS[-6:]] + [
     ({"type": "string", "const": "safe", "maxLength": 8, "pattern": "^safe$"}, True),
@@ -180,7 +303,16 @@ async def test_registered_mcp_regex_contract_admission_without_wrapper_contact(m
     content["task_tools"][tool.name] = declaration
     path.write_text(json.dumps(content))
     descriptors = current.descriptors()
-    selected = next(item for item in descriptors if item.server_id == "local")
+    candidates = [item for item in descriptors if item.server_id == "local"]
+    if not candidates:
+        from src.work_board.general_task_schema import validate_safe_patterns
+        with pytest.raises(ValueError, match="pattern"):
+            validate_safe_patterns(source)
+        assert not compatible
+        assert any(item["tool_id"] == "mcp:local:repo_read" for item in current.blocked_tools())
+        assert tool.calls == 0
+        return
+    selected = candidates[0]
     assert selected.output_schema == source
     value = GeneralTaskCreate(goal_revision=1, idempotency_key="deny-regex-mcp", expected_plan_revision=1,
         input=GeneralTaskInput(goal_ref="goal-1", intent="Read the bounded result",

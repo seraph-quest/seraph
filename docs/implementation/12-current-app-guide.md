@@ -602,9 +602,13 @@ acceptance unavailable while edits are unsaved. Plans contain at most sixteen
 closed typed steps, literal inputs and declared dependency pointers; they carry
 no executable expressions or permission grants.
 Admission also proves that each registered output satisfies its step contract
-and that the final step satisfies the requested output contract. Exact schemas
-and a conservative supported subset are accepted; incompatible or unsupported
-nonidentical contracts remain editable proposal errors before execution effects.
+and that the final step satisfies the requested output contract. Even equal
+schemas require an inhabited, known safe supported contract; unsupported unique
+array cardinalities block before effects. Regex matching permits only literal
+ASCII patterns with optional start/end anchors, the exact SHA-256 pattern and
+the native HTTP(S) URL prefix pattern. Other patterns and patternProperties
+are rejected before matching, including finite enum/const candidates and input
+validation. Incompatible contracts remain editable proposal errors.
 
 Accepted work uses the existing dispatcher, `WorkflowRunState`, leases, fences,
 effect journal and verified readback. Current owner, Goal, evidence, strategy

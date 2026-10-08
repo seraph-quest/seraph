@@ -7,11 +7,11 @@ from sqlalchemy import select
 
 from config.settings import settings
 from src.db.models import Goal, WorkBoardStatus, WorkBoardTask, WorkflowRunState
-from src.work_board.contracts import WorkBoardOwner
+from src.work_board.contracts import WorkBoardOwner, GeneralTaskPlanUpdate
 from src.work_board.general_task import GeneralTaskService
 from src.work_board.repository import BoardError
 from tests.test_general_task_contract import Registry, request
-from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION
+from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
 
 @pytest.fixture
@@ -68,6 +68,122 @@ async def test_one_canonical_task_immutable_plan_and_owner_isolation(task_runtim
         with pytest.raises(BoardError):
             await service.plan(db, WorkBoardOwner(principal_id="other", session_id=SESSION), task_id)
     assert registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_edit_keeps_one_task_revokes_prior_artifact_and_fences_stale_revision(task_runtime):
+    sessions, workspace = task_runtime
+    owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
+    async with sessions() as db:
+        db.add(_goal("goal-1", "Editable general task"))
+    registry = Registry()
+    service = GeneralTaskService(registry)
+    service.start()
+    initial = request(registry)
+    async with sessions() as db:
+        mutation = await service.create(db, owner, initial)
+        task_id, task_revision, original_artifact = mutation.task.task_id, mutation.task.task_revision, mutation.task.input_artifact_id
+    revised = initial.plan.model_copy(update={"revision": 2,
+        "steps": [initial.plan.steps[0].model_copy(update={"input": {"text": "changed"}})]})
+    update = GeneralTaskPlanUpdate(expected_revision=task_revision, expected_plan_revision=1,
+        idempotency_key="edit-1", plan=revised)
+    async with sessions() as db:
+        task = await service.update_plan(db, owner, task_id, update)
+        assert task.task_id == task_id
+        assert task.task_revision == task_revision + 1
+        assert task.input_artifact_id != original_artifact
+    async with sessions() as db:
+        from src.db.models import WorkBoardInputArtifact
+        assert (await db.get(WorkBoardInputArtifact, original_artifact)).state == "revoked"
+        plan = await service.plan(db, owner, task_id)
+        assert plan["plan"]["revision"] == 2
+        assert plan["plan"]["steps"][0]["input"] == {"text": "changed"}
+        assert len((await db.execute(select(WorkBoardTask))).scalars().all()) == 1
+    async with sessions() as db:
+        with pytest.raises(BoardError):
+            await service.update_plan(db, owner, task_id, update)
+
+
+@pytest.mark.asyncio
+async def test_accepted_task_executes_real_durable_root_and_private_artifact_readback(task_runtime):
+    sessions, workspace = task_runtime
+    owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
+    async with sessions() as db:
+        db.add(_goal("goal-1", "Execute literal general task"))
+    registry = Registry()
+    service = GeneralTaskService(registry)
+    service.start()
+    accepted = request(registry).model_copy(update={"accept": True})
+    async with sessions() as db:
+        task = (await service.create(db, owner, accepted)).task
+        task_id = task.task_id
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+    result = await dispatcher.run_pass()
+    assert result["completed"] == 1, result
+    async with sessions() as db:
+        task = await service.repository.get_task(db, owner, task_id)
+        assert task.status == WorkBoardStatus.review
+        runs = (await db.execute(select(WorkflowRunState))).scalars().all()
+        assert len(runs) == 1
+        assert runs[0].job_kind == "agent.task.v1"
+        assert runs[0].status == "succeeded"
+        assert runs[0].owner_principal_id == OWNER
+    assert len(registry.calls) == 1
+    assert registry.calls[0][2]["principal"].job_id == runs[0].run_identity
+    assert list((workspace / "artifacts/work-board/general-tasks").glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_sixteen_step_dependency_chain_has_independent_verified_artifacts(task_runtime):
+    sessions, workspace = task_runtime
+    owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
+    async with sessions() as db:
+        db.add(_goal("goal-1", "Sixteen bounded dependent local steps"))
+    registry = Registry()
+    service = GeneralTaskService(registry)
+    service.start()
+    from src.work_board.contracts import PlanSpec
+    steps = [{"step_id": "s0", "tool_id": "fixture.read", "input": {"text": "literal"},
+        "output_contract": registry.entries[0].output_schema}]
+    for index in range(1, 16):
+        steps.append({"step_id": f"s{index}", "tool_id": "fixture.read",
+            "input": {"text": {"$dependency": {"step_id": f"s{index-1}", "pointer": "/text"}}},
+            "depends_on": [f"s{index-1}"], "output_contract": registry.entries[0].output_schema})
+    accepted = request(registry).model_copy(update={"accept": True, "plan": PlanSpec(revision=1, steps=steps)})
+    async with sessions() as db:
+        await service.create(db, owner, accepted)
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    result = await WorkBoardDispatcher(session_provider=sessions, general_tasks=service).run_pass()
+    assert result["completed"] == 1, result
+    assert len(registry.calls) == 16
+    assert all(call[1] == {"text": "literal"} for call in registry.calls)
+    assert len(list((workspace / "artifacts/work-board/general-tasks").glob("*.json"))) == 16
+    async with sessions() as db:
+        run = (await db.execute(select(WorkflowRunState))).scalar_one()
+        import json
+        checkpoints = json.loads(run.checkpoint_receipts_json)
+        assert len([item for item in checkpoints if item["checkpoint_id"].startswith("general:verified:")]) == 16
+
+
+@pytest.mark.asyncio
+async def test_step_schema_violation_and_removed_tool_block_before_execution_admission(task_runtime):
+    sessions, workspace = task_runtime
+    owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
+    async with sessions() as db:
+        db.add(_goal("goal-1", "Removed tool cannot dispatch"))
+    registry = Registry()
+    service = GeneralTaskService(registry)
+    service.start()
+    async with sessions() as db:
+        await service.create(db, owner, request(registry).model_copy(update={"accept": True}))
+    registry.entries = []
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    result = await WorkBoardDispatcher(session_provider=sessions, general_tasks=service).run_pass()
+    assert result["admitted"] == 0, result
+    assert registry.calls == []
+    async with sessions() as db:
+        assert list((await db.execute(select(WorkflowRunState))).scalars()) == []
 
 
 @pytest.mark.asyncio

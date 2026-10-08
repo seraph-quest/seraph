@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import hashlib
 import time
 
 from src.work_board.contracts import PlanSpec
@@ -69,6 +70,7 @@ class GeneralTaskPlanner:
             _governed_preflight_target_async, _governed_research_chat_completion,
             _token_usage_from_payload)
         from src.work_board.general_task import digest
+        from src.vault.redaction import redact_secrets_in_text_readonly
 
         if not task_input.inference_egress_acknowledged:
             raise BoardError("general_task_planning_consent_required", "Acknowledge intent egress for planning", status_code=422)
@@ -76,7 +78,10 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
-        configured, _policy_digest = current_inference_policy()
+        try:
+            configured, _policy_digest = current_inference_policy()
+        except PermissionError as exc:
+            raise BoardError("general_task_planning_policy_blocked", str(exc), status_code=409) from exc
         setup = configured.openrouter_setup
         route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
         if route is None or not getattr(route, "enabled", True):
@@ -96,18 +101,31 @@ class GeneralTaskPlanner:
         options = _profile_options(profile_id)
         if set(options) - {"provider", "_seraph_openrouter"}:
             raise BoardError("general_task_planning_options_invalid", "Unsupported provider request options", status_code=409)
+        messages = planner_messages(task_input, descriptors)
+        text = json.dumps(messages, ensure_ascii=False)
+        if await redact_secrets_in_text_readonly(db, text, fail_closed=True) != text:
+            raise BoardError("general_task_planning_secret_input", "Remove secret values from planning input; unavailable redaction blocks egress", status_code=422)
         body = finalized_openai_compatible_body(model_id=profile.model,
-            messages=planner_messages(task_input, descriptors),
+            messages=messages,
             options={"provider": options["provider"]} if "provider" in options else {},
             temperature=0, max_tokens=min(4096, route.max_output_tokens), stream=False)
         operation_id = "planning:" + digest({"owner": owner.model_dump(), "goal_revision": goal_revision,
             "idempotency_key": idempotency_key, "input": task_input.model_dump(mode="json"),
             "descriptors": [item.model_dump(mode="json") for item in descriptors]})[:48]
+        from src.workflows.job_runtime import durable_job_repository
+        inference_job_id = "inference:" + hashlib.sha256(operation_id.encode()).hexdigest()[:40]
+        prior = await durable_job_repository.get_job(inference_job_id)
+        if prior is not None:
+            raise BoardError("general_task_planning_operation_exists",
+                "Original planning operation exists; inspect its accounting receipt before a new proposal", status_code=409)
         context = build_canonical_inference_context("general_task_planner", payload=body,
             output_tokens=body["max_tokens"], timeout_seconds=min(45, route.timeout_seconds, task_input.limits.wall_seconds),
             principal=principal, session_id=owner.session_id, request_id=operation_id)
-        context = replace(context, owner_budget_microusd=budget, estimated_cost_microusd=bound,
-            requirements=replace(context.requirements, max_cost_microusd=budget))
+        # Route metadata uses the persisted deployment cost envelope. The
+        # broker applies the narrower operator ceiling to its actual reserve;
+        # substituting it into route metadata would reject every legacy
+        # profile whose cost tag describes the deployment ceiling instead.
+        context = replace(context, owner_budget_microusd=budget, estimated_cost_microusd=bound)
         target = {"profile": profile_id, "model_id": profile.model, "api_base": profile.api_base,
             "api_key": profile.api_key, "source": "primary",
             "options": {"provider": options["provider"]} if "provider" in options else {}}
@@ -116,7 +134,8 @@ class GeneralTaskPlanner:
         if decision is None or not decision.allowed:
             if decision is not None:
                 await hooks.finalize_denied(decision=decision, reason_codes=("general_task_planning_route_denied",))
-            raise BoardError("general_task_planning_route_denied", "Planning route lacks current policy/capability proof", status_code=409)
+            reasons = ", ".join(item.reason_code for item in getattr(decision, "rejections", ())) or "route_unavailable"
+            raise BoardError("general_task_planning_route_denied", "Planning route denied: " + reasons, status_code=409)
         request = GpuAdmissionRequest.from_inference_context(context, operation_id=operation_id, uncertain_on_error=True)
         tokens = set_runtime_context(owner.session_id, "high_risk", trust_principal=principal)
         started = False
@@ -134,13 +153,16 @@ class GeneralTaskPlanner:
             receipt = await hooks.finalize(outcome="succeeded")
             if not receipt.persisted:
                 raise RuntimeError("general_task_planning_receipt_unavailable")
-        except BaseException:
+        except BaseException as exc:
             if started and not getattr(hooks, "_finalized", False):
                 if getattr(hooks, "_active", None) is not None:
                     hooks.attempt_finished(outcome="failed", error_code="general_task_planning_incomplete", decision=decision)
                 await hooks.finalize(outcome="failed")
             elif not started:
                 await hooks.finalize_denied(decision=decision, reason_codes=("general_task_planning_contact_denied",))
+            from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionError
+            if isinstance(exc, RemoteInferenceAdmissionError):
+                raise BoardError("general_task_planning_admission_blocked", str(exc), status_code=409) from exc
             raise
         finally:
             reset_runtime_context(tokens)

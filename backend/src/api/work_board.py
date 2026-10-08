@@ -2761,6 +2761,13 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                     expected_revision=body.expected_revision,
                 )
             else:
+                if body.action.value == "promote":
+                    promoted = await repository.get_task(db, owner, task_id)
+                    if promoted.capability_id == "agent.task.v1":
+                        if dispatcher.general_tasks is None:
+                            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+                        await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
+                            body.expected_revision)
                 mutation = await repository.action_task(db, owner, task_id, body)
             latest_attempt = (
                 await db.execute(

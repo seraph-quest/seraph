@@ -24,7 +24,7 @@ export interface GeneralToolDescriptor {
 }
 export interface GeneralTaskPlanRead {
   task_id: string; task_revision: number; accepted: boolean;
-  task_input: GeneralTaskInput; plan: TaskPlan; descriptors: GeneralToolDescriptor[];
+  task_input: GeneralTaskInput; plan: TaskPlan | null; descriptors: GeneralToolDescriptor[]; proposal_error?: string;
   strategy: { status: string; reason: string | null }; no_learning: true;
 }
 export interface GeneralTaskCreateRequest {
@@ -38,6 +38,7 @@ export async function generalTaskRequest(path: string, body?: unknown, signal?: 
     signal, ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
   if (!response.ok) {
+    if ([401, 403].includes(response.status)) throw new GeneralTaskError("Current operator authority is unavailable. Sign in with the original task owner or recover ownership through Work, then refresh.", response.status);
     throw new GeneralTaskError(response.status === 409
       ? "The task, goal, plan or tool revision changed. Refresh the current plan and review again."
       : `Task service blocked (${response.status}). Inspect current consent, budget and capability settings, then refresh Work.`, response.status);
@@ -49,9 +50,9 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
   if (!record(value) || value.task_id !== task.task_id || value.task_revision !== task.task_revision
     || typeof value.accepted !== "boolean" || value.no_learning !== true || !record(value.task_input)
     || value.task_input.goal_ref !== task.goal_id || typeof value.task_input.intent !== "string"
-    || !record(value.task_input.limits) || !record(value.plan) || value.plan.schema_version !== 1
-    || !Number.isSafeInteger(value.plan.revision) || !Array.isArray(value.plan.steps) || !value.plan.steps.length
-    || !Array.isArray(value.descriptors) || !value.descriptors.length || !record(value.strategy)) {
+    || !record(value.task_input.limits) || !Array.isArray(value.descriptors) || !record(value.strategy)
+    || (value.plan === null ? (value.accepted !== false || typeof value.proposal_error !== "string")
+      : (!record(value.plan) || value.plan.schema_version !== 1 || !Number.isSafeInteger(value.plan.revision) || !Array.isArray(value.plan.steps) || !value.plan.steps.length || !value.descriptors.length))) {
     throw new Error("Plan readback did not match the current task revision. Refresh Work before reviewing.");
   }
   const descriptors = value.descriptors;
@@ -59,7 +60,7 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || !record(d.input_schema) || !record(d.output_schema) || !Array.isArray(d.effects) || !Array.isArray(d.permissions)
     || !d.effects.every(x => typeof x === "string") || !d.permissions.every(x => typeof x === "string")
     || typeof d.verifier !== "string" || typeof d.deadline !== "number")) throw new Error("Registered tool metadata is incomplete; refresh before acceptance.");
-  if (value.plan.steps.some(s => !record(s) || typeof s.step_id !== "string" || typeof s.tool_id !== "string"
+  if (record(value.plan) && (value.plan.steps as unknown[]).some(s => !record(s) || typeof s.step_id !== "string" || typeof s.tool_id !== "string"
     || !record(s.input) || !record(s.output_contract) || !Array.isArray(s.depends_on)
     || !s.depends_on.every(x => typeof x === "string") || !descriptors.some(d => record(d) && d.tool_id === s.tool_id))) {
     throw new Error("Plan steps do not match the registered tool descriptors.");

@@ -181,8 +181,9 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     """Single immutable artifact holding intent and the accepted inert plan."""
     schema_version: Literal[1] = 1
     task_input: GeneralTaskInput
-    plan: PlanSpec
-    descriptors: list[ToolDescriptor] = Field(min_length=1, max_length=16)
+    plan: PlanSpec | None = None
+    proposal_error: str | None = Field(default=None, max_length=128)
+    descriptors: list[ToolDescriptor] = Field(default_factory=list, max_length=16)
     strategy: TaskStrategyBinding
     evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
 
@@ -190,12 +191,16 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     def immutable_snapshot(self):
         if not self.task_input.tool_set_digest:
             raise ValueError("persisted plans require an exact tool snapshot")
+        if self.plan is None and not self.proposal_error:
+            raise ValueError("an incomplete proposal requires a visible reason")
+        if self.plan is not None and (not self.descriptors or self.proposal_error):
+            raise ValueError("valid plans require registered descriptors without proposal errors")
         return self
 
 
 class GeneralTaskPlanUpdate(ClosedTaskModel):
     expected_revision: int = Field(ge=1)
-    expected_plan_revision: int = Field(ge=1)
+    expected_plan_revision: int = Field(ge=0)
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
     plan: PlanSpec
 

@@ -4323,6 +4323,8 @@ class WorkBoardDispatcher:
                 if self.general_tasks is None:
                     return "general_task_inactive", "Restore the registered task service"
                 envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
+                if envelope.task_input.goal_ref != task.goal_id:
+                    return "general_task_goal_binding_changed", "Task intent belongs to a different goal"
                 async with self.session_provider() as db:
                     await self.general_tasks.recheck_authority(db,
                         WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), envelope)
@@ -4339,6 +4341,7 @@ class WorkBoardDispatcher:
                 inspect_runtime(runtime_root())
                 return None, None
             if capability == "work.research-dossier.v1":
+                await self._research_strategy(task)
                 from src.workflows.research_provider import _target
                 from src.model_fabric.caller_context import build_canonical_inference_context
                 from src.llm_runtime import _governed_preflight_target_async
@@ -4769,6 +4772,8 @@ class WorkBoardDispatcher:
             safe_inputs["parent_handoff_context"] = parent_handoffs
             safe_inputs["parent_handoff_digest"] = _text(attempt.parent_handoff_digest)
         deadline = self.now() + timedelta(seconds=runtime_seconds)
+        if general:
+            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
                 job_id=job_id,
@@ -5698,11 +5703,16 @@ class WorkBoardDispatcher:
         from src.workflows.research_native import checkpoint
         from src.work_board.research_artifacts import read
         task, attempt = claim.task, claim.attempt
+        strategy = await self._research_strategy(task)
         inputs = _parse_typed_input(task)
         # The immutable original Board attempt bounds first admission and
         # recovery. A later pass cannot grant another execution window.
         deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
         spec = spec_for(task, attempt, inputs, deadline=deadline)
+        # The resolver is an optional current-owner dependency. Its absence
+        # records baseline behavior and creates no task-method import or grant.
+        spec = replace(spec, declared_authority={**spec.declared_authority,
+            "task_strategy_binding": strategy.model_dump(mode="json")})
         projection = await self.jobs.admit_job(spec)
         expected = expected_identity(task, attempt, spec)
         async with self.session_provider() as db:
@@ -5741,6 +5751,21 @@ class WorkBoardDispatcher:
             return {"admitted": True, "completed": False, "blocked": True}
         finally:
             self._active_worker_tasks.pop(key, None)
+
+    async def _research_strategy(self, task):
+        from src.work_board.contracts import TaskStrategyBinding
+        import inspect
+        binding = TaskStrategyBinding(status="none", reason="baseline")
+        if self.strategy_resolver is not None:
+            binding = self.strategy_resolver.resolve(WorkBoardOwner(
+                principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+                task.goal_id, "work.research-dossier.v1")
+            if inspect.isawaitable(binding):
+                binding = await binding
+            binding = TaskStrategyBinding.model_validate(binding)
+        if binding.status == "blocked":
+            raise BoardError("task_strategy_blocked", binding.reason, status_code=409)
+        return binding
 
     async def _admit_execute_direct(
         self,

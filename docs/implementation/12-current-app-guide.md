@@ -535,6 +535,61 @@ are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
 missing route, authority, or budget is visible as a blocked recovery state.
 
+#### Typed general tasks (#997)
+
+Available on the installed `develop` revision containing
+the independently reviewed [#997](https://github.com/seraph-quest/seraph/issues/997)
+merge. This section describes the intended post-merge contract; it does not
+establish model quality or complete the later interpreter and specialist-child
+work in [#998](https://github.com/seraph-quest/seraph/issues/998) and
+[#999](https://github.com/seraph-quest/seraph/issues/999).
+
+The Work panel accepts ordinary intent, an owned Goal, requested output and
+explicit limits. The operator does not author tool-specific forms to request a
+task. Planning requires separate model-egress acknowledgment, a positive explicit
+cost ceiling and the existing current policy, consent, capability and inference
+admission checks. The canonical `general_task_planner` consumer uses the text
+purpose, interactive workload and priority, `OPERATOR_INPUT` provenance, and
+`text` plus `structured_output` capabilities. It uses the existing durable
+inference accounting owner. Evidence content, credential references and tool
+permission declarations are excluded from its model messages; unavailable secret
+redaction blocks planning.
+
+`POST /api/work-board/general-tasks` captures the server's current typed tool
+descriptor snapshot and creates one ordinary `WorkBoardTask`. Its bounded plan
+and input share an immutable private artifact. Repeating the same owner-scoped
+request returns the same card without contacting the planner again. A valid
+proposal remains in Triage for review. Invalid model output remains an editable
+Triage card with a visible proposal error and no task execution Root. Missing
+authority, route, consent or budget returns the current blocked reason rather
+than silently selecting a fallback.
+
+`GET /api/work-board/general-tasks/tools` reports descriptors, their digest and
+excluded tools with reasons. `GET /api/work-board/tasks/{id}/plan` reads the
+owner's plan and acceptance state. `POST /api/work-board/tasks/{id}/plan` edits
+the same unattempted Triage card using exact task and plan revisions; it stages
+a new immutable artifact and revokes the previous binding. The existing promote
+action accepts only the reviewed current revision. The inspector keeps
+acceptance unavailable while edits are unsaved. Plans contain at most sixteen
+closed typed steps, literal inputs and declared dependency pointers; they carry
+no executable expressions or permission grants.
+
+Accepted work uses the existing dispatcher, `WorkflowRunState`, leases, fences,
+effect journal and verified readback. Current owner, Goal, evidence, strategy
+binding and descriptor policy/revision are checked before admission and each
+step. Native tools retain current approval, audit and secret wrappers; MCP tools
+require a complete trusted typed contract and current connection revision.
+Unavailable or changed contracts block execution. An unknown contacted effect
+is retained for reconciliation instead of automatic replay. Successful output
+is a bounded private artifact with physical hash readback, and the card enters
+Review. Completion records an explicit no-learning result; task success alone
+does not update canonical memory.
+
+Isolated API-to-dispatcher receipts exercise genuine current native file reads,
+durable accounting, acceptance, physical artifact readback and restart replay.
+The planner HTTP response is intercepted inside the test: these receipts make no
+external provider call or spend and make no usefulness or quality claim.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for

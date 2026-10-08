@@ -9,7 +9,7 @@ from src.work_board.contracts import (
     GeneralTaskCreate, GeneralTaskInput, PlanSpec, TaskStrategyBinding,
     ToolDescriptor, WorkBoardOwner,
 )
-from src.work_board.general_task import GeneralTaskService, digest, resolve_input, validate_data, validate_schema
+from src.work_board.general_task import GeneralTaskService, digest, resolve_input, validate_data, validate_schema, current_task_service
 from src.work_board.repository import BoardError
 from src.security.trust_contract import TrustPrincipal, PrincipalType
 
@@ -36,6 +36,13 @@ class Registry:
     def __init__(self):
         self.entries = [descriptor()]
         self.calls = []
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
 
     def descriptors(self):
         return self.entries
@@ -63,6 +70,17 @@ def test_closed_roundtrip_and_utf8_bounds():
         GeneralTaskInput.model_validate({**model.input.model_dump(), "intent": "😀" * 3000})
     with pytest.raises(ValidationError):
         GeneralTaskCreate.model_validate({**model.model_dump(), "owner": "forged"})
+
+
+def test_lifecycle_cleans_up_when_startup_fails_before_readiness():
+    registry = Registry()
+    dispatcher = type("Dispatcher", (), {"general_tasks": None})()
+    with pytest.raises(RuntimeError, match="later startup failed"):
+        with current_task_service(registry=registry, dispatcher=dispatcher, planner=object()) as service:
+            assert registry.started and service.started
+            raise RuntimeError("later startup failed")
+    assert dispatcher.general_tasks is None
+    assert not registry.started and not service.started
 
 
 def test_cycles_unknown_dependencies_and_step_bound():

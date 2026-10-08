@@ -1,6 +1,6 @@
 /** Trusted finite two-way bootstrap; native state and execution remain Python-owned. */
 import { Composition, packageIdentity } from './composition.js';
-import { CONTROL_TIMEOUT_MS, MAX_PENDING, ProtocolError, readFrames, writeFrame, type Frame, type Json, type Method } from './protocol.js';
+import { MAX_PENDING, ProtocolError, readFrames, writeFrame, validateIncomingDeadline, type Frame, type Json, type Method } from './protocol.js';
 import { isServiceMethod, validateInput, validateResult, type Input, type ServiceMethod } from './contracts/methods.js';
 import type { ScopedRequestClient } from './contracts/client.js';
 import { Resources } from './resources.js';
@@ -64,7 +64,8 @@ async function main(): Promise<void> {
   };
   try {
     for await (const frame of readFrames(process.stdin)) {
-      if (failure || frame.seq !== inboundSeq + 1 || frame.deadline_at <= Date.now() || frame.deadline_at - Date.now() > CONTROL_TIMEOUT_MS || frame.composition_digest !== identity.composition_digest || frame.package_digest !== identity.package_digest) throw new ProtocolError("frame identity or deadline mismatch");
+      if (failure || frame.seq !== inboundSeq + 1 || frame.composition_digest !== identity.composition_digest || frame.package_digest !== identity.package_digest) throw new ProtocolError("frame identity or deadline mismatch");
+      validateIncomingDeadline(frame);
       if (nonce === undefined) {
         if (frame.kind !== "request" || frame.method !== "bootstrap.hello" || frame.seq !== 1) throw new ProtocolError("hello required");
         nonce = frame.boot_nonce;

@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 import secrets
 import time
 from typing import Any
 
 from .composition import CHILD_ENV, CORDIS_VERSION, CompositionBlocked, ReviewedComposition, reviewed_composition
-from .protocol import CONTROL_TIMEOUT, MAX_PENDING, ProtocolError, encode_frame, read_frame
+from .protocol import MAX_PENDING, ProtocolError, encode_frame, read_frame, rpc_deadline
 from .contracts import SERVICE_METHODS, validate_request, validate_result
 
 STDERR_LIMIT = 65_536
@@ -28,6 +30,8 @@ class Pending:
     future: asyncio.Future[dict[str, Any]]
     native_binding: Any = None
     native_forwarded: bool = False
+    native_inference: Any = None
+    native_cancel_purpose: Any = None
 
 
 class CordisHost:
@@ -50,6 +54,9 @@ class CordisHost:
         self._lifecycle_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._native_inflight: set[str] = set()
+        self._native_owner_loop = None
+        self._native_owner_boot_nonce = None
+        self._native_deadline_seals = {}
         self._reaped = False
         self._cleanup_state = "not_started"
         self._cordis_disposal = "not_started"
@@ -161,6 +168,8 @@ class CordisHost:
                 self._plugins = response["payload"]["plugins"]
                 self._verify_plugins(self._plugins)
                 self.state, self.reason = "ready", None
+                self._native_owner_loop = asyncio.get_running_loop()
+                self._native_owner_boot_nonce = self.boot_nonce
                 return True
             except asyncio.CancelledError:
                 self.process = await spawn
@@ -191,7 +200,7 @@ class CordisHost:
                     if (frame["method"] not in SERVICE_METHODS or self.service_dispatch is None
                         or not self.admitting or frame["request_id"] != f"c-{frame['seq']}"
                         or self._unresolved >= MAX_PENDING
-                        or not int(time.time() * 1000) < frame["deadline_at"] <= int(time.time() * 1000) + 5000):
+                        or frame["deadline_at"] <= int(time.time() * 1000)):
                         raise ProtocolError("unadmitted native service request")
                     originals = [entry for entry in self._pending.values()
                         if entry.native_binding is not None and not entry.future.done() and not entry.native_forwarded
@@ -200,6 +209,10 @@ class CordisHost:
                             "boot_nonce", "package_digest", "composition_digest"))]
                     if len(originals) != 1:
                         raise ProtocolError("native request lacks unique original scoped invocation")
+                    if frame["method"] == "inference.request":
+                        self._native_inference_candidate(originals[0].native_binding, frame["payload"]["request_ref"])
+                    if originals[0].native_cancel_purpose is not None:
+                        self._native_cancel_purpose(originals[0].native_binding, frame["payload"])
                     originals[0].native_forwarded = True
                     self._in_seq = frame["seq"]
                     self._unresolved += 1
@@ -219,7 +232,7 @@ class CordisHost:
                 pending.future.set_result(frame)
         except asyncio.CancelledError:
             raise
-        except (ProtocolError, OSError, ValueError, TypeError, KeyError):
+        except (ProtocolError, HostBlocked, OSError, ValueError, TypeError, KeyError):
             if self.state not in {"quiescing", "stopped", "cleanup_unknown"}:
                 self._fence("protocol_rejected_or_pipe_lost")
 
@@ -257,7 +270,103 @@ class CordisHost:
             self._unresolved -= 1
             self._tasks.pop(name, None)
 
-    async def request_service(self, method: str, payload: dict[str, Any], *, original_scope) -> dict[str, Any]:
+    def get_original_owner_loop(self):
+        """Original lifecycle-loop locator; never callable or candidate authority."""
+        loop = self._native_owner_loop
+        if (not self.admitting or loop is None or loop.is_closed() or not loop.is_running()
+            or self._native_owner_boot_nonce != self.boot_nonce):
+            raise HostBlocked("native_original_owner_loop_unavailable")
+        return loop
+
+    def _ordinary_original_deadline(self, method, payload, original_scope, deadline, *, now):
+        """Timing only: exact original source and purpose cannot renew a call."""
+        if original_scope.deadline_at <= now:
+            raise HostBlocked("native_original_call_deadline_expired")
+        for key, (source, original_cutoff, _cutoff) in list(self._native_deadline_seals.items()):
+            if original_cutoff <= now:
+                del self._native_deadline_seals[key]
+        claim_digest = hashlib.sha256(json.dumps(dict(original_scope.witness), sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        purpose_digest = hashlib.sha256(json.dumps(payload, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        source_key = (self.boot_nonce, claim_digest)
+        for key, (source, _original_cutoff, _cutoff) in self._native_deadline_seals.items():
+            if key[:2] == source_key and source is not original_scope:
+                raise HostBlocked("native_original_deadline_source_changed")
+        key = (*source_key, method, purpose_digest)
+        prior = self._native_deadline_seals.get(key)
+        if prior is not None:
+            if prior[1] != original_scope.deadline_at:
+                raise HostBlocked("native_original_deadline_source_changed")
+            deadline = min(deadline, prior[2])
+        else:
+            if len(self._native_deadline_seals) >= MAX_PENDING * len(SERVICE_METHODS):
+                raise HostBlocked("native_original_deadline_capacity_exhausted")
+            self._native_deadline_seals[key] = (original_scope, original_scope.deadline_at, deadline)
+        if deadline <= now:
+            raise HostBlocked("native_original_call_deadline_expired")
+        return deadline
+
+    def _checked_native_inference(self, candidate, original_scope):
+        try:
+            from src.model_fabric.native_inference import NativeInferenceContinuation
+        except ImportError as error:
+            raise HostBlocked("native_inference_original_candidate_unavailable") from error
+        if type(candidate) is not NativeInferenceContinuation:
+            raise HostBlocked("native_inference_original_candidate_required")
+        candidate.validate_host_scope(self, original_scope)
+        return candidate
+
+    def _native_inference_candidate(self, called_scope, request_ref):
+        """Only the exact unresolved original pending frame retains this object."""
+        from .dispatch import CalledServiceInvocation
+        if type(called_scope) is not CalledServiceInvocation:
+            raise HostBlocked("native_inference_original_pending_required")
+        pending = self._pending.get(called_scope.parent_request_id)
+        if (pending is None or pending.future.done() or pending.native_binding is not called_scope
+            or pending.frame["method"] != "inference.request"
+            or pending.frame["payload"] != {"request_ref": request_ref}
+            or pending.frame["deadline_at"] != called_scope.deadline_at
+            or called_scope.deadline_at <= int(time.time() * 1000)):
+            raise HostBlocked("native_inference_original_pending_changed")
+        candidate = self._checked_native_inference(pending.native_inference, called_scope.original)
+        candidate.validate_called_scope(self, called_scope, request_ref)
+        return candidate
+
+    def _checked_cancel_purpose(self, purpose, original_scope, method, payload):
+        if method not in {"conversation.cancel", "agent-loop.cancelTurn"}:
+            raise HostBlocked("native_cancel_purpose_method_changed")
+        try:
+            from src.agent.native_turn_controls import validate_forward_cancel_purpose
+        except ImportError as error:
+            raise HostBlocked("native_cancel_original_purpose_unavailable") from error
+        cutoff = validate_forward_cancel_purpose(purpose, self, original_scope, method, payload)
+        from .protocol import integer
+        integer(cutoff, 1)
+        if cutoff > original_scope.deadline_at or cutoff <= int(time.time() * 1000):
+            raise HostBlocked("native_cancel_original_purpose_expired")
+        return cutoff
+
+    def _native_cancel_purpose(self, called_scope, payload):
+        from .dispatch import CalledServiceInvocation
+        from src.agent.native_turn_controls import validate_called_cancel_purpose
+        if type(called_scope) is not CalledServiceInvocation:
+            raise HostBlocked("native_cancel_original_pending_required")
+        pending = self._pending.get(called_scope.parent_request_id)
+        if (pending is None or pending.future.done() or pending.native_binding is not called_scope
+            or pending.native_cancel_purpose is None
+            or pending.frame["method"] not in {"conversation.cancel", "agent-loop.cancelTurn"}
+            or pending.frame["payload"] != payload or pending.frame["deadline_at"] != called_scope.deadline_at):
+            raise HostBlocked("native_cancel_original_pending_changed")
+        cutoff = self._checked_cancel_purpose(pending.native_cancel_purpose, called_scope.original,
+            pending.frame["method"], payload)
+        if called_scope.deadline_at > cutoff:
+            raise HostBlocked("native_cancel_original_pending_changed")
+        validate_called_cancel_purpose(pending.native_cancel_purpose, self, called_scope, payload)
+        return pending.native_cancel_purpose
+
+    async def request_service(self, method: str, payload: dict[str, Any], *, original_scope,
+                              native_inference=None, native_cancel_purpose=None) -> dict[str, Any]:
         """Forward only an already captured original native claim scope."""
         from .dispatch import OriginalServiceInvocation
         from .ownership import RuntimeCompositionBinding
@@ -272,6 +381,12 @@ class CordisHost:
             or original_scope.witness["package_digest"] != self.reviewed.package_digest
             or original_scope.witness["host_composition_digest"] != self.reviewed.composition_digest):
             raise HostBlocked("native_original_host_changed")
+        if method == "inference.request":
+            self._checked_native_inference(native_inference, original_scope)
+        elif native_inference is not None:
+            raise HostBlocked("native_inference_attachment_unexpected")
+        if native_cancel_purpose is not None:
+            self._checked_cancel_purpose(native_cancel_purpose, original_scope, method, payload)
         key = original_scope.witness["invocation_ref"]
         if key in self._native_inflight:
             raise HostBlocked("native_original_scope_already_pending")
@@ -281,7 +396,8 @@ class CordisHost:
         try:
             response = await self._rpc(method, invocation_ref=key,
                 deadline_at=original_scope.deadline_at, composition_epoch=original_scope.binding.epoch_for(method),
-                payload=payload, native_binding=original_scope)
+                payload=payload, native_binding=original_scope, native_inference=native_inference,
+                native_cancel_purpose=native_cancel_purpose)
             return validate_result(method, response["payload"])
         finally:
             self._native_inflight.discard(key)
@@ -335,7 +451,8 @@ class CordisHost:
 
     async def _rpc(self, method: str, *, internal: bool = False, invocation_ref: str | None = None,
                    deadline_at: int | None = None, composition_epoch: int | None = None,
-                   payload: dict[str, Any] | None = None, native_binding=None) -> dict[str, Any]:
+                   payload: dict[str, Any] | None = None, native_binding=None,
+                   native_inference=None, native_cancel_purpose=None) -> dict[str, Any]:
         if not internal and not self.admitting:
             raise HostBlocked("runtime_not_ready")
         if self.process is None or self.process.stdin is None or self.reviewed is None or self.boot_nonce is None:
@@ -345,7 +462,32 @@ class CordisHost:
         now = int(time.time() * 1000)
         if deadline_at is not None and (type(deadline_at) is not int or deadline_at <= now):
             raise HostBlocked("deadline_expired")
-        deadline = min(now + int(CONTROL_TIMEOUT * 1000), deadline_at if deadline_at is not None else now + int(CONTROL_TIMEOUT * 1000))
+        purpose_deadlines = None
+        if method == "inference.request":
+            from .dispatch import OriginalServiceInvocation
+            if type(native_binding) is not OriginalServiceInvocation or deadline_at != native_binding.deadline_at:
+                raise HostBlocked("native_inference_original_scope_required")
+            candidate = self._checked_native_inference(native_inference, native_binding)
+            if asyncio.get_running_loop() is not self.get_original_owner_loop():
+                raise HostBlocked("native_inference_original_owner_loop_changed")
+            purpose_deadlines = (candidate.purpose_deadline_at, candidate.operation_deadline_at, candidate.turn_deadline_at)
+        elif native_inference is not None:
+            raise HostBlocked("native_inference_attachment_unexpected")
+        try:
+            deadline = rpc_deadline(method, now=now, original_deadline=deadline_at, purpose_deadlines=purpose_deadlines)
+        except ProtocolError as error:
+            raise HostBlocked(str(error)) from error
+        if native_cancel_purpose is not None:
+            from .dispatch import OriginalServiceInvocation
+            if type(native_binding) is not OriginalServiceInvocation or deadline_at != native_binding.deadline_at:
+                raise HostBlocked("native_cancel_original_scope_required")
+            cutoff = self._checked_cancel_purpose(native_cancel_purpose, native_binding, method, payload)
+            deadline = min(deadline, cutoff)
+        if method in SERVICE_METHODS and method != "inference.request":
+            from .dispatch import OriginalServiceInvocation
+            if type(native_binding) is not OriginalServiceInvocation or deadline_at != native_binding.deadline_at:
+                raise HostBlocked("native_original_deadline_scope_required")
+            deadline = self._ordinary_original_deadline(method, payload, native_binding, deadline, now=now)
         original_boot = self.boot_nonce
         self._unresolved += 1
         future = asyncio.get_running_loop().create_future()
@@ -372,7 +514,8 @@ class CordisHost:
                 from .dispatch import CalledServiceInvocation
                 native_binding = CalledServiceInvocation(native_binding, method, composition_epoch,
                     deadline, request_id, original_boot)
-            self._pending[request_id] = Pending(frame, future, native_binding)
+            self._pending[request_id] = Pending(frame, future, native_binding,
+                native_inference=native_inference, native_cancel_purpose=native_cancel_purpose)
             self.process.stdin.write(wire)
             await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
             self._write_lock.release()
@@ -421,10 +564,16 @@ class CordisHost:
                 self._cleanup_state = "clean"
             if not preserve_blocked:
                 self.state, self.reason = "stopped", None
+            if self._cleanup_state == "clean":
+                self._native_owner_loop = self._native_owner_boot_nonce = None
+                self._native_deadline_seals.clear()
             return
         if self._reaped:
             if not preserve_blocked and self._cleanup_state == "clean":
                 self.state, self.reason = "stopped", None
+            if self._cleanup_state == "clean":
+                self._native_owner_loop = self._native_owner_boot_nonce = None
+                self._native_deadline_seals.clear()
             return
         # Admission closes before any drain/restart. No original RPC gets renewed.
         self.state = "quiescing"
@@ -487,6 +636,8 @@ class CordisHost:
         # pipe/listener/timer destruction even when Cordis disposal is unconfirmed.
         if self._cleanup_state != "unknown":
             self._cleanup_state = "clean"
+            self._native_owner_loop = self._native_owner_boot_nonce = None
+            self._native_deadline_seals.clear()
         if self._cleanup_state == "unknown":
             self.state, self.reason = "cleanup_unknown", "owned_cleanup_unknown"
         else:

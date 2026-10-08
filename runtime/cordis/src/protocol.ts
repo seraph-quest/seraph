@@ -6,6 +6,7 @@ import { isServiceMethod, validateInput, validateResult, type ServiceMethod } fr
 
 export const MAX_FRAME = 1_048_576;
 export const CONTROL_TIMEOUT_MS = 5_000;
+export const ORDINARY_TIMEOUT_MS = 30_000;
 export const MAX_PENDING = 32;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ServiceMethod;
@@ -20,6 +21,22 @@ const fields = ['protocol', 'boot_nonce', 'request_id', 'seq', 'kind', 'method',
 const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel']);
 const hex64 = /^[0-9a-f]{64}$/;
 const token = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/** The trusted Python owner seals inference purpose before this initial frame.
+ * Child service calls and responses must retain that original exact cutoff. */
+export function validateIncomingDeadline(frame: Frame, now = Date.now()): void {
+  integer(now, 1);
+  integer(frame.deadline_at, 1);
+  if (frame.deadline_at <= now) throw new ProtocolError('deadline expired');
+  if (frame.kind !== 'request') return; // Pending identity verifies response echo.
+  if (methods.has(frame.method)) {
+    if (frame.deadline_at - now > CONTROL_TIMEOUT_MS) throw new ProtocolError('control deadline exceeded');
+  } else if (isServiceMethod(frame.method)) {
+    if (frame.method !== 'inference.request' && frame.deadline_at - now > ORDINARY_TIMEOUT_MS) {
+      throw new ProtocolError('ordinary deadline exceeded');
+    }
+  } else throw new ProtocolError('unknown deadline method');
+}
 
 export function integer(value: Json | undefined, min = 0, max = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ProtocolError('invalid integer');

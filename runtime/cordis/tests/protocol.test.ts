@@ -2,11 +2,21 @@ import { readFileSync } from "node:fs";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Readable } from 'node:stream';
-import { decodeJson, encodeFrame, readFrames, validateFrame, type Frame } from '../src/protocol.js';
+import { decodeJson, encodeFrame, readFrames, validateFrame, validateIncomingDeadline, type Frame } from '../src/protocol.js';
 import { Resources } from '../src/resources.js';
 import { Composition, validateProfile } from '../src/composition.js';
 
 const frame: Frame = { protocol: 1, boot_nonce: 'a'.repeat(64), request_id: 'r-1', seq: 1, kind: 'request', method: 'bootstrap.hello', invocation_ref: null, composition_epoch: null, composition_digest: 'b'.repeat(64), package_digest: 'c'.repeat(64), deadline_at: 2_000_000_000_000, payload: {} };
+test('fixed controls and ordinary services retain distinct original deadline classes', () => {
+  validateIncomingDeadline({...frame, deadline_at:6000}, 1000);
+  assert.throws(() => validateIncomingDeadline({...frame, deadline_at:6001}, 1000), /control/);
+  validateIncomingDeadline({...frame, method:'conversation.read', deadline_at:31000}, 1000);
+  assert.throws(() => validateIncomingDeadline({...frame, method:'conversation.read', deadline_at:31001}, 1000), /ordinary/);
+  // The initial inference cutoff is sealed by Python; the child cannot mint one.
+  validateIncomingDeadline({...frame, method:'inference.request', deadline_at:100000}, 1000);
+  assert.throws(() => validateIncomingDeadline({...frame, method:'inference.request', deadline_at:1000}, 1000), /expired/);
+  assert.throws(() => validateIncomingDeadline({...frame, deadline_at:Number.MAX_SAFE_INTEGER+1}, 1000), /integer/);
+});
 test('raw length-prefix framing survives fragmented input without delimiters', async () => {
   const wire = encodeFrame(frame);
   assert.equal(wire.readUInt32BE(0), wire.length - 4);

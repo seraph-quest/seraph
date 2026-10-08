@@ -12,6 +12,7 @@ MAX_FRAME = 1_048_576
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_PENDING = 32
 CONTROL_TIMEOUT = 5.0
+ORDINARY_TIMEOUT = 30.0
 CONTROL_METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown", "invocation.cancel"})
 METHODS = CONTROL_METHODS
 FIELDS = frozenset({"protocol", "boot_nonce", "request_id", "seq", "kind", "method", "invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at", "payload"})
@@ -21,6 +22,36 @@ TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 class ProtocolError(ValueError):
     """A boot must be fenced; malformed input must never dispatch."""
+
+
+def rpc_deadline(method, *, now, original_deadline=None, purpose_deadlines=None):
+    """Finite timing arithmetic; the host separately validates private authority."""
+    from .contracts import SERVICE_METHODS
+    integer(now, 1)
+    if original_deadline is not None:
+        integer(original_deadline, 1)
+        if original_deadline <= now:
+            raise ProtocolError("deadline expired")
+    if method in CONTROL_METHODS:
+        if purpose_deadlines is not None:
+            raise ProtocolError("unexpected inference purpose")
+        return min(now + int(CONTROL_TIMEOUT * 1000), original_deadline or now + int(CONTROL_TIMEOUT * 1000))
+    if method not in SERVICE_METHODS or original_deadline is None:
+        raise ProtocolError("original service deadline required")
+    if method == "inference.request":
+        if type(purpose_deadlines) is not tuple or len(purpose_deadlines) != 3:
+            raise ProtocolError("original inference purpose required")
+        for cutoff in purpose_deadlines:
+            integer(cutoff, 1)
+        if purpose_deadlines[2] != original_deadline:
+            raise ProtocolError("original inference turn deadline changed")
+        deadline = min(purpose_deadlines)
+        if deadline <= now:
+            raise ProtocolError("deadline expired")
+        return deadline
+    if purpose_deadlines is not None:
+        raise ProtocolError("unexpected inference purpose")
+    return min(now + int(ORDINARY_TIMEOUT * 1000), original_deadline)
 
 
 def integer(value: Any, minimum: int = 0, maximum: int = MAX_SAFE_INTEGER) -> int:

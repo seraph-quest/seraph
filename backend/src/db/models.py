@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
+from src.browser.forgejo_forms import EMPTY_FORM_PROFILES as _FORGEJO_EMPTY_FORM_PROFILES
 
 
 # ─── Enums ────────────────────────────────────────────────
@@ -3176,5 +3177,9 @@ class ForgejoConnection(SQLModel, table=True):
     read_consent_revision: int = Field(default=0)
     read_consent_expires_at: Optional[datetime] = Field(default=None)
     provisioning_job_id: Optional[str] = Field(default=None)
+    # Derive at import, before writers, from the same owner as migration and
+    # activation. A copied literal digest goes stale on grammar review.
+    reviewed_form_profiles_json: str = Field(default=_FORGEJO_EMPTY_FORM_PROFILES, max_length=1024)
+    form_profiles_revision: int = Field(default=0)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

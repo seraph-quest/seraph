@@ -189,9 +189,28 @@ async def test_actual_auth_vault_connection_cas_without_provider_contact(account
             assert value["provider_user_id"] is None and value["read_consent_expires_at"] is None
             assert value["available"] is False and value["production_acceptance"] == "blocked_unverified"
             assert "local-fixture-password" not in saved.text
+            assert value["reviewed_form_profile_ids"] == []
+            profile_revision=value["form_profiles_revision"]
+            activation={"expected_revision":1,"expected_form_profiles_revision":profile_revision,
+                        "profile_ids":[],"profile_ack":True}
+            route="/api/capabilities/forgejo/connection/form-profiles"
+            for fields in ({"profile_ack":False},{"profile_ack":1},{"profile_ids":["other"]},
+                           {"profile_ids":["forgejo.issue-comment.v1"]*2},
+                           {"profile_ids":["forgejo.issue-create.v1","forgejo.issue-comment.v1"]}):
+                denied=await client.put(route,json={**activation,**fields})
+                assert denied.status_code==422,denied.text
+                assert (await client.get("/api/capabilities/forgejo/connection")).json()==value
+            for fields in ({"expected_revision":20},{"expected_form_profiles_revision":profile_revision+1}):
+                assert (await client.put(route,json={**activation,**fields})).status_code==409
+            unavailable=await client.put(route,json={**activation,"profile_ids":["forgejo.issue-create.v1"]})
+            assert unavailable.status_code==409,unavailable.text
+            unchanged=await client.put(route,json=activation)
+            assert unchanged.status_code==200 and unchanged.json()==value
             wrong = await client.post("/api/capabilities/forgejo/connection/revoke", json={"expected_revision": 20})
             assert wrong.status_code == 409
             revoked = await client.post("/api/capabilities/forgejo/connection/revoke", json={"expected_revision": 1})
             assert revoked.status_code == 200, revoked.text
             assert revoked.json()["state"] == "revoked" and revoked.json()["revision"] == 2
             assert revoked.json()["read_consent_revision"] == 1
+            assert revoked.json()["reviewed_form_profile_ids"]==[]
+            assert revoked.json()["form_profiles_revision"]==profile_revision+1

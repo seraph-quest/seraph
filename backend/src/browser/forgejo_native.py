@@ -19,6 +19,9 @@ from src.artifacts.registry import build_artifact_record
 from src.browser.forgejo_issue_title import (CAPABILITY, JOB_KIND, PROFILE, ForgejoError,
     TitleTarget, canonical, digest, checked_segment, checked_title, positive_id)
 from src.browser.forgejo_profile import BackendSession
+from src.browser.forgejo_forms import (FORM_CAPABILITY, FORM_JOB_KIND, FORM_PROFILES, MAX_FORM_CONTACTS,
+    SOURCE_MANIFEST_DIGEST, active_profiles, checked_content, clear_profiles)
+from src.browser.forgejo_issue_title import PROVIDER_VERSION
 from src.browser.task_lane import try_acquire_browser_task_lane
 from src.db import engine
 from src.db.models import ApprovalRequest, ForgejoConnection, Goal, Secret, WorkflowRunState
@@ -33,6 +36,29 @@ from src.workspace import canonical_workspace_root
 
 PREFIX = "artifacts/forgejo/"
 STATE = "forgejo:state"
+
+
+def form_operation(operation):
+    return operation in {"form-prepare", "form-submit", "form-observe"}
+
+
+def operation_capability(operation):
+    return FORM_CAPABILITY if form_operation(operation) else CAPABILITY
+
+
+def form_source(job_id, content=None):
+    ref = reference(job_id, "form-source")
+    path = canonical_workspace_root(settings.workspace_dir) / ref
+    if content is not None:
+        if type(content) is not bytes or len(content) > 524288:
+            raise ForgejoError("forgejo_source_document_bound")
+        if not path.exists(): _write_payload(path, encrypt(content.decode("utf-8", errors="strict")).encode())
+    raw, over = _read_workspace_text_bounded(_safe_resolve(ref), max_bytes=1048576)
+    if over: raise ForgejoError("forgejo_encrypted_source_bound")
+    actual = decrypt(raw).encode()
+    if len(actual) > 524288 or (content is not None and actual != content):
+        raise ForgejoError("forgejo_private_source_readback_changed")
+    return ref, actual
 
 
 def reference(job_id, kind):
@@ -50,7 +76,9 @@ def journal(run):
 def save(run, value):
     if len(canonical(value)) > 65536 or len(value.get("calls",[])) > 64:
         raise ForgejoError("forgejo_canonical_journal_bound")
-    run.checkpoint_receipts_json = canonical([{"checkpoint_id":STATE,"payload":value,
+    history=json.loads(run.checkpoint_receipts_json or "[]")
+    preserved=[entry for entry in history if entry.get("checkpoint_id")!=STATE]
+    run.checkpoint_receipts_json = canonical([*preserved,{"checkpoint_id":STATE,"payload":value,
         "state_digest":digest(value),"fencing_token":run.fencing_token,
         "recorded_at":now().isoformat(),"safe":True}]).decode()
     run.revision += 1; run.updated_at = now()
@@ -100,7 +128,7 @@ class ForgejoNative:
         # every bounded canonical row is inspected, never a truncated success.
         runs = (await db.execute(select(WorkflowRunState).where(
             WorkflowRunState.owner_principal_id==owner.principal_id,
-            WorkflowRunState.job_kind==JOB_KIND,
+            WorkflowRunState.job_kind.in_((JOB_KIND, FORM_JOB_KIND)),
             WorkflowRunState.status.not_in(("succeeded","degraded","cancelled")))
             .order_by(WorkflowRunState.updated_at.desc()).limit(21))).scalars().all()
         if len(runs)>20: raise ForgejoError("forgejo_unresolved_inventory_overflow")
@@ -120,11 +148,11 @@ class ForgejoNative:
     async def current(self, db, owner, run, *, lease=None, admission=False, read_only=False):
         await original_root(db,owner)
         if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
-            or run.job_kind != JOB_KIND or run.capability_version != "1"):
+            or run.job_kind not in {JOB_KIND, FORM_JOB_KIND} or run.capability_version != "1"):
             raise ForgejoError("forgejo_original_job_owner_changed",status_code=404)
         await WorkBoardRepository._validate_goal(db,owner,goal_id=run.goal_id,goal_revision=run.goal_revision)
         authority = json.loads(run.declared_authority_json)
-        if (run.authority_digest != authority_digest(authority) or authority.get("capability_id") != CAPABILITY
+        if (run.authority_digest != authority_digest(authority) or authority.get("capability_id") != operation_capability(authority.get("operation"))
             or authority.get("principal") != owner.principal_id or authority.get("session_id") != owner.session_id
             or authority.get("no_learning") is not True or authority.get("profile") != PROFILE):
             raise ForgejoError("forgejo_original_authority_changed")
@@ -137,6 +165,15 @@ class ForgejoNative:
             or row.read_consent_revision != authority["read_consent_revision"]
             or row.read_consent_expires_at is None or utc(row.read_consent_expires_at)<=now()):
             raise ForgejoError("forgejo_current_connection_read_consent_required")
+        if form_operation(authority["operation"]) and (
+            authority.get("form_profile") not in active_profiles(row.reviewed_form_profiles_json)
+            or authority.get("form_profiles_revision") != row.form_profiles_revision
+            or authority.get("form_provider_version") != PROVIDER_VERSION
+            or authority.get("form_source_manifest_digest") != SOURCE_MANIFEST_DIGEST):
+            raise ForgejoError("forgejo_original_form_activation_changed")
+        if form_operation(authority["operation"]):
+            from src.browser.sessions import ProfiledInteractionSessions
+            await ProfiledInteractionSessions._stable_root(db,owner)
         expected_inputs={"payload_ref":reference(run.run_identity,"input"),
             "payload_digest":authority["payload_digest"],"no_learning":True}
         if run.input_digest != digest(expected_inputs): raise ForgejoError("forgejo_original_input_changed")
@@ -150,31 +187,37 @@ class ForgejoNative:
             row.state!="active" or row.provider_user_id!=authority["provider_user_id"]
             or row.provider_login!=authority["provider_login"] or row.session_binding!=authority["session_binding"]):
             raise ForgejoError("forgejo_original_numeric_session_identity_changed")
-        if authority["operation"]=="title" and run.status=="running":
+        if authority["operation"] in {"title", "form-submit"} and run.status=="running":
             value=journal(run);approval=await db.get(ApprovalRequest,value.get("approval_id"))
             if (approval is None or approval.status!="consumed" or approval.owner_principal_id!=owner.principal_id
-                or approval.operator_session_id!=owner.session_id or approval.tool_name!=CAPABILITY
+                or approval.operator_session_id!=owner.session_id or approval.tool_name!=operation_capability(authority["operation"])
                 or approval.fingerprint!=value.get("approval_fingerprint") or utc(approval.expires_at)<=now()
                 or json.loads(approval.details_json).get("approval_scope")!=value.get("approval_scope")
                 or value["approval_scope"]["authority_digest"]!=run.authority_digest):
                 raise ForgejoError("forgejo_original_consumed_approval_changed")
+            if authority["operation"]=="form-submit" and value.get("exact_form_ack") is not True:
+                raise ForgejoError("forgejo_explicit_private_form_review_required")
         observed_original=None
-        if authority["operation"]=="observe":
+        if authority["operation"] in {"observe","form-observe"}:
             observed_original=authority["original_job_id"]
             original=await self.jobs._fetch(db,observed_original)
             original_authority=json.loads(original.declared_authority_json)
-            if (original.status!="unknown_external_effect" or original.job_kind!=JOB_KIND
+            if (original.status!="unknown_external_effect" or original.job_kind!=(FORM_JOB_KIND if authority["operation"]=="form-observe" else JOB_KIND)
                 or original.owner_principal_id!=owner.principal_id or original.operator_session_id!=owner.session_id
                 or original.goal_id!=run.goal_id or original.goal_revision!=run.goal_revision
                 or original.revision!=authority["original_job_revision"]
                 or original.fencing_token!=authority["original_job_fence"]
-                or original_authority.get("operation")!="title"
+                or original_authority.get("operation")!=("form-submit" if authority["operation"]=="form-observe" else "title")
                 or original.authority_digest!=authority["original_authority_digest"]
                 or any(original_authority.get(k)!=authority.get(k) for k in (
                     "connection_id","connection_revision","vault_binding_digest","session_binding",
                     "provider_user_id","provider_login"))
-                or not any(c["operation"]=="title_submission" for c in journal(original)["calls"])):
+                or not any(c["operation"]==("form_submission" if authority["operation"]=="form-observe" else "title_submission") for c in journal(original)["calls"])):
                 raise ForgejoError("forgejo_original_unknown_observation_binding_changed")
+            if authority["operation"]=="form-observe" and (
+                type(authority.get("exact_destination_id")) is not int
+                or journal(original).get("exact_destination_id")!=authority["exact_destination_id"]):
+                raise ForgejoError("forgejo_trustworthy_exact_id_required")
         if lease is not None: self.jobs._assert_lease(run,owner=lease[0],fencing_token=lease[1])
         if admission: await self.inventory(db,owner,row.id,excluding=run.run_identity,observed_original=observed_original)
         return row
@@ -184,7 +227,7 @@ class ForgejoNative:
             await original_root(db,owner)
             run = await self.jobs._fetch(db,job_id)
             if (run.owner_principal_id!=owner.principal_id or run.operator_session_id!=owner.session_id
-                or run.job_kind!=JOB_KIND): raise ForgejoError("forgejo_job_not_owned",status_code=404)
+                or run.job_kind not in {JOB_KIND, FORM_JOB_KIND}): raise ForgejoError("forgejo_job_not_owned",status_code=404)
             result = _serialize(run)
             value = journal(run) if run.checkpoint_receipts_json not in (None,"","[]") else {}
             result["forgejo"] = value
@@ -199,9 +242,18 @@ class ForgejoNative:
         self.service.browser.require_available()
         try: uuid.UUID(request_key)
         except (ValueError,TypeError,AttributeError): raise ForgejoError("forgejo_request_uuid_required",status_code=422) from None
-        if operation not in {"provision","preview","title","observe"}:
+        if operation not in {"provision","preview","title","observe","form-prepare","form-submit","form-observe"}:
             raise ForgejoError("forgejo_fixed_operation_required",status_code=422)
-        if operation in {"preview","observe"}:
+        if operation=="form-prepare":
+            required={"profile","owner","repository","content"}
+            if fields.get("profile")=="forgejo.issue-create.v1":required.add("title")
+            elif fields.get("profile")=="forgejo.issue-comment.v1":required.add("issue_index")
+            else:raise ForgejoError("forgejo_reviewed_profile_required",status_code=422)
+            if set(fields)!=required:raise ForgejoError("forgejo_closed_form_input_required",status_code=422)
+            checked_segment(fields["owner"]);checked_segment(fields["repository"]);checked_content(fields["content"])
+            if "title" in fields:checked_title(fields["title"])
+            if "issue_index" in fields:positive_id(fields["issue_index"])
+        elif operation in {"preview","observe"}:
             if set(fields)!={"owner","repository","issue_index","new_title"}:
                 raise ForgejoError("forgejo_closed_title_input_required",status_code=422)
             checked_segment(fields["owner"]);checked_segment(fields["repository"])
@@ -217,9 +269,25 @@ class ForgejoNative:
             if prior_authority.get("request_digest")!=digest(request): raise ForgejoError("forgejo_idempotency_conflict")
             return await self.snapshot(owner,job_id)
         payload={"operation":operation,"fields":fields,"no_learning":True}
-        if operation=="observe":
+        original_deadline=None
+        original_form_authority=None
+        if operation=="form-submit":
+            preview=await self.output(owner,preview_job_id)
+            snap=await self.snapshot(owner,preview_job_id)
+            if (snap["status"]!="succeeded" or snap["declared_authority"]["operation"]!="form-prepare"
+                or preview_digest!=digest(preview) or snap["goal_id"]!=goal_id or snap["goal_revision"]!=goal_revision
+                or snap["declared_authority"]["connection_revision"]!=expected_revision):
+                raise ForgejoError("forgejo_current_exact_form_preview_required")
+            original_deadline=utc(datetime.fromisoformat(snap["deadline_at"]))
+            original_form_authority=snap["declared_authority"]
+            payload.update(target=preview["target"],source_job_id=preview_job_id,
+                preview_job_id=preview_job_id,preview_digest=preview_digest)
+        if operation in {"observe","form-observe"}:
             if not isinstance(original_binding,dict):raise ForgejoError("forgejo_original_unknown_binding_required")
             payload["original_binding"]=original_binding
+            if operation=="form-observe":
+                payload["target"]=original_binding["target"]
+                payload["exact_destination_id"]=original_binding["exact_destination_id"]
         if operation=="title":
             preview=await self.output(owner,preview_job_id)
             snap=await self.snapshot(owner,preview_job_id)
@@ -234,27 +302,44 @@ class ForgejoNative:
             payload["preview_job_id"]=preview_job_id;payload["preview_digest"]=preview_digest
         ref,cipher_digest,_=stage(job_id,"input",payload)
         async with engine.get_session() as db:
+            if operation=="provision":await writer(db)
             root=await original_root(db,owner)
             goal=await WorkBoardRepository._validate_goal(db,owner,goal_id=goal_id,goal_revision=goal_revision)
             row=await db.scalar(select(ForgejoConnection).where(ForgejoConnection.owner_principal_id==owner.principal_id))
             if row is None or row.revision!=expected_revision: raise ForgejoError("forgejo_configuration_revision_changed")
-            deadline=min(now()+timedelta(seconds=120),utc(root.absolute_expires_at),utc(root.idle_expires_at),
+            if operation=="provision":
+                was_active=bool(active_profiles(row.reviewed_form_profiles_json))
+                clear_profiles(row)
+                if was_active:row.revision+=1
+                row.updated_at=now();db.add(row)
+            form_profile=fields.get("profile") if operation=="form-prepare" else payload.get("target",{}).get("profile")
+            if form_operation(operation) and form_profile not in active_profiles(row.reviewed_form_profiles_json):
+                raise ForgejoError("forgejo_reviewed_form_profile_inactive")
+            if original_form_authority and any(original_form_authority.get(key)!=value for key,value in (
+                ("form_profiles_revision",row.form_profiles_revision),
+                ("form_source_manifest_digest",SOURCE_MANIFEST_DIGEST),("read_consent_revision",row.read_consent_revision))):
+                raise ForgejoError("forgejo_original_form_activation_changed")
+            deadline=min(now()+timedelta(seconds=180 if form_operation(operation) else 120),utc(root.absolute_expires_at),utc(root.idle_expires_at),
                 utc(row.read_consent_expires_at) if row.read_consent_expires_at else now())
             if goal.due_date is not None: deadline=min(deadline,utc(goal.due_date))
+            if original_deadline is not None:deadline=min(deadline,original_deadline)
             authority={"principal":owner.principal_id,"owner_kind":"user","session_id":owner.session_id,
-                "capability_id":CAPABILITY,"profile":PROFILE,"operation":operation,"connection_id":row.id,
+                "capability_id":operation_capability(operation),"profile":PROFILE,"operation":operation,"connection_id":row.id,
                 "connection_revision":row.revision,"read_consent_revision":row.read_consent_revision,
                 "vault_binding_digest":row.credential_binding,"session_binding":row.session_binding,
                 "provider_user_id":row.provider_user_id,"provider_login":row.provider_login,
                 "payload_digest":digest(payload),"input_cipher_digest":cipher_digest,"request_digest":digest(request),
                 "permissions":["forgejo_private_read","credential_egress","browser_process","workspace_write"]+
-                    (["external_mutation"] if operation=="title" else ["provider_session_login"] if operation=="provision" else []),
+                    (["external_mutation"] if operation in {"title","form-submit"} else ["provider_session_login"] if operation=="provision" else []),
                 "no_learning":True}
-            if operation=="observe":authority.update(original_binding)
+            if operation in {"observe","form-observe"}:authority.update({key:value for key,value in original_binding.items() if key!="target"})
+            if form_operation(operation):authority.update(form_profile=form_profile,
+                form_profiles_revision=row.form_profiles_revision,form_provider_version=PROVIDER_VERSION,
+                form_source_manifest_digest=SOURCE_MANIFEST_DIGEST,goal_id=goal_id,goal_revision=goal_revision)
         async def guard(db,candidate): await self.current(db,owner,candidate,admission=True)
         admitted=await self.jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=job_id,
-            owner_kind="user",owner_principal_id=owner.principal_id,job_kind=JOB_KIND,capability_version="1",
-            idempotency_scope="forgejo-title",idempotency_key=request_key),
+            owner_kind="user",owner_principal_id=owner.principal_id,job_kind=FORM_JOB_KIND if form_operation(operation) else JOB_KIND,capability_version="1",
+            idempotency_scope="forgejo-forms" if form_operation(operation) else "forgejo-title",idempotency_key=request_key),
             inputs={"payload_ref":ref,"payload_digest":digest(payload),"no_learning":True},
             session_id=owner.session_id,operator_session_id=owner.session_id,goal_id=goal_id,goal_revision=goal_revision,
             priority=50,declared_authority=authority,deadline_at=deadline,max_attempts=1,budget_microusd=0,
@@ -264,7 +349,7 @@ class ForgejoNative:
             await writer(db);run=await self.jobs._fetch(db,job_id);await self.current(db,owner,run)
             save(run,{"phase":"prepared","calls":[],"operation":operation,"no_learning":True})
             db.add(run)
-        if operation=="title": await self.make_approval(owner,job_id,payload)
+        if operation in {"title","form-submit"}: await self.make_approval(owner,job_id,payload)
         return await self.snapshot(owner,job_id)
 
     async def recover(self, owner, original_job_id, *, expected_revision, original_job_revision,
@@ -272,16 +357,25 @@ class ForgejoNative:
         if read_ack is not True:raise ForgejoError("forgejo_separate_read_only_ack_required",status_code=422)
         async with engine.get_session() as db:
             await original_root(db,owner);original=await self.jobs._fetch(db,original_job_id)
-            if (original.job_kind!=JOB_KIND or original.owner_principal_id!=owner.principal_id
+            if (original.job_kind not in {JOB_KIND,FORM_JOB_KIND} or original.owner_principal_id!=owner.principal_id
                 or original.operator_session_id!=owner.session_id or original.status!="unknown_external_effect"
                 or original.revision!=original_job_revision or original.fencing_token!=original_fencing_token):
                 raise ForgejoError("forgejo_exact_original_unknown_required")
             a=json.loads(original.declared_authority_json)
-            if a.get("operation")!="title":raise ForgejoError("forgejo_exact_original_title_required")
+            if a.get("operation") not in {"title","form-submit"}:raise ForgejoError("forgejo_exact_original_mutation_required")
+            exact_id=journal(original).get("exact_destination_id")
+            if a.get("operation")=="form-submit" and (type(exact_id) is not int or exact_id<=0):
+                raise ForgejoError("forgejo_unknown_without_trustworthy_id_unresolved")
             goal_id,goal_revision=original.goal_id,original.goal_revision
         _,sha,payload=stage(original_job_id,"input")
         if sha!=a["input_cipher_digest"] or digest(payload)!=a["payload_digest"]:
             raise ForgejoError("forgejo_original_private_input_changed")
+        if a.get("operation")=="form-submit":
+            binding={"original_job_id":original_job_id,"original_job_revision":original_job_revision,
+                "original_job_fence":original_fencing_token,"original_authority_digest":original.authority_digest,
+                "target":payload["target"],"exact_destination_id":exact_id}
+            return await self.prepare(owner,operation="form-observe",fields={},request_key=request_key,
+                goal_id=goal_id,goal_revision=goal_revision,expected_revision=expected_revision,original_binding=binding)
         target=TitleTarget(**payload["target"])
         fields={"owner":target.owner,"repository":target.repository,"issue_index":target.issue_index,
             "new_title":target.new_title}
@@ -298,9 +392,15 @@ class ForgejoNative:
                 "preview_digest":payload["preview_digest"],"owner":owner.principal_id,"root":owner.session_id,
                 "goal_id":run.goal_id,"goal_revision":run.goal_revision,"expires_at":utc(run.deadline_at).isoformat(),
                 "no_provider_cas":True,"single_original_post":True,"unknown_no_reclick":True}
-        fingerprint=fingerprint_tool_call(CAPABILITY,{"scope_digest":digest(scope)})
-        approval=await approval_repository.get_or_create_pending(session_id=owner.session_id,tool_name=CAPABILITY,
-            risk_level="high",summary="Approve one exact issue title edit; no provider CAS or automatic repeat",
+            capability=operation_capability(payload["operation"])
+            if payload["operation"]=="form-submit":
+                scope["target"]={key:value for key,value in payload["target"].items() if key not in {"title","content","controls"}}
+                scope.update(private_preview_job_id=payload["preview_job_id"],
+                    effect="Create one ordinary issue" if payload["target"]["profile"]=="forgejo.issue-create.v1" else "Add one ordinary issue comment",
+                    notification_effects="Ordinary Forgejo notifications and history may be created")
+        fingerprint=fingerprint_tool_call(capability,{"scope_digest":digest(scope)})
+        approval=await approval_repository.get_or_create_pending(session_id=owner.session_id,tool_name=capability,
+            risk_level="high",summary="Approve one exact native Forgejo form; no repeat" if payload["operation"]=="form-submit" else "Approve one exact issue title edit; no provider CAS or automatic repeat",
             fingerprint=fingerprint,details={"approval_scope":scope,"approval_owner_principal_id":owner.principal_id,
                 "approval_owner_operator_session_id":owner.session_id,"operator_session_id":owner.session_id,
                 "approval_conversation_id":owner.session_id,"approval_expires_at":utc(run.deadline_at).timestamp()})
@@ -308,6 +408,7 @@ class ForgejoNative:
             await writer(db);run=await self.jobs._fetch(db,job_id);await self.current(db,owner,run)
             value=journal(run);value.update(approval_id=approval.id,approval_scope=scope,
                 approval_fingerprint=fingerprint,phase="awaiting_exact_approval")
+            if payload["operation"]=="form-submit":value["exact_form_ack"]=False
             save(run,value);db.add(run)
 
     async def approve(self, owner, job_id, *, approval_id, decision, exact_ack):
@@ -323,6 +424,8 @@ class ForgejoNative:
                 raise ForgejoError("forgejo_exact_approval_changed")
             await approval_repository.resolve_exact_in_session(db,approval_id,decision,
                 expected_digest=approval_decision_digest(row))
+            if json.loads(run.declared_authority_json)["operation"]=="form-submit":
+                value["exact_form_ack"]=decision=="approved";save(run,value);db.add(run)
         return await self.snapshot(owner,job_id)
 
     async def output(self, owner, job_id):
@@ -372,7 +475,7 @@ class ForgejoNative:
         assets=json.loads(Path(__file__).with_name("forgejo_assets_v15.json").read_bytes())["assets"]
         lane=try_acquire_browser_task_lane(settings.workspace_dir)
         if lane is None: raise ForgejoError("browser_slot_busy")
-        lease=None;cleanup={"status":"verified","browser_closed":True,"launch_attempted":False,
+        lease=None;physical_committed=True;cleanup={"status":"verified","browser_closed":True,"launch_attempted":False,
             "transport":{"status":"verified","requests_started":0,"requests_settled":0}};task=asyncio.current_task()
         try:
             async with engine.get_session() as db:
@@ -380,6 +483,14 @@ class ForgejoNative:
                 value=journal(run)
                 if run.revision!=expected_revision or run.fencing_token!=fencing_token or value.get("execution_request"):
                     raise ForgejoError("forgejo_original_execution_request_changed")
+                if authority["operation"]=="form-submit":
+                    approval=await db.get(ApprovalRequest,value.get("approval_id"))
+                    if (value.get("exact_form_ack") is not True or approval is None
+                        or approval.status!="approved" or approval.tool_name!=FORM_CAPABILITY
+                        or approval.owner_principal_id!=owner.principal_id or approval.operator_session_id!=owner.session_id
+                        or utc(approval.expires_at)<=now() or approval.fingerprint!=value.get("approval_fingerprint")
+                        or json.loads(approval.details_json).get("approval_scope")!=value.get("approval_scope")):
+                        raise ForgejoError("forgejo_explicit_private_form_review_required")
                 value["execution_request"]=execution_request;save(run,value);db.add(run)
                 queue_revision=run.revision
             queued=await self.jobs.queue_job(job_id,expected_revision=queue_revision)
@@ -389,18 +500,29 @@ class ForgejoNative:
                 value=journal(run)
                 if value.get("calls") or value.get("cancel_requested"):
                     raise ForgejoError("forgejo_original_execution_not_replayable")
-                if authority["operation"]=="title":
+                if authority["operation"] in {"title","form-submit"}:
                     approval=await db.get(ApprovalRequest,value.get("approval_id"))
-                    if (approval is None or approval.status!="approved" or approval.tool_name!=CAPABILITY
+                    if (approval is None or approval.status!="approved" or approval.tool_name!=operation_capability(authority["operation"])
                         or approval.owner_principal_id!=owner.principal_id or approval.operator_session_id!=owner.session_id
                         or utc(approval.expires_at)<=now() or approval.fingerprint!=value.get("approval_fingerprint")
                         or json.loads(approval.details_json).get("approval_scope")!=value.get("approval_scope")
                         or value["approval_scope"]["authority_digest"]!=run.authority_digest):
                         raise ForgejoError("forgejo_exact_current_approval_required")
+                    if authority["operation"]=="form-submit" and value.get("exact_form_ack") is not True:
+                        raise ForgejoError("forgejo_explicit_private_form_review_required")
                     approval.status="consumed";approval.resolved_at=now();db.add(approval)
             claimed=await self.jobs.claim_job(job_id,owner=runner,expected_revision=queued["revision"],
                 expected_fencing_token=fencing_token,lease_seconds=120,claim_authority_check=claim_guard)
             lease=(runner,claimed["lease"]["fencing_token"]);self.active[job_id]=task
+            physical_witness=None
+            if authority["operation"] in {"form-prepare","form-submit"}:
+                from src.browser.sessions import ProfiledInteractionSessions
+                physical_committed=False
+                physical_witness=lane.stage_prelaunch(job_id)
+                physical_binding=ProfiledInteractionSessions._physical_binding(claimed,physical_witness)
+                await self.jobs.reserve_native_physical_resource(physical_binding,witness=physical_witness,
+                    current_owner=owner,authenticated_token_hash=owner.authenticated_token_hash)
+                lane.require_positive_cleanup(job_id)
 
             def fence(run):
                 if run.lease_owner!=lease[0] or run.fencing_token!=lease[1]:
@@ -422,13 +544,15 @@ class ForgejoNative:
                 async with engine.get_session() as db:
                     await writer(db);run=await self.jobs._fetch(db,job_id);await self.current(db,owner,run,lease=lease)
                     value=journal(run);calls=value["calls"]
-                    if value.get("cancel_requested") or len(calls)>=64 or any(c["request_id"]==descriptor["request_id"] for c in calls):
+                    max_contacts=MAX_FORM_CONTACTS if form_operation(authority["operation"]) else 64
+                    if value.get("cancel_requested") or len(calls)>=max_contacts or any(c["request_id"]==descriptor["request_id"] for c in calls):
                         raise ForgejoError("forgejo_contact_bound_or_cancelled")
                     if descriptor["method"]=="POST":
-                        expected="provision_login" if authority["operation"]=="provision" else "title_submission"
+                        expected="provision_login" if authority["operation"]=="provision" else "form_submission" if authority["operation"]=="form-submit" else "title_submission"
                         if (operation!=expected or any(c["method"]=="POST" for c in calls)
                             or (operation=="title_submission" and (authority["operation"]!="title"
-                                or descriptor.get("body_digest")!=digest(TitleTarget(**payload["target"]).title_body)))):
+                                or descriptor.get("body_digest")!=digest(TitleTarget(**payload["target"]).title_body)))
+                            or (operation=="form_submission" and descriptor.get("body_digest")!=payload["target"]["encoded_body_digest"])):
                             raise ForgejoError("forgejo_original_single_post_required")
                     calls.append({**descriptor,"status":"intent","fencing_token":lease[1],"at":now().isoformat()})
                     value["phase"]="contact_started";save(run,value);db.add(run)
@@ -453,6 +577,29 @@ class ForgejoNative:
                     await writer(db);run=await self.jobs._fetch(db,job_id);fence(run)
                     value=journal(run);value["cleanup"]=cleanup;save(run,value);db.add(run)
 
+            async def retain_form_cleanup(value, resources):
+                nonlocal physical_committed
+                await retain_cleanup(value)
+                if value["status"]=="verified":
+                    from src.browser.sessions import ProfiledInteractionSessions
+                    no_child=resources.context_not_started
+                    if no_child:lane._no_child_resources=resources
+                    lane.retain_positive_cleanup(physical_witness,proof="owned_no_child" if no_child else "owned_positive_close")
+                    await ProfiledInteractionSessions._physical_cleanup_receipt(self,owner,job_id,lane=lane)
+                    physical_committed=True
+
+            async def retain_source(document):
+                ref,_=form_source(job_id,document)
+                return ref
+
+            async def retain_destination(exact_id):
+                positive_id(exact_id)
+                async with engine.get_session() as db:
+                    await writer(db);run=await self.jobs._fetch(db,job_id);await self.current(db,owner,run,lease=lease)
+                    value=journal(run)
+                    if "exact_destination_id" in value:raise ForgejoError("forgejo_destination_already_recorded")
+                    value["exact_destination_id"]=exact_id;save(run,value);db.add(run)
+
             operation=authority["operation"]
             session_cipher=None
             cleanup={"status":"unknown","browser_closed":False,"launch_attempted":True}
@@ -465,6 +612,24 @@ class ForgejoNative:
                     "provider_login":minted.provider_login}).decode())
                 result={"provider_user_id":minted.provider_user_id,"provider_login":minted.provider_login,
                     "session_provisioned":True,"no_learning":True}
+            elif operation=="form-observe":
+                from src.browser.forgejo_form_browser import ForgejoFormBrowser
+                result=await ForgejoFormBrowser(self.service.browser).inspect_exact(target=payload["target"],
+                    exact_id=payload["exact_destination_id"],username=credentials["user_name"],password=credentials["password"],
+                    deadline=deadline,check_current=current,contact=contact,observe=observe,cleanup_observer=retain_cleanup)
+            elif operation in {"form-prepare","form-submit"}:
+                from src.browser.forgejo_form_browser import ForgejoFormBrowser
+                target=payload.get("target")
+                fields=payload["fields"] if operation=="form-prepare" else {
+                    key:target[key] for key in ("owner","repository","content")}
+                if operation=="form-submit":
+                    fields.update({"title":target["title"]} if target["profile"]=="forgejo.issue-create.v1" else {"issue_index":target["issue_index"]})
+                document=form_source(payload["source_job_id"])[1] if operation=="form-submit" else None
+                result=await ForgejoFormBrowser(self.service.browser).transact(profile=authority["form_profile"],fields=fields,
+                    session=session,username=credentials["user_name"],password=credentials["password"],
+                    expected_user_id=authority["provider_user_id"],deadline=deadline,check_current=current,
+                    contact=contact,observe=observe,cleanup_observer=retain_form_cleanup,target=target,
+                    document=document,retain_source=retain_source,retain_destination=retain_destination)
             elif operation in {"preview","observe"}:
                 result=await self.service.browser.inspect(**payload["fields"],username=credentials["user_name"],
                     password=credentials["password"],expected_user_id=authority["provider_user_id"],deadline=deadline,
@@ -481,12 +646,13 @@ class ForgejoNative:
                 result=await self.service.browser.submit(target=TitleTarget(**payload["target"]),session=session,
                     username=credentials["user_name"],password=credentials["password"],asset_manifest=assets,deadline=deadline,
                     check_current=current,contact=contact,observe=observe,cleanup_observer=retain_cleanup)
-            result.update(job_id=job_id,operation=operation,profile=PROFILE,no_learning=True)
+            result.update(job_id=job_id,operation=operation,profile=authority.get("form_profile",PROFILE),no_learning=True)
             ref,sha,actual=stage(job_id,"output",result)
             artifact=build_artifact_record(file_path=ref,artifact_type="forgejo_private_transaction",
-                producer=JOB_KIND,run_id=job_id,session_id=owner.session_id,
+                producer=FORM_JOB_KIND if form_operation(operation) else JOB_KIND,run_id=job_id,session_id=owner.session_id,
                 content=_safe_resolve(ref).read_bytes(),trust_boundary="owner_private_encrypted_no_model_context",
-                recovery_hint="Unknown title edit: explicit GET-only inspection; never Save again")
+                recovery_hint="Unknown exact form: retained-ID GET-only observation; never POST again" if form_operation(operation)
+                    else "Unknown title edit: explicit GET-only inspection; never Save again")
             await current()
             async with engine.get_session() as db:
                 await writer(db);run=await self.jobs._fetch(db,job_id);row=await self.current(db,owner,run,lease=lease)
@@ -521,7 +687,7 @@ class ForgejoNative:
                     if run.lease_owner==lease[0] and run.fencing_token==lease[1] and run.status=="running":
                         value=journal(run)
                         uncertain=cleanup["status"]!="verified" or any(c["status"]!="received" for c in value["calls"])
-                        possible_title=any(c["operation"]=="title_submission" for c in value["calls"])
+                        possible_title=any(c["operation"] in {"title_submission","form_submission"} for c in value["calls"])
                         value.update(phase="unknown" if uncertain or possible_title else "blocked",
                             cleanup=cleanup,capacity_closed=not uncertain and not possible_title)
                         save(run,value);run.status="unknown_external_effect" if uncertain or possible_title else "blocked"
@@ -530,7 +696,7 @@ class ForgejoNative:
             raise
         finally:
             if self.active.get(job_id) is task:self.active.pop(job_id,None)
-            if cleanup["status"]=="verified":lane.release()
+            if cleanup["status"]=="verified" and physical_committed:lane.release()
             else:lane.quarantine(job_id)
 
     async def local_withdrawal_current(self, db, owner, run):
@@ -541,7 +707,7 @@ class ForgejoNative:
         """
         await original_root(db,owner)
         if (run.owner_kind!="user" or run.owner_principal_id!=owner.principal_id
-            or run.operator_session_id!=owner.session_id or run.job_kind!=JOB_KIND
+            or run.operator_session_id!=owner.session_id or run.job_kind not in {JOB_KIND,FORM_JOB_KIND}
             or run.capability_version!="1"):
             raise ForgejoError("forgejo_original_job_owner_changed",status_code=404)
         goal=await db.get(Goal,run.goal_id,populate_existing=True)
@@ -557,9 +723,9 @@ class ForgejoNative:
             valid=(isinstance(authority,dict) and run.authority_digest==authority_digest(authority)
                 and authority.get("principal")==owner.principal_id
                 and authority.get("session_id")==owner.session_id
-                and authority.get("owner_kind")=="user" and authority.get("capability_id")==CAPABILITY
+                and authority.get("owner_kind")=="user" and authority.get("capability_id")==operation_capability(authority.get("operation"))
                 and authority.get("profile")==PROFILE and authority.get("no_learning") is True
-                and authority.get("operation") in {"provision","preview","title","observe"}
+                and authority.get("operation") in {"provision","preview","title","observe","form-prepare","form-submit","form-observe"}
                 and run.input_digest==digest({"payload_ref":reference(run.run_identity,"input"),
                     "payload_digest":authority["payload_digest"],"no_learning":True})
                 and len(entries)==1 and entries[0].get("safe") is True

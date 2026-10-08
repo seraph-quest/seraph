@@ -1,0 +1,6907 @@
+{
+  "action": "https://codeberg.org/seraph_fixture1013/fixture1013/issues/new",
+  "method": "post",
+  "form": {
+    "tag": "FORM",
+    "id": "new-issue",
+    "attributes": [
+      [
+        "class",
+        "issue-content ui comment form form-fetch-action"
+      ],
+      [
+        "id",
+        "new-issue"
+      ],
+      [
+        "action",
+        "/seraph_fixture1013/fixture1013/issues/new"
+      ],
+      [
+        "method",
+        "post"
+      ]
+    ]
+  },
+  "controls": [
+    {
+      "tag": "INPUT",
+      "id": "issue_title",
+      "attributes": [
+        [
+          "name",
+          "title"
+        ],
+        [
+          "class",
+          "js-autofocus-end"
+        ],
+        [
+          "id",
+          "issue_title"
+        ],
+        [
+          "placeholder",
+          "Title"
+        ],
+        [
+          "value",
+          ""
+        ],
+        [
+          "required",
+          ""
+        ],
+        [
+          "maxlength",
+          "255"
+        ],
+        [
+          "autocomplete",
+          "off"
+        ]
+      ],
+      "name": "title",
+      "type": "text",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "button"
+        ],
+        [
+          "class",
+          "active item"
+        ],
+        [
+          "data-tab-for",
+          "markdown-writer"
+        ]
+      ],
+      "name": "",
+      "type": "button",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "switch"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "Write"
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "button"
+        ],
+        [
+          "class",
+          "item"
+        ],
+        [
+          "data-tab-for",
+          "markdown-previewer"
+        ],
+        [
+          "data-preview-url",
+          "/seraph_fixture1013/fixture1013/markup"
+        ],
+        [
+          "data-preview-context",
+          "/seraph_fixture1013/fixture1013"
+        ]
+      ],
+      "name": "",
+      "type": "button",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "switch"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "Preview"
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "markdown-toolbar-button show-modal"
+        ],
+        [
+          "data-md-button",
+          ""
+        ],
+        [
+          "data-md-action",
+          "new-link"
+        ],
+        [
+          "data-tooltip-content",
+          "Add a link (Ctrl+K / \u2318K)"
+        ],
+        [
+          "data-md-ctrl-shortcut",
+          "k"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "markdown-toolbar-group"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": ""
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "button"
+        ],
+        [
+          "class",
+          "markdown-toolbar-button"
+        ],
+        [
+          "data-md-button",
+          ""
+        ],
+        [
+          "data-md-action",
+          "unindent"
+        ],
+        [
+          "data-tooltip-content",
+          "Unnest items by one level"
+        ]
+      ],
+      "name": "",
+      "type": "button",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "markdown-toolbar-group"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": ""
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "button"
+        ],
+        [
+          "class",
+          "markdown-toolbar-button"
+        ],
+        [
+          "data-md-button",
+          ""
+        ],
+        [
+          "data-md-action",
+          "indent"
+        ],
+        [
+          "data-tooltip-content",
+          "Nest items by one level"
+        ]
+      ],
+      "name": "",
+      "type": "button",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "markdown-toolbar-group"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": ""
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "button"
+        ],
+        [
+          "class",
+          "markdown-toolbar-button show-modal"
+        ],
+        [
+          "data-md-button",
+          ""
+        ],
+        [
+          "data-md-action",
+          "new-table"
+        ],
+        [
+          "data-tooltip-content",
+          "Add table"
+        ]
+      ],
+      "name": "",
+      "type": "button",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "markdown-toolbar-group"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": ""
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "markdown-toolbar-button markdown-switch-monospace"
+        ],
+        [
+          "data-md-button",
+          ""
+        ],
+        [
+          "role",
+          "switch"
+        ],
+        [
+          "data-enable-text",
+          "Enable monospace font"
+        ],
+        [
+          "data-disable-text",
+          "Disable monospace font"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "markdown-toolbar-group"
+            ]
+          ]
+        },
+        {
+          "tag": "MARKDOWN-TOOLBAR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": ""
+    },
+    {
+      "tag": "TEXTAREA",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "markdown-text-editor js-quick-submit"
+        ],
+        [
+          "name",
+          "content"
+        ],
+        [
+          "placeholder",
+          "Leave a comment"
+        ]
+      ],
+      "name": "content",
+      "type": "textarea",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "TEXT-EXPANDER",
+          "id": "",
+          "attributes": [
+            [
+              "keys",
+              ": @"
+            ],
+            [
+              "suffix",
+              ""
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui tab active"
+            ],
+            [
+              "data-tab-panel",
+              "markdown-writer"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "name",
+          "table-header"
+        ],
+        [
+          "value",
+          "Header"
+        ],
+        [
+          "disabled",
+          ""
+        ]
+      ],
+      "name": "table-header",
+      "type": "hidden",
+      "value": "Header",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form content"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "name",
+          "table-content"
+        ],
+        [
+          "value",
+          "Content"
+        ],
+        [
+          "disabled",
+          ""
+        ]
+      ],
+      "name": "table-content",
+      "type": "hidden",
+      "value": "Content",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form content"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "number"
+        ],
+        [
+          "name",
+          "table-rows"
+        ],
+        [
+          "class",
+          "js-enable"
+        ],
+        [
+          "min",
+          "1"
+        ],
+        [
+          "value",
+          "2"
+        ],
+        [
+          "disabled",
+          ""
+        ],
+        [
+          "required",
+          ""
+        ]
+      ],
+      "name": "table-rows",
+      "type": "number",
+      "value": "2",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "TD",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TBODY",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TABLE",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form content"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "number"
+        ],
+        [
+          "name",
+          "table-columns"
+        ],
+        [
+          "class",
+          "js-enable"
+        ],
+        [
+          "min",
+          "1"
+        ],
+        [
+          "value",
+          "2"
+        ],
+        [
+          "disabled",
+          ""
+        ],
+        [
+          "required",
+          ""
+        ]
+      ],
+      "name": "table-columns",
+      "type": "number",
+      "value": "2",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "TD",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TR",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TBODY",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "TABLE",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form content"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui cancel button"
+        ],
+        [
+          "data-selector-name",
+          "cancel-button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right actions"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "Cancel"
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui primary button"
+        ],
+        [
+          "data-selector-name",
+          "ok-button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right actions"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal tw-w-fit"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-table"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "OK"
+    },
+    {
+      "tag": "FIELDSET",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "content"
+        ]
+      ],
+      "name": "",
+      "type": "fieldset",
+      "value": null,
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-link"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "name",
+          "link-url"
+        ],
+        [
+          "class",
+          "js-enable"
+        ],
+        [
+          "disabled",
+          ""
+        ],
+        [
+          "required",
+          ""
+        ],
+        [
+          "dir",
+          "auto"
+        ],
+        [
+          "autocomplete",
+          "off"
+        ]
+      ],
+      "name": "link-url",
+      "type": "text",
+      "value": "",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "LABEL",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "FIELDSET",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "content"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-link"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "name",
+          "link-description"
+        ],
+        [
+          "class",
+          "js-enable"
+        ],
+        [
+          "disabled",
+          ""
+        ],
+        [
+          "required",
+          ""
+        ],
+        [
+          "dir",
+          "auto"
+        ],
+        [
+          "autocomplete",
+          "off"
+        ]
+      ],
+      "name": "link-description",
+      "type": "text",
+      "value": "",
+      "disabled": true,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "LABEL",
+          "id": "",
+          "attributes": []
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "FIELDSET",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "content"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-link"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui cancel button"
+        ],
+        [
+          "data-selector-name",
+          "cancel-button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right actions"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "FIELDSET",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "content"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-link"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "Cancel"
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui primary button"
+        ],
+        [
+          "data-selector-name",
+          "ok-button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right actions"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui form"
+            ],
+            [
+              "data-selector-name",
+              "form"
+            ]
+          ]
+        },
+        {
+          "tag": "FIELDSET",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "content"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui small modal"
+            ],
+            [
+              "data-modal-name",
+              "new-markdown-link"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "combo-markdown-editor "
+            ],
+            [
+              "data-dropzone-parent-container",
+              "form, .ui.form"
+            ],
+            [
+              "data-tab-hint",
+              "Line already indented. Press <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ],
+            [
+              "data-shift-tab-hint",
+              "No indentation on this line. Press <kbd>Shift</kbd> + <kbd>Tab</kbd> again or <kbd>Escape</kbd> to leave the editor."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "field"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "OK"
+    },
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui primary button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t\tCreate issue\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t"
+    },
+    {
+      "tag": "INPUT",
+      "id": "ref_selector",
+      "attributes": [
+        [
+          "id",
+          "ref_selector"
+        ],
+        [
+          "name",
+          "ref"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "ref",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "editing_mode",
+      "attributes": [
+        [
+          "id",
+          "editing_mode"
+        ],
+        [
+          "name",
+          "edit_mode"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          "true"
+        ]
+      ],
+      "name": "edit_mode",
+      "type": "hidden",
+      "value": "true",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "name",
+          "search"
+        ],
+        [
+          "placeholder",
+          "Filter branch or tag..."
+        ]
+      ],
+      "name": "search",
+      "type": "text",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui icon search input"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "menu"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui  floating filter select-branch dropdown tw-max-w-full"
+            ],
+            [
+              "data-no-results",
+              "No results found."
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "label_ids",
+      "attributes": [
+        [
+          "id",
+          "label_ids"
+        ],
+        [
+          "name",
+          "label_ids"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "label_ids",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "milestone_id",
+      "attributes": [
+        [
+          "id",
+          "milestone_id"
+        ],
+        [
+          "name",
+          "milestone_id"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "milestone_id",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "project_id",
+      "attributes": [
+        [
+          "id",
+          "project_id"
+        ],
+        [
+          "name",
+          "project_id"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "project_id",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "assignee_ids",
+      "attributes": [
+        [
+          "id",
+          "assignee_ids"
+        ],
+        [
+          "name",
+          "assignee_ids"
+        ],
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "assignee_ids",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    },
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "text"
+        ],
+        [
+          "placeholder",
+          "Filter assignee"
+        ]
+      ],
+      "name": "",
+      "type": "text",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui icon search input"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "filter menu"
+            ],
+            [
+              "data-id",
+              "#assignee_ids"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui  floating jump select-assignees dropdown"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-right ui segment"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    }
+  ],
+  "successful": [
+    [
+      "title",
+      ""
+    ],
+    [
+      "content",
+      ""
+    ],
+    [
+      "ref",
+      ""
+    ],
+    [
+      "edit_mode",
+      "true"
+    ],
+    [
+      "search",
+      ""
+    ],
+    [
+      "label_ids",
+      ""
+    ],
+    [
+      "milestone_id",
+      ""
+    ],
+    [
+      "project_id",
+      ""
+    ],
+    [
+      "assignee_ids",
+      ""
+    ]
+  ],
+  "ordinary_submitters": [
+    {
+      "tag": "BUTTON",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "ui primary button"
+        ]
+      ],
+      "name": "",
+      "type": "submit",
+      "value": "",
+      "disabled": false,
+      "owner": {
+        "tag": "FORM",
+        "id": "new-issue",
+        "attributes": [
+          [
+            "class",
+            "issue-content ui comment form form-fetch-action"
+          ],
+          [
+            "id",
+            "new-issue"
+          ],
+          [
+            "action",
+            "/seraph_fixture1013/fixture1013/issues/new"
+          ],
+          [
+            "method",
+            "post"
+          ]
+        ]
+      },
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "text right"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui segment content tw-my-0"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "comment"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui comments"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "issue-content-left"
+            ]
+          ]
+        },
+        {
+          "tag": "FORM",
+          "id": "new-issue",
+          "attributes": [
+            [
+              "class",
+              "issue-content ui comment form form-fetch-action"
+            ],
+            [
+              "id",
+              "new-issue"
+            ],
+            [
+              "action",
+              "/seraph_fixture1013/fixture1013/issues/new"
+            ],
+            [
+              "method",
+              "post"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": "\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t\tCreate issue\n\t\t\t\t\t\t\t\n\t\t\t\t\t\t"
+    }
+  ],
+  "forms": [
+    {
+      "tag": "FORM",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "stopwatch-commit"
+        ],
+        [
+          "method",
+          "post"
+        ],
+        [
+          "action",
+          "/times/stopwatch/toggle"
+        ]
+      ]
+    },
+    {
+      "tag": "FORM",
+      "id": "",
+      "attributes": [
+        [
+          "class",
+          "stopwatch-cancel"
+        ],
+        [
+          "method",
+          "post"
+        ],
+        [
+          "action",
+          "/times/stopwatch/cancel"
+        ]
+      ]
+    },
+    {
+      "tag": "FORM",
+      "id": "",
+      "attributes": [
+        [
+          "hx-boost",
+          "true"
+        ],
+        [
+          "hx-target",
+          "this"
+        ],
+        [
+          "method",
+          "post"
+        ],
+        [
+          "action",
+          "/seraph_fixture1013/fixture1013/action/unwatch"
+        ],
+        [
+          "hx-on::after-settle",
+          "this.querySelector('button').focus()"
+        ]
+      ]
+    },
+    {
+      "tag": "FORM",
+      "id": "",
+      "attributes": [
+        [
+          "hx-boost",
+          "true"
+        ],
+        [
+          "hx-target",
+          "this"
+        ],
+        [
+          "method",
+          "post"
+        ],
+        [
+          "action",
+          "/seraph_fixture1013/fixture1013/action/star"
+        ],
+        [
+          "hx-on::after-settle",
+          "this.querySelector('button').focus()"
+        ]
+      ]
+    },
+    {
+      "tag": "FORM",
+      "id": "new-issue",
+      "attributes": [
+        [
+          "class",
+          "issue-content ui comment form form-fetch-action"
+        ],
+        [
+          "id",
+          "new-issue"
+        ],
+        [
+          "action",
+          "/seraph_fixture1013/fixture1013/issues/new"
+        ],
+        [
+          "method",
+          "post"
+        ]
+      ]
+    }
+  ],
+  "redirect_controls": [
+    {
+      "tag": "INPUT",
+      "id": "",
+      "attributes": [
+        [
+          "type",
+          "hidden"
+        ],
+        [
+          "name",
+          "redirect_after_creation"
+        ],
+        [
+          "value",
+          ""
+        ]
+      ],
+      "name": "redirect_after_creation",
+      "type": "hidden",
+      "value": "",
+      "disabled": false,
+      "owner": null,
+      "ancestors": [
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "ui container"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "role",
+              "main"
+            ],
+            [
+              "aria-label",
+              "New issue"
+            ],
+            [
+              "class",
+              "page-content repository new issue"
+            ]
+          ]
+        },
+        {
+          "tag": "DIV",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "full height"
+            ]
+          ]
+        },
+        {
+          "tag": "BODY",
+          "id": "",
+          "attributes": [
+            [
+              "class",
+              "no-js"
+            ],
+            [
+              "hx-swap",
+              "outerHTML"
+            ],
+            [
+              "hx-ext",
+              "morph"
+            ],
+            [
+              "hx-push-url",
+              "false"
+            ]
+          ]
+        },
+        {
+          "tag": "HTML",
+          "id": "",
+          "attributes": [
+            [
+              "lang",
+              "en-US"
+            ],
+            [
+              "data-theme",
+              "forgejo-auto"
+            ]
+          ]
+        }
+      ],
+      "text": null
+    }
+  ],
+  "active_scripts": [
+    {
+      "attributes": [],
+      "text": "\n\t\n\twindow.addEventListener('error', function(e) {window._globalHandlerErrors=window._globalHandlerErrors||[]; window._globalHandlerErrors.push(e);});\n\twindow.addEventListener('unhandledrejection', function(e) {window._globalHandlerErrors=window._globalHandlerErrors||[]; window._globalHandlerErrors.push(e);});\n\twindow.config = {\n\t\tappUrl: 'https:\\/\\/codeberg.org\\/',\n\t\tappSubUrl: '',\n\t\tassetVersionEncoded: encodeURIComponent('15.0.9~gitea-1.22.0'), \n\t\tassetUrlPrefix: '\\/assets',\n\t\trunModeIsProd:  true ,\n\t\tcustomEmojis: new Set([\"git\",\"gitea\",\"codeberg\",\"gitlab\",\"github\",\"gogs\",\"forgejo\"]),\n\t\tpageData: {\"DATETIMESTRINGS\":{\"FUTURE\":\"in future\",\"NOW\":\"now\",\"relativetime.1day\":\"yesterday\",\"relativetime.1month\":\"last month\",\"relativetime.1week\":\"last week\",\"relativetime.1year\":\"last year\"},\"PLURALSTRINGS_FALLBACK\":{},\"PLURALSTRINGS_LANG\":{\"relativetime.days\":[\"%d day ago\",\"%d days ago\"],\"relativetime.hours\":[\"%d hour ago\",\"%d hours ago\"],\"relativetime.mins\":[\"%d minute ago\",\"%d minutes ago\"],\"relativetime.months\":[\"%d month ago\",\"%d months ago\"],\"relativetime.weeks\":[\"%d week ago\",\"%d weeks ago\"],\"relativetime.years\":[\"%d year ago\",\"%d years ago\"]},\"PLURAL_RULE_FALLBACK\":0,\"PLURAL_RULE_LANG\":0},\n\t\tnotificationSettings: {\"EventSourceUpdateTime\":10000,\"MaxTimeout\":60000,\"MinTimeout\":10000,\"TimeoutStep\":10000}, \n\t\tenableTimeTracking:  true ,\n\t\t\n\t\tmentionValues: Array.from(new Map([['seraph_fixture1013', {key: 'seraph_fixture1013 ', value: 'seraph_fixture1013', name: 'seraph_fixture1013', fullname: '', avatar: 'https:\\/\\/codeberg.org\\/avatars\\/ff7782f43f676b71f37404d310262a8f'}],]).values()),\n\t\t\n\t\tmermaidMaxSourceCharacters:  50000 ,\n\t\t\n\t\ti18n: {\n\t\t\tcopy_success: \"Copied!\",\n\t\t\tcopy_error: \"Copy failed\",\n\t\t\terror_occurred: \"An error occurred\",\n\t\t\tnetwork_error: \"Network error\",\n\t\t\tremove_label_str: \"Remove item \\\"%s\\\"\",\n\t\t\tmodal_confirm: \"Confirm\",\n\t\t\tmodal_cancel: \"Cancel\",\n\t\t\tmore_items: \"More items\",\n\t\t\tincorrect_root_url: \"This Forgejo instance is configured to be served on \\\"https://codeberg.org/\\\". You are currently viewing Forgejo through a different URL, which may cause parts of the application to break. The canonical URL is controlled by Forgejo admins via the ROOT_URL setting in the app.ini.\",\n\t\t},\n\t};\n\t\n\twindow.config.pageData = window.config.pageData || {};\n"
+    },
+    {
+      "attributes": [
+        [
+          "src",
+          "/assets/js/webcomponents.js?v=15.0.9~gitea-1.22.0"
+        ]
+      ],
+      "text": ""
+    },
+    {
+      "attributes": [],
+      "text": "\n\t\t\tif (localStorage?.getItem('markdown-editor-monospace') === 'true') {\n\t\t\t\tdocument.querySelector('.markdown-text-editor').classList.add('tw-font-mono');\n\t\t\t}\n\t\t"
+    },
+    {
+      "attributes": [
+        [
+          "src",
+          "/assets/js/index.js?v=15.0.9~gitea-1.22.0"
+        ],
+        [
+          "onerror",
+          "alert('Failed to load asset files from {path}. Please make sure the asset files can be accessed.'.replace('{path}', this.src))"
+        ]
+      ],
+      "text": ""
+    }
+  ]
+}

@@ -1854,6 +1854,22 @@ async def _ensure_procedure_v2_binding(conn) -> None:
         )
 
 
+async def _ensure_forgejo_form_profiles(conn) -> None:
+    """Preserve existing title/consent rows; defaults confer no form authority."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(forgejo_connections)")
+    existing = {row[1] for row in result.fetchall()}
+    if not existing:
+        return
+    from src.browser.forgejo_forms import EMPTY_FORM_PROFILES
+    additions = {
+        "reviewed_form_profiles_json": "VARCHAR DEFAULT '" + EMPTY_FORM_PROFILES + "'",
+        "form_profiles_revision": "INTEGER DEFAULT 0",
+    }
+    for column, sql_type in additions.items():
+        if column not in existing:
+            await conn.exec_driver_sql(f"ALTER TABLE forgejo_connections ADD COLUMN {column} {sql_type}")
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -1889,6 +1905,7 @@ async def init_db() -> None:
         await _ensure_repo_repair_columns(conn)
         await _ensure_mail_columns(conn)
         await _ensure_connection_sync_columns(conn)
+        await _ensure_forgejo_form_profiles(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)

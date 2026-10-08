@@ -558,9 +558,16 @@ def _job_has_unsafe_effects(effects: Any) -> bool:
 
 def native_external_effect_state(run: WorkflowRunState) -> str:
     """Redacted canonical liability projection; physical cleanup changes none."""
-    if run.job_kind not in {"connection_source_sync", "browser_interact_v2"}:
+    if run.job_kind not in {"connection_source_sync", "browser_interact_v2", "forgejo_form_transaction_v1"}:
         raise DurableJobTransitionError("native external-state projection kind is invalid")
     effects = _effect_ledger_or_raise(run.effect_receipts_json)
+    if run.job_kind == "forgejo_form_transaction_v1" and not effects:
+        history = _json_load(run.checkpoint_receipts_json, None)
+        entries = [item for item in history or [] if item.get("checkpoint_id") == "forgejo:state"]
+        if len(entries) != 1 or not isinstance(entries[0].get("payload"), dict):
+            raise DurableJobTransitionError("Forgejo form effect journal is unavailable")
+        if any(call.get("method") == "POST" for call in entries[0]["payload"].get("calls", [])):
+            return "unknown"
     if _job_has_unsafe_effects(effects):
         return "unknown"
     return "settled" if effects else "none"
@@ -2117,9 +2124,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if db.get_bind().dialect.name == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, binding.job_id)
-            kinds = {"connection_source_sync": "connection-sync-v1", "browser_interact_v2": "2"}
+            kinds = {"connection_source_sync": "connection-sync-v1", "browser_interact_v2": "2", "forgejo_form_transaction_v1":"1"}
             eligible = {"connection_source_sync": {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"},
-                        "browser_interact_v2": {"running", "unknown_external_effect", "cost_liability"}}
+                        "browser_interact_v2": {"running", "unknown_external_effect", "cost_liability"},
+                        "forgejo_form_transaction_v1": {"running", "unknown_external_effect", "cost_liability"}}
             expected = native_physical_cleanup_binding_payload(binding)
             actual = {
                 "job_id": run.run_identity, "original_owner_principal_id": run.owner_principal_id,
@@ -2147,6 +2155,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if (run.job_kind == "browser_interact_v2" and
                 (binding.resource_claim != "browser-task-lane" or authority.get("capability_id") != "browser.interact.v2")):
                 raise DurableJobTransitionError("native browser cleanup kind changed")
+            if (run.job_kind == "forgejo_form_transaction_v1" and
+                (binding.resource_claim != "browser-task-lane" or authority.get("capability_id") != "browser.forgejo-forms.v1")):
+                raise DurableJobTransitionError("native Forgejo form cleanup kind changed")
             if (run.job_kind == "connection_source_sync" and
                 (binding.resource_claim != "connection-sync:" + str(authority.get("connection_id", ""))
                  or authority.get("capability_id") not in {"mail.messages.read", "calendar.events.read"})):
@@ -2997,7 +3008,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 effect_receipts_json="[]",
             )
             await recheck_run_dependencies(db, run, admission_dependencies)
-            if identity.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and admission_authority_check is None:
+            if identity.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1", "inference.near-text.v1"} and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")
             if identity.job_kind == "guardian_opportunity_assess" and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("guardian_opportunity_fixed_native_admission_required")
@@ -3685,7 +3696,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
             if to_status in {"succeeded", "degraded"}:
-                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and terminal_authority_check is None:
+                if run.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1", "inference.near-text.v1", "browser_interact_v2"} and terminal_authority_check is None:
                     raise DurableJobTransitionError("Forgejo terminalization requires its fixed native authority callback")
                 if run.job_kind == "guardian_opportunity_assess" and terminal_authority_check is None:
                     raise DurableJobTransitionError("Opportunity terminalization requires its fixed native authority callback")
@@ -4233,7 +4244,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
-            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and claim_authority_check is None:
+            if preflight_run.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1", "inference.near-text.v1", "browser_interact_v2"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
                 raise DurableJobLeaseError("Opportunity claims require the fixed native authority callback")
@@ -4263,7 +4274,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
-                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"}:
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "forgejo_form_transaction_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(
@@ -4897,8 +4908,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     if type(binding) is not NativePhysicalCleanupBinding:
                         raise DurableJobTransitionError("native typed physical binding is required")
                     claims = _json_load(run.resource_claims_json, [])
-                    if (run.job_kind not in {"connection_source_sync", "browser_interact_v2"}
-                        or run.capability_version != {"connection_source_sync":"connection-sync-v1", "browser_interact_v2":"2"}[run.job_kind]
+                    if (run.job_kind not in {"connection_source_sync", "browser_interact_v2", "forgejo_form_transaction_v1"}
+                        or run.capability_version != {"connection_source_sync":"connection-sync-v1", "browser_interact_v2":"2", "forgejo_form_transaction_v1":"1"}[run.job_kind]
                         or run.owner_kind != "user" or run.status != "running"
                         or run.operator_session_id != run.session_id or len(claims) != 1
                         or run.owner_principal_id != authenticated_owner.principal_id
@@ -6674,7 +6685,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 and not run.lease_owner
                 and not run.lease_expires_at
             )
-            if run.job_kind == "forgejo_issue_title_v1" and readback_authority_check is None:
+            if run.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1"} and readback_authority_check is None:
                 raise DurableJobTransitionError("Forgejo effects require its fixed native authority callback")
             if _deadline_expired(run) and not recovery_readback:
                 raise DurableJobTransitionError("job deadline has expired")

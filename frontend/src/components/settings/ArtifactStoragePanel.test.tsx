@@ -335,6 +335,11 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.queryByRole("option", { name: "context tokens" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "output tokens" })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/canary"))).toBe(false);
+    await waitFor(() => {
+      expect(runButton).toBeEnabled();
+      expect(screen.getByLabelText("Canary profile")).toHaveValue("local-text");
+      expect(screen.getByLabelText("Canary capability")).toHaveValue("text");
+    });
     fireEvent.click(runButton);
 
     expect(await screen.findByText(/local-text\/text · passed · proof abcdef123456/)).toHaveClass("text-green-400");

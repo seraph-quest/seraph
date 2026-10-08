@@ -2665,6 +2665,10 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             "fencing_token": int(job.fencing_token or 0),
             "authority_digest": job.authority_digest,
         }
+        return LocalRepoRepairExecutor._stage_binding_token(binding)
+
+    @staticmethod
+    def _stage_binding_token(binding: Mapping[str, Any]) -> str:
         return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -2727,12 +2731,12 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 os.close(descriptor)
             os.close(directory)
 
-    def _write_job_marker(self, job_id: str, payload: Mapping[str, Any]) -> None:
+    def _write_job_marker(self, job_id: str, payload: Mapping[str, Any]) -> bool:
         with self._job_marker_lock(job_id):
-            self._write_job_marker_locked(job_id, payload)
+            return self._write_job_marker_locked(job_id, payload)
 
-    def _write_job_marker_locked(self, job_id: str, payload: Mapping[str, Any]) -> None:
-        """Atomically replace a private, server-owned local execution marker."""
+    def _write_job_marker_locked(self, job_id: str, payload: Mapping[str, Any]) -> bool:
+        """Write a private marker; return true if terminal cancellation won."""
 
         marker_dir_fd = _open_trusted_directory(self._job_marker_directory, create=True)
         marker_fd = -1
@@ -2751,22 +2755,36 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             # and this atomic rename. Terminal cancellation is the only
             # non-running state allowed to replace that fence here.
             existing_payload: dict[str, Any] | None = None
+            existing_metadata: os.stat_result | None = None
             existing_fd = -1
             try:
                 existing_fd = os.open(
                     self._job_marker_name(job_id),
-                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                     dir_fd=marker_dir_fd,
                 )
+                existing_metadata = os.fstat(existing_fd)
+                if (not stat.S_ISREG(existing_metadata.st_mode)
+                    or existing_metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(existing_metadata.st_mode) != 0o600
+                    or existing_metadata.st_nlink != 1):
+                    raise RepoSandboxError("local execution marker is not owner-controlled")
                 existing_raw = os.read(existing_fd, 16 * 1024 + 1)
+                if len(existing_raw) > 16 * 1024:
+                    raise RepoSandboxError("local execution marker exceeds the bounded size")
                 parsed_existing = json.loads(existing_raw.decode("utf-8"))
-                if isinstance(parsed_existing, dict):
-                    existing_payload = parsed_existing
-            except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                if not isinstance(parsed_existing, dict):
+                    raise RepoSandboxError("local execution marker is not an object")
+                existing_payload = parsed_existing
+            except FileNotFoundError:
                 existing_payload = None
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise RepoSandboxError("local execution marker cannot be verified") from exc
             finally:
                 if existing_fd >= 0:
                     os.close(existing_fd)
+            if existing_payload is None and payload.get("status") == "cancellation_requested":
+                raise RepoSandboxError("local cancellation marker is missing")
             if existing_payload and (existing_payload.get("cancellation_requested") is True or existing_payload.get("status") == "cancellation_requested"):
                 payload = {**payload, "cancellation_requested": True}
             if (
@@ -2804,6 +2822,82 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 or existing.st_nlink != 1
             ):
                 raise RepoSandboxError("local execution marker is not owner-controlled")
+            if existing_metadata is not None and (
+                existing is None or not _same_file_metadata(existing_metadata, existing)
+            ):
+                raise RepoSandboxError("local execution marker identity changed")
+            if (existing_payload is not None
+                and payload.get("profile") in {PROFILE, "repo-python-pytest-publication-v1"}
+                and payload.get("status") == "cancellation_requested"
+                and (existing_payload.get("phase") == "cleanup_verified"
+                     or existing_payload.get("status") == "cancelled"
+                     or existing_payload.get("cleanup_proven") is True)):
+                # The worker may finish after cancel sets its active flag but
+                # before this locked write. Preserve only its exact, verified
+                # cancellation receipt, and tell cancel not to signal a PID
+                # whose original process group has already been reaped.
+                immutable = ("schema", "executor_kind", "profile", "job_id",
+                             "authority_digest", "attempt_id", "fencing_token",
+                             "base_digest", "posture_digest", "runtime_identity",
+                             "stage_binding", "stage_directory", "stage_identity")
+                binding = {
+                    "executor_kind": "local", "job_id": job_id,
+                    "authority_digest": payload.get("authority_digest"),
+                    "attempt_id": payload.get("attempt_id"),
+                    "fencing_token": payload.get("fencing_token"),
+                }
+                terminal = existing_payload.get("terminal_receipt")
+                stage_identity = payload.get("stage_identity")
+                valid = (
+                    all(key in payload and payload[key] == existing_payload.get(key) for key in immutable)
+                    and payload.get("job_id") == job_id
+                    and payload.get("schema") == "seraph.repo_repair_local_job.v1"
+                    and payload.get("executor_kind") == "local"
+                    and isinstance(binding["authority_digest"], str) and bool(binding["authority_digest"])
+                    and isinstance(binding["attempt_id"], str) and bool(binding["attempt_id"])
+                    and type(binding["fencing_token"]) is int and binding["fencing_token"] >= 0
+                    and type(existing_payload.get("fencing_token")) is int
+                    and payload.get("stage_binding") == binding
+                    and isinstance(existing_payload.get("stage_binding"), dict)
+                    and type(existing_payload["stage_binding"].get("fencing_token")) is int
+                    and isinstance(stage_identity, dict) and set(stage_identity) == {"device", "inode"}
+                    and all(type(stage_identity[key]) is int and stage_identity[key] >= 0 for key in stage_identity)
+                    and all(type(existing_payload["stage_identity"][key]) is int for key in stage_identity)
+                    and payload.get("phase") == "cancel_requested"
+                    and existing_payload.get("status") == "cancelled"
+                    and existing_payload.get("phase") == "cleanup_verified"
+                    and existing_payload.get("cleanup_proven") is True
+                    and isinstance(terminal, dict) and terminal.get("status") == "cancelled"
+                    and terminal.get("attempt_id") == binding["attempt_id"]
+                    and type(terminal.get("fencing_token")) is int
+                    and terminal.get("fencing_token") == binding["fencing_token"]
+                    and terminal.get("stage_binding") == binding
+                    and isinstance(terminal.get("stage_binding"), dict)
+                    and type(terminal["stage_binding"].get("fencing_token")) is int
+                    and terminal.get("manifest_sha256") == terminal.get("readback_sha256")
+                    and all(isinstance(terminal.get(key), str) and len(terminal[key]) == 64
+                            and all(character in "0123456789abcdef" for character in terminal[key])
+                            for key in ("manifest_sha256", "readback_sha256"))
+                )
+                if not valid:
+                    raise RepoSandboxError("local terminal cancellation binding is unproven")
+                token = self._stage_binding_token(binding)
+                staging = self.workspace_dir / "artifacts" / "repo-sandbox" / "staging"
+                expected_stage = staging / token
+                if payload["stage_directory"] != str(expected_stage.relative_to(self.workspace_dir)):
+                    raise RepoSandboxError("local terminal cancellation stage binding changed")
+                staging_fd = _open_trusted_directory(staging)
+                try:
+                    parent = os.fstat(staging_fd)
+                    if parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+                        raise RepoSandboxError("local terminal cancellation staging parent is untrusted")
+                    try:
+                        os.stat(token, dir_fd=staging_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        return True
+                    raise RepoSandboxError("local terminal cancellation stage cleanup is unproven")
+                finally:
+                    os.close(staging_fd)
             os.rename(
                 temporary_name,
                 self._job_marker_name(job_id),
@@ -2811,6 +2905,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 dst_dir_fd=marker_dir_fd,
             )
             os.fsync(marker_dir_fd)
+            return False
         finally:
             if marker_fd >= 0:
                 os.close(marker_fd)
@@ -3767,13 +3862,13 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         if marker is None:
             return {"status": "unknown_external_effect", "reason": "local_cancellation_intent_unavailable", "cleanup_proven": False, "job_id": resolved_job_id}
         try:
-            self._write_job_marker(
+            terminal_cancelled = self._write_job_marker(
                 resolved_job_id,
                 {**marker, "phase": "cancel_requested", "status": "cancellation_requested"},
             )
         except (OSError, ValueError, RepoSandboxError):
             return {"status": "unknown_external_effect", "reason": "local_cancellation_intent_unavailable", "cleanup_proven": False, "job_id": resolved_job_id}
-        if active_cancellation_fence:
+        if terminal_cancelled or active_cancellation_fence:
             return {"status": "cancel_requested", "cleanup_proven": False, "job_id": resolved_job_id}
         try:
             pid = int(process.pid) if process is not None else marker_pid

@@ -65,13 +65,13 @@ describe("Programme digest binding", () => {
     expect(JSON.parse(post[1].body)).toEqual({ enabled: true, deadline_categories: ["research", "funding"] });
   });
 
-  it("persists defer and dismiss through API and disables stale findings", async () => {
-    const data = receipt(); data.digests[0].findings[0].source_freshness = "stale";
+  it("persists defer and dismiss through API for a current actionable finding", async () => {
+    const data = receipt();
     fetchMock.mockResolvedValue(reply(data));
     render(<ProgrammeDigestContent ownerKey="operator:root" />);
     const card = await screen.findByRole("article", { name: "Programme finding" });
     fireEvent.change(within(card).getByLabelText("Desired outcome"), { target: { value: "Checklist" } });
-    expect(within(card).getByRole("button", { name: "Prepare next step for review" })).toBeDisabled();
+    expect(within(card).getByRole("button", { name: "Prepare next step for review" })).toBeEnabled();
     fireEvent.change(within(card).getByLabelText("Planned follow-up"), { target: { value: new Date(Date.now() + 86400000).toISOString().slice(0, 16) } });
     fetchMock.mockImplementation((url) => Promise.resolve(reply(String(url).endsWith("/actions") ? { finding_id: "finding-one" } : data)));
     fireEvent.click(within(card).getByRole("button", { name: "Defer finding" }));
@@ -82,6 +82,28 @@ describe("Programme digest binding", () => {
     const posts = fetchMock.mock.calls.filter(([, init]) => init.method === "POST").map(([, init]) => JSON.parse(init.body));
     expect(posts[0]).toMatchObject({ action: "snooze", until: expect.any(String) });
     expect(posts[1]).toMatchObject({ action: "dismiss" });
+  });
+
+  it.each(["selected-read-only", "stale-source"])("blocks all new actions for %s while preserving read and task navigation", async (reason) => {
+    const data = receipt(); const finding = data.digests[0].findings[0];
+    finding.actionable = reason !== "selected-read-only";
+    finding.source_freshness = reason === "stale-source" ? "stale" : "current";
+    finding.task_id = "retained-task";
+    fetchMock.mockResolvedValue(reply(data));
+    const open = vi.fn();
+    render(<ProgrammeDigestContent ownerKey="operator:root" onOpenTask={open} />);
+    const card = await screen.findByRole("article", { name: "Programme finding" });
+    fireEvent.change(within(card).getByLabelText("Desired outcome"), { target: { value: "Checklist" } });
+    fireEvent.change(within(card).getByLabelText("Planned follow-up"), { target: { value: new Date(Date.now() + 86400000).toISOString().slice(0, 16) } });
+    for (const name of ["Prepare next step for review", "Defer finding", "Dismiss finding"]) {
+      const button = within(card).getByRole("button", { name });
+      expect(button).toBeDisabled(); fireEvent.click(button);
+    }
+    expect(within(card).getByText(/Read only.*current Goal ownership/)).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Read discovery brief and prepared outputs" })).toBeEnabled();
+    fireEvent.click(within(card).getByRole("button", { name: "Review prepared proposal in Work" }));
+    expect(open).toHaveBeenCalledWith("retained-task");
+    expect(fetchMock.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(0);
   });
 
   it("blocks mutation after an uncertain action or failed refresh and never retries automatically", async () => {

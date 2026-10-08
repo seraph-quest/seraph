@@ -27,6 +27,8 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
   const [categories, setCategories] = useState("");
   const [taskLinks, setTaskLinks] = useState<Record<string, string>>({});
   const [readbacks, setReadbacks] = useState<Record<string, string>>({});
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const controller = useRef<AbortController | null>(null);
   const mounted = useRef(false);
   const lock = useRef(false);
@@ -51,7 +53,10 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
   }, [ownerKey, active, load]);
 
   const action = async (finding: ProgrammeFinding, kind: "accept_followup" | "snooze" | "dismiss") => {
-    if (lock.current || !confirmed || !ownerKey || uncertain.current.has(finding.id)) return;
+    const current = snapshotRef.current?.digests.flatMap((entry) => entry.findings).find((entry) => entry.id === finding.id);
+    if (!mounted.current || lock.current || !confirmed || !ownerKey || uncertain.current.has(finding.id)
+      || !current?.actionable || current.source_freshness !== "current" || current.goal_id !== finding.goal_id
+      || current.programme_id !== finding.programme_id || current.job_id !== finding.job_id) return;
     if (kind === "accept_followup" && (!finding.actionable || finding.source_freshness !== "current" || !outcomes[finding.id]?.trim())) return;
     if (kind === "snooze" && (!Number.isFinite(Date.parse(dates[finding.id])) || Date.parse(dates[finding.id]) <= Date.now()
       || Date.parse(dates[finding.id]) > Date.now() + 30 * 86400000)) return;
@@ -134,6 +139,7 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
             <button type="button" disabled={busy || !confirmed} onClick={() => void readBrief(f)}>Read discovery brief and prepared outputs</button>
             {readbacks[f.id] ? <pre aria-label="Current discovery source and output readback">{readbacks[f.id]}</pre> : null}
             {f.recovery ? <p>Recovery · {f.recovery}</p> : null}
+            {!f.actionable || f.source_freshness !== "current" ? <p>Read only · review current Goal ownership and refresh original sources before taking a new action.</p> : null}
             {f.follow_through ? <p>Follow-through · {f.follow_through.status} · {f.follow_through.desired_outcome} · planned follow-up {f.follow_through.due_at ? time(f.follow_through.due_at) : "None"}</p> : null}
             {f.prepared_outputs.map((output) => <div key={output.artifact_id}>Output · {output.artifact_id} · digest {output.digest}</div>)}
             {(taskLinks[f.id] || f.task_id) && onOpenTask ? <button type="button" onClick={() => onOpenTask(taskLinks[f.id] || f.task_id!)}>{f.follow_through?.status === "completed" ? "Open completed task and output" : "Review prepared proposal in Work"}</button> : null}
@@ -141,8 +147,8 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
             <button type="button" disabled={busy || !confirmed || !f.actionable || f.source_freshness !== "current" || uncertain.current.has(f.id) || !outcomes[f.id]?.trim()} onClick={() => void action(f, "accept_followup")}>Prepare next step for review</button>
             <p>Preparation is inert. Review and accept the existing C1 task proposal in Work before execution.</p>
             <label>Planned follow-up <input type="datetime-local" value={dates[f.id] ?? ""} onChange={(e) => setDates((current) => ({ ...current, [f.id]: e.target.value }))} disabled={busy || !confirmed} /></label>
-            <button type="button" disabled={busy || !confirmed || uncertain.current.has(f.id) || !dates[f.id] || !Number.isFinite(Date.parse(dates[f.id])) || Date.parse(dates[f.id]) <= Date.now() || Date.parse(dates[f.id]) > Date.now() + 30 * 86400000} onClick={() => void action(f, "snooze")}>Defer finding</button>
-            <button type="button" disabled={busy || !confirmed || uncertain.current.has(f.id)} onClick={() => void action(f, "dismiss")}>Dismiss finding</button>
+            <button type="button" disabled={busy || !confirmed || !f.actionable || f.source_freshness !== "current" || uncertain.current.has(f.id) || !dates[f.id] || !Number.isFinite(Date.parse(dates[f.id])) || Date.parse(dates[f.id]) <= Date.now() || Date.parse(dates[f.id]) > Date.now() + 30 * 86400000} onClick={() => void action(f, "snooze")}>Defer finding</button>
+            <button type="button" disabled={busy || !confirmed || !f.actionable || f.source_freshness !== "current" || uncertain.current.has(f.id)} onClick={() => void action(f, "dismiss")}>Dismiss finding</button>
           </article>)}
         </div>)}
       </>}

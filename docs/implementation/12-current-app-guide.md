@@ -273,13 +273,18 @@ implemented and reviewed integration before activation.
 
 The [#1005](https://github.com/seraph-quest/seraph/issues/1005) implementation
 adds a passive daily programme digest and finding dispositions to Home and the
-Guardian Inbox.
+Guardian Inbox on `develop` revisions containing that milestone merge. Earlier
+revisions require the independently reviewed merge; feature-branch receipts do
+not establish their availability.
 The existing Python scheduler considers the current operator IANA local day
 after 08:00. A durable stable-owner/day receipt survives restart and Goal
 deletion. Its bounded pending phase lets an original discovery finish before
 finalizing the same digest; an expired cutoff, missing source, changed authority
 or unresolved original work produces passive recovery. Missed days do not run in
-a catch-up burst. This adds no inference, source fetch, execution queue or cost
+a catch-up burst. Only the exact original current UTC source occurrence is
+staged; unresolved current work never falls back to an older successful output.
+Finalized-day ticks do not reopen historical programme artifacts. This adds no
+inference, source fetch, execution queue or cost
 ledger and does not change discovery's original UTC occurrence or deadlines.
 
 Inbox delivery is the default. Native notices need a separate explicit opt-in
@@ -304,7 +309,11 @@ Work task card; it is not a second proposal row or a new allowance. Review and
 accept the plan separately in Tasks. Completion links the verified physical
 local output back to the original finding. Corrections, missing/altered artifacts
 or expired sources block preparation; a selected recovered Goal remains
-read-only. Defer/dismiss and action-key replay/conflict survive reload. Operator
+read-only. All new dispositions, including defer and dismiss, require current
+original Goal ownership and fresh source authority again in their final writer.
+Private follow-through reads and exact action replay require that Goal's current
+read scope; a recovered Root must explicitly select it. Defer/dismiss and
+action-key replay/conflict survive reload. Operator
 disposition receipts are limited to 128 per owner/day and 16 KiB each, without
 evicting history to manufacture capacity.
 

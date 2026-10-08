@@ -41,7 +41,7 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
         replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
         egress_revision=configured.egress_revision + 1))
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
-    monkeypatch.setattr(settings, "user_timezone", "Europe/Warsaw")
+    monkeypatch.setattr(settings, "user_timezone", "UTC")
     jobs = DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     calls, public_routes = [], []
@@ -259,7 +259,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
         replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
         egress_revision=configured.egress_revision + 1))
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
-    monkeypatch.setattr(settings, "user_timezone", "Europe/Warsaw")
+    monkeypatch.setattr(settings, "user_timezone", "UTC")
     # This original fixture Root must remain valid at the same day's08local
     # delivery clock. Configure its lifetime before login; never renew old rows.
     monkeypatch.setattr(settings, "operator_auth_idle_seconds", 86400)
@@ -386,6 +386,63 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             assert len(set(claimed_ids)) == 2
             no_third = await client.get("/api/observer/notifications/next", params={"worker_id": "owned-third-daemon"}, headers={"X-Seraph-Daemon-Id": "owned-third-daemon"})
             assert no_third.status_code == 200 and no_third.json()["notification"] is None
+            actual_findings = receipt["digests"][0]["findings"]
+            assert len(actual_findings) == 2 and all(f["actionable"] for f in actual_findings)
+            deferred, dismissed = actual_findings
+            from src.auth.service import authenticate_session
+            from src.db.models import ProgrammeFindingAction, ProgrammeFollowThrough
+            from src.guardian.goal_programmes import GoalProgrammeError
+            operator = await authenticate_session(root_id, touch=False)
+            stale_clock = datetime.now(timezone.utc) + timedelta(hours=49)
+            for action_kind in ("snooze", "dismiss"):
+                with pytest.raises(GoalProgrammeError, match="programme_finding_refresh_required"):
+                    await digest.action(operator, deferred["id"], digest.FindingAction(action=action_kind,
+                        until=stale_clock + timedelta(hours=1) if action_kind == "snooze" else None,
+                        idempotency_key="stale-source-" + action_kind), now=stale_clock)
+            async with factory.accounting_sessions() as db:
+                assert list((await db.execute(select(ProgrammeFindingAction))).scalars()) == []
+                assert list((await db.execute(select(ProgrammeFollowThrough))).scalars()) == []
+            deferred_path = f"/api/guardian/inbox/programme-findings/{deferred['id']}/actions"
+            dismissed_path = f"/api/guardian/inbox/programme-findings/{dismissed['id']}/actions"
+            deferred_body = {"action": "snooze", "until": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                "desired_outcome": "Review the original cited grants evidence tomorrow", "idempotency_key": "actual-deadline-defer"}
+            dismissed_body = {"action": "dismiss", "desired_outcome": "Suppress this reviewed finding", "idempotency_key": "actual-deadline-dismiss"}
+            for path, action in ((deferred_path, deferred_body), (dismissed_path, dismissed_body)):
+                changed = await client.post(path, json=action)
+                assert changed.status_code == 200, changed.text
+                replay = await client.post(path, json=action)
+                assert replay.status_code == 200 and replay.json() == changed.json()
+            reloaded = await client.get("/api/guardian/inbox/programme-digests")
+            assert reloaded.status_code == 200, reloaded.text
+            retained = {f["id"]: f for d in reloaded.json()["digests"] for f in d["findings"]}
+            assert retained[deferred["id"]]["follow_through"]["status"] == "deferred"
+            assert datetime.fromisoformat(retained[deferred["id"]]["follow_through"]["due_at"].replace("Z", "+00:00")) == datetime.fromisoformat(deferred_body["until"])
+            assert retained[dismissed["id"]]["follow_through"]["status"] == "dismissed"
+            assert not retained[deferred["id"]]["actionable"] and not retained[dismissed["id"]]["actionable"]
+            for path in (deferred_path, dismissed_path):
+                blocked = await client.post(path, json={"action": "accept_followup", "desired_outcome": "Try a new task", "idempotency_key": "must-not-restore-suppressed"})
+                assert blocked.status_code == 409, blocked.text
+            assert len(calls) == 6 and len(physical_contacts) == 4
+            # Admit the real next UTC occurrence without executing it. Yesterday's
+            # actual completed physical source must never satisfy today's digest.
+            next_day = (delivery_now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+            monkeypatch.setattr(goal_programme_service, "_clock", lambda: next_day)
+            held = await discovery.admit(goal_id=bindings[0][0], programme_id=bindings[0][1], grant_revision=1)
+            assert held["job_id"] != bindings[0][2] and held["status"] in {"accepted", "queued"}
+            import src.workflows.research_sources as actual_sources
+            async def forbid_previous_physical_source(*args, **kwargs):
+                raise AssertionError("A current held/missing occurrence must not reopen yesterday's physical source")
+            monkeypatch.setattr(actual_sources, "physical_discovery_inputs", forbid_previous_physical_source)
+            await digest.tick(next_day)
+            await digest.tick(next_day + timedelta(minutes=6))
+            from src.db.models import ProgrammeDigestReceipt
+            async with factory.accounting_sessions() as db:
+                next_receipt = await db.scalar(select(ProgrammeDigestReceipt).where(
+                    ProgrammeDigestReceipt.local_date == next_day.date().isoformat()))
+                assert next_receipt is not None and next_receipt.phase == "finalized"
+                next_digest = json.loads(next_receipt.digest_json)
+                assert next_digest["finding_ids"] == next_digest["prepared_outputs"] == []
+                assert "programme_current_output_unresolved" in next_digest["blocked_reasons"]
             assert len(calls) == 6 and len(physical_contacts) == 4
             print(json.dumps({"flow": "actual_cited_deadline_two_programmes_owner_day_daemon_claim", "programme_jobs": bindings,
                 "source_http_sha256": hashlib.sha256(literal_source).hexdigest(), "native_claim_ids": claimed_ids, "owner_root": root_id,

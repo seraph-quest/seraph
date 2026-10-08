@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -190,21 +191,54 @@ async def tick(now=None):
     from src.work_board.research_parent import discovery_authority
     from src.workflows.research_sources import physical_discovery_inputs
     from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    from uuid import uuid5, NAMESPACE_URL
+    occurrence_day = now.astimezone(timezone.utc).date().isoformat()
+    def occurrence_id(programme, original_day=occurrence_day):
+        return "goal-discovery:" + uuid5(NAMESPACE_URL,
+            f"seraph:public-discovery:{programme['owner_identity_id']}:{programme['id']}:{original_day}").hex
     # Stage physical immutable bytes without any SQLite writer held. The final
     # writer then checks the same original run/authority/checkpoint receipts.
     async with database.get_session() as db:
         goals = list((await db.execute(select(Goal).order_by(Goal.id))).scalars())
-        runs = list((await db.execute(select(WorkflowRunState).where(
-            WorkflowRunState.job_kind == DISCOVERY_KIND,
-            ).order_by(
-                WorkflowRunState.started_at.desc()))).scalars())
+        finalized = set((await db.execute(select(ProgrammeDigestReceipt.owner_identity_id).where(
+            ProgrammeDigestReceipt.local_date == local.date().isoformat(),
+            ProgrammeDigestReceipt.phase == "finalized"))).scalars())
+        pending_rows = list((await db.execute(select(ProgrammeDigestReceipt).where(
+            ProgrammeDigestReceipt.local_date == local.date().isoformat(), ProgrammeDigestReceipt.phase == "pending"))).scalars())
+        pending_days = {row.owner_identity_id: _aware(row.created_at).astimezone(timezone.utc).date().isoformat() for row in pending_rows}
+        pending_originals = {row.owner_identity_id: set(ProgrammeDigestV1.model_validate_json(row.digest_json).programme_ids)
+            for row in pending_rows}
+        shortlist = {}
+        for goal in goals:
+            for programme in _load(goal)["generations"][-1:]:
+                if programme["owner_identity_id"] not in finalized:
+                    shortlist.setdefault(programme["owner_identity_id"], []).append((goal, programme))
+        runs = {}
+        eligible = set()
+        async with discovery_writer_scope() as policy:
+            for owner_id, programmes in shortlist.items():
+                for goal, programme in programmes[:128]:
+                    if owner_id in pending_originals and programme["id"] not in pending_originals[owner_id]:
+                        continue
+                    # This is the original UTC source occurrence, never an
+                    # older success selected around a current held/Unknown job.
+                    run = await db.scalar(select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == occurrence_id(programme, pending_days.get(owner_id, occurrence_day)),
+                        WorkflowRunState.job_kind == DISCOVERY_KIND))
+                    runs[programme["id"]] = run
+                    try:
+                        await goal_programme_service.validate_current_binding(db=db,
+                            binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(programme),
+                                "guardian.goal-discovery.v1"), policy=policy)
+                    except GoalProgrammeError:
+                        continue
+                    eligible.add(programme["id"])
     staged = {}
-    for run in runs:
-        if run.status not in {"succeeded", "degraded"}:
+    for programme_id, run in runs.items():
+        if programme_id not in eligible or run is None or run.status not in {"succeeded", "degraded"}:
             continue
         binding = discovery_authority(run.declared_authority_json).programme_binding
-        if binding.programme_id in staged:
-            continue
         outcome = run_outcome(run)
         if not outcome:
             continue
@@ -261,16 +295,25 @@ async def tick(now=None):
                 if programme["state"] != "active" or _aware(datetime.fromisoformat(programme["expires_at"])) <= now:
                     blocked.append(programme.get("reason_code") or "programme_review_due")
                     continue
-                current_run = next((r for r in runs if discovery_authority(r.declared_authority_json).programme_binding.programme_id == programme["id"]), None)
+                current_run = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == occurrence_id(programme,
+                        _aware(existing.created_at).astimezone(timezone.utc).date().isoformat() if existing else occurrence_day),
+                    WorkflowRunState.job_kind == DISCOVERY_KIND))
                 if now < deadline and (current_run is None or current_run.status in {"accepted", "queued", "running"}):
                     pending = True
                     blocked.append("programme_current_output_pending")
+                    continue
+                if current_run is not None and current_run.status not in {"succeeded", "degraded"}:
+                    blocked.append("programme_current_output_unresolved")
                     continue
                 source = staged.get(programme["id"])
                 if source is None:
                     blocked.append("programme_no_completed_output")
                     continue
                 original, witness, brief = source
+                if current_run is None or current_run.run_identity != original.run_identity:
+                    blocked.append("programme_current_output_changed")
+                    continue
                 run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == original.run_identity))
                 try:
                     async with discovery_writer_scope(witness=witness):
@@ -324,7 +367,14 @@ async def list_digests(operator, now=None):
                 ProgrammeDigestReceipt.created_at.desc()).limit(14))).scalars())
         follow_rows = list((await db.execute(select(ProgrammeFollowThrough).where(
             ProgrammeFollowThrough.owner_identity_id == identity.id))).scalars())
-    follows = {row.finding_id: row for row in follow_rows}
+        visible_follow_rows = []
+        for row in follow_rows:
+            try:
+                await authorize_disposition_replay(db, operator, identity, row)
+            except GoalProgrammeError:
+                continue
+            visible_follow_rows.append(row)
+    follows = {row.finding_id: row for row in visible_follow_rows}
     digests = []
     for receipt in receipts:
         digest = ProgrammeDigestV1.model_validate_json(receipt.digest_json)
@@ -455,14 +505,67 @@ async def deliver_notices(now):
     from src.guardian.goal_discovery import goal_discovery_service
     from src.workflows.research_sources import physical_discovery_inputs
     from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
     async with database.get_session() as db:
-        candidates = list((await db.execute(select(ProgrammeDigestReceipt).where(
+        possible = list((await db.execute(select(ProgrammeDigestReceipt).where(
             ProgrammeDigestReceipt.local_date == local_clock(now).date().isoformat(),
             ProgrammeDigestReceipt.phase == "finalized", ProgrammeDigestReceipt.deadline_notice == "unreserved"))).scalars())
+        candidates = []
+        async with discovery_writer_scope() as policy:
+            for candidate in possible:
+                preference = await db.get(ProgrammeNotificationPreference, candidate.owner_identity_id)
+                if not preference or not preference.enabled or not json.loads(preference.deadline_categories_json):
+                    continue
+                identity = await db.get(OperatorIdentity, candidate.owner_identity_id)
+                root = await db.get(OperatorSession, preference.recipient_root_id)
+                if (not identity or identity.revoked_at or root is None or root.is_bearer_tombstone or root.revoked_at
+                    or root.operator_identity_id != identity.id or root.principal_id != preference.recipient_principal_id
+                    or _aware(root.idle_expires_at) <= now or _aware(root.absolute_expires_at) <= now):
+                    continue
+                quiet, allowance = await owner_delivery_policy(db, identity.id, now)
+                if quiet or allowance < 2:
+                    continue
+                original_ids = set(ProgrammeDigestV1.model_validate_json(candidate.digest_json).programme_ids)
+                current_ids = set()
+                for goal in (await db.execute(select(Goal))).scalars():
+                    for raw in _load(goal)["generations"]:
+                        if raw["id"] not in original_ids or raw["owner_identity_id"] != identity.id:
+                            continue
+                        try:
+                            await goal_programme_service.validate_current_binding(db=db,
+                                binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(raw),
+                                    "guardian.goal-discovery.v1"), policy=policy)
+                        except GoalProgrammeError:
+                            continue
+                        current_ids.add(raw["id"])
+                if current_ids != original_ids:
+                    continue
+                bindings = json.loads(candidate.finding_bindings_json)
+                if not any(timedelta(0) < _aware(datetime.fromisoformat(d["due_at"])) - now <= timedelta(hours=48)
+                    for binding in bindings for d in binding.get("deadline_evidence", [])):
+                    continue
+                valid = True
+                for binding in bindings:
+                    goal = await db.get(Goal, binding["goal_id"], populate_existing=True)
+                    raw = next((p for p in _load(goal)["generations"] if p["id"] == binding["programme_id"]), None) if goal else None
+                    if (raw is None or goal.revision != binding["goal_revision"]
+                        or raw["grant_revision"] != binding["grant_revision"] or raw["owner_identity_id"] != identity.id):
+                        valid = False
+                        break
+                    try:
+                        await goal_programme_service.validate_current_binding(db=db,
+                            binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(raw),
+                                "guardian.goal-discovery.v1"), policy=policy)
+                    except GoalProgrammeError:
+                        valid = False
+                        break
+                if valid:
+                    candidates.append(candidate)
     staged = {}
     for candidate in candidates:
         for binding in json.loads(candidate.finding_bindings_json):
-            if not binding.get("deadline_evidence"):
+            if not any(timedelta(0) < _aware(datetime.fromisoformat(d["due_at"])) - now <= timedelta(hours=48)
+                for d in binding.get("deadline_evidence", [])):
                 continue
             try:
                 staged[binding["job_id"]] = await physical_discovery_inputs(goal_discovery_service.jobs, binding["job_id"], completed_read=True)
@@ -613,6 +716,7 @@ async def authorize_disposition_replay(db, operator, identity, receipt):
 
 async def action(operator, identifier, request, now=None):
     now = _aware(now or datetime.now(timezone.utc))
+    staged_at = time.monotonic()
     if len(json.dumps({"finding_id": identifier, "request": request.model_dump(mode="json")}).encode()) > 16384:
         raise GoalProgrammeError("programme_action_receipt_capacity_requires_review")
     request_digest = hashlib.sha256(json.dumps({"finding_id": identifier,
@@ -638,12 +742,39 @@ async def action(operator, identifier, request, now=None):
     finding = next((f for d in data["digests"] for f in d["findings"] if f["id"] == identifier), None)
     if finding is None:
         raise GoalProgrammeError("programme_finding_not_found")
+    if not finding["actionable"]:
+        raise GoalProgrammeError("programme_finding_refresh_required")
     if request.action == "snooze" and (request.until is None or _aware(request.until) <= now or _aware(request.until) > now + timedelta(days=30)):
         raise GoalProgrammeError("programme_followup_date_invalid")
+    from src.guardian.goal_discovery import goal_discovery_service
+    from src.workflows.research_sources import physical_discovery_inputs
+    from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
+    witness = await physical_discovery_inputs(goal_discovery_service.jobs, finding["job_id"], completed_read=True)
+    if witness.plan.goal_revision != finding["goal_revision"] or witness.plan.programme_id.hex != finding["programme_id"]:
+        raise GoalProgrammeError("programme_finding_original_binding_changed")
+    async def recheck_disposition(db):
+        goal = await db.get(Goal, finding["goal_id"], populate_existing=True)
+        if goal is None or goal.revision != finding["goal_revision"]:
+            raise GoalProgrammeError("programme_goal_review_required")
+        await goal_programme_service._issuer(db, operator, goal)
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == finding["job_id"]))
+        if run is None:
+            raise GoalProgrammeError("programme_finding_refresh_required")
+        await assert_discovery_authority(db, run.declared_authority_json, run=run)
+        observed = now + timedelta(seconds=time.monotonic() - staged_at)
+        snapshots = [a["parsed"] for a in witness.artifacts.values() if a["kind"] == "snapshot"]
+        if not snapshots or any(not timedelta(0) <= observed - _aware(s.fetched_at) <= timedelta(hours=48) for s in snapshots):
+            raise GoalProgrammeError("programme_finding_refresh_required")
+        current_follow = await db.scalar(select(ProgrammeFollowThrough).where(
+            ProgrammeFollowThrough.owner_identity_id == identity.id,
+            ProgrammeFollowThrough.finding_id == identifier))
+        if current_follow and (current_follow.task_proposal_id or current_follow.status == "dismissed"
+            or current_follow.due_at is not None and _aware(current_follow.due_at) > observed):
+            raise GoalProgrammeError("programme_finding_refresh_required")
     # Reserve finite disposition-receipt capacity before preparing a C1 card.
     # A crash resumes the same original finding's native idempotency key; this
     # record owns no job/attempt, budget, effect, provider contact or execution.
-    async with database.get_session() as db:
+    async with discovery_writer_scope(witness=witness), database.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         _, identity = await owner_identity(db, operator)
         receipt = await db.scalar(select(ProgrammeFindingAction).where(
@@ -655,7 +786,8 @@ async def action(operator, identifier, request, now=None):
             if not json.loads(receipt.result_json).get("_pending"):
                 await authorize_disposition_replay(db, operator, identity, receipt)
                 return json.loads(receipt.result_json)
-        else:
+        await recheck_disposition(db)
+        if receipt is None:
             used = await db.scalar(select(func.count(ProgrammeFindingAction.id)).where(
                 ProgrammeFindingAction.owner_identity_id == identity.id,
                 ProgrammeFindingAction.local_date == local_clock(now).date().isoformat()))
@@ -676,7 +808,7 @@ async def action(operator, identifier, request, now=None):
         if not finding["actionable"] and not existing_task_id:
             raise GoalProgrammeError("programme_finding_refresh_required")
         task_id = existing_task_id or await prepare_task(operator, finding, request)
-    async with database.get_session() as db:
+    async with discovery_writer_scope(witness=witness), database.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         _, identity = await owner_identity(db, operator)
         replay = await db.scalar(select(ProgrammeFindingAction).where(
@@ -686,7 +818,9 @@ async def action(operator, identifier, request, now=None):
             if replay.request_digest != request_digest:
                 raise GoalProgrammeError("programme_action_idempotency_conflict")
             if not json.loads(replay.result_json).get("_pending"):
+                await authorize_disposition_replay(db, operator, identity, replay)
                 return json.loads(replay.result_json)
+        await recheck_disposition(db)
         row = await db.scalar(select(ProgrammeFollowThrough).where(ProgrammeFollowThrough.owner_identity_id == identity.id,
             ProgrammeFollowThrough.finding_id == identifier))
         if row is None:

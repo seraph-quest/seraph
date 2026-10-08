@@ -231,9 +231,12 @@ inspection/readback is available in the Goal panel. See the
 Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
 mechanical contracts and failure boundaries. Whole cumulative independent review
 and merge are still required; real provider/model quality, native macOS execution
-and digest delivery are not established.
+and digest delivery were not established by the #1004 receipts; #1005's bounded
+delivery mechanics have their separate receipts below.
 
-**Daily programme digest and follow-through: Shipped.**
+**Daily programme digest and follow-through: on `develop` revisions containing
+the #1005 milestone merge, Shipped.** The validated feature-branch implementation
+awaits independent review and merge on earlier revisions.
 The [#1005](https://github.com/seraph-quest/seraph/issues/1005) slice implements
 the current Python scheduler's local 08:00 stable-owner/day Inbox receipt,
 bounded same-receipt pending/finalization, passive blocked recovery, persistent

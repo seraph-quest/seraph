@@ -529,6 +529,16 @@ def _job_has_unsafe_effects(effects: Any) -> bool:
     return False
 
 
+def native_external_effect_state(run: WorkflowRunState) -> str:
+    """Redacted canonical liability projection; physical cleanup changes none."""
+    if run.job_kind not in {"connection_source_sync", "browser_interact_v2"}:
+        raise DurableJobTransitionError("native external-state projection kind is invalid")
+    effects = _effect_ledger_or_raise(run.effect_receipts_json)
+    if _job_has_unsafe_effects(effects):
+        return "unknown"
+    return "settled" if effects else "none"
+
+
 def _effect_is_unresolved(item: Any) -> bool:
     """Return whether one receipt still carries an external liability."""
     if not isinstance(item, dict):
@@ -2171,7 +2181,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.id == run.id, WorkflowRunState.revision == binding.expected_revision,
                 WorkflowRunState.fencing_token == binding.fencing_token,
                 WorkflowRunState.attempt_count == binding.attempt_count,
-            ).values(checkpoint_receipts_json=_canonical(history), revision=WorkflowRunState.revision + 1))
+            ).values(checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(history)), revision=WorkflowRunState.revision + 1))
             if changed.rowcount != 1:
                 raise DurableJobLeaseError("native physical cleanup CAS is stale")
             if type(cleanup_owner) is ConnectedSourcePhysicalCleanupOwner:

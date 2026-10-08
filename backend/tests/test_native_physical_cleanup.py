@@ -1,7 +1,9 @@
 """Cleanup journal checks with disposable canonical rows; no resource contacts."""
 from dataclasses import replace
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,9 +13,11 @@ from sqlalchemy import update
 
 from src.db.models import Goal, OperatorIdentity, OperatorSession, Session, WorkflowRunState
 from src.workflows.job_runtime import (
-    ConnectedSourcePhysicalCleanupOwner, DurableJobError, DurableJobLeaseError, NativePhysicalCleanupBinding,
+    BrowserPhysicalCleanupOwner, ConnectedSourcePhysicalCleanupOwner, DurableJobError, DurableJobLeaseError, NativePhysicalCleanupBinding,
     NativePhysicalCleanupProof, _canonical, _digest, durable_job_repository as jobs,
     native_physical_cleanup_binding_payload,
+    _bounded_checkpoint_receipts,
+    native_external_effect_state,
 )
 
 
@@ -176,3 +180,143 @@ async def test_exact_cleanup_replay_never_calls_owner_or_clears_new_pointer(orig
         await jobs.record_native_physical_cleanup(replace(binding, expected_revision=5), current_owner=owner,
             authenticated_token_hash="current-token", proof_kind="linux_boot_changed",
             cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+
+
+async def make_precontact(original_resource):
+    db_factory, binding, _ = original_resource
+    now = datetime.now(timezone.utc)
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        witness = json.loads(run.checkpoint_receipts_json)[0]["payload"]["witness"]
+        run.checkpoint_receipts_json = "[]"
+        run.status = "running"
+        run.lease_owner = binding.lease_owner
+        run.lease_expires_at = now+timedelta(minutes=2)
+        run.deadline_at = now+timedelta(minutes=2)
+        original = await db.get(OperatorSession, "original-session")
+        original.revoked_at = None
+        original.idle_expires_at = original.absolute_expires_at = now+timedelta(hours=1)
+        (await db.get(Goal, "cleanup-goal")).revision = 1
+    return binding, witness, SimpleNamespace(session_id="original-session", principal_id="original-principal")
+
+
+@pytest.mark.asyncio
+async def test_typed_precontact_reservation_preserves_exact_identity_and_cannot_replace(original_resource):
+    db_factory, _, _ = original_resource
+    binding, witness, owner = await make_precontact(original_resource)
+    row = await jobs.reserve_native_physical_resource(binding, witness=witness,
+        current_owner=owner, authenticated_token_hash="original-token")
+    assert row["revision"] == 5
+    async with db_factory() as db:
+        receipt = json.loads((await db.get(WorkflowRunState, "physical-row")).checkpoint_receipts_json)[0]
+        assert receipt["safe"] is True and receipt["payload"]["witness"] == witness
+        assert receipt["payload"]["binding"]["fencing_token"] == 2
+        assert receipt["state_digest"] == _digest(receipt["payload"])
+    with pytest.raises(DurableJobError):
+        await jobs.reserve_native_physical_resource(replace(binding, expected_revision=5), witness=witness,
+            current_owner=owner, authenticated_token_hash="original-token")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["root", "goal", "deadline", "witness", "generic_writer"])
+async def test_precontact_reservation_cannot_skip_normal_execution_fences(original_resource, invalid):
+    db_factory, _, _ = original_resource
+    binding, witness, owner = await make_precontact(original_resource)
+    async with db_factory() as db:
+        if invalid == "root":
+            (await db.get(OperatorSession, "original-session")).revoked_at = datetime.now(timezone.utc)
+        elif invalid == "goal":
+            (await db.get(Goal, "cleanup-goal")).revision = 2
+        elif invalid == "deadline":
+            (await db.get(WorkflowRunState, "physical-row")).deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+    with pytest.raises(DurableJobError):
+        if invalid == "witness":
+            malformed = {**witness, "operator_assertion":True}
+            await jobs.reserve_native_physical_resource(replace(binding, witness_digest=_digest(malformed)),
+                witness=malformed, current_owner=owner, authenticated_token_hash="original-token")
+        elif invalid == "generic_writer":
+            payload = {"binding":native_physical_cleanup_binding_payload(binding), "witness":witness}
+            await jobs.record_checkpoint(binding.job_id, checkpoint_id="native-physical-resource-reservation",
+                state=payload, checkpoint_payload=payload, owner=binding.lease_owner,
+                fencing_token=binding.fencing_token, expected_revision=binding.expected_revision)
+        else:
+            await jobs.reserve_native_physical_resource(binding, witness=witness,
+                current_owner=owner, authenticated_token_hash="original-token")
+    async with db_factory() as db:
+        assert (await db.get(WorkflowRunState, "physical-row")).checkpoint_receipts_json == "[]"
+
+
+def test_physical_reservation_and_cleanup_survive_history_churn():
+    special = [{"checkpoint_id":"native-physical-resource-reservation"}, {"checkpoint_id":"native-physical-resource-cleanup"}]
+    retained = _bounded_checkpoint_receipts(special + [{"checkpoint_id":f"event:{i}"} for i in range(100)])
+    assert len(retained) == 50 and all(item in retained for item in special)
+
+
+def test_native_external_state_is_strict_redacted_and_separate_from_cleanup():
+    run = SimpleNamespace(job_kind="connection_source_sync", effect_receipts_json='[{"status":"intent"}]')
+    assert native_external_effect_state(run) == "unknown"
+    run.effect_receipts_json = "[]"
+    assert native_external_effect_state(run) == "none"
+    run.effect_receipts_json = '[{"status":"succeeded"}]'
+    assert native_external_effect_state(run) == "settled"
+    run.effect_receipts_json = "malformed"
+    with pytest.raises(DurableJobError): native_external_effect_state(run)
+
+
+@pytest.mark.asyncio
+async def test_source_requires_fixed_pointer_owner_adapter(original_resource):
+    _, binding, owner = original_resource
+    callback = AsyncMock()
+    with pytest.raises(DurableJobError):
+        await jobs.record_native_physical_cleanup(binding, current_owner=owner,
+            authenticated_token_hash="current-token", proof_kind="owned_positive_close",
+            cleanup_owner=BrowserPhysicalCleanupOwner(callback))
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_fixed_owner_requires_exact_lane_witness_and_proof_kind(original_resource):
+    db_factory, binding, owner = original_resource
+    witness = {"schema_version":3, "pid":123, "process_nonce":"c"*32, "context_nonce":"d"*32,
+               "job_digest":hashlib.sha256(binding.job_id.encode()).hexdigest(), "root_path_digest":"e"*64,
+               "root_device":1, "root_inode":2, "lock_device":1, "lock_inode":3,
+               "linux_boot_id":None, "positive_cleanup_required":True}
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        authority = json.loads(run.declared_authority_json)
+        authority["capability_id"] = "browser.interact.v2"
+        run.job_kind = "browser_interact_v2"; run.capability_version = "2"
+        run.resource_claims_json = '["browser-task-lane"]'
+        run.declared_authority_json = _canonical(authority); run.authority_digest = _digest(authority)
+        binding = replace(binding, authority_digest=run.authority_digest,
+                          resource_claim="browser-task-lane", witness_digest=_digest(witness))
+        payload = {"binding":native_physical_cleanup_binding_payload(binding), "witness":witness}
+        run.checkpoint_receipts_json = _canonical([{"checkpoint_id":"native-physical-resource-reservation",
+            "safe":True, "state_digest":_digest(payload), "payload":payload, "fencing_token":2}])
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, "owned_positive_close"))
+    for adapter, kind in [(ConnectedSourcePhysicalCleanupOwner(callback, AsyncMock()), "owned_positive_close"),
+                          (BrowserPhysicalCleanupOwner(callback), "positive_process_death")]:
+        with pytest.raises(DurableJobError):
+            await jobs.record_native_physical_cleanup(binding, current_owner=owner,
+                authenticated_token_hash="current-token", proof_kind=kind, cleanup_owner=adapter)
+    callback.assert_not_awaited()
+    result = await jobs.record_native_physical_cleanup(binding, current_owner=owner,
+        authenticated_token_hash="current-token", proof_kind="owned_positive_close",
+        cleanup_owner=BrowserPhysicalCleanupOwner(callback))
+    assert result["status"] == "unknown_external_effect" and result["revision"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_two_writer_cas_race_releases_original_pointer_once(original_resource):
+    _, binding, owner = original_resource
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, "owned_positive_close"))
+    release = AsyncMock()
+    async def contender():
+        return await jobs.record_native_physical_cleanup(binding, current_owner=owner,
+            authenticated_token_hash="current-token", proof_kind="owned_positive_close",
+            cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+    results = await asyncio.gather(contender(), contender(), return_exceptions=True)
+    assert sum(isinstance(result, dict) for result in results) == 1
+    assert sum(isinstance(result, DurableJobLeaseError) for result in results) == 1
+    callback.assert_awaited_once(); release.assert_awaited_once()

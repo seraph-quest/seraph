@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import resource
 import signal
 import stat
 import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +20,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.tools.audit import wrap_tools_for_audit
 from src.tools import process_tools as process_tools_module
+from src.tools import process_limit_bootstrap as bootstrap_module
 from src.tools.filesystem_tool import read_file
 from src.tools.process_tools import (
     _ProcessDescendantIdentity,
@@ -337,7 +340,9 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound():
     script_name = _write_script(
         "wave_process_cancellation.py",
         """
+        import pathlib
         import time
+        pathlib.Path("cancel-child-ready").write_text("ready")
         time.sleep(30)
         """,
     )
@@ -354,14 +359,215 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound():
 
     worker = threading.Thread(target=run)
     worker.start()
-    time.sleep(0.35)
-    cancel_event.set()
-    worker.join(timeout=3)
+    try:
+        marker = Path(settings.workspace_dir) / "cancel-child-ready"
+        deadline = time.monotonic() + 3
+        while not marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.is_file(), "the genuine child did not start"
+        cancel_event.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert result_holder["result"]["cancelled"] is True
+        assert result_holder["result"]["ok"] is False
+        assert result_holder["result"]["timed_out"] is False
+    finally:
+        cancel_event.set()
+        worker.join(timeout=3)
 
-    assert not worker.is_alive()
-    assert result_holder["result"]["cancelled"] is True
-    assert result_holder["result"]["ok"] is False
-    assert result_holder["result"]["timed_out"] is False
+
+@pytest.mark.parametrize("background", [False, True], ids=["run", "start"])
+def test_process_bootstrap_preserves_limits_arguments_environment_and_identity(tmp_path, monkeypatch, background):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_BOOTSTRAP_SECRET", "must-not-be-forwarded")
+    script = _write_script("profile_readback.py", """
+        import json
+        import os
+        import resource
+        import sys
+        import time
+        payload = {"pid": os.getpid(), "pgid": os.getpgrp(), "cwd": os.getcwd(),
+                   "arguments": sys.argv[1:], "secret_absent": "SERAPH_BOOTSTRAP_SECRET" not in os.environ,
+                   "sandbox_env": os.environ.get("SERAPH_SANDBOX_ENV"),
+                   "limits": {name: resource.getrlimit(getattr(resource, name))
+                              for name in ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_NPROC", "RLIMIT_FSIZE")}}
+        print(json.dumps(payload), flush=True)
+        time.sleep(30 if sys.argv[2] == "background" else 0.2)
+    """)
+    ceilings = {"RLIMIT_CPU": process_tools_module._PROCESS_CPU_SECONDS,
+                "RLIMIT_AS": process_tools_module._PROCESS_MEMORY_BYTES,
+                "RLIMIT_NPROC": process_tools_module._PROCESS_PID_LIMIT,
+                "RLIMIT_FSIZE": process_tools_module._PROCESS_OUTPUT_BYTES}
+    expected = {}
+    for name, requested in ceilings.items():
+        soft, hard = resource.getrlimit(getattr(resource, name))
+        if name == "RLIMIT_NPROC":
+            requested = max(requested, soft) if soft != resource.RLIM_INFINITY else 1024
+        hard = hard if hard != resource.RLIM_INFINITY else requested
+        expected[name] = [min(requested, hard), hard]
+    launched = []
+    original_popen = process_tools_module.subprocess.Popen
+
+    def observe_launch(argv, **kwargs):
+        assert "preexec_fn" not in kwargs
+        assert argv[:4] == [process_tools_module.sys.executable, "-I", "-S", "-B"]
+        assert Path(argv[4]).is_absolute()
+        assert argv[9] == "--"
+        process = original_popen(argv, **kwargs)
+        launched.append((process, process_tools_module._read_process_identity(process.pid)))
+        return process
+
+    monkeypatch.setattr(process_tools_module.subprocess, "Popen", observe_launch)
+    args = [script, "argument with spaces", "background" if background else "foreground"]
+    if background:
+        result = process_runtime_manager.start_process(command="python3", args_json=json.dumps(args))
+        process_id = result["process_id"]
+        deadline = time.monotonic() + 3
+        output = ""
+        while not output.endswith("\n") and time.monotonic() < deadline:
+            output = process_runtime_manager.read_process_output(process_id)["output"]
+            time.sleep(0.01)
+        assert output, "the genuine background target did not report"
+        payload = json.loads(output)
+        process, identity = launched[0]
+        assert process_tools_module._read_process_identity(process.pid) == identity
+        stopped = process_runtime_manager.stop_process(process_id, force=True)
+        assert stopped["cleanup_status"] == "stopped"
+    else:
+        result = process_runtime_manager.run_command(command="python3", args_json=json.dumps(args))
+        assert result["ok"] is True
+        payload = json.loads(result["stdout"])
+        process, identity = launched[0]
+    assert len(launched) == 1 and identity is not None
+    assert payload["pid"] == process.pid == identity.pid
+    assert payload["pgid"] == process.pid == identity.process_group_id
+    assert payload["cwd"] == str(tmp_path)
+    assert payload["arguments"] == args[1:]
+    assert payload["secret_absent"] is True and payload["sandbox_env"] == "allowlisted"
+    assert payload["limits"] == expected
+    assert process.poll() is not None
+    assert process_tools_module._read_process_identity(process.pid) is None
+
+
+@pytest.mark.parametrize("inherited", [(10, 20), (-1, -1), (128, 256)])
+def test_process_bootstrap_retains_inherited_limit_policy(monkeypatch, inherited):
+    names = ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_NPROC", "RLIMIT_FSIZE")
+    applied = {}
+    fake = SimpleNamespace(**{name: name for name in names}, RLIM_INFINITY=-1,
+                           getrlimit=lambda limit: inherited,
+                           setrlimit=lambda limit, values: applied.__setitem__(limit, values))
+    monkeypatch.setitem(process_tools_module.sys.modules, "resource", fake)
+    ceilings = (300, 512 * 1024 * 1024, 64, 1024 * 1024)
+    bootstrap_module.apply_process_limits(ceilings)
+    for name, requested in zip(names, ceilings):
+        soft, hard = inherited
+        if name == "RLIMIT_NPROC":
+            requested = max(requested, soft) if soft != -1 else 1024
+        hard = hard if hard != -1 else requested
+        assert applied[name] == (min(requested, hard), hard)
+
+
+@pytest.mark.parametrize("error", [AttributeError, OSError, ValueError])
+def test_process_bootstrap_limit_failure_keeps_sibling_enforcement(monkeypatch, capsys, error):
+    names = ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_NPROC", "RLIMIT_FSIZE")
+    applied = []
+
+    def read(limit):
+        if limit == "RLIMIT_CPU":
+            raise error("private error text must not escape")
+        return (-1, -1)
+
+    fake = SimpleNamespace(**{name: name for name in names}, RLIM_INFINITY=-1,
+                           getrlimit=read, setrlimit=lambda limit, values: applied.append(limit))
+    monkeypatch.setitem(process_tools_module.sys.modules, "resource", fake)
+    bootstrap_module.apply_process_limits((300, 512 * 1024 * 1024, 64, 1024 * 1024))
+    assert applied == list(names[1:])
+    assert capsys.readouterr().err == "process_resource_limit_unavailable:RLIMIT_CPU\n"
+
+
+@pytest.mark.parametrize("argv", [[], ["300", "1", "64", "1", "--"],
+                                  ["300", "1", "64", "1", "wrong", "/target"],
+                                  ["300", "0", "64", "1", "--", "/target"]])
+def test_process_bootstrap_invalid_framing_never_executes(monkeypatch, capsys, argv):
+    monkeypatch.setattr(bootstrap_module.os, "execvpe", lambda *args: pytest.fail("invalid framing executed target"))
+    assert bootstrap_module.main(argv) == 125
+    assert capsys.readouterr().err == "process_limit_bootstrap_invalid\n"
+
+
+def test_process_bootstrap_restores_target_signals_and_reports_exec_failure(monkeypatch, capsys):
+    restored = []
+    monkeypatch.setattr(bootstrap_module, "apply_process_limits", lambda ceilings: None)
+    monkeypatch.setattr(bootstrap_module.signal, "signal", lambda number, handler: restored.append((number, handler)))
+
+    def unavailable(executable, argv, env):
+        assert executable == "/missing-target" and argv == ["/missing-target", "argument"]
+        assert env is os.environ
+        raise OSError("private target path and error must not escape")
+
+    monkeypatch.setattr(bootstrap_module.os, "execvpe", unavailable)
+    assert bootstrap_module.main(["300", "512", "64", "1024", "--", "/missing-target", "argument"]) == 127
+    assert restored == [(getattr(signal, name), signal.SIG_DFL)
+                        for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ") if hasattr(signal, name)]
+    assert capsys.readouterr().err == "process_target_exec_unavailable\n"
+
+
+def test_process_bootstrap_preserves_native_sigpipe_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    (tmp_path / "finite-input.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+    launched = []
+    original_popen = process_tools_module.subprocess.Popen
+
+    def close_parent_reader(argv, **kwargs):
+        process = original_popen(argv, **kwargs)
+        launched.append(process)
+        # The finite input exceeds the pipe capacity, so cat must encounter
+        # the missing reader even if its first write wins this observation.
+        process.stdout.close()
+        return process
+
+    monkeypatch.setattr(process_tools_module.subprocess, "Popen", close_parent_reader)
+    result = process_runtime_manager.run_command(command="cat", args_json='["finite-input.txt"]', timeout_seconds=3)
+    assert result["ok"] is False and result["timed_out"] is False
+    assert result["exit_code"] == -signal.SIGPIPE
+    assert len(launched) == 1 and launched[0].poll() == -signal.SIGPIPE
+    assert process_tools_module._read_process_identity(launched[0].pid) is None
+
+
+def test_process_launch_preserves_non_posix_argv(monkeypatch):
+    monkeypatch.setattr(process_tools_module, "os", SimpleNamespace(name="nt"))
+    assert process_tools_module._process_launch_argv("target", ["argument with spaces"]) == ["target", "argument with spaces"]
+
+
+@pytest.mark.parametrize("background", [False, True], ids=["run", "start"])
+def test_process_bootstrap_exec_failure_is_visible_without_retry(tmp_path, monkeypatch, background):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(process_tools_module, "_normalize_command_invocation",
+                        lambda **kwargs: (str(tmp_path / "missing-target"), ["private-argument"], tmp_path))
+    launches = []
+    original_popen = process_tools_module.subprocess.Popen
+
+    def observe_launch(argv, **kwargs):
+        process = original_popen(argv, **kwargs)
+        launches.append(process)
+        return process
+
+    monkeypatch.setattr(process_tools_module.subprocess, "Popen", observe_launch)
+    if background:
+        result = process_runtime_manager.start_process(command="python3")
+        deadline = time.monotonic() + 3
+        while result["status"] != "exited" and time.monotonic() < deadline:
+            result = process_runtime_manager.read_process_output(result["process_id"])
+            time.sleep(0.01)
+        result = process_runtime_manager.read_process_output(result["process_id"])
+        assert result["status"] == "exited" and result["exit_code"] == 127
+        assert result["output"] == "process_target_exec_unavailable\n"
+    else:
+        result = process_runtime_manager.run_command(command="python3")
+        assert result["ok"] is False and result["exit_code"] == 127
+        assert result["stdout"] == "" and result["stderr"] == "process_target_exec_unavailable\n"
+    assert len(launches) == 1
+    assert launches[0].poll() is not None
+    assert process_tools_module._read_process_identity(launches[0].pid) is None
 
 
 def test_stop_process_reports_unknown_for_live_detached_descendant(monkeypatch):

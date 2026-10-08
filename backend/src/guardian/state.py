@@ -938,20 +938,22 @@ async def build_guardian_state(
     )
     normalized_intervention_type = str(intervention_type or "").strip() or "advisory"
     soul_context = render_soul_text(await sync_soul_file_to_profile())
-    session_record = await session_manager.get(session_id) if session_id is not None else None
+    transcript_principal = await session_manager.context_principal(session_id, trust_principal=trust_principal)
+    session_record = (await session_manager.get(session_id, owner_principal_id=transcript_principal.principal_id)
+        if transcript_principal is not None else None)
 
     current_session_history = (
-        await session_manager.get_history_text(session_id)
-        if session_id is not None
+        await session_manager.get_history_text(session_id, trust_principal=transcript_principal, require_current_owner=True)
+        if transcript_principal is not None
         else ""
     )
     if session_id is not None:
         task_context = await session_manager.get_task_continuity_context(session_id, trust_principal=trust_principal)
         if task_context:
             current_session_history = "\n\n".join(filter(None, [current_session_history, task_context]))
-    session_todos = await session_manager.get_todos(session_id) if session_id is not None else []
+    session_todos = await session_manager.get_todos(session_id) if transcript_principal is not None else []
     recent_sessions_summary = await session_manager.get_recent_sessions_summary(
-        exclude_session_id=session_id
+        exclude_session_id=session_id, trust_principal=trust_principal,
     )
     live_learning_resolution = await guardian_feedback_repository.resolve_learning_signal(
         intervention_type=normalized_intervention_type,

@@ -1,6 +1,7 @@
 """Bounded local task continuity; references confer no execution or egress rights."""
 
 import json
+import hashlib
 from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.ownership import _current_root
-from src.db.models import OperatorSession, Session, WorkBoardAttempt, WorkBoardEvent, WorkflowRunState
+from src.db.models import OperatorSession, Session, WorkBoardAttempt, WorkBoardEvent, WorkBoardComment, WorkflowRunState
 from src.auth.service import AuthenticatedOperator, AuthFailure, authenticate_session
 from src.security.trust_contract import AuthorityGrant, TrustPrincipal
 from src.memory.evidence_working_set import _PUBLIC_TYPES, _read_file, read_evidence
@@ -41,6 +42,10 @@ class TaskContextPacket(BaseModel):
     summary_kind: str = "factual_canonical_timeline"
     timeline: list[dict[str, str | int]]
     correction_refs: list[str]
+    task_title: str
+    remaining_work: list[str]
+    blocker_text: str | None
+    corrections: list[dict[str, str | bool]]
     unresolved_effect: str | None
     ownership_access: str
     execution_block_reason: str | None
@@ -94,7 +99,6 @@ class TaskContinuityService:
         ).order_by(WorkBoardEvent.event_id.desc()).limit(MAX_TIMELINE + 1))).scalars())
         # Whitelisted factual metadata only: never arbitrary event text or intent.
         timeline = []
-        correction_refs = []
         for event in reversed(events[:MAX_TIMELINE]):
             metadata = _load(event.metadata_json, {})
             if not isinstance(metadata, dict):
@@ -109,8 +113,20 @@ class TaskContinuityService:
             if type(metadata.get("task_revision")) is int:
                 item["revision"] = metadata["task_revision"]
             timeline.append(item)
-            if event.kind == "comment.created":
-                correction_refs.append(f"task-event:{event.event_id}")
+        comments = list((await db.execute(select(WorkBoardComment).where(
+            WorkBoardComment.task_id == task_id,
+            WorkBoardComment.owner_principal_id == read_owner.principal_id,
+            WorkBoardComment.owner_session_id == read_owner.session_id,
+            WorkBoardComment.author_principal_id == read_owner.principal_id,
+            WorkBoardComment.author_session_id == read_owner.session_id,
+        ).order_by(WorkBoardComment.created_at.desc(), WorkBoardComment.comment_id).limit(5))).scalars())
+        corrections = [{"ref": f"task-comment:{comment.comment_id}",
+            "digest": hashlib.sha256(comment.body.encode()).hexdigest(),
+            "at": comment.created_at.isoformat(), "body": comment.body[:500],
+            "classification": "local_only_operator_correction", "model_context_allowed": False}
+            for comment in comments[:4]]
+        correction_refs = [correction["ref"] for correction in corrections]
+        remaining = [task.body[:1500]] if task.body and task.status.value not in {"done", "cancelled"} else []
         evidence_state = "available"
         private_refs = []
         source_egress = []
@@ -178,6 +194,8 @@ class TaskContinuityService:
             actions = ["Open Work and supply the missing input"]
         else:
             actions = ["Open Work and review current task controls"]
+        if corrections and not recovered:
+            actions.append("Review operator corrections locally before proceeding; correction bodies are not model context")
         questions = ["What input is required to unblock this task? Review its current blocker in Work."] if task.block_kind == "needs_input" else []
         return TaskContextPacket(
             task_id=task_id, goal_id=task.goal_id, revision=task.task_revision,
@@ -185,13 +203,15 @@ class TaskContinuityService:
             conversation_ids=conversations[:MAX_CONTEXT_REFS], verified_artifact_refs=verified[:MAX_CONTEXT_REFS],
             open_questions=questions, next_actions=actions, private_source_refs=private_refs,
             timeline=timeline, correction_refs=correction_refs, unresolved_effect=unresolved,
+            task_title=task.title[:256], remaining_work=remaining, blocker_text=(task.block_reason or "")[:500] or None,
+            corrections=corrections,
             ownership_access="recovered_read_only" if recovered else "current",
             execution_block_reason="current_scope_review_required" if recovered else None,
             evidence_state=evidence_state,
             source_egress=source_egress,
             assistant_context_state="current_scope_review_required" if recovered else (
                 "ready_reference_only" if AuthorityGrant.MODEL_INFERENCE in operator.principal.grants else "current_model_grant_required"),
-            truncated=len(events) > MAX_TIMELINE or len(conversations) > MAX_CONTEXT_REFS or len(verified) > MAX_CONTEXT_REFS,
+            truncated=len(comments) > 4 or len(task.body) > 1500 or len(task.block_reason or "") > 500 or any(len(c.body) > 500 for c in comments[:4]) or len(events) > MAX_TIMELINE or len(conversations) > MAX_CONTEXT_REFS or len(verified) > MAX_CONTEXT_REFS,
         )
 
     async def for_chat(self, db: AsyncSession, conversation_id: str, principal: TrustPrincipal | None) -> str:
@@ -224,7 +244,10 @@ class TaskContinuityService:
             return blocked
         allowed_refs = [source["source_id"] for source in packet.source_egress if source["model_context_allowed"]]
         projection = {"task_id": packet.task_id, "goal_id": packet.goal_id, "revision": packet.revision,
-            "status": packet.status, "verified_artifact_refs": packet.verified_artifact_refs,
+            "status": packet.status, "task_title": packet.task_title,
+            "remaining_work": packet.remaining_work, "blocker_text": packet.blocker_text,
+            "operator_corrections": [{key: correction[key] for key in ("ref", "digest", "at", "classification", "model_context_allowed")} for correction in packet.corrections],
+            "verified_artifact_refs": packet.verified_artifact_refs,
             "selected_source_refs": allowed_refs, "open_questions": packet.open_questions,
             "next_actions": packet.next_actions, "unresolved_effect": packet.unresolved_effect}
         return ("--- CANONICAL TASK CONTINUITY (read-only facts and permitted references; no execution authority) ---\n"

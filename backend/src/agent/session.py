@@ -39,6 +39,7 @@ from src.db.models import (
 from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
 from src.memory.flush import flush_session_memory
+from src.security.trust_contract import TrustPrincipal
 from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,26 @@ class SessionManager:
                 return await self._task_continuity.for_chat(db, session_id, principal)
             except (SQLAlchemyError, ValueError):
                 return "Task continuity is unavailable; reload current task context in Work."
+
+    async def context_principal(self, session_id: str | None, *, trust_principal: TrustPrincipal | None = None) -> TrustPrincipal | None:
+        """Current chat transcript authority, never recovered task read scope."""
+        from src.auth.service import AuthFailure, authenticate_session
+        from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+        principal = trust_principal if trust_principal is not None else get_current_trust_principal()
+        if (not session_id or principal is None or not principal.authenticated or principal.revoked
+            or principal.principal_type != PrincipalType.OPERATOR
+            or principal.session_id != session_id or not principal.operator_session_id
+            or AuthorityGrant.MODEL_INFERENCE not in principal.grants):
+            return None
+        try:
+            operator = await authenticate_session(principal.operator_session_id, touch=False)
+            if operator.principal.principal_id != principal.principal_id:
+                return None
+            conversation = await self.get(session_id, owner_principal_id=principal.principal_id)
+            return principal if conversation is not None else None
+        except (AuthFailure, SQLAlchemyError):
+            return None
 
     @staticmethod
     async def _claim_session_owner(db, session: Session, owner_principal_id: str | None) -> None:
@@ -494,41 +515,41 @@ class SessionManager:
         exclude_session_id: str | None = None,
         limit_sessions: int = 3,
         snippet_chars: int = 140,
+        trust_principal: TrustPrincipal | None = None,
     ) -> str:
-        """Summarize recent sessions outside the current thread for guardian state."""
+        """Bounded current-Root conversations only; task recovery selects no transcript."""
+        candidate = trust_principal if trust_principal is not None else get_current_trust_principal()
+        current_id = exclude_session_id or getattr(candidate, "session_id", None)
+        principal = await self.context_principal(current_id, trust_principal=candidate)
+        if principal is None:
+            return ""
+        limit_sessions = max(1, min(int(limit_sessions), 6))
+        snippet_chars = max(1, min(int(snippet_chars), 500))
         try:
             async with get_session() as db:
-                stmt = select(Session)
-                if exclude_session_id:
-                    stmt = stmt.where(Session.id != exclude_session_id)
+                recency = (select(Message.session_id, func.max(Message.created_at).label("latest_at"))
+                    .join(Session, Session.id == Message.session_id)
+                    .where(Session.owner_principal_id == principal.principal_id,
+                        Message.role.in_(["user", "assistant"]),
+                        or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id),
+                        or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
+                    .group_by(Message.session_id).subquery())
+                stmt = (select(Session).outerjoin(recency, Session.id == recency.c.session_id)
+                    .where(Session.owner_principal_id == principal.principal_id, Session.id != current_id)
+                    .order_by(func.coalesce(recency.c.latest_at, Session.created_at).desc())
+                    .limit(limit_sessions))
                 session_result = await db.execute(stmt)
                 sessions = session_result.scalars().all()
                 if not sessions:
                     return ""
-
-                recency_stmt = (
-                    select(Message.session_id, func.max(Message.created_at))
-                    .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                    .group_by(Message.session_id)
-                )
-                if exclude_session_id:
-                    recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
-                recency_rows = await db.execute(recency_stmt)
-                conversation_recency = {
-                    session_id: latest_at
-                    for session_id, latest_at in recency_rows.all()
-                }
-                sessions = sorted(
-                    sessions,
-                    key=lambda session: conversation_recency.get(session.id) or session.created_at,
-                    reverse=True,
-                )[:limit_sessions]
 
                 lines: list[str] = []
                 for session in sessions:
                     msg_result = await db.execute(
                         select(Message)
                         .where(Message.session_id == session.id)
+                        .where(or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id))
+                        .where(or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
                         .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                         .order_by(col(Message.created_at).desc())
                         .limit(1)
@@ -1249,15 +1270,24 @@ class SessionManager:
         limit: int = 50,
         *,
         allow_memory_flush: bool = True,
+        trust_principal: TrustPrincipal | None = None,
+        require_current_owner: bool = False,
     ) -> str:
+        principal = None
+        if require_current_owner:
+            principal = await self.context_principal(session_id, trust_principal=trust_principal)
+            if principal is None:
+                return ""
         async with get_session() as db:
-            result = await db.execute(
-                select(Message)
+            stmt = (select(Message)
                 .where(Message.session_id == session_id)
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                 .order_by(col(Message.created_at).desc())
-                .limit(200)
-            )
+                .limit(200))
+            if principal is not None:
+                stmt = stmt.where(or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id))
+                stmt = stmt.where(or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
+            result = await db.execute(stmt)
             messages = list(reversed(result.scalars().all()))
             if not messages:
                 return ""

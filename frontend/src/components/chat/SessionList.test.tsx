@@ -14,6 +14,8 @@ vi.mock("../../stores/chatStore", () => ({ useChatStore: (selector: (value: unkn
 
 const packet = { task_id: "task-one", goal_id: "goal-one", revision: 7, status: "blocked",
   summary: "Task is blocked; 1 verified output reference(s).", summary_kind: "factual_canonical_timeline",
+  task_title: "Same durable task", remaining_work: ["Verify the recipient before scheduling"], blocker_text: "Supply the reviewed recipient",
+  correction_refs: ["task-comment:correction-one"], corrections: [{ ref: "task-comment:correction-one", digest: "digest", at: "2026-10-08", body: "Change the recipient to Alice", classification: "local_only_operator_correction", model_context_allowed: false }],
   conversation_ids: [], verified_artifact_refs: ["opaque-output"], private_source_refs: ["opaque-private-source"],
   open_questions: ["What input remains?"], next_actions: ["Review current scope in Work before any execution or egress"],
   unresolved_effect: "unknown_external_effect", ownership_access: "recovered_read_only", evidence_state: "available", truncated: false,
@@ -37,6 +39,9 @@ async function chooseTask() {
 describe("task conversation continuity", () => {
   it("shows recovered read-only context, unanswered input, permitted action and Unknown separately", async () => {
     await chooseTask();
+    expect(screen.getByText(/Remaining work: Verify the recipient before scheduling/)).toBeInTheDocument();
+    expect(screen.getByText(/Operator correction: Change the recipient to Alice/)).toBeInTheDocument();
+    expect(screen.getByText(/Local review required; body excluded from assistant context/)).toBeInTheDocument();
     expect(screen.getByText(/Recovered history is read-only/)).toBeInTheDocument();
     expect(screen.getByText(/Unanswered questions: What input remains/)).toBeInTheDocument();
     expect(screen.getByText(/Next permitted action: Review current scope/)).toBeInTheDocument();

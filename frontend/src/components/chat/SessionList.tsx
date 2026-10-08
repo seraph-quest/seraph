@@ -106,7 +106,14 @@ export function SessionList() {
         </select>
       </label>
       {packet && <div className="text-[9px] px-2" aria-label="Task continuity context">
+        <p>{packet.task_title}</p>
         <p>{packet.summary}</p>
+        <p>Remaining work: {packet.remaining_work?.join(" ") || "None recorded"}</p>
+        <p>Current blocker: {packet.blocker_text || "None recorded"}</p>
+        {packet.corrections?.map((correction) => <div key={correction.ref}>
+          <p>Operator correction: {correction.body}</p>
+          <p>{correction.ref} · {correction.at} · Local review required; body excluded from assistant context.</p>
+        </div>)}
         {packet.ownership_access === "recovered_read_only" && <p>Recovered history is read-only. Current scope review is required for execution.</p>}
         <p>Verified outputs: {packet.verified_artifact_refs.length}</p>
         <p>Selected private references: {packet.private_source_refs.length}</p>

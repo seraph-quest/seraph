@@ -7,6 +7,11 @@ export interface TaskContextPacket {
   revision: number;
   status: string;
   summary: string;
+  task_title: string;
+  remaining_work: string[];
+  blocker_text: string | null;
+  correction_refs: string[];
+  corrections: { ref: string; digest: string; at: string; body: string; classification: string; model_context_allowed: boolean }[];
   summary_kind: "factual_canonical_timeline";
   conversation_ids: string[];
   verified_artifact_refs: string[];

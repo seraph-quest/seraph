@@ -16,10 +16,12 @@ replace the runtime or migrate stored data.
 
 ## Task conversation continuity
 
-The [#1021](https://github.com/seraph-quest/seraph/issues/1021) continuation
-journey is **Planned** until its reviewed feature branch merges. That branch
-adds a task picker to the chat list. Local context shows canonical status,
-verified output references, selected private reference counts, unanswered input,
+The bounded [#1021](https://github.com/seraph-quest/seraph/issues/1021)
+continuation journey is **Shipped** in this milestone contract. Availability
+requires installation of the reviewed milestone merge. The chat list includes a
+task picker. Local context shows canonical status,
+bounded task title and remaining intent, the current blocker, verified output
+references, selected private reference counts, unanswered input,
 the next permitted local review action and unresolved effects separately.
 Missing narrative summaries use a bounded factual canonical timeline; no model
 summary or provider call is needed. Open Work for full history and output controls.
@@ -36,7 +38,14 @@ Root's owned task facts and permitted opaque references enter the next prompt.
 Selecting history grants no assistant access to its facts or sources. A selected
 source reference requires current packet adoption and current per-source model
 permission; private-source classification is independent from model permission.
-No source body or historical transcript is copied into the task handoff.
+Up to four corrections authored by the original task owner and Root are readable
+locally with their canonical references. Correction bodies remain local-only;
+the assistant receives their IDs, digests and timestamps plus an explicit local
+review requirement. No correction body, source body or historical transcript is
+copied into the task handoff. Ordinary current and recent chat transcript context
+also requires the live current narrowed chat principal, current owned
+conversation and model grant. Unscoped service/report calls receive no transcript
+context; historical Task selection selects no transcript.
 Deleted or changed output bytes invalidate the displayed reference. A stale
 revision prompts context reload without replaying the previous chat action.
 Recovery rollback removes access on the next context read.

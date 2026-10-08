@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from config.settings import settings
 from src.artifacts.registry import artifact_id_for
 from src.conversation.task_context import TaskContinuityService
-from src.db.models import Session, WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.db.models import Session, WorkBoardAttempt, WorkBoardComment, WorkBoardEvent, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.db.engine import _ensure_legacy_columns
 from src.work_board.repository import WorkBoardRepository
 from src.agent.session import session_manager
@@ -167,7 +167,16 @@ async def test_questions_unknown_and_corrections_are_separate_bounded_metadata(c
         row = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == t["task_id"]))).scalar_one()
         row.status = WorkBoardStatus.blocked
         row.block_kind = "needs_input"
-        row.block_reason = "PRIVATE contents must not leak"
+        row.block_reason = "Supply the reviewed recipient"
+        row.body = "Remaining: verify the recipient before scheduling"
+        db.add(WorkBoardComment(comment_id="owned-correction", task_id=row.task_id,
+            owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
+            author_principal_id=row.owner_principal_id, author_session_id=row.owner_session_id,
+            body="PRIVATE CORRECTION: change the recipient to Alice"))
+        db.add(WorkBoardComment(comment_id="foreign-correction", task_id=row.task_id,
+            owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
+            author_principal_id="foreign-owner", author_session_id=row.owner_session_id,
+            body="FOREIGN_CORRECTION_SENTINEL"))
         for index in range(20):
             db.add(WorkBoardEvent(task_id=row.task_id, owner_principal_id=row.owner_principal_id,
                 owner_session_id=row.owner_session_id, actor_principal_id=row.owner_principal_id,
@@ -179,7 +188,18 @@ async def test_questions_unknown_and_corrections_are_separate_bounded_metadata(c
     assert packet["open_questions"] and packet["next_actions"]
     assert packet["unresolved_effect"] == "unknown_external_effect"
     assert packet["truncated"] and len(packet["timeline"]) == 16
-    assert packet["correction_refs"] and "PRIVATE" not in response.text
+    assert packet["correction_refs"] == ["task-comment:owned-correction"]
+    assert packet["corrections"][0]["body"] == "PRIVATE CORRECTION: change the recipient to Alice"
+    assert packet["corrections"][0]["model_context_allowed"] is False
+    assert packet["remaining_work"] == ["Remaining: verify the recipient before scheduling"]
+    assert "FOREIGN_CORRECTION_SENTINEL" not in response.text
+    await continue_chat(client, t)
+    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+    prompt = await session_manager.get_task_continuity_context("new-chat", trust_principal=bind_operator_principal(operator, "new-chat"))
+    assert "Remaining: verify the recipient before scheduling" in prompt
+    assert "Supply the reviewed recipient" in prompt
+    assert "task-comment:owned-correction" in prompt and "Review operator corrections locally" in prompt
+    assert "PRIVATE CORRECTION" not in prompt and "FOREIGN_CORRECTION" not in prompt
     assert len(response.content) < 16_384
 
 
@@ -333,6 +353,14 @@ async def test_actual_rest_and_ws_pre_run_guardian_receive_narrowed_principal(cl
     from fastapi import WebSocketDisconnect
     from src.api.ws import websocket_chat
     g, t = await task(client)
+    async with async_db() as db:
+        row = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == t["task_id"]))).scalar_one()
+        row.body = "TASK_REMAINING_SENTINEL verify recipient before scheduling"
+        row.block_reason = "TASK_BLOCKER_SENTINEL supply recipient"
+        db.add(WorkBoardComment(comment_id="transport-correction", task_id=row.task_id,
+            owner_principal_id=row.owner_principal_id, owner_session_id=row.owner_session_id,
+            author_principal_id=row.owner_principal_id, author_session_id=row.owner_session_id,
+            body="PRIVATE_CORRECTION_SENTINEL change recipient"))
     if recovered:
         await enroll(client)
         await client.post("/api/auth/logout", headers=HEADERS)
@@ -350,7 +378,8 @@ async def test_actual_rest_and_ws_pre_run_guardian_receive_narrowed_principal(cl
 
     def build(*, guardian_state=None):
         assert guardian_state is not None, "A silent minimal-agent fallback cannot prove context continuity"
-        prepared.append(guardian_state.current_session_history)
+        # Existing agent factory consumes the prompt block and history separately.
+        prepared.append(guardian_state.to_prompt_block() + "\n" + guardian_state.current_session_history)
         return LiteralAgent()
 
     # The canonical compiler and authority/evidence owners stay real. The
@@ -391,10 +420,60 @@ async def test_actual_rest_and_ws_pre_run_guardian_receive_narrowed_principal(cl
         if recovered:
             assert "Task continuation context is blocked" in history
             assert t["task_id"] not in history and g["id"] not in history
+            assert "TASK_REMAINING_SENTINEL" not in history and "TASK_BLOCKER_SENTINEL" not in history
         else:
             assert "CANONICAL TASK CONTINUITY" in history and t["task_id"] in history
             assert "no execution authority" in history
-        assert "PRIVATE SOURCE TEXT" not in history
+            assert "TASK_REMAINING_SENTINEL verify recipient before scheduling" in history
+            assert "task-comment:transport-correction" in history
+        assert "PRIVATE SOURCE TEXT" not in history and "PRIVATE_CORRECTION_SENTINEL" not in history
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_actual_guardian_prompt_never_selects_foreign_recent_transcripts(client, async_db, monkeypatch, linked):
+    from src.guardian.state import build_guardian_state
+    _, t = await task(client)
+    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+    if linked:
+        await continue_chat(client, t)
+    else:
+        await session_manager.get_or_create("new-chat", owner_principal_id=operator.principal.principal_id)
+    await session_manager.get_or_create("foreign-history", owner_principal_id="operator:root:other-owner")
+    await session_manager.add_message("foreign-history", "assistant", "FOREIGN_OWNER_TRANSCRIPT_MARKER")
+    await session_manager.get_or_create("current-owned-history", owner_principal_id=operator.principal.principal_id)
+    await session_manager.add_message("current-owned-history", "assistant", "CURRENT_OWNED_TRANSCRIPT_MARKER")
+    monkeypatch.setattr("src.memory.hybrid_retrieval.search_with_status", lambda *args, **kwargs: ([], False))
+    state = await build_guardian_state(session_id="new-chat", user_message="Continue",
+        owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id,
+        trust_principal=bind_operator_principal(operator, "new-chat"))
+    prompt = state.to_prompt_block()
+    assert "CURRENT_OWNED_TRANSCRIPT_MARKER" in prompt
+    assert "FOREIGN_OWNER_TRANSCRIPT_MARKER" not in prompt
+
+
+@pytest.mark.parametrize("denial", ["no_principal", "no_model_grant", "wrong_chat", "revoked_root"])
+async def test_actual_guardian_prompt_denies_current_and_recent_history_without_live_chat_authority(client, async_db, monkeypatch, denial):
+    from src.guardian.state import build_guardian_state
+    await task(client)
+    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+    for chat in ("new-chat", "owned-prior"):
+        await session_manager.get_or_create(chat, owner_principal_id=operator.principal.principal_id)
+        await session_manager.add_message(chat, "assistant", "DENIED_TRANSCRIPT_SENTINEL")
+    principal = bind_operator_principal(operator, "new-chat")
+    if denial == "no_principal":
+        principal = None
+    elif denial == "no_model_grant":
+        principal = replace(principal, grants=(AuthorityGrant.INGRESS,))
+    elif denial == "wrong_chat":
+        principal = replace(principal, session_id="another-chat")
+    else:
+        await client.post("/api/auth/logout", headers=HEADERS)
+    monkeypatch.setattr("src.memory.hybrid_retrieval.search_with_status", lambda *args, **kwargs: ([], False))
+    state = await build_guardian_state(session_id="new-chat", user_message="Continue",
+        owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id,
+        trust_principal=principal)
+    assert "DENIED_TRANSCRIPT_SENTINEL" not in state.to_prompt_block()
+    assert state.recent_sessions_summary == "" and state.current_session_history == ""
 
 
 async def test_additive_migration_is_rerunnable_and_keeps_old_session(tmp_path):

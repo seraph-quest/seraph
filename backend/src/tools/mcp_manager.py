@@ -30,6 +30,22 @@ _ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
 _VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
 
 
+def _check_closed_task_schema(schema, depth=0):
+    """Require local, closed typed objects at every task schema boundary."""
+    if depth > 32 or not isinstance(schema, dict) or schema.get("type") not in {
+        "object", "array", "string", "integer", "number", "boolean", "null"}:
+        raise ValueError("task schema must declare a bounded local type")
+    if schema["type"] == "object":
+        if schema.get("additionalProperties") is not False or not isinstance(schema.get("properties"), dict):
+            raise ValueError("task object schemas must be closed")
+        for child in schema["properties"].values():
+            _check_closed_task_schema(child, depth + 1)
+    if schema["type"] == "array":
+        if not isinstance(schema.get("maxItems"), int) or not 0 <= schema["maxItems"] <= 256:
+            raise ValueError("task arrays must be bounded")
+        _check_closed_task_schema(schema.get("items"), depth + 1)
+
+
 class _InstrumentedMCPTool:
     """Delegate wrapper for MCP tools that cannot accept dynamic attributes."""
 
@@ -77,6 +93,7 @@ class MCPManager:
         self._config_path: str | None = None
         self._config: dict[str, dict] = {}
         self._status: dict[str, dict] = {}
+        self._connection_revisions: dict[str, int] = {}
         # Each: {"status": "connected"|"disconnected"|"auth_required"|"error", "error": str|None}
 
     # --- Config loading ---
@@ -398,6 +415,8 @@ class MCPManager:
 
     def connect(self, name: str, url: str, headers: dict[str, str] | None = None) -> None:
         """Connect to a named MCP server via HTTP/SSE. Fails gracefully."""
+        # Invalidate every accepted snapshot even if reconnection fails.
+        self._connection_revisions[name] = self._connection_revisions.get(name, 0) + 1
         try:
             endpoint_issues = self.endpoint_policy_issues(url)
             if endpoint_issues:
@@ -466,6 +485,7 @@ class MCPManager:
                 credential_sources=credential_sources,
                 used_headers=bool(resolved_headers),
             )
+            source_context["connection_revision"] = self._connection_revisions[name]
             tools = [
                 self._instrument_mcp_tool(tool, source_context)
                 for tool in client.get_tools()
@@ -514,6 +534,7 @@ class MCPManager:
 
     def disconnect(self, name: str) -> None:
         """Disconnect a specific named MCP server."""
+        self._connection_revisions[name] = self._connection_revisions.get(name, 0) + 1
         client = self._clients.pop(name, None)
         self._tools.pop(name, None)
         self._status[name] = {"status": "disconnected", "error": None}
@@ -542,6 +563,111 @@ class MCPManager:
         for server_tools in self._tools.values():
             tools.extend(server_tools)
         return tools
+
+    def task_tool_entries(self, extension_registry, mcp_mode: str) -> list:
+        """Return typed snapshots declared by trusted existing MCP extensions.
+
+        Server advertisements alone cannot grant effects or permissions. A
+        local extension's existing MCP contribution may declare ``task_tools``
+        alongside its server definition. Missing or incomplete declarations
+        exclude a tool. This is metadata access only, never an MCP call API.
+        """
+        from src.extensions.connectors import load_connector_payload
+        from src.work_board.contracts import ToolDescriptor
+        from src.work_board.general_task import digest, validate_schema
+        from src.tools.policy import get_tool_source_context
+        from jsonschema.exceptions import SchemaError
+
+        if mcp_mode not in {"approval", "full"}:
+            return []
+        entries = []
+        for contribution in extension_registry.list_contributions("mcp_servers"):
+            metadata = contribution.metadata
+            if metadata.get("trust") != "local" or metadata.get("conflict"):
+                continue
+            server_id = metadata.get("name")
+            config = self._config.get(server_id, {})
+            if (not server_id or not self.is_connected(server_id)
+                or self._status.get(server_id, {}).get("status") != "connected"
+                or not config.get("enabled", True)
+                or config.get("extension_id") != contribution.extension_id
+                or config.get("extension_reference") != contribution.reference
+                or config.get("url") != metadata.get("url")):
+                continue
+            path = Path(str(metadata.get("resolved_path") or ""))
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                payload = load_connector_payload(path)
+                declarations = payload.get("task_tools", {})
+                if not isinstance(declarations, dict):
+                    continue
+                revision = self._connection_revisions.get(server_id, 0)
+                if revision < 1:
+                    continue
+                for tool in self.get_server_tools(server_id):
+                    declaration = declarations.get(tool.name)
+                    if not isinstance(declaration, dict):
+                        continue
+                    try:
+                        input_schema = declaration["input_schema"]
+                        output_schema = declaration["output_schema"]
+                        if input_schema.get("type") != "object":
+                            continue
+                        _check_closed_task_schema(input_schema)
+                        _check_closed_task_schema(output_schema)
+                        validate_schema(input_schema, check_value=False)
+                        validate_schema(output_schema, check_value=False)
+                        if declaration.get("verifier") != "json_schema.v1":
+                            continue
+                        # Exact advertised inputs/output contract is required;
+                        # output_type="string" alone is never a typed result.
+                        if getattr(tool, "output_schema", None) != output_schema:
+                            continue
+                        advertised = getattr(tool, "inputs", {})
+                        if set(advertised) != set(input_schema["properties"]):
+                            continue
+                        if any(advertised[key].get("type") != value.get("type")
+                               for key, value in input_schema["properties"].items()):
+                            continue
+                        source = get_tool_source_context(tool)
+                        if (not source or source.get("server_name") != server_id
+                            or source.get("connection_revision") != revision):
+                            continue
+                        egress = source.get("credential_egress_policy")
+                        if not isinstance(egress, dict) or egress.get("mode") not in {
+                            "no_credentials", "explicit_host_allowlist"}:
+                            continue
+                        if egress.get("transport") not in {"http", "https"}:
+                            continue
+                        effects = declaration["effects"]
+                        if not isinstance(effects, list) or any(effect not in {
+                            "external_read", "connector_mutation"} for effect in effects):
+                            continue
+                        if declaration["permissions"] != ["capability_execute"]:
+                            continue
+                        # Connection-owned credentials stay in the current
+                        # manager/vault boundary; planner-supplied refs denied.
+                        credentials = source.get("credential_sources", [])
+                        if not isinstance(credentials, list) or any(not isinstance(ref, str) for ref in credentials):
+                            continue
+                        policy = {"declaration": declaration, "source": source,
+                            "mode": mcp_mode, "extension_id": contribution.extension_id,
+                            "reference": contribution.reference, "advertised_inputs": advertised,
+                            "advertised_output": getattr(tool, "output_schema", None),
+                            "config_digest": digest(config)}
+                        descriptor = ToolDescriptor(tool_id=f"mcp:{server_id}:{tool.name}",
+                            version=declaration["version"], input_schema=input_schema,
+                            output_schema=output_schema, effects=effects,
+                            permissions=declaration["permissions"], credential_refs=credentials,
+                            deadline=declaration["deadline"], verifier="json_schema.v1",
+                            server_id=server_id, connection_revision=revision, policy_digest=digest(policy))
+                        entries.append((descriptor, tool))
+                    except (KeyError, TypeError, ValueError, SchemaError):
+                        continue
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        return entries
 
     def get_server_tools(self, name: str) -> list:
         """Return tools for a specific named server."""

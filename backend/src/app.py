@@ -449,6 +449,16 @@ async def lifespan(app: FastAPI):
             os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
             shutil.copy2(default_proxy_config, stdio_proxy_config)
     mcp_manager.load_config(mcp_config)
+    from src.native_tools.registry import ToolRegistry
+    from src.extensions.registry import extension_registry
+    from src.work_board.general_task import GeneralTaskService
+    from src.work_board.general_task_planner import GeneralTaskPlanner
+    from src.work_board.dispatcher import _dispatcher
+    general_tool_registry = ToolRegistry(mcp_runtime=mcp_manager, extension_registry=extension_registry)
+    general_tool_registry.start()
+    general_tasks = GeneralTaskService(general_tool_registry, planner=GeneralTaskPlanner())
+    general_tasks.start()
+    _dispatcher.general_tasks = general_tasks
     extensions_dir = os.path.join(settings.workspace_dir, "extensions")
     os.makedirs(extensions_dir, exist_ok=True)
     manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
@@ -474,6 +484,9 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
     shutdown_scheduler()
+    general_tasks.stop()
+    general_tool_registry.stop()
+    _dispatcher.general_tasks = None
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:

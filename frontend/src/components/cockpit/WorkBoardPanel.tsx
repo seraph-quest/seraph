@@ -26,6 +26,8 @@ import { NearTextWorkPanel } from "./NearTextWorkPanel";
 import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import { GeneralTaskPanel } from "./GeneralTaskPanel";
+import { GENERAL_TASK_CAPABILITY } from "../../lib/generalTask";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
 import { SpecificationEvidenceReview, specificationScope, retainSpecificationAcceptance } from "./SpecificationEvidenceReview";
 import type { SpecificationReplacement } from "./SpecificationEvidenceReview";
@@ -850,6 +852,7 @@ function WorkBoardPanel({
   const [moveFeedback, setMoveFeedback] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
+  const [generalTaskOpen, setGeneralTaskOpen] = useState(false);
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
   const [researchOpen, setResearchOpen] = useState(false);
   const [formatterOpen, setFormatterOpen] = useState(false);
@@ -2867,6 +2870,7 @@ function WorkBoardPanel({
   const canPromote = Boolean(
     selectedTask
     && selectedTask.status === "triage"
+    && selectedTask.capability_id !== GENERAL_TASK_CAPABILITY
     && selectedTask.capability_id
     && selectedTask.typed_input_ref
     && selectedTask.typed_input_digest
@@ -3205,6 +3209,7 @@ function WorkBoardPanel({
           </div>
         </div>
         <div className="cockpit-operator-actions flex-wrap">
+          <button type="button" className="cockpit-feedback-button" onClick={() => setGeneralTaskOpen(true)}>Describe a task</button>
           <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
           </button>
@@ -3578,10 +3583,10 @@ function WorkBoardPanel({
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {selectedTask.status === "triage" && (
+                  {selectedTask.status === "triage" && selectedTask.capability_id !== GENERAL_TASK_CAPABILITY && (
                     <button type="button" className="cockpit-feedback-button" disabled={!canPromote || busyAction} onClick={() => void performAction("promote")} title={!canPromote ? "Complete the typed specification and acknowledge the current server limit first." : undefined}>Promote to Todo</button>
                   )}
-                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && !linkedPlan && (
+                  {["triage", "todo"].includes(selectedTask.status) && selectedTask.capability_id !== GENERAL_TASK_CAPABILITY && currentOwnerSession && !linkedPlan && (
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("specify")}>Specify for review</button>
                   )}
                   {selectedTask.status === "todo" && currentOwnerSession && !linkedPlan && (
@@ -4196,6 +4201,10 @@ function WorkBoardPanel({
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
+              {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && <GeneralTaskPanel
+                key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
               <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 
@@ -4267,6 +4276,13 @@ function WorkBoardPanel({
       )}
 
       {createPortal(<div className="relative z-[200]">
+      {generalTaskOpen && <div className="fixed inset-0 z-[200] overflow-auto bg-black/65 p-4" role="dialog" aria-modal="true" aria-label="Describe a task"><div className="mx-auto max-w-2xl">
+        <GeneralTaskPanel key={`general-create:${ownerPrincipalId}:${ownerSessionId}`} goals={allGoals}
+          ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+          onClose={() => setGeneralTaskOpen(false)} onCreated={async task => {
+            setGeneralTaskOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
+          }} />
+      </div></div>}
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
           <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>

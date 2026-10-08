@@ -504,6 +504,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "agent.task.v1":
+        from src.work_board.contracts import GeneralTaskEnvelope
+        return GeneralTaskEnvelope
     if capability_id == "inference.near-text.v1":
         from src.model_fabric.near_text_contracts import NearTextInput
         return NearTextInput
@@ -553,6 +556,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "agent.task.v1": CapabilitySpec("agent.task.v1", "1", secret_like=False),
     "inference.near-text.v1": CapabilitySpec("inference.near-text.v1", "1", secret_like=False),
     "memory.opportunity-preference.v1": CapabilitySpec("memory.opportunity-preference.v1", "1", secret_like=False),
     "work.context.selected_text.v1": CapabilitySpec(
@@ -1542,6 +1546,8 @@ class WorkBoardDispatcher:
         session_provider: Any | None = None,
         now: Any = _now,
         runner_id: str = DISPATCHER_PRINCIPAL,
+        general_tasks: Any | None = None,
+        strategy_resolver: Any | None = None,
     ) -> None:
         self.repository = repository or WorkBoardRepository()
         self.jobs = jobs or durable_job_repository
@@ -1552,6 +1558,8 @@ class WorkBoardDispatcher:
         self.session_provider = session_provider or (lambda: get_session())
         self.now = now
         self.runner_id = runner_id
+        self.general_tasks = general_tasks
+        self.strategy_resolver = strategy_resolver
         self.runner_session = f"{runner_id}:session"
         # GoalSnapshot executes inline in the dispatcher.  Keep a server-side
         # handle so cancellation can stop that worker before the durable root
@@ -4217,9 +4225,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
+        if (capability_id in {"agent.task.v1", "browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
+        if capability_id in {"agent.task.v1", "browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4310,6 +4318,15 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability == "agent.task.v1":
+                from src.work_board.contracts import GeneralTaskEnvelope
+                if self.general_tasks is None:
+                    return "general_task_inactive", "Restore the registered task service"
+                envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
+                async with self.session_provider() as db:
+                    await self.general_tasks.recheck_authority(db,
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), envelope)
+                return None, None
             if capability == "work.document-compare.v1":
                 from src.work_board.document_pairs import source_pair
                 async with self.session_provider() as db:
@@ -4700,7 +4717,7 @@ class WorkBoardDispatcher:
         *,
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
     ) -> tuple[DurableJobSpec, dict[str, Any], str, str, int]:
-        if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) not in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
             raise TypedInputError(
                 "adapter_root_owned_by_capability",
                 "Only GoalSnapshot uses the work-board wrapper root",
@@ -4716,12 +4733,16 @@ class WorkBoardDispatcher:
             )
         inputs = _parse_typed_input(task)
         runtime_seconds = max(1, min(runtime_seconds, MAX_RUNTIME_SECONDS))
+        if task.capability_id == "agent.task.v1":
+            runtime_seconds = min(runtime_seconds, inputs["task_input"]["limits"]["wall_seconds"])
         job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
-        owner_principal = DISPATCHER_PRINCIPAL
-        service_id = DISPATCHER_SERVICE
+        general = task.capability_id == "agent.task.v1"
+        owner_principal = task.owner_principal_id if general else DISPATCHER_PRINCIPAL
+        owner_kind = "user" if general else "service"
+        service_id = None if general else DISPATCHER_SERVICE
         declared_authority = {
             "principal": owner_principal,
-            "owner_kind": "service",
+            "owner_kind": owner_kind,
             "service_id": service_id,
             "session_id": task.owner_session_id,
             "goal_owner_principal_id": task.owner_principal_id,
@@ -4732,7 +4753,7 @@ class WorkBoardDispatcher:
             "budget_microusd": 0,
             "limits": {
                 "runtime_seconds": runtime_seconds,
-                "max_attempts": MAX_ATTEMPTS_PER_TASK,
+                "max_attempts": 1 if general else MAX_ATTEMPTS_PER_TASK,
             },
         }
         safe_inputs = {
@@ -4751,7 +4772,7 @@ class WorkBoardDispatcher:
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
                 job_id=job_id,
-                owner_kind="service",
+                owner_kind=owner_kind,
                 owner_principal_id=owner_principal,
                 job_kind=_text(task.capability_id),
                 capability_version=REGISTERED_CAPABILITIES[_text(task.capability_id)].version,
@@ -4795,7 +4816,7 @@ class WorkBoardDispatcher:
                 max_outstanding_jobs=max_outstanding_jobs,
                 browser_lane=browser_lane,
             )
-        if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) not in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
             try:
                 inputs = _parse_typed_input(task)
                 return await self._admit_execute_direct(claim, inputs, runtime_seconds=runtime_seconds)
@@ -9908,6 +9929,17 @@ class WorkBoardDispatcher:
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
     ) -> dict[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "agent.task.v1":
+            from src.work_board.contracts import GeneralTaskEnvelope
+            if self.general_tasks is None:
+                return {"verified": False, "reason": "general_task_inactive"}
+            operator = await authenticate_session(task.owner_session_id, touch=False)
+            if operator.principal.principal_id != task.owner_principal_id:
+                raise DurableJobError("general_task_owner_changed")
+            envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
+            return await self.general_tasks.execute(self.jobs, job_id=job_id,
+                owner=parent_runtime_owner, fence=parent_fence, envelope=envelope,
+                principal=operator.principal)
         if capability_id != GOAL_SNAPSHOT_CAPABILITY:
             return {
                 "verified": False,

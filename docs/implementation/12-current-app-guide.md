@@ -11,8 +11,100 @@ The application described here runs the existing Python/FastAPI backend and
 React cockpit. [ADR-026](./decisions/026-all-plugin-cordis-architecture.md) accepts
 an all-plugin Cordis agent-runtime composition target; its migration capabilities
 are **Planned**. Continue using the current managed commands, workspace and
-operator controls. The architecture documentation does not install Cordis,
-replace the runtime or migrate stored data.
+operator controls. The architecture decision by itself does not install Cordis,
+replace the runtime or migrate stored data. The separately implemented optional
+lifecycle host below does not migrate the agent loop or canonical ownership.
+
+### Reviewed optional Cordis lifecycle host
+
+This is the implementation contract for [#1006](https://github.com/seraph-quest/seraph/issues/1006)
+under [ADR-026](./decisions/026-all-plugin-cordis-architecture.md). Availability
+requires a revision containing its independently reviewed implementation merge;
+receipts before that merge establish only the implementation under review.
+
+The private `runtime/cordis/` npm package uses stock **Cordis 4.0.0-rc.10**,
+integrity `sha512-xG90nPNQxR272cC4lR/m5LHevegIJvdddQBlKdEAdGz3n+zgH5lsgkg8o9fc2P3T/f+pO5D7FN1HZvkNBiABnw==`,
+**npm 11.8.0**, and **Node 22.x from 22.12.0 or Node 24.x**. The frontend and
+docs retain their own manifests and lockfiles. Install this package's locked
+dependencies explicitly with that npm version (`npm ci --ignore-scripts
+--omit=optional --no-audit --no-fund` inside `runtime/cordis/`), then build through
+the managed command. Missing dependencies are a setup condition, never a reason
+to install packages during app startup. The installed toolchain and package are
+reviewed trusted application code, not a sandbox for arbitrary same-user code.
+
+```bash
+./manage.sh -e dev cordis status
+./manage.sh -e dev cordis build
+./manage.sh -e dev cordis probe
+```
+
+These finite commands accept `--node /absolute/path/to/node` for an explicitly
+selected reviewed binary, do not persist the choice, and do not load `.env.dev`,
+provider credentials, or the operator workspace. `status` is package preflight,
+not live readiness. `build` uses already installed pins with no installation or
+network fetch. `probe` starts, checks, quiesces, shuts down and positively reaps
+the same production host without starting the API, database or provider. The
+ordinary app remains managed through `local run/up/down/status`; its lifespan
+automatically attempts this optional host only against the fixed reviewed
+profile and validated build. Missing or unsupported Node (including 22.11), a
+missing/stale build, invalid configuration or a failed child blocks dependent
+Cordis readiness while the existing Python core and settings remain usable.
+
+Python owns one directly spawned trusted child using a fixed absolute entrypoint
+and working directory, closed inherited descriptors, and only `LANG=C.UTF-8`
+and `TZ=UTC` in the child's environment. It inherits no `NODE_OPTIONS`,
+`NODE_PATH`, home/config paths or credentials. Two anonymous pipes carry the
+protocol; bounded stderr is separate. There is no listener, discovery, tunnel,
+dynamic import, runtime installer or hot reload. The literal profile allows only
+release-pinned reviewed plugin IDs and closed configurations/dependencies.
+Profile changes require drain/dispose/restart and cannot grant authority.
+
+Frames are four raw big-endian uint32 length bytes followed by 1..1048576 UTF-8
+JSON bytes without a delimiter. Both sides reject duplicate keys, unknown
+fields/methods, malformed or incomplete frames, nonfinite values, depth above 16
+and more than 4096 nodes. Integer fields use actual safe JSON integers. Each boot
+has a fresh 32-byte random nonce, exact package/composition digests and independent
+strictly consecutive sequences starting at 1. Request IDs bind to those sequences;
+responses require a matching unresolved request and identity/deadline. The closed
+envelope is `protocol`, `boot_nonce`, `request_id`, `seq`, `kind`, `method`,
+`invocation_ref`, `composition_epoch`, `composition_digest`, `package_digest`,
+`deadline_at`, and `payload`. Unix-millisecond deadlines bound controls to 5 seconds
+and unresolved calls to 32. Stderr is limited to 64 KiB per boot.
+
+Only `bootstrap.hello`, `runtime.ready`, `runtime.status`, `runtime.quiesce`,
+`runtime.shutdown` and `invocation.cancel` are admitted here. Lifecycle controls
+have null invocation reference and null composition epoch. Cancellation requires
+a bounded nonempty invocation reference and returns false for an unknown
+invocation. Service methods and streams are absent until their separately owned
+typed-service contract is implemented; no ownership epoch, second authority,
+job queue, inference lane or agent loop is created by the host.
+
+Admission closes before shutdown. The parent drains/cancels within 10 seconds or
+the original earlier deadline, then uses TERM, a 2-second wait, KILL and positive
+reap when required. Each owned resource is registered before acquisition.
+Application resource cleanup is recorded independently from Cordis plugin-fiber
+disposal, because upstream contains disposal errors and root-fiber disposal is
+a restart operation. Unknown cleanup remains blocked and retains ownership;
+restart cannot erase it. Current host resources are process-local, so positive
+OS reap proves their pipe/timer/listener destruction even if graceful Cordis
+disposal was unconfirmed.
+
+The authenticated `/api/runtime/status` exposes the redacted `cordis_runtime`
+snapshot as a **lifecycle_host**, including actual profile/plugin readiness,
+recovery reason and independent cleanup/disposal state. Settings shows this state
+without disabling artifact controls during host or metadata failures. It exposes
+no nonce, PID, stderr, credentials or environment values. This host does not
+change the effective `chat_agent` route or the Python owners of authority,
+canonical storage and the shared serial inference lane.
+
+Focused implementation checks cover real stock Cordis service registration and
+dependency loss, framing/parser attacks, stale boot/replay/unsolicited output,
+bounded admission/deadlines, stale builds, unknown cleanup and repeated actual
+child reaping. A keyless managed Linux x64 probe was also executed with inherited
+IPv4/IPv6 socket creation denied. This is Linux-host lifecycle/security proof,
+not a native macOS receipt or inference/provider proof. macOS remains a peer
+core-host target; unsupported optional native proofs do not block independent
+core operation.
 
 ## Optional NEAR HTTPS text question
 

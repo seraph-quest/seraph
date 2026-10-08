@@ -31,6 +31,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
   }, [managed, metadata]);
   return <section aria-label="Cordis runtime host" className="mb-3 rounded border border-retro-text/10 p-2 text-[10px]">
     <div className="flex items-center justify-between gap-2"><h3>Cordis runtime host</h3><button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? "Checking host…" : "Refresh Cordis host"}</button></div>
+    <p>This lifecycle host reports composition and cleanup. Agent-loop migration remains planned.</p>
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>

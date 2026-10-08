@@ -32,6 +32,7 @@ def build(node_path: Path | None) -> int:
         if not (PACKAGE_ROOT / "node_modules/typescript/bin/tsc").is_file():
             raise CompositionBlocked("build_dependencies_missing")
         build_env = {**CHILD_ENV, "PATH": str(node.parent) + os.pathsep + os.defpath,
+                     "HOME": str(PACKAGE_ROOT / ".build-home"),
                      "npm_config_userconfig": str(PACKAGE_ROOT / ".absent-user-npmrc"),
                      "npm_config_globalconfig": str(PACKAGE_ROOT / ".absent-global-npmrc"),
                      "npm_config_update_notifier": "false", "npm_config_audit": "false"}

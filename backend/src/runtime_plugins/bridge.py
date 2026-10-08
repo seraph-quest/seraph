@@ -38,6 +38,7 @@ class CordisHost:
         self._out_seq = 0
         self._in_seq = 0
         self._pending: dict[str, Pending] = {}
+        self._unresolved = 0
         self._tasks: dict[str, asyncio.Task[Any] | None] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -55,14 +56,17 @@ class CordisHost:
     def snapshot(self) -> dict[str, Any]:
         active_tasks = sum(task is None or not task.done() for task in self._tasks.values())
         resources = active_tasks + (1 if self.process is not None and not self._reaped else 0)
+        state, reason = self.state, self.reason
+        if state == "ready" and not self.admitting:
+            state, reason = "blocked", reason or "child_unavailable"
         return {
-            "runtime_role": "lifecycle_host", "state": self.state, "reason": self.reason,
+            "runtime_role": "lifecycle_host", "state": state, "reason": reason,
             "profile_id": self.reviewed.profile["profile_id"] if self.reviewed else None,
             "cordis_version": CORDIS_VERSION,
             "node_version": self.reviewed.node_version if self.reviewed else None,
             "composition_digest": self.reviewed.composition_digest if self.reviewed else None,
             "package_digest": self.reviewed.package_digest if self.reviewed else None,
-            "plugins": [dict(plugin) for plugin in self._plugins],
+            "plugins": [{**plugin, "state": "blocked", "reason": reason} if state == "blocked" else dict(plugin) for plugin in self._plugins],
             "cleanup": {"state": self._cleanup_state, "process_reaped": self._reaped,
                         "resources_remaining": resources if self._cleanup_state != "unknown" else None,
                         "cordis_disposal": self._cordis_disposal},
@@ -197,35 +201,52 @@ class CordisHost:
             raise HostBlocked("runtime_not_ready")
         if self.process is None or self.process.stdin is None or self.reviewed is None or self.boot_nonce is None:
             raise HostBlocked("runtime_not_started")
+        if self._unresolved >= MAX_PENDING:
+            raise HostBlocked("rpc_capacity_exhausted")
+        now = int(time.time() * 1000)
+        if deadline_at is not None and (type(deadline_at) is not int or deadline_at <= now):
+            raise HostBlocked("deadline_expired")
+        deadline = min(now + int(CONTROL_TIMEOUT * 1000), deadline_at if deadline_at is not None else now + int(CONTROL_TIMEOUT * 1000))
+        original_boot = self.boot_nonce
+        self._unresolved += 1
         future = asyncio.get_running_loop().create_future()
         request_id: str | None = None
+        locked = False
         try:
-            async with self._write_lock:
-                if len(self._pending) >= MAX_PENDING:
-                    raise HostBlocked("rpc_capacity_exhausted")
-                now = int(time.time() * 1000)
-                if deadline_at is not None and (type(deadline_at) is not int or deadline_at <= now):
-                    raise HostBlocked("deadline_expired")
-                deadline = min(now + int(CONTROL_TIMEOUT * 1000), deadline_at if deadline_at is not None else now + int(CONTROL_TIMEOUT * 1000))
-                seq = self._out_seq + 1
-                request_id = f"r-{seq}"
-                frame = {"protocol": 1, "boot_nonce": self.boot_nonce, "request_id": request_id, "seq": seq,
-                         "kind": "request", "method": method, "invocation_ref": invocation_ref,
-                         "composition_epoch": None, "composition_digest": self.reviewed.composition_digest,
-                         "package_digest": self.reviewed.package_digest, "deadline_at": deadline, "payload": {}}
-                wire = encode_frame(frame)  # Validate before consuming a sequence.
-                self._out_seq = seq
-                self._pending[request_id] = Pending(frame, future)
-                self.process.stdin.write(wire)
-                await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            await asyncio.wait_for(self._write_lock.acquire(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            locked = True
+            if self.boot_nonce != original_boot or (not internal and not self.admitting):
+                raise HostBlocked("boot_changed_or_admission_closed")
+            if len(self._pending) >= MAX_PENDING:
+                raise HostBlocked("rpc_capacity_exhausted")
+            if deadline <= int(time.time() * 1000):
+                raise HostBlocked("deadline_expired")
+            seq = self._out_seq + 1
+            request_id = f"r-{seq}"
+            frame = {"protocol": 1, "boot_nonce": self.boot_nonce, "request_id": request_id, "seq": seq,
+                     "kind": "request", "method": method, "invocation_ref": invocation_ref,
+                     "composition_epoch": None, "composition_digest": self.reviewed.composition_digest,
+                     "package_digest": self.reviewed.package_digest, "deadline_at": deadline, "payload": {}}
+            wire = encode_frame(frame)  # Validate before consuming a sequence.
+            self._out_seq = seq
+            self._pending[request_id] = Pending(frame, future)
+            self.process.stdin.write(wire)
+            await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            self._write_lock.release()
+            locked = False
             return await asyncio.wait_for(future, max(0.001, (deadline - int(time.time() * 1000)) / 1000))
         except asyncio.CancelledError:
-            self._fence("rpc_cancelled")
+            if request_id in self._pending:
+                self._fence("rpc_cancelled")
             raise
         except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
-            self._fence("rpc_failed_or_deadline_expired")
-            raise HostBlocked(self.reason) from exc
+            if request_id in self._pending:
+                self._fence("rpc_failed_or_deadline_expired")
+            raise HostBlocked(self.reason or "rpc_deadline_expired") from exc
         finally:
+            if locked:
+                self._write_lock.release()
+            self._unresolved -= 1
             if request_id is not None:
                 self._pending.pop(request_id, None)
             if future.done() and not future.cancelled():
@@ -234,8 +255,20 @@ class CordisHost:
                 future.cancel()
 
     async def stop(self, *, preserve_blocked: bool = False) -> None:
-        async with self._lifecycle_lock:
-            await self._stop_owned(preserve_blocked=preserve_blocked)
+        try:
+            cleanup = self._cleanup_task
+            if cleanup is not None and cleanup is not asyncio.current_task() and not cleanup.done():
+                await asyncio.shield(cleanup)
+            async with self._lifecycle_lock:
+                await self._stop_owned(preserve_blocked=preserve_blocked)
+            cleanup = self._cleanup_task
+            if cleanup is not None and cleanup is not asyncio.current_task() and not cleanup.done():
+                await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # Caller cancellation must not orphan the owned child/reap obligation.
+            if asyncio.current_task() is not self._cleanup_task:
+                self._fence("shutdown_cancelled")
+            raise
 
     async def _stop_owned(self, *, preserve_blocked: bool) -> None:
         previous_reason = self.reason
@@ -282,13 +315,19 @@ class CordisHost:
                 self._cleanup_state = "unknown"
         if process.stdin is not None:
             process.stdin.close()
+            try:
+                await asyncio.wait_for(process.stdin.wait_closed(), 2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The OS already closed this pipe.
+            except (OSError, asyncio.TimeoutError):
+                self._cleanup_state = "unknown"
         for pending in self._pending.values():
             if not pending.future.done():
                 pending.future.set_exception(HostBlocked("runtime_stopped"))
-        for task in self._tasks.values():
-            if task is not None and not task.done() and task is not asyncio.current_task():
+        for name, task in self._tasks.items():
+            if name != "cleanup" and task is not None and not task.done() and task is not asyncio.current_task():
                 task.cancel()
-        results = await asyncio.gather(*[task for task in self._tasks.values() if task is not None and task is not asyncio.current_task()], return_exceptions=True)
+        results = await asyncio.gather(*[task for name, task in self._tasks.items() if name != "cleanup" and task is not None and task is not asyncio.current_task()], return_exceptions=True)
         if any(isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError) for result in results):
             self._cleanup_state = "unknown"
         if not self._reaped:

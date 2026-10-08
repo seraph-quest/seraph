@@ -22,6 +22,21 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+The separately implemented **optional Cordis lifecycle host** in
+[#1006](https://github.com/seraph-quest/seraph/issues/1006) requires its reviewed
+implementation merge before availability is claimed on `develop`. Its
+[runtime contract](./12-current-app-guide.md#reviewed-optional-cordis-lifecycle-host)
+pins stock Cordis 4.0.0-rc.10, npm 11.8.0 and Node 22.x >=22.12.0 or 24.x, with a
+fixed literal profile and restart-only anonymous-pipe process boundary. The
+Python backend remains parent and sole existing authority/state/admission owner;
+this host supplies lifecycle readiness, not a migrated agent loop or research
+capability. Missing Node/build and failed children block only dependent host work;
+runtime and settings expose actual plugin/recovery and independent cleanup state.
+Focused parser/security/resource and real start/stop/reap checks use no providers
+or operator workspace. A managed keyless Linux x64 probe with denied IPv4/IPv6
+socket creation establishes only that platform's owned-child lifecycle; native
+macOS and later typed-service/research migration are not proven by it.
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.

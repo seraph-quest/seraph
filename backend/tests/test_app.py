@@ -2,6 +2,8 @@ import pytest
 from unittest.mock import patch
 
 from config.settings import settings
+from src.runtime_plugins.bridge import CordisHost
+from src.runtime_plugins.composition import CompositionBlocked
 from src.app import (
     _active_chat_runtime_status,
     _augment_inference_readiness,
@@ -333,3 +335,66 @@ async def test_browser_provider_api_is_publicly_exposed(client):
     response = await client.get("/api/browser/providers?owner_session_id=test-auth-bypass")
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_optional_cordis_failure_preserves_health_and_redacted_runtime_status(client, monkeypatch):
+    """The actual status binding must not make missing Node a core outage."""
+    import httpx
+
+    original_send = httpx.AsyncClient.send
+
+    async def deny_external_transport(session, *args, **kwargs):
+        if not isinstance(session._transport, httpx.ASGITransport):
+            raise AssertionError("external transport forbidden during implementation check")
+        return await original_send(session, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", deny_external_transport)
+    host = CordisHost()
+    with patch("src.runtime_plugins.bridge.reviewed_composition", side_effect=CompositionBlocked("node_unsupported")):
+        assert await host.start() is False
+    monkeypatch.setattr("src.app.cordis_host", host)
+    assert (await client.get("/health")).json() == {"status": "ok"}
+    response = await client.get("/api/runtime/status")
+    assert response.status_code == 200
+    snapshot = response.json()["cordis_runtime"]
+    assert snapshot["state"] == "blocked"
+    assert snapshot["reason"] == "node_unsupported"
+    assert snapshot["runtime_role"] == "lifecycle_host"
+    assert snapshot["cleanup"]["state"] == "not_started"
+    assert not {"boot_nonce", "pid", "stderr", "env"} & snapshot.keys()
+
+
+@pytest.mark.asyncio
+async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_runs_owned_stop(client, monkeypatch, tmp_path):
+    """Execute actual lifespan wiring with unrelated startup owners isolated."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    import src.app as app_module
+
+    host = CordisHost(node_path=tmp_path / "absent-node")
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+        monkeypatch.setattr(app_module, name, AsyncMock())
+    for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
+        monkeypatch.setattr(app_module, name, Mock())
+    for manager, methods in [(app_module.mcp_manager, ("load_config", "disconnect_all")),
+                             (app_module.skill_manager, ("init",)), (app_module.runbook_manager, ("init",)),
+                             (app_module.workflow_manager, ("init",)), (app_module.starter_pack_manager, ("init",))]:
+        for method in methods:
+            monkeypatch.setattr(manager, method, Mock())
+    monkeypatch.setattr("src.model_fabric.configuration.hydrate_openrouter_credential", AsyncMock())
+    monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("src.workflows.routines.routine_service.recover_pending_installs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("src.guardian.audio_worker.cleanup_audio_ingress_jobs", AsyncMock(return_value=[]))
+    profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
+    monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
+    monkeypatch.setattr("src.observer.manager.context_manager.refresh", AsyncMock())
+    async with app_module.lifespan(client._transport.app):
+        assert host.snapshot()["state"] == "blocked"
+        assert host.reason == "node_missing"
+        assert (await client.get("/health")).json() == {"status": "ok"}
+    assert host.state == "stopped"
+    assert host.process is None
+    assert host.snapshot()["cleanup"]["resources_remaining"] == 0

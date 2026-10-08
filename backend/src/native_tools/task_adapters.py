@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import marshal
 from dataclasses import dataclass
 
 from smolagents import Tool
@@ -19,6 +20,11 @@ from src.work_board.contracts import ToolDescriptor
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+def _producer_digest(function):
+    code = getattr(function, "__code__", None)
+    return hashlib.sha256(marshal.dumps(code)).hexdigest() if code is not None else None
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,46 @@ _APPROVAL_FIELDS = (
 
 _PRECONTACT_SEAL = object()
 _CLOSURE_SEAL = object()
+_CAPACITY_SEAL = object()
+
+
+@dataclass(frozen=True)
+class TaskToolCapacityWitness:
+    """Private current producer proof; never caller supplied tool metadata."""
+    registry: object
+    descriptor: ToolDescriptor
+    descriptor_digest: str
+    approval_possible: bool
+    producer_code: object
+    classifier_digest: str
+    _seal: object
+
+
+def verify_task_tool_capacity(witness, *, descriptor_digest):
+    if (type(witness) is not TaskToolCapacityWitness or witness._seal is not _CAPACITY_SEAL
+        or witness.descriptor_digest != descriptor_digest):
+        raise PermissionError("original native capacity producer required")
+    current = _CAPACITY_COMPILER(witness.registry, witness.descriptor)
+    if (type(current) is not TaskToolCapacityWitness or current._seal is not _CAPACITY_SEAL
+        or current.descriptor_digest != witness.descriptor_digest
+        or current.producer_code is not witness.producer_code
+        or current.classifier_digest != witness.classifier_digest
+        or current.approval_possible != witness.approval_possible):
+        raise PermissionError("native callback capacity policy changed")
+    return witness.approval_possible, witness.classifier_digest
+
+
+def _current_approval_wrapper(tool, *, is_mcp):
+    from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+    from src.tools.audit import wrap_tools_for_audit
+    from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
+    from src.tools.policy import get_current_mcp_policy_mode
+    tools = wrap_tools_for_audit(wrap_tools_for_secret_refs([_MCPResultGuard(tool) if is_mcp else tool]),
+        treat_all_as_mcp=is_mcp)
+    marker = _InvocationMarker(tools[0])
+    wrapper = (wrap_tools_with_forced_approval if is_mcp and get_current_mcp_policy_mode() == "approval"
+        else wrap_tools_for_approval)([marker], treat_all_as_mcp=is_mcp)[0]
+    return wrapper, marker
 
 
 @dataclass(frozen=True)
@@ -48,6 +94,7 @@ class TaskToolClosureWitness:
     output_digest: str | None
     approval_id: str | None
     _seal: object
+    approval_fingerprint: str | None = None
 
 
 def verify_task_tool_closure(witness, *, binding, fencing_token):
@@ -60,7 +107,8 @@ def verify_task_tool_closure(witness, *, binding, fencing_token):
     return GeneralTaskToolClosureV1(original_binding_digest=_digest(binding.model_dump(mode="json")),
         invocation_id=binding.invocation_id, child_fence=fencing_token,
         descriptor_digest=binding.descriptor_digest, input_digest=binding.input_digest,
-        outcome=witness.outcome, output_digest=witness.output_digest, approval_id=witness.approval_id)
+        outcome=witness.outcome, output_digest=witness.output_digest, approval_id=witness.approval_id,
+        approval_fingerprint=witness.approval_fingerprint)
 
 
 @dataclass(frozen=True)
@@ -85,6 +133,13 @@ class TaskToolInvocation:
             raise PermissionError("original native callback has not closed")
         return self._future.result().witness
 
+    def on_closed(self, callback):
+        """Notify the private owner only after the original future returned."""
+        def returned(_future):
+            if self.closed:
+                callback(self)
+        self._future.add_done_callback(returned)
+
     async def wait(self, *, timeout=None):
         waiting = asyncio.shield(self._future)
         completion = (await waiting if timeout is None
@@ -98,10 +153,11 @@ class TaskToolApprovalRequired(ApprovalRequired):
     """Existing wrapper approval with adapter-proven absence of tool contact."""
 
     def __init__(self, approval: ApprovalRequired, *, binding: TaskToolApprovalBinding,
-                 _producer_seal=None):
+                 _producer_seal=None, _original_fingerprint=None):
         super().__init__(**{name: getattr(approval, name) for name in _APPROVAL_FIELDS})
         self._binding = binding
         self._producer_seal = _producer_seal
+        self._original_fingerprint = _original_fingerprint
 
     @property
     def binding(self):
@@ -199,6 +255,39 @@ class ToolRegistry:
     def start(self):
         self.started = True
 
+    def compile_capacity(self, descriptor):
+        from src.tools.approval import ApprovalTool
+        entry = self._entries().get(descriptor.tool_id)
+        if entry is None or entry[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+            raise PermissionError("task tool capacity contract changed")
+        producer = getattr(self._invoke_sync, "__func__", None)
+        begin = getattr(self.begin_invocation, "__func__", None)
+        closure = getattr(self._invoke_with_closure, "__func__", None)
+        possible = True
+        wrapper_type = None
+        if (producer is _STOCK_SYNC_PRODUCER and producer.__code__ is _STOCK_SYNC_CODE
+            and begin is _STOCK_BEGIN_PRODUCER and begin.__code__ is _STOCK_BEGIN_CODE
+            and closure is _STOCK_CLOSURE_PRODUCER and closure.__code__ is _STOCK_CLOSURE_CODE):
+            if entry[1] is None:
+                possible = True
+                if (getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
+                    and self._invoke_document_with_closure.__func__.__code__ is _STOCK_DOCUMENT_CODE):
+                    possible = False
+            else:
+                wrapper, _ = _current_approval_wrapper(entry[1], is_mcp=entry[2])
+                possible = isinstance(wrapper, ApprovalTool)
+                wrapper_type = type(wrapper).__module__ + "." + type(wrapper).__qualname__
+        classifier_digest = _digest({"descriptor": descriptor.model_dump(mode="json"),
+            "producer": [getattr(producer, "__module__", None), getattr(producer, "__qualname__", None),
+                _producer_digest(producer)],
+            "wrapper": wrapper_type, "approval_possible": possible,
+            "begin": _producer_digest(begin), "closure": _producer_digest(closure),
+            "document": _producer_digest(getattr(self._invoke_document_with_closure, "__func__", None))
+                if entry[1] is None else None,
+            "wrapper_selector": _producer_digest(_current_approval_wrapper)})
+        return TaskToolCapacityWitness(self, descriptor.model_copy(deep=True),
+            _digest(descriptor.model_dump(mode="json")), possible, producer, classifier_digest, _CAPACITY_SEAL)
+
     def stop(self):
         self.started = False
 
@@ -254,7 +343,8 @@ class ToolRegistry:
                 identity = f"mcp:{source.get('server_name', 'unknown')}:{tool.name}"
                 if identity not in active:
                     blocked.append({"tool_id": identity,
-                        "reason": self.mcp_runtime.task_tool_block_reason(source.get("server_name"))})
+                        "reason": getattr(tool, "seraph_task_schema_block_reason", None)
+                            or self.mcp_runtime.task_tool_block_reason(source.get("server_name"))})
         return sorted(blocked, key=lambda item: item["tool_id"])
 
     def approval_context(self, descriptor, inputs, *, job_id):
@@ -368,7 +458,8 @@ class ToolRegistry:
             precontact = (type(error) is TaskToolApprovalRequired
                 and error._producer_seal is _PRECONTACT_SEAL and error.binding == binding)
             witness = TaskToolClosureWitness(binding, "approval_precontact" if precontact else "unknown",
-                None, error.approval_id if precontact else None, _CLOSURE_SEAL)
+                None, error.approval_id if precontact else None, _CLOSURE_SEAL,
+                error._original_fingerprint if precontact else None)
             return _InvocationCompletion(None, error, witness)
 
     def _invoke_sync(self, descriptor, inputs, principal, job_id, fencing_token):
@@ -384,12 +475,7 @@ class ToolRegistry:
         if current is None or current[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
             raise PermissionError("task tool contract changed before execution")
         _, tool, is_mcp = current
-        tools = wrap_tools_for_audit(wrap_tools_for_secret_refs([_MCPResultGuard(tool) if is_mcp else tool]),
-                                    treat_all_as_mcp=is_mcp)
-        marker = _InvocationMarker(tools[0])
-        tools = [marker]
-        wrapper = (wrap_tools_with_forced_approval if is_mcp and get_current_mcp_policy_mode() == "approval"
-                   else wrap_tools_for_approval)(tools, treat_all_as_mcp=is_mcp)[0]
+        wrapper, marker = _current_approval_wrapper(tool, is_mcp=is_mcp)
         tokens = set_runtime_context(principal.session_id, "high_risk", trust_principal=principal)
         fence = set_runtime_fencing_token(str(fencing_token))
         from contextlib import nullcontext
@@ -409,12 +495,17 @@ class ToolRegistry:
                 wrapper_origin = (origin is not None
                     and origin.tb_frame.f_code is ApprovalTool.__call__.__code__
                     and origin.tb_frame.f_locals.get("self") is wrapper)
+                original_fingerprint = origin.tb_frame.f_locals.get("fingerprint") if wrapper_origin else None
+                import re
                 if (isinstance(wrapper, ApprovalTool) and wrapper_origin and not marker.contacted
-                    and tool.name not in _ADOPTED_CAPABILITIES):
+                    and tool.name not in _ADOPTED_CAPABILITIES
+                    and isinstance(original_fingerprint, str)
+                    and re.fullmatch(r"[a-f0-9]{64}", original_fingerprint)):
                     raise TaskToolApprovalRequired(approval, binding=TaskToolApprovalBinding(
                         descriptor_digest=_digest(descriptor.model_dump(mode="json")),
                         input_digest=_digest(inputs), job_id=job_id,
-                        fencing_token=fencing_token), _producer_seal=_PRECONTACT_SEAL) from approval
+                        fencing_token=fencing_token), _producer_seal=_PRECONTACT_SEAL,
+                        _original_fingerprint=original_fingerprint) from approval
                 if isinstance(approval, TaskToolApprovalRequired):
                     raise ApprovalRequired(**{name: getattr(approval, name)
                         for name in _APPROVAL_FIELDS}) from approval
@@ -461,3 +552,14 @@ class ToolRegistry:
         if len(text.encode()) > 60000:
             raise ValueError("task tool output exceeds byte limit")
         return {"content": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+
+_STOCK_SYNC_PRODUCER = ToolRegistry._invoke_sync
+_STOCK_DOCUMENT_PRODUCER = ToolRegistry._invoke_document_with_closure
+_STOCK_BEGIN_PRODUCER = ToolRegistry.begin_invocation
+_STOCK_CLOSURE_PRODUCER = ToolRegistry._invoke_with_closure
+_STOCK_SYNC_CODE = _STOCK_SYNC_PRODUCER.__code__
+_STOCK_DOCUMENT_CODE = _STOCK_DOCUMENT_PRODUCER.__code__
+_STOCK_BEGIN_CODE = _STOCK_BEGIN_PRODUCER.__code__
+_STOCK_CLOSURE_CODE = _STOCK_CLOSURE_PRODUCER.__code__
+_CAPACITY_COMPILER = ToolRegistry.compile_capacity

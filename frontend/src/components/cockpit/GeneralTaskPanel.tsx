@@ -42,6 +42,9 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [preparationView, setPreparationView] = useState<DocumentPreparationView | null>(null);
   const [ack, setAck] = useState(false);
   const [planDraft, setPlanDraft] = useState("");
+  const [replacementDraft, setReplacementDraft] = useState("");
+  const [revisionReason, setRevisionReason] = useState("");
+  const [pendingRevision, setPendingRevision] = useState<{ expected_revision: number; replacements: TaskPlan["steps"]; reason: string; idempotency_key: string } | null>(null);
   const [pendingEdit, setPendingEdit] = useState<{ expected_revision: number; expected_plan_revision: number; idempotency_key: string; plan: TaskPlan } | null>(null);
   const generation = useRef(0);
   const ownedGoals = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
@@ -59,11 +62,16 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
           value.descriptors = registry.tools.filter(d => d && typeof d === "object" && typeof d.tool_id === "string" && Array.isArray(d.effects) && Array.isArray(d.permissions));
         }
       }
-      if (version === generation.current) { setRead(value); setPlanDraft(JSON.stringify(value.plan?.steps ?? [], null, 2)); }
+      if (version === generation.current) {
+        setRead(value); setPlanDraft(JSON.stringify(value.plan?.steps ?? [], null, 2));
+        const frozen = new Set(value.native_execution?.steps.map(step => step.step_id) ?? []);
+        setReplacementDraft(JSON.stringify(value.plan?.steps.filter(step => !frozen.has(step.step_id)) ?? [], null, 2));
+      }
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
   }
   useEffect(() => {
     ++generation.current; setBusy(false); setRead(null); setAck(false); setError(null); setPendingEdit(null); setPlanDraft("");
+    setPendingRevision(null); setReplacementDraft(""); setRevisionReason("");
     const retained = scope ? pendingCreates.get(scope) ?? null : null;
     setPending(retained); setIntent(retained?.input.intent ?? ""); setGoalId(retained?.input.goal_ref ?? "");
     setCost(String(retained?.input.limits.max_cost_microusd ?? 0)); setEgress(retained?.input.inference_egress_acknowledged ?? false);
@@ -168,6 +176,42 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } }
     finally { if (version === generation.current) setBusy(false); }
   }
+  async function revisePausedPlan() {
+    if (!task || !read?.plan || read.native_execution?.phase !== "operator_paused" || !owned || busy) return;
+    const version = generation.current;
+    let request = pendingRevision;
+    if (!request) {
+      try {
+        const replacements: unknown = JSON.parse(replacementDraft);
+        if (!Array.isArray(replacements) || !replacements.length || replacements.length > 16
+          || !revisionReason.trim() || revisionReason.length > 500
+          || new TextEncoder().encode(replacementDraft).length > 65536) throw Error("Provide bounded replacement steps and a revision reason.");
+        const frozen = new Set(read.native_execution.steps.map(step => step.step_id));
+        const editable = read.plan.steps.filter(step => !frozen.has(step.step_id));
+        const edited = replacements as TaskPlan["steps"];
+        if (edited.length !== editable.length || new Set(edited.map(step => step.step_id)).size !== edited.length
+          || edited.some(step => !editable.some(original => original.step_id === step.step_id))) throw Error("Keep the current unstarted step IDs; admitted steps remain frozen.");
+        const completePlan = read.plan.steps.map(step => frozen.has(step.step_id) ? step : edited.find(row => row.step_id === step.step_id)!);
+        request = { expected_revision: read.task_revision, replacements: completePlan,
+          reason: revisionReason, idempotency_key: crypto.randomUUID() };
+        setPendingRevision(request);
+      } catch (e) { setError((e as Error).message); return; }
+    }
+    setBusy(true); setError(null);
+    try {
+      const result = await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/plan/revise`, request);
+      if (version !== generation.current) return;
+      const receipt = result && typeof result === "object" && "task" in result ? result.task as WorkBoardTask : null;
+      if (!receipt || receipt.task_id !== task.task_id || receipt.owner_principal_id !== ownerPrincipalId
+        || receipt.owner_session_id !== ownerSessionId || receipt.task_revision <= read.task_revision
+        || receipt.block_reason !== "general_task_operator_paused"
+        || receipt.latest_attempt?.attempt_id !== task.latest_attempt?.attempt_id) throw Error("Paused revision receipt is unconfirmed. Refresh the original plan before further action.");
+      setPendingRevision(null); setRead(null); await onChanged?.();
+    } catch (e) { if (version === generation.current) {
+      setError((e as Error).message);
+      if (e instanceof GeneralTaskError && [400, 403, 409, 422].includes(e.status)) { setPendingRevision(null); if (e.status === 409) setRead(null); }
+    } } finally { if (version === generation.current) setBusy(false); }
+  }
   async function control(action: "pause" | "resume" | "cancel") {
     if (!task || !read?.native_execution || !owned || busy || read.task_revision !== task.task_revision) return;
     const version = generation.current, originalAttempt = task.latest_attempt;
@@ -215,6 +259,10 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
         <p className="text-xs">Task revision {read.task_revision} · plan revision {read.plan?.revision ?? "not yet valid"} · no_learning. Acceptance grants no new permission; the dispatcher owns admission and each effect still requires its current approval.</p>
         {read.native_execution && <section aria-label="Native task execution" className="mt-3 rounded border border-white/10 p-2">
           <p role="status">Native phase {read.native_execution.phase} · manifest revision {read.native_execution.manifest_revision}</p>
+          {read.native_execution.cancellation?.state && <p role="status">{
+            read.native_execution.cancellation?.state === "pending" ? "Cancellation fenced this run. The original tool callback or effect remains unresolved."
+              : read.native_execution.cancellation?.state === "callback_closed_outcome_debt" ? "The original callback has closed. Its effect outcome still requires reconciliation."
+                : "Cancellation completed with original tool closure and known effect outcomes."}</p>}
           <p>Original deadline {read.native_execution.original_deadline_at} · native cutoff {read.native_execution.native_deadline_at}</p>
           <p>Remaining work: {read.native_execution.remaining_steps.join(", ") || "none"}</p>
           {read.native_execution.steps.map(step => <p key={step.step_id}>{step.step_id} · {step.status} · {step.contact_state}</p>)}
@@ -227,7 +275,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
               onClick={() => void control("pause")}>Pause remaining task work</button>
             <button type="button" disabled={busy || !owned || read.native_execution.phase !== "operator_paused"}
               onClick={() => void control("resume")}>Resume paused task work</button>
-            <button type="button" disabled={busy || !owned || !task.latest_attempt || Boolean(task.latest_attempt.ended_at)
+            <button type="button" disabled={busy || !owned || Boolean(read.native_execution.cancellation?.state) || !task.latest_attempt || Boolean(task.latest_attempt.ended_at)
               || !["running", "blocked"].includes(task.status)} onClick={() => void control("cancel")}>Cancel native task work</button>
           </div>
           <p className="text-xs">Safe pause requires closed tool work. Cancellation fences future work and late output; an uncertain contacted tool remains visible until reconciliation.</p>
@@ -262,6 +310,13 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
             {preparationView.sections.map((section) => <article key={section.source_ref} className="mt-2"><h4 className="break-all font-mono">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>{(section.formula !== null || section.cached_value !== null) && <dl><dt>Formula (inert)</dt><dd className="whitespace-pre-wrap break-all">{section.formula ?? "none"}</dd><dt>Cached value (freshness unknown)</dt><dd className="whitespace-pre-wrap break-all">{section.cached_value ?? "unavailable"}</dd></dl>}{section.cached_value === null && <p role="status">Cached value unavailable; freshness unknown. Formula remains inert.</p>}</article>)}
           </section>}
         </section>}
+        {read.native_execution?.phase === "operator_paused" && <details className="mt-3">
+          <summary>Revise unstarted task steps</summary>
+          <p className="text-xs">Admitted and completed steps stay fixed. Edit the current unstarted step IDs below. Saving keeps this original run safely paused; review its current plan before resuming.</p>
+          <label>Replacement steps<textarea aria-label="Replacement steps" className="cockpit-input w-full font-mono text-xs" rows={10} maxLength={65536} value={replacementDraft} disabled={busy || !owned || Boolean(pendingRevision)} onChange={e => setReplacementDraft(e.target.value)} /></label>
+          <label>Revision reason<input aria-label="Revision reason" className="cockpit-input w-full" maxLength={500} value={revisionReason} disabled={busy || !owned || Boolean(pendingRevision)} onChange={e => setRevisionReason(e.target.value)} /></label>
+          <button type="button" disabled={busy || !owned || (!pendingRevision && !revisionReason.trim())} onClick={() => void revisePausedPlan()}>{pendingRevision ? "Reconcile exact paused revision" : "Save paused plan revision"}</button>
+        </details>}
         {!read.accepted && <>
           {!documentPreparation && <details className="mt-3"><summary>Edit typed plan steps</summary><p className="text-xs">Edit only registered tool IDs, typed inputs, dependencies and output contracts shown above. Saving creates a new inert revision; permissions and limits stay server owned.</p>
             <label>Typed plan steps<textarea aria-label="Typed plan steps" className="cockpit-input w-full font-mono text-xs" rows={12} maxLength={65536} value={planDraft} disabled={busy || !owned || Boolean(pendingEdit)} onChange={e => { setPlanDraft(e.target.value); setAck(false); }} /></label>

@@ -113,6 +113,22 @@ def test_native_operator_action_values_remain_closed():
             WorkBoardAction(value)
 
 
+def test_precontact_closure_requires_original_callback_fingerprint_only():
+    from src.work_board.contracts import GeneralTaskToolClosureV1
+    base = dict(original_binding_digest='a' * 64, invocation_id='original-child', child_fence=1,
+        descriptor_digest='b' * 64, input_digest='c' * 64, outcome='approval_precontact', approval_id='approval')
+    with pytest.raises(ValidationError):
+        GeneralTaskToolClosureV1.model_validate(base)
+    closure = GeneralTaskToolClosureV1.model_validate({**base, 'approval_fingerprint': 'd' * 64})
+    assert closure.approval_fingerprint == 'd' * 64
+    for outcome in ('returned', 'unknown'):
+        changed = {**base, 'outcome': outcome, 'approval_id': None, 'approval_fingerprint': 'd' * 64}
+        if outcome == 'returned':
+            changed['output_digest'] = 'e' * 64
+        with pytest.raises(ValidationError):
+            GeneralTaskToolClosureV1.model_validate(changed)
+
+
 def test_lifecycle_cleans_up_when_startup_fails_before_readiness():
     registry = Registry()
     dispatcher = type("Dispatcher", (), {"general_tasks": None})()

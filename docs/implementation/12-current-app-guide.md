@@ -897,6 +897,68 @@ revoked, uncertain or physically changed output bindings.
 The planner HTTP response is intercepted inside the test: these receipts make no
 external provider call or spend and make no usefulness or quality claim.
 
+#### Bounded native task interpreter (#998)
+
+**Intended Shipped scope after reviewed merge:** available on the installed
+`develop` revision containing the independently reviewed
+[#998](https://github.com/seraph-quest/seraph/issues/998) implementation merge.
+It extends the typed task contract above. The existing Python dispatcher and
+managed `local run/up/down/status`
+lifecycle remain the execution owner. The optional Cordis host does not execute
+this interpreter; [#1007](https://github.com/seraph-quest/seraph/issues/1007) owns
+the later bridge migration.
+
+Acceptance starts one bounded native parent and actual typed tool children.
+Dependency inputs come from physically verified private child artifacts.
+Admission, tool contact, approval continuation and final assembly recheck the
+original Root, Goal, input binding, current policy and canonical task/attempt
+fences. Verified child outputs remain separate from the parent's final readback;
+only verified final assembly sends the card to Review. Artifacts remain private,
+and execution records `no_learning` without a canonical-memory write.
+
+Planning and any bounded continuation share the original accepted inference
+group, call/cost allowances and absolute deadline. Only acknowledged,
+budgeted planning can continue after a verified result; manual zero-cost plans
+do not contact a model. Private tool inputs and output bodies do not enter
+continuation messages. A paused edit uses the existing full-Plan replacement
+contract through `/plan/revise`: only unadmitted rows are editable, while every
+admitted, started or completed row must remain unchanged. Editing stays paused
+and does not renew leases, attempts, fences, permission or deadlines.
+
+The inspector exposes safe Pause, Resume and Cancel for native task work.
+Pause requires verified quiescence; an active or unresolved original callback
+blocks it. Resume continues the original uncontacted remaining work. Tool
+approval binds the exact original child and manifest; explicit continuation
+uses that same child attempt once under the original deadline. Missing or stale
+bindings and historical root-only tool intents require reconciliation.
+Restart can recover the same admitted, unclaimed child or assemble already
+verified outputs. Running or Unknown effects cannot be replayed.
+
+Cancel fences further admission and late output adoption immediately. The card
+shows `pending` while the original callback remains unresolved, then
+`callback_closed_outcome_debt` if its actual closure leaves an uncertain effect.
+`fully_cancelled` requires positive original closure and no effect debt. Lease
+expiry, process absence and missing or corrupt closure evidence do not establish
+safe cancellation; they retain visible Unknown recovery. A repeated cancellation
+returns its original action receipt without renewing execution. Protected
+history has fixed capacity reserved before contact; exhausted history rejects
+admission early rather than losing space for cancellation and closure receipts.
+
+Typed MCP discovery uses the stock client's original advertised input and output
+schemas. The trusted declaration must exactly match the bounded closed input
+schema, and current connection/policy identity remains bound at approval and
+contact. Unsupported or changed metadata blocks the tool visibly. The
+[three-tool integration journey](../../backend/tests/test_general_task_native_full_journey.py)
+exercises actual file read/write, stock MCP JSON-RPC discovery and one approved
+operation through an owned local HTTP transport, with physical private output
+readback. [API recovery tests](../../backend/tests/test_general_task_native_dispatch_api.py)
+cover paused full-Plan edits, original-child restart, held-callback cancellation,
+full reserved history and corrupt-evidence recovery;
+[UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.test.tsx)
+cover exact control bindings and truthful cancellation states. These isolated
+Linux receipts make no external provider call or quality claim. The contract is
+OS-agnostic; native macOS execution remains unverified.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for

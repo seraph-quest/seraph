@@ -33,18 +33,18 @@ async def current_interpreter(jobs, parent_id, *, owner, fence):
     return parent, task, attempt, envelope, manifest
 
 
-async def initialize_interpreter(jobs, parent_id, *, owner, fence):
+async def initialize_interpreter(jobs, parent_id, *, owner, fence, service=None):
     parent, task, attempt, envelope, manifest = await current_interpreter(jobs,
         parent_id, owner=owner, fence=fence)
     if manifest is None:
         manifest = initial_native_manifest(parent, task, attempt, envelope)
         result = await jobs.replace_general_task_manifest(parent_id, manifest=manifest,
-            owner=owner, fencing_token=fence, expected_revision=parent.revision)
+            owner=owner, fencing_token=fence, expected_revision=parent.revision, service=service)
         manifest = GeneralTaskCurrentManifestV1.model_validate(result["manifest"])
     return manifest
 
 
-async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, inputs):
+async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, inputs, service=None):
     """Publish private literals and atomically enter one exact native wait."""
     from src.work_board.general_task import digest
     parent, task, attempt, envelope, previous = await current_interpreter(jobs,
@@ -75,8 +75,17 @@ async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, 
             "session_id": task.owner_session_id, "capability_id": GENERAL_TASK_NATIVE_CHILD_CAPABILITY,
             "general_task_child_binding": binding.model_dump(mode="json")},
         deadline_at=parent.deadline_at, max_attempts=1)
+    capacity_witness = None
+    if service is not None:
+        from src.work_board.general_task import GeneralTaskService
+        if type(service) is not GeneralTaskService or not service.started:
+            raise PermissionError("owned current task service required for capacity compilation")
+        compiler = getattr(service.registry, "compile_capacity", None)
+        if callable(compiler):
+            capacity_witness = compiler(descriptor)
     result = await jobs.admit_general_task_tool_child(spec, manifest=proposed, owner=owner,
-        fencing_token=fence, expected_revision=parent.revision, staged_input=staged)
+        fencing_token=fence, expected_revision=parent.revision, staged_input=staged,
+        capacity_witness=capacity_witness, service=service)
     return binding, result
 
 
@@ -164,10 +173,20 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         details={"tool_id": private.tool_id, "step_id": binding.step_id,
             "input_digest": binding.input_digest, "no_learning": True}, owner=child_owner, fencing_token=fence)
     from src.native_tools.task_adapters import TaskToolApprovalRequired
+    from src.workflows.general_task_guard import assert_general_task_child_current
+    async with jobs._session() as db:
+        authorized = await jobs._fetch(db, binding.invocation_id)
+        jobs._assert_lease(authorized, owner=child_owner, fencing_token=fence)
+        await assert_general_task_child_current(db, authorized)
+        from src.workflows.general_task_guard import assert_native_callback_capacity
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        compiler = getattr(service.registry, "compile_capacity", None)
+        capacity_witness = compiler(descriptor) if callable(compiler) else None
+        assert_native_callback_capacity(parent, binding, fence, capacity_witness=capacity_witness)
     invocation = service.registry.begin_invocation(descriptor, private.inputs,
         principal=replace(principal, job_id=binding.invocation_id), job_id=binding.invocation_id,
         fencing_token=fence)
-    service._native_invocations[binding.invocation_id] = invocation
+    service.retain_native_invocation(jobs, binding, invocation)
     try:
         output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
     except TaskToolApprovalRequired:
@@ -177,7 +196,7 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
             owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
             producer_witness=invocation.witness, tool_name=metadata["tool_name"],
             approval_context=metadata["approval_context"])
-        service._native_invocations.pop(binding.invocation_id, None)
+        service.release_native_invocation(binding.invocation_id)
         return {"awaiting_approval": True, "approval_id": waiting["transition"]["approval_id"],
             "child_id": binding.invocation_id}, None, None
     validate_schema(descriptor.output_schema, output)
@@ -230,7 +249,7 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
     await jobs.transition_job(binding.invocation_id, "succeeded", owner=child_owner, fencing_token=fence,
         result={"verified": True, "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True},
         result_summary="Native tool output physically read back")
-    service._native_invocations.pop(binding.invocation_id, None)
+    service.release_native_invocation(binding.invocation_id)
     return verified, artifact, reference
 
 
@@ -289,7 +308,7 @@ async def retain_native_failure(service, jobs, binding, *, child_owner):
         await jobs.transition_job(binding.invocation_id, "unknown_external_effect", owner=child_owner,
             fencing_token=fence, reason="general_task_native_unknown")
         if cleanup_digest is not None:
-            service._native_invocations.pop(binding.invocation_id, None)
+            service.release_native_invocation(binding.invocation_id)
     except (BoardError, DurableJobError):
         # Canonical drift invalidates the writer. Keep its original intent and
         # phase inspectable; failure never supplies substitute authority.
@@ -390,7 +409,7 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
             resumed = await jobs.resume_general_task_native_parent(job_id, owner=owner,
                 expected_revision=parent.revision, expected_manifest_revision=existing.manifest_revision)
             owner, fence = resumed["job"]["lease"]["owner"], resumed["job"]["lease"]["fencing_token"]
-    await initialize_interpreter(jobs, job_id, owner=owner, fence=fence)
+    await initialize_interpreter(jobs, job_id, owner=owner, fence=fence, service=service)
     while True:
         parent, task, attempt, envelope, manifest = await current_interpreter(jobs, job_id,
             owner=owner, fence=fence)
@@ -404,6 +423,9 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         remaining = [step for step in plan.steps if step.step_id not in outputs]
         if not remaining:
             break
+        if await continue_verified_plan(service, jobs, parent, task, attempt, envelope, manifest,
+            owner=owner, fence=fence):
+            continue
         ready = next((step for step in remaining if set(step.depends_on) <= outputs.keys()), None)
         if ready is None:
             raise BoardError("general_task_dependency_unverified", "Ready verified dependencies required", status_code=409)
@@ -412,7 +434,7 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
             inputs = await resolve_current_native_step_inputs(db, parent, task, attempt,
                 manifest, envelope, ready)
         binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
-            step=ready, descriptor=descriptor, inputs=inputs)
+            step=ready, descriptor=descriptor, inputs=inputs, service=service)
         output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
             child_owner="general-task-native:" + binding.invocation_id, principal=principal)
         if _artifact is None:
@@ -462,16 +484,102 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         "result_refs": [artifact], "artifact_refs": [artifact]}
 
 
-async def publish_plan_revision(service, jobs, parent_id, *, owner, fence, request):
-    """Only unadmitted steps may change within the original selected grant."""
+async def continue_verified_plan(service, jobs, parent, task, attempt, envelope, manifest, *, owner, fence):
+    """Use original planning grants once per immutable verified receipt set."""
+    from src.work_board.general_task import digest
+    from src.work_board.contracts import WorkBoardOwner, PlanRevisionRequest
+    from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+    limits = envelope.task_input.limits
+    if (service.planner is None or not envelope.task_input.inference_egress_acknowledged
+        or limits.max_inference_calls <= 0 or limits.max_cost_microusd <= 0 or not manifest.step_ids):
+        return False
+    key = "verified-continuation:" + digest([manifest.creation_digest,
+        sorted(zip(manifest.step_ids, manifest.step_receipt_artifact_ids, manifest.step_receipt_digests))])
+    for index in range(1, len(manifest.revision_numbers)):
+        retained = read_native_artifact_reference(GeneralTaskArtifactRef(
+            artifact_id=manifest.revision_artifact_ids[index], digest=manifest.revision_artifact_digests[index],
+            schema_version="GeneralTaskPlanRevision.v1"), parent_job_id=parent.run_identity,
+            creation_digest=manifest.creation_digest)
+        if retained.idempotency_key == key:
+            return False
+    operator = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+    async with jobs._session() as db:
+        from src.db.models import InferenceCostReservation, WorkflowRunState
+        from src.workflows.general_task_accounting import entry_for, validate_group_owner
+        from src.workflows.inference_accounting import InferenceAccountingError
+        from src.model_fabric.effective_policy import current_inference_policy
+        from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION
+        from src.work_board.general_task_proposal import proposal_provenance
+        group = envelope.proposal_group
+        await validate_group_owner(db, group)
+        rows = list((await db.execute(select(InferenceCostReservation).join(WorkflowRunState,
+            WorkflowRunState.run_identity == InferenceCostReservation.job_id).where(
+            WorkflowRunState.owner_principal_id == task.owner_principal_id,
+            WorkflowRunState.session_id == task.owner_session_id))).scalars())
+        members = []
+        for row in rows:
+            entry = entry_for(row)
+            if entry and entry["group"]["group_id"] == group.group_id:
+                if entry["group"] != group.model_dump(mode="json"):
+                    raise InferenceAccountingError("general_task_group_conflict")
+                members.append(row)
+        provenance = envelope.proposal_provenance
+        if provenance is not None:
+            original = next((row for row in members if row.operation_id == provenance.initial_operation_id), None)
+            if original is None or proposal_provenance(original.model_dump(mode="json"), group) != provenance:
+                raise BoardError("general_task_provenance_missing", "Original proposal accounting binding unavailable", status_code=409)
+        if any(row.state in {"unknown", "reserved", "contact_started"} or
+            row.state == "settled" and row.actual_cost_microusd is None for row in members):
+            raise InferenceAccountingError("general_task_group_unknown")
+        spent = sum(row.actual_cost_microusd for row in members if row.state == "settled")
+        configured, _ = current_inference_policy()
+        setup = configured.openrouter_setup
+        route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
+        if route is None or not getattr(route, "enabled", True):
+            raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
+        bound = getattr(route, "request_cost_bound_microusd", None)
+        if type(bound) is not int or bound <= 0:
+            raise BoardError("general_task_planning_budget_insufficient", "Original governed request bound required", status_code=409)
+        exhausted = len(members) >= group.max_inference_calls or spent + bound > group.max_cost_microusd
+    if exhausted:
+        trace_key = "general:continuation-budget:" + digest([manifest.creation_digest, manifest.group_id])
+        trace = {"reason": "general_task_continuation_budget_exhausted",
+            "group_id": envelope.proposal_group.group_id, "no_learning": True, "accepted_plan_unchanged": True}
+        projection = await jobs.get_job(parent.run_identity)
+        existing = [item for item in projection["checkpoints"] if item.get("checkpoint_id") == trace_key]
+        completed = [item for item in existing if item.get("payload") == trace
+            and item.get("state_digest") == digest("budget_exhausted") and item.get("safe") is True]
+        if not completed:
+            await jobs.record_checkpoint(parent.run_identity, checkpoint_id=trace_key,
+                state="budget_exhausted", checkpoint_payload=trace, owner=owner, fencing_token=fence)
+        return False
+    async with jobs._session() as db:
+        proposal = await service.planner.continue_plan(db, operator, parent=parent, task=task,
+            attempt=attempt, manifest=manifest, envelope=envelope, request_key=key)
+    if proposal.plan is None or proposal.error:
+        raise BoardError("general_task_plan_invalid", "Bounded continuation requires a valid remaining plan", status_code=409)
+    if proposal.group != envelope.proposal_group or proposal.provenance != envelope.proposal_provenance:
+        raise BoardError("general_task_continuation_not_bound", "Original planning group required", status_code=409)
+    await publish_plan_revision(service, jobs, parent.run_identity, owner=owner, fence=fence,
+        request=PlanRevisionRequest(expected_revision=task.task_revision,
+            replacements=proposal.plan.steps, reason="Bounded continuation after verified native result",
+            idempotency_key=key))
+    return True
+
+
+async def compile_paused_plan_revision(service, db, parent, task, attempt, envelope, previous, request):
+    """Compile private replacements under the caller's canonical transaction."""
     from src.db.models import WorkflowRunState
     from src.workflows.general_task_guard import child_binding
-    from src.work_board.general_task import digest
-    parent, task, attempt, envelope, previous = await current_interpreter(jobs,
-        parent_id, owner=owner, fence=fence)
-    if (previous is None or previous.phase not in {"native_ready", "assembly"}
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.general_task import canonical
+    parent_id = parent.run_identity
+    if (previous is None or previous.phase not in {"native_ready", "assembly", "operator_paused"}
         or task.task_revision != request.expected_revision):
         raise BoardError("general_task_plan_revision_stale", "Current bounded assembly revision required", status_code=409)
+    canonical(request.model_dump(mode="json"))
+    await service.recheck_authority(db, WorkBoardOwner(principal_id=task.owner_principal_id,
+        session_id=task.owner_session_id), envelope)
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     for index in range(1, len(previous.revision_numbers)):
         retained = read_native_artifact_reference(GeneralTaskArtifactRef(
@@ -482,23 +590,23 @@ async def publish_plan_revision(service, jobs, parent_id, *, owner, fence, reque
         if retained.idempotency_key == request.idempotency_key:
             if retained.plan.steps != request.replacements or retained.reason != request.reason:
                 raise BoardError("general_task_idempotency_conflict", "Revision key identifies different task data", status_code=409)
-            return {"job": await jobs.get_job(parent_id), "manifest": previous.model_dump(mode="json")}
+            return retained.plan, None
     if previous.plan_revision >= 16:
         raise BoardError("general_task_plan_revision_stale", "Current bounded assembly revision required", status_code=409)
     original = current_plan(previous, envelope)
     proposed_plan = PlanSpec(revision=original.revision + 1, steps=request.replacements)
     original_steps = {step.step_id: step for step in original.steps}
     revised_steps = {step.step_id: step for step in proposed_plan.steps}
-    async with jobs._session() as db:
-        siblings = list((await db.execute(select(WorkflowRunState).where(
-            WorkflowRunState.parent_job_id == parent_id))).scalars())
-        if {row.run_identity for row in siblings} != set(previous.admitted_invocation_ids):
-            raise BoardError("general_task_native_binding_changed", "Canonical admitted identities changed", status_code=409)
-        for row in siblings:
-            binding = child_binding(row)
-            if original_steps.get(binding.step_id) != revised_steps.get(binding.step_id):
-                raise BoardError("general_task_admitted_step_frozen", "Admitted tool inputs and contracts are immutable", status_code=409)
-    service.recheck(envelope.model_copy(update={"plan": proposed_plan}))
+    siblings = list((await db.execute(select(WorkflowRunState).where(
+        WorkflowRunState.parent_job_id == parent_id))).scalars())
+    if {row.run_identity for row in siblings} != set(previous.admitted_invocation_ids):
+        raise BoardError("general_task_native_binding_changed", "Canonical admitted identities changed", status_code=409)
+    for row in siblings:
+        binding = child_binding(row)
+        if original_steps.get(binding.step_id) != revised_steps.get(binding.step_id):
+            raise BoardError("general_task_admitted_step_frozen", "Admitted tool inputs and contracts are immutable", status_code=409)
+    await service.recheck_authority(db, WorkBoardOwner(principal_id=task.owner_principal_id,
+        session_id=task.owner_session_id), envelope.model_copy(update={"plan": proposed_plan}))
     staged = stage_task_artifact(parent_job_id=parent_id, creation_digest=previous.creation_digest,
         payload=GeneralTaskPlanRevisionV1(parent_job_id=parent_id, creation_digest=previous.creation_digest,
             original_envelope_digest=previous.original_envelope_digest,
@@ -506,6 +614,21 @@ async def publish_plan_revision(service, jobs, parent_id, *, owner, fence, reque
             original_limits_digest=previous.original_limits_digest,
             original_deadline_at=previous.original_deadline_at, plan=proposed_plan,
             reason=request.reason, idempotency_key=request.idempotency_key))
+    return proposed_plan, staged
+
+
+async def publish_plan_revision(service, jobs, parent_id, *, owner, fence, request):
+    """Only unadmitted steps may change within the original selected grant."""
+    from src.work_board.general_task import digest
+    parent, task, attempt, envelope, previous = await current_interpreter(jobs,
+        parent_id, owner=owner, fence=fence)
+    if previous is None or previous.phase not in {"native_ready", "assembly"}:
+        raise BoardError("general_task_plan_revision_stale", "Current bounded assembly revision required", status_code=409)
+    async with jobs._session() as db:
+        proposed_plan, staged = await compile_paused_plan_revision(service, db, parent, task,
+            attempt, envelope, previous, request)
+    if staged is None:
+        return {"job": await jobs.get_job(parent_id), "manifest": previous.model_dump(mode="json")}
     proposed = previous.model_copy(update={"manifest_revision": previous.manifest_revision + 1,
         "phase_revision": previous.phase_revision + 1, "plan_revision": proposed_plan.revision,
         "current_plan_artifact_id": staged.reference.artifact_id,

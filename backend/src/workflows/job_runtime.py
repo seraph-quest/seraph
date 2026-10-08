@@ -3127,6 +3127,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import resume_native_approval
         return await resume_native_approval(self, child_id, **bindings)
 
+    async def cancel_general_task_native_parent(self, parent_id, **bindings):
+        from src.workflows.general_task_guard import cancel_native_parent
+        return await cancel_native_parent(self, parent_id, **bindings)
+
+    async def observe_general_task_native_cancel_closure(self, child_id, **bindings):
+        from src.workflows.general_task_guard import observe_native_cancel_closure
+        return await observe_native_cancel_closure(self, child_id, **bindings)
+
     async def pause_general_task_native_parent(self, parent_id, **bindings):
         from src.workflows.general_task_guard import pause_parent
         return await pause_parent(self, parent_id, **bindings)
@@ -3134,6 +3142,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def resume_general_task_native_parent(self, parent_id, **bindings):
         from src.workflows.general_task_guard import resume_parent
         return await resume_parent(self, parent_id, **bindings)
+
+    async def revise_general_task_operator_paused_parent(self, parent_id, **bindings):
+        from src.workflows.general_task_guard import revise_operator_paused_parent
+        return await revise_operator_paused_parent(self, parent_id, **bindings)
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         async with self._session() as db:
@@ -4919,7 +4931,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     ) -> dict[str, Any]:
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
-        if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:")):
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:", "general:cancel:")):
             raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")

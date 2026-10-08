@@ -146,7 +146,8 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
                     runs = list((await db.scalars(select(WorkflowRunState))).all())
                 for run in runs:
                     assert run.status != "succeeded"
-                    assert not any(item.get("checkpoint_id") == "general:verified:prepare" for item in (await jobs.get_job(run.run_identity))["checkpoints"])
+                    from tests.test_general_task_persistence import actual_output_checkpoints
+                    assert not actual_output_checkpoints(await jobs.get_job(run.run_identity))
                 print(json.dumps({"negative": scenario, "succeeded": False, "provider_contacts": 0}))
                 return
             if outcome["completed"] != 1:

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
 from src.work_board.contracts import (
     GeneralTaskCurrentManifestV1, GeneralTaskNativeChildBindingV1,
-    GeneralTaskToolInputV1, GeneralTaskStepReceiptV1, WorkBoardOwner,
+    GeneralTaskToolInputV1, GeneralTaskStepReceiptV1, WorkBoardOwner, GeneralTaskResume,
 )
 from src.work_board.general_task import GeneralTaskService, digest
 from src.work_board.general_task_runtime_artifacts import (
@@ -447,8 +447,8 @@ async def test_wrong_native_capability_denies_before_private_input_read(task_run
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('drift', ['missing', 'malformed', 'foreign', 'stale_fence', 'expired_approval'])
-async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, drift, request):
+@pytest.mark.parametrize('drift', ['missing', 'malformed', 'foreign', 'stale_fence', 'expired_approval', 'descriptor_before_resume'])
+async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, drift, request, monkeypatch):
     from src.auth.service import authenticate_session
     from src.approval.repository import ApprovalRepository
     from src.db.models import ApprovalRequest
@@ -485,10 +485,46 @@ async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, d
         parent = await jobs._fetch(db, binding.parent_job_id)
         manifest = read_manifest(parent)
         parent_revision = parent.revision
+        attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+        resume_request = GeneralTaskResume(expected_revision=manifest.task_revision,
+            expected_plan_revision=manifest.plan_revision, workflow_run_id=parent.run_identity,
+            attempt_id=attempt.attempt_id, fencing_token=attempt.fencing_token,
+            workflow_revision=parent_revision, approval_id=waiting['approval_id'],
+            child_job_id=binding.invocation_id, expected_manifest_revision=manifest.manifest_revision)
+    if drift == 'descriptor_before_resume':
+        from src.work_board.repository import BoardError
+        # An earlier successful preflight cannot authorize a later changed descriptor.
+        async with sessions() as db:
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+            await service.validate_native_resume(db,
+                WorkBoardOwner(principal_id=OWNER, session_id=SESSION), task, attempt,
+                parent, manifest, envelope, await jobs._fetch(db, binding.invocation_id), binding, resume_request)
+        before_parent = await jobs.get_job(binding.parent_job_id)
+        before_child = await jobs.get_job(binding.invocation_id)
+        changed = descriptor.model_copy(update={'deadline': descriptor.deadline + 1})
+        monkeypatch.setattr(registry, 'descriptors', lambda: [changed if item.tool_id == descriptor.tool_id
+            else item for item in descriptors])
+        with pytest.raises(BoardError):
+            await jobs.resume_general_task_native_approval(binding.invocation_id,
+                operator_owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
+                expected_task_revision=manifest.task_revision, expected_parent_revision=parent_revision,
+                expected_manifest_revision=manifest.manifest_revision, approval_id=waiting['approval_id'],
+                service=service, request=resume_request)
+        assert await jobs.get_job(binding.parent_job_id) == before_parent
+        assert await jobs.get_job(binding.invocation_id) == before_child
+        async with sessions() as db:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            assert task.task_revision == manifest.task_revision
+            assert (await db.get(WorkBoardAttempt, binding.attempt_id)).fencing_token == manifest.board_fence
+        assert tool.calls == 0
+        return
     resumed = await jobs.resume_general_task_native_approval(binding.invocation_id,
         operator_owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
         expected_task_revision=manifest.task_revision, expected_parent_revision=parent_revision,
-        expected_manifest_revision=manifest.manifest_revision, approval_id=waiting['approval_id'])
+        expected_manifest_revision=manifest.manifest_revision, approval_id=waiting['approval_id'],
+        service=service, request=resume_request)
     owner, fence = resumed['runtime_owner'], resumed['child']['lease']['fencing_token']
     async with sessions() as db:
         await assert_general_task_child_current(db, await jobs._fetch(db, binding.invocation_id))
@@ -639,7 +675,14 @@ async def test_actual_precontact_wait_attachment_failure_rolls_back_paired_state
     assert manifest.phase == 'native_wait' and manifest.admitted_invocation_ids == [binding.invocation_id]
     assert child['status'] == 'running' and child['attempt_count'] == 1
     assert tool.calls == 0
-    assert not any(item['checkpoint_id'].startswith(('general:approval:', 'general:cleanup:')) for item in parent['checkpoints'])
+    # Admission reserves finite slots, but a failed attachment may replace none
+    # of them with actual approval/closure evidence or change their provenance.
+    protected_slots = lambda projection: [item for item in projection['checkpoints']
+        if item['checkpoint_id'].startswith(('general:approval:', 'general:cleanup:'))]
+    assert protected_slots(parent) == protected_slots(before)
+    assert not any(item.get('payload', {}).get('schema_version') in {
+        'general_task.native_approval_transition.v1', 'general_task.tool_closure.v1'}
+        for item in parent['checkpoints'])
     assert parent['revision'] == before['revision'] + 1  # only original positive claim receipt
     assert len(child['effects']) == 1 and child['effects'][0]['status'] == 'intent'
     with pytest.raises(DurableJobLeaseError):

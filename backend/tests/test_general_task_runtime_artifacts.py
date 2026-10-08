@@ -76,7 +76,9 @@ async def test_manifest_and_child_compilers_use_original_canonical_binding(task_
         attempt = await db.scalar(select(WorkBoardAttempt).where(
             WorkBoardAttempt.attempt_id == current["manifest"]["attempt_id"]))
         manifest = initial_native_manifest(parent, task, attempt, envelope)
-        assert manifest.model_dump(mode="json") == current["manifest"]
+        from src.workflows.general_task_guard import cancel_checkpoint_id
+        required = [cancel_checkpoint_id(parent.run_identity, attempt.attempt_id)]
+        assert manifest.model_copy(update={"required_checkpoint_ids": required}).model_dump(mode="json") == current["manifest"]
         descriptor, step = envelope.descriptors[0], envelope.plan.steps[0]
         binding = compile_native_child_binding(parent, task, attempt, manifest, step, descriptor, step.input)
         assert binding.parent_authority_digest == parent.authority_digest

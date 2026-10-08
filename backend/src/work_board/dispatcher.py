@@ -3495,6 +3495,44 @@ class WorkBoardDispatcher:
         task = detail["task"]
         if task.task_revision != int(expected_revision):
             raise BoardError("stale_revision", "The task changed before cancellation", status_code=409)
+        if task.capability_id == "agent.task.v1":
+            # Cancellation uses its fixed authority-reducing compiler, never
+            # an execution lease or the generic no-process cleanup adapter.
+            latest = detail["attempts"][0] if detail["attempts"] else None
+            if latest is None or not latest.workflow_run_id:
+                raise BoardError("admission_reconcile_required", "The original task admission must be reconciled before cancellation", status_code=409)
+            try:
+                cancelled = await self.jobs.cancel_general_task_native_parent(latest.workflow_run_id,
+                    operator_owner=owner, expected_task_revision=expected_revision)
+            except BoardError:
+                raise
+            except Exception as exc:
+                raise BoardError("general_task_cancel_blocked", "Refresh the original cancellation state; missing or changed evidence requires reconciliation", status_code=409) from exc
+            if self.general_tasks is not None:
+                try:
+                    await self.general_tasks.observe_native_cancellation(self.jobs, latest.workflow_run_id)
+                except Exception as exc:
+                    logger.info("native cancellation retains original recovery: %s", type(exc).__name__)
+            async with self.session_provider() as db:
+                current_task = await self.repository.get_task(db, owner, task_id)
+                current_attempt = await db.get(WorkBoardAttempt, cancelled["attempt"].attempt_id)
+                if current_attempt is None or current_attempt.workflow_run_id != latest.workflow_run_id:
+                    raise BoardError("general_task_cancel_blocked", "Inspect the original cancellation binding", status_code=409)
+                from src.workflows.general_task_guard import read_general_task_native_cancel
+                try:
+                    read_general_task_native_cancel(await self.jobs._fetch(db, latest.workflow_run_id), current_task, current_attempt)
+                except Exception as exc:
+                    raise BoardError("general_task_cancel_blocked", "Refresh the original cancellation state; changed evidence requires reconciliation", status_code=409) from exc
+                event = cancelled["event"]
+                if event is None:
+                    replay_detail = await self.repository.get_detail(db, owner, task_id)
+                    cancel_key = f"work-board-cancel:{task_id}:{current_attempt.attempt_id}"
+                    event = next((item for item in replay_detail.get("events", [])
+                        if item.kind == "attempt.cancel_requested"
+                        and _load_json_mapping(item.metadata_json).get("cancel_key") == cancel_key), None)
+                    if event is None:
+                        raise BoardError("general_task_cancel_blocked", "The original cancellation action receipt is unavailable", status_code=409)
+            return BoardAttemptProjection(current_task, current_attempt, event)
         if task.status is not WorkBoardStatus.running:
             raise BoardError("illegal_transition", "Only a running task can be cancelled", status_code=409)
         active = next((attempt for attempt in detail["attempts"] if attempt.ended_at is None), None)
@@ -10465,6 +10503,26 @@ class WorkBoardDispatcher:
             await self._reconcile_linked_failure(claim, request.workflow_run_id)
             raise BoardError("general_task_continuation_blocked", "Read the exact original task recovery state", status_code=409)
 
+    async def revise_paused_general_task(self, owner, task_id, request):
+        """Select the original paused parent; the fixed writer owns its CAS."""
+        if self.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        async with self.session_provider() as db:
+            task = await self.repository.get_task(db, owner, task_id)
+            if task.capability_id != "agent.task.v1":
+                raise BoardError("unsupported_action", "Plan revisions apply only to a general task", status_code=422)
+            if task.task_revision != request.expected_revision:
+                raise BoardError("stale_revision", "Refresh the original paused task", status_code=409)
+            attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+            if attempt is None or not attempt.workflow_run_id:
+                raise BoardError("general_task_revision_unavailable", "Safely pause the original admitted task first", status_code=409)
+            parent_id = attempt.workflow_run_id
+        await self.jobs.revise_general_task_operator_paused_parent(parent_id,
+            operator_owner=owner, request=request, service=self.general_tasks)
+        task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
+        return task, attempt
+
     async def control_general_task(self, owner, task_id, *, expected_revision, action):
         """Operator controls derive every native execution binding server-side."""
         from src.workflows.general_task_guard import _current, _assert_joint_manifest
@@ -10525,6 +10583,11 @@ class WorkBoardDispatcher:
             await _begin_sqlite_immediate(db)
             parent, task, attempt, manifest, _envelope = await _current(self.jobs, db, request.workflow_run_id)
             _assert_joint_manifest(parent, task, attempt, manifest)
+            history = json.loads(parent.checkpoint_receipts_json or "[]")
+            if (not isinstance(history, list) or any(isinstance(item, dict)
+                and str(item.get("checkpoint_id", "")).startswith("general:step:") for item in history)):
+                raise BoardError("general_task_legacy_intent_reconciliation",
+                    "Reconcile the original historical tool intent before any continuation", status_code=409)
             child = await self.jobs._fetch(db, request.child_job_id)
             binding = child_binding(child)
             if (task.task_id != task_id or task.owner_principal_id != owner.principal_id
@@ -10535,10 +10598,13 @@ class WorkBoardDispatcher:
                 or binding.parent_job_id != parent.run_identity or binding.attempt_id != attempt.attempt_id
                 or manifest.phase != "approval_wait"):
                 raise BoardError("general_task_resume_binding_changed", "Refresh the exact native child approval", status_code=409)
+            await self.general_tasks.validate_native_resume(db, owner, task, attempt,
+                parent, manifest, _envelope, child, binding, request)
         resumed = await self.jobs.resume_general_task_native_approval(request.child_job_id,
             operator_owner=owner, expected_task_revision=request.expected_revision,
             expected_parent_revision=request.workflow_revision,
-            expected_manifest_revision=request.expected_manifest_revision, approval_id=request.approval_id)
+            expected_manifest_revision=request.expected_manifest_revision, approval_id=request.approval_id,
+            service=self.general_tasks, request=request)
         claim = BoardDispatchClaim(task, attempt, None)
         try:
             outcome = await self._execute_registered(task, attempt, _parse_typed_input(task),
@@ -10742,6 +10808,18 @@ class WorkBoardDispatcher:
 
         try:
             current = await self._refresh_claim(claim)
+            if current.task.capability_id == "agent.task.v1" and current.attempt.cancel_requested_at is not None:
+                try:
+                    if self.general_tasks is not None:
+                        await self.general_tasks.observe_native_cancellation(self.jobs, workflow_run_id)
+                    from src.workflows.general_task_guard import read_general_task_native_cancel
+                    async with self.session_provider() as db:
+                        read_general_task_native_cancel(await self.jobs._fetch(db, workflow_run_id),
+                            await db.get(WorkBoardTask, current.task.task_id),
+                            await db.get(WorkBoardAttempt, current.attempt.attempt_id))
+                except Exception as exc:
+                    logger.info("native cancellation retains Unknown recovery: %s", type(exc).__name__)
+                return True
             projection = await self.jobs.get_job(workflow_run_id)
             if not isinstance(projection, Mapping):
                 await self._project_blocked(current, "unknown_effect", "reconcile_admission_binding")
@@ -10884,6 +10962,28 @@ class WorkBoardDispatcher:
         if lookup is None:
             raise DurableJobError("durable_binding_lookup_unavailable")
         capability_id = _text(task.capability_id)
+        if capability_id == "agent.task.v1":
+            # Native phase changes advance the live fences without changing
+            # the original admission. Resolve that persisted admission rather
+            # than rebuilding a spec, deadline or authority during recovery.
+            from src.workflows.general_task_guard import _current, _assert_joint_manifest
+            expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
+            async with self.session_provider() as db:
+                parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
+                _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                    or current_task.task_revision != task.task_revision
+                    or current_attempt.fencing_token != attempt.fencing_token):
+                    raise DurableJobIdempotencyConflict("original native board binding changed")
+                expected = dict(owner_principal_id=parent.owner_principal_id,
+                    goal_id=parent.goal_id, goal_revision=parent.goal_revision,
+                    idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+                    expected_job_id=expected_job_id, owner_kind="user", service_id=None,
+                    session_id=parent.session_id, operator_session_id=parent.operator_session_id,
+                    job_kind="agent.task.v1", capability_version="1", input_digest=parent.input_digest,
+                    authority_digest=parent.authority_digest, run_fingerprint=parent.run_fingerprint)
+            found = await lookup(**expected)
+            return expected_job_id if isinstance(found, Mapping) else None
         if capability_id == "browser.public-task.v1":
             projection = await self.jobs.get_job(f"browser-task:{task.task_id}:{attempt.attempt_id}")
             if not isinstance(projection, Mapping):
@@ -11027,6 +11127,23 @@ class WorkBoardDispatcher:
         for task, attempt in linked:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
+                continue
+            if task.capability_id == "agent.task.v1" and attempt.cancel_requested_at is not None:
+                # Cancelled native work has no execution authority. Missing or
+                # corrupt proof remains its visible Unknown recovery; generic
+                # cleanup, tree cancellation and output projection cannot act.
+                try:
+                    if self.general_tasks is not None:
+                        await self.general_tasks.observe_native_cancellation(self.jobs, job_id)
+                    from src.workflows.general_task_guard import read_general_task_native_cancel
+                    async with self.session_provider() as db:
+                        parent = await self.jobs._fetch(db, job_id)
+                        current_task = await db.get(WorkBoardTask, task.task_id)
+                        current_attempt = await db.get(WorkBoardAttempt, attempt.attempt_id)
+                        read_general_task_native_cancel(parent, current_task, current_attempt)
+                except Exception as exc:
+                    logger.info("native cancellation %s retains Unknown recovery: %s", task.task_id, type(exc).__name__)
+                recovered.append(job_id)
                 continue
             if getattr(attempt, "ended_at", None) is not None:
                 # An explicit owning readback may settle an ended unknown

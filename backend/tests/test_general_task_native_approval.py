@@ -54,6 +54,13 @@ async def test_actual_mcp_approval_resumes_same_native_child_once(task_runtime, 
         arguments = dict(operator_owner=owner, expected_task_revision=manifest.task_revision,
             expected_parent_revision=parent_revision, expected_manifest_revision=manifest.manifest_revision,
             approval_id=waiting["approval_id"])
+        from src.work_board.contracts import GeneralTaskResume
+        arguments.update(service=service, request=GeneralTaskResume(
+            expected_revision=manifest.task_revision, expected_plan_revision=manifest.plan_revision,
+            workflow_run_id=binding.parent_job_id, attempt_id=binding.attempt_id,
+            fencing_token=manifest.board_fence, workflow_revision=parent_revision,
+            approval_id=waiting["approval_id"], child_job_id=binding.invocation_id,
+            expected_manifest_revision=manifest.manifest_revision))
         with pytest.raises(DurableJobLeaseError):
             await dispatcher.jobs.resume_general_task_native_approval(binding.invocation_id, **arguments)
         assert (await dispatcher.jobs.get_job(binding.invocation_id))["revision"] == original["revision"]

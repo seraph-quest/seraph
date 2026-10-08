@@ -106,6 +106,8 @@ def read_native_artifact_reference(reference, *, parent_job_id, creation_digest)
 
 
 async def read_current_native_envelope(db, run, task, attempt):
+    from src.workflows.general_task_guard import assert_original_parent_authority
+    assert_original_parent_authority(run)
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
     from src.db.models import WorkBoardInputArtifact
     if (task.capability_id != "agent.task.v1" or attempt.task_id != task.task_id
@@ -211,9 +213,15 @@ async def read_current_native_tool_input(db, child):
     from src.work_board.general_task import digest
     await assert_general_task_child_current(db, child)
     binding = child_binding(child)
+    return read_bound_native_tool_input(child, binding)
+
+
+def read_bound_native_tool_input(child, binding):
+    """Physical literals after the fixed caller proves its current phase."""
+    from src.work_board.general_task import digest
     arguments = json.loads(child.arguments_json)
     keys = {"step_id", "tool_id", "tool_input_digest", "descriptor_digest", "typed_input_ref", "typed_input_digest"}
-    if (not isinstance(arguments, dict) or set(arguments) != keys
+    if (not isinstance(arguments, dict) or set(arguments) != keys or digest(arguments) != child.input_digest
         or arguments["step_id"] != binding.step_id
         or arguments["tool_input_digest"] != binding.input_digest
         or arguments["descriptor_digest"] != binding.descriptor_digest
@@ -391,6 +399,12 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
 
 async def verify_readonly_native_projection(db, owner, parent, task, attempt, manifest):
     """Verify retained local facts without granting execution or model egress."""
+    from src.workflows.general_task_guard import assert_original_parent_authority
+    from src.workflows.job_runtime import DurableJobError
+    try:
+        assert_original_parent_authority(parent)
+    except DurableJobError as exc:
+        raise BoardError("general_task_manifest_binding_changed", "Original retained authority changed", status_code=409) from exc
     from src.db.models import WorkBoardInputArtifact
     from src.work_board.input_artifacts import (_metadata_digest, _payload_path,
         _safe_file_bytes, _decode_and_validate_payload)

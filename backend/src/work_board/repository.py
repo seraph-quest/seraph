@@ -4135,6 +4135,10 @@ class WorkBoardRepository:
                     ))
                     & WorkBoardAttempt.ended_at.is_(None),
                     (WorkBoardTask.status == WorkBoardStatus.blocked)
+                    & (WorkBoardTask.capability_id == "agent.task.v1")
+                    & WorkBoardAttempt.cancel_requested_at.is_not(None)
+                    & WorkBoardAttempt.ended_at.is_(None),
+                    (WorkBoardTask.status == WorkBoardStatus.blocked)
                     & (WorkBoardTask.block_kind == "unknown_effect")
                     & (WorkBoardTask.capability_id == "work.github-followthrough.v1")
                     & WorkBoardAttempt.ended_at.is_not(None)

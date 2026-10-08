@@ -87,6 +87,11 @@ class GeneralTaskPlanner:
             "plan_revision": manifest.plan_revision, "selected_grant_digest": manifest.selected_grant_digest,
             "parent_owner": parent.lease_owner, "parent_fence": parent.fencing_token,
             "original_provenance": envelope.proposal_provenance, "step_statuses": summaries}
+        # These originals stay local. Only status/opaque refs above enter the
+        # request; the model cannot reconstruct an admitted private input.
+        from src.work_board.general_task_native import current_plan
+        continuation["frozen_steps"] = [step for step in current_plan(manifest, envelope).steps
+            if step.step_id in manifest.step_ids]
         return await self.propose(db, owner, envelope.task_input, envelope.descriptors,
             task.goal_revision, request_key, with_provenance=True, _continuation=continuation)
 
@@ -162,6 +167,9 @@ class GeneralTaskPlanner:
                         for ref in item["artifact_refs"]) for item in summaries)):
                 raise BoardError("general_task_continuation_context_invalid", "Only bounded nonsecret status and opaque references may leave", status_code=409)
             messages[0]["content"] = messages[0]["content"].replace("revision:1", "revision:" + str(_continuation["plan_revision"] + 1))
+            messages[0]["content"] += (" Return only the remaining unadmitted steps. "
+                "Do not emit or change any step listed in step_statuses. Their identities "
+                "may be declared predecessors; the runtime retains their exact original contracts locally.")
             messages.append({"role": "user", "content": canonical({"current_plan_revision": _continuation["plan_revision"],
                 "step_statuses": summaries, "requested_revision": _continuation["plan_revision"] + 1}).decode()})
         text = json.dumps(messages, ensure_ascii=False)
@@ -265,7 +273,17 @@ class GeneralTaskPlanner:
             raw = response.choices[0].message.content
             if not isinstance(raw, str) or len(raw.encode()) > 16384:
                 raise ValueError("plan output exceeds envelope")
-            plan = PlanSpec.model_validate(json.loads(raw))
+            parsed = json.loads(raw)
+            if _continuation is not None and _continuation.get("frozen_steps"):
+                from src.work_board.contracts import PlanStep
+                if not isinstance(parsed, dict) or set(parsed) - {"schema_version", "revision", "steps"}:
+                    raise ValueError("continuation must use the closed plan schema")
+                replacement_steps = [PlanStep.model_validate(item) for item in parsed["steps"]]
+                frozen_steps = _continuation["frozen_steps"]
+                if any(step.step_id in {prior.step_id for prior in frozen_steps} for step in replacement_steps):
+                    raise ValueError("continuation changed an admitted step")
+                parsed = {**parsed, "steps": [*frozen_steps, *replacement_steps]}
+            plan = PlanSpec.model_validate(parsed)
             expected_revision = _continuation["plan_revision"] + 1 if _continuation else 1
             if plan.revision != expected_revision or len(plan.steps) > task_input.limits.max_steps:
                 raise ValueError("initial plan exceeds revision or step authority")

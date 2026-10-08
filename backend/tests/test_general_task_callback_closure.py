@@ -57,6 +57,8 @@ async def test_original_file_callback_must_exit_before_closure(interruption, tas
         principal = replace(operator.principal, job_id=binding.invocation_id)
         handle = registry.begin_invocation(descriptor, envelope.plan.steps[0].input,
             principal=principal, job_id=binding.invocation_id, fencing_token=fence)
+        closures = []
+        handle.on_closed(lambda original_handle: closures.append(original_handle.witness))
         assert await asyncio.to_thread(entered.wait, 1)
         if interruption == "timeout":
             with pytest.raises(TimeoutError):
@@ -68,6 +70,7 @@ async def test_original_file_callback_must_exit_before_closure(interruption, tas
             with pytest.raises(asyncio.CancelledError):
                 await waiter
         assert not handle.closed
+        assert closures == []
         with pytest.raises(PermissionError, match="has not closed"):
             _ = handle.witness
         parent = await dispatcher.jobs.get_job(binding.parent_job_id)
@@ -83,6 +86,7 @@ async def test_original_file_callback_must_exit_before_closure(interruption, tas
         release.set()
         output = await handle.wait(timeout=2)
         assert handle.closed and output["content"] == source
+        assert len(closures) == 1 and closures[0] is handle.witness
         closure = verify_task_tool_closure(handle.witness, binding=binding, fencing_token=fence)
         assert closure.outcome == "returned" and closure.output_digest == digest(output)
         for witness, wrong_binding, wrong_fence in (

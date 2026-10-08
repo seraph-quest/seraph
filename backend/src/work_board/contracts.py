@@ -420,15 +420,72 @@ class GeneralTaskToolClosureV1(ClosedTaskModel):
     outcome: Literal["returned", "approval_precontact", "unknown"]
     output_digest: TaskDigest | None = None
     approval_id: TaskIdentity | None = None
+    approval_fingerprint: TaskDigest | None = None
     no_learning: Literal[True] = True
 
     @model_validator(mode="after")
     def exact_outcome(self):
-        if ((self.outcome == "returned" and (self.output_digest is None or self.approval_id is not None))
-            or (self.outcome == "approval_precontact" and (self.approval_id is None or self.output_digest is not None))
-            or (self.outcome == "unknown" and (self.output_digest is not None or self.approval_id is not None))):
+        if ((self.outcome == "returned" and (self.output_digest is None or self.approval_id is not None
+                or self.approval_fingerprint is not None))
+            or (self.outcome == "approval_precontact" and (self.approval_id is None
+                or self.approval_fingerprint is None or self.output_digest is not None))
+            or (self.outcome == "unknown" and (self.output_digest is not None or self.approval_id is not None
+                or self.approval_fingerprint is not None))):
             raise ValueError("closure outcome requires its exact callback evidence")
         return self
+
+
+class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
+    schema_version: Literal["general_task.checkpoint_reservation.v1"] = "general_task.checkpoint_reservation.v1"
+    parent_job_id: NativeInvocationIdentity
+    attempt_id: TaskIdentity
+    creation_digest: TaskDigest
+    checkpoint_id: str = Field(min_length=1, max_length=512)
+    invocation_id: NativeInvocationIdentity | None = None
+    binding_digest: TaskDigest | None = None
+    callback_fence: int | None = Field(default=None, ge=1)
+    capacity_mode: Literal["approval_capable", "no_approval"] = "approval_capable"
+    classifier_digest: TaskDigest | None = None
+    maximum_payload_bytes: Literal[65536] = 65536
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
+    original_binding: GeneralTaskNativeChildBindingV1
+    original_binding_digest: TaskDigest
+    original_attempt_count: Literal[0, 1]
+    original_claim_fence: int = Field(ge=0)
+    original_revision: int = Field(ge=0)
+    current_child_fence: int = Field(ge=0)
+    current_child_revision: int = Field(ge=0)
+    effect_digest: TaskDigest
+    artifact_digest: TaskDigest
+    checkpoint_digest: TaskDigest
+    closure: GeneralTaskToolClosureV1 | None = None
+    effect_debt: bool
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskNativeCancelV1(ClosedTaskModel):
+    schema_version: Literal["general_task.native_cancel.v1"] = "general_task.native_cancel.v1"
+    original_manifest: GeneralTaskCurrentManifestV1
+    original_parent_authority_digest: TaskDigest
+    original_parent_input_digest: TaskDigest
+    input_artifact_id: TaskIdentity
+    typed_input_ref: str = Field(min_length=1, max_length=512)
+    typed_input_digest: TaskDigest
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    task_revision: int = Field(ge=1)
+    manifest_revision: int = Field(ge=1)
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    board_fence: int = Field(ge=1)
+    job_fence: int = Field(ge=1)
+    phase: Literal["unknown_recovery", "cancelled"]
+    state: Literal["pending", "callback_closed_outcome_debt", "fully_cancelled"]
+    children: list[GeneralTaskNativeCancelChildV1] = Field(default_factory=list, max_length=16)
+    no_learning: Literal[True] = True
 
 
 class GeneralTaskApprovalTransitionV1(ClosedTaskModel):

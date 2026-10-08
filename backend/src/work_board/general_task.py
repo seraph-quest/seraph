@@ -201,12 +201,62 @@ class GeneralTaskService:
         # Ephemeral original callback handles, never execution authority. They
         # remain inspectable after waiter cancellation until the callback exits.
         self._native_invocations = {}
+        self._native_invocation_bindings = {}
+        self._native_cancel_observers = set()
 
     def start(self):
         self.started = True
 
     def stop(self):
         self.started = False
+
+    async def observe_native_cancellation(self, jobs, parent_id):
+        """Reduce cancellation debt using retained original callbacks only."""
+        from src.db.models import WorkBoardAttempt
+        from src.workflows.job_runtime import DurableJobError
+        bindings = [(child_id, binding, self._native_invocations.get(child_id))
+            for child_id, binding in list(self._native_invocation_bindings.items())
+            if binding.parent_job_id == parent_id]
+        result = None
+        for child_id, binding, handle in bindings:
+            if handle is None or not handle.closed:
+                continue
+            async with jobs._session() as db:
+                attempt = await db.get(WorkBoardAttempt, binding.attempt_id, populate_existing=True)
+                if attempt is None or attempt.cancel_requested_at is None:
+                    continue
+            try:
+                result = await jobs.observe_general_task_native_cancel_closure(child_id,
+                    producer_witness=handle.witness)
+            except (BoardError, DurableJobError):
+                # Invalid/corrupt canonical cancellation remains debt. Keep
+                # the original closed producer available for reconciliation.
+                continue
+            self._native_invocations.pop(child_id, None)
+            self._native_invocation_bindings.pop(child_id, None)
+        return result
+
+    def retain_native_invocation(self, jobs, binding, invocation):
+        import asyncio
+        self._native_invocations[binding.invocation_id] = invocation
+        self._native_invocation_bindings[binding.invocation_id] = binding
+        def closed(_original):
+            async def observe():
+                try:
+                    await self.observe_native_cancellation(jobs, binding.parent_job_id)
+                except Exception:
+                    # Shutdown/storage failure cannot manufacture closure or
+                    # discard the source producer. A later observation may
+                    # retry the same cleanup-only canonical publication.
+                    return
+            task = asyncio.create_task(observe())
+            self._native_cancel_observers.add(task)
+            task.add_done_callback(self._native_cancel_observers.discard)
+        invocation.on_closed(closed)
+
+    def release_native_invocation(self, child_id):
+        self._native_invocations.pop(child_id, None)
+        self._native_invocation_bindings.pop(child_id, None)
 
     def snapshot(self):
         if not self.started:
@@ -466,6 +516,17 @@ class GeneralTaskService:
                     item["step_id"] == step.step_id and item["status"] == "verified" for item in steps)],
                 "partial_output_refs": [ref for item in steps if item["status"] == "verified" for ref in item["artifact_refs"]],
                 "no_learning": True}
+            if attempt.cancel_requested_at is not None:
+                from src.workflows.general_task_guard import read_general_task_native_cancel
+                from src.workflows.job_runtime import DurableJobError
+                try:
+                    cancellation = read_general_task_native_cancel(parent, task, attempt)
+                except (BoardError, DurableJobError):
+                    cancellation = {"state": "pending", "child_ids": list(manifest.admitted_invocation_ids),
+                        "callback_closed": False, "effect_debt": True,
+                        "reason": "general_task_native_cancel_evidence_unavailable"}
+                    payload["native_execution"]["phase"] = "unknown_recovery"
+                payload["native_execution"]["cancellation"] = cancellation
         return payload
 
     def recovered_outputs(self, projection, envelope):
@@ -482,6 +543,19 @@ class GeneralTaskService:
             if len(matches) != 1:
                 raise BoardError("general_task_output_changed", "Completed output needs reconciliation", status_code=409)
             artifact = matches[0].get("payload")
+            if isinstance(artifact, dict) and artifact.get("schema_version") == "general_task.checkpoint_reservation.v1":
+                from types import SimpleNamespace
+                from src.workflows.general_task_guard import read_native_checkpoint_reservation
+                from src.workflows.job_runtime import DurableJobError
+                try:
+                    reservation = read_native_checkpoint_reservation(SimpleNamespace(
+                        run_identity=projection.get("job_id"), checkpoint_receipts_json=json.dumps(checkpoints)),
+                        "general:verified:" + step.step_id)
+                    if reservation.invocation_id is None or reservation.binding_digest is None:
+                        raise ValueError("output reservation needs original child binding")
+                except (ValueError, DurableJobError) as exc:
+                    raise BoardError("general_task_output_changed", "Output reservation changed", status_code=409) from exc
+                continue
             if not isinstance(artifact, dict) or artifact.get("producer_ref") != projection.get("job_id") or artifact.get("step_id") != step.step_id or artifact.get("plan_digest") != digest(envelope.model_dump(mode="json")):
                 raise BoardError("general_task_output_changed", "Completed output binding changed", status_code=409)
             reference = artifact.get("file_path", "")
@@ -546,6 +620,15 @@ class GeneralTaskService:
                 if (owner.principal_id != original.owner_principal_id or owner.session_id != original.original_root_id
                     or witness.phase != "approval_wait" or approval.status != "approved"):
                     reason = "general_task_approval_not_approved"
+                else:
+                    await self.validate_native_resume(db, owner, current_task, current_attempt,
+                        current_parent, current_manifest, envelope, child, original,
+                        GeneralTaskResume(expected_revision=current_task.task_revision,
+                            expected_plan_revision=current_manifest.plan_revision,
+                            workflow_run_id=current_parent.run_identity, attempt_id=current_attempt.attempt_id,
+                            fencing_token=current_attempt.fencing_token, workflow_revision=current_parent.revision,
+                            approval_id=receipt.approval_id, child_job_id=child.run_identity,
+                            expected_manifest_revision=current_manifest.manifest_revision))
             except Exception as exc:
                 reason = getattr(exc, "code", "general_task_resume_unavailable")
             return {"approval_id": receipt.approval_id, "approval_status": status,
@@ -647,6 +730,33 @@ class GeneralTaskService:
         if not any(item.get("effect_id") == wait.get("effect_id") and item.get("status") == "succeeded" and item.get("details", {}).get("never_contacted") is True and item.get("content_sha256") == digest(wait) for item in projection.get("effects", [])):
             raise BoardError("general_task_unresolved_step", "Positive no-contact proof is required", status_code=409)
         return task, attempt, envelope
+
+    async def validate_native_resume(self, db, owner, task, attempt, parent, manifest, envelope, child, binding, request):
+        """Preflight the exact waiting child without consuming its approval."""
+        from src.workflows.general_task_guard import verify_native_approval_transition
+        from src.work_board.general_task_native import current_plan
+        from src.work_board.general_task_runtime_artifacts import read_bound_native_tool_input, read_current_native_outputs
+        transition, approval = await verify_native_approval_transition(db, child, parent)
+        if (transition.phase != "approval_wait" or transition.approval_id != request.approval_id
+            or approval.status != "approved" or binding.parent_job_id != parent.run_identity
+            or binding.task_id != task.task_id or binding.attempt_id != attempt.attempt_id
+            or owner.principal_id != task.owner_principal_id or owner.session_id != task.owner_session_id):
+            raise BoardError("general_task_resume_binding_changed", "Exact original approved native child required", status_code=409)
+        plan = current_plan(manifest, envelope)
+        await self.recheck_authority(db, owner, envelope.model_copy(update={"plan": plan}))
+        step = next((item for item in plan.steps if item.step_id == binding.step_id), None)
+        if step is None:
+            raise BoardError("general_task_resume_binding_changed", "Original pending plan step required", status_code=409)
+        await read_current_native_outputs(db, parent, task, attempt, manifest, envelope, step.depends_on)
+        private = read_bound_native_tool_input(child, binding)
+        descriptor = next((item for item in self.registry.descriptors() if item.tool_id == private.tool_id), None)
+        if descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest:
+            raise BoardError("general_task_tool_contract_changed", "Original registered descriptor required", status_code=409)
+        metadata = self.registry.approval_context(descriptor, private.inputs, job_id=child.run_identity)
+        if (metadata["fingerprint"] != transition.approval_fingerprint
+            or digest(metadata["approval_context"]) != transition.approval_context_digest
+            or metadata["tool_name"] != approval.tool_name):
+            raise BoardError("approval_not_current", "Approve the exact current native tool request", status_code=409)
 
     async def update_plan(self, db, owner, task_id, request):
         from sqlalchemy import select

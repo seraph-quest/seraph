@@ -35,6 +35,8 @@ export interface GeneralTaskPlanRead {
   native_execution?: GeneralTaskNativeExecution;
 }
 export interface GeneralTaskNativeExecution {
+  cancellation?: { state: "pending" | "callback_closed_outcome_debt" | "fully_cancelled";
+    child_ids: string[]; callback_closed: boolean; effect_debt: boolean; reason: string };
   phase: "native_ready" | "native_wait" | "assembly" | "operator_paused" | "approval_wait" | "cancelled" | "unknown_recovery" | "complete";
   plan_revision: number; manifest_revision: number; original_deadline_at: string; native_deadline_at: string;
   steps: { step_id: string; status: string; contact_state: string; invocation_id: string; plan_revision: number;
@@ -109,6 +111,17 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
   const descriptors = value.descriptors;
   const native = value.native_execution;
   if (native != null && (!record(native) || !["native_ready", "native_wait", "assembly", "operator_paused", "approval_wait", "cancelled", "unknown_recovery", "complete"].includes(String(native.phase))
+    || (native.cancellation != null && (!record(native.cancellation)
+      || !["pending", "callback_closed_outcome_debt", "fully_cancelled"].includes(String(native.cancellation.state))
+      || (native.cancellation.state === "fully_cancelled" ? native.phase !== "cancelled" : native.phase !== "unknown_recovery")
+      || !Array.isArray(native.cancellation.child_ids) || native.cancellation.child_ids.length > 16
+      || !native.cancellation.child_ids.every(id => typeof id === "string" && id.length > 0 && id.length <= 256)
+      || typeof native.cancellation.callback_closed !== "boolean" || typeof native.cancellation.effect_debt !== "boolean"
+      || typeof native.cancellation.reason !== "string" || native.cancellation.reason.length > 500
+      || (native.cancellation.state === "pending" ? native.cancellation.callback_closed
+        : !native.cancellation.callback_closed)
+      || (native.cancellation.state === "fully_cancelled" && native.cancellation.effect_debt)
+      || (native.cancellation.state === "callback_closed_outcome_debt" && !native.cancellation.effect_debt)))
     || !Number.isSafeInteger(native.plan_revision) || Number(native.plan_revision) < 1 || Number(native.plan_revision) > 16
     || !Number.isSafeInteger(native.manifest_revision) || Number(native.manifest_revision) < 1
     || native.no_learning !== true || typeof native.original_deadline_at !== "string" || typeof native.native_deadline_at !== "string"

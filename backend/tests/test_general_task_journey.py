@@ -250,6 +250,14 @@ async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_le
         assert len(children) == 1 and children[0].status == "unknown_external_effect"
         child = await jobs.get_job(children[0].run_identity)
         assert child["effects"] and all(item["details"]["no_learning"] is True for item in child["effects"])
+        restarted = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+        for _ in range(2):
+            await restarted.reconcile_linked_attempts()
+            assert await jobs.get_job(children[0].run_identity) == child
+            assert await jobs.get_job(run.run_identity) == projection
+        async with sessions() as db:
+            assert len(list((await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.parent_job_id == run.run_identity))).scalars())) == 1
         # The native original attempt remains open for exact reconciliation;
         # a held child is not a terminal automatic-learning source.
         assert observed == []

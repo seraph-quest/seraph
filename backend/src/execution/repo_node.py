@@ -24,6 +24,7 @@ from src.execution.repo_sandbox import (
     LocalRepoRepairExecutor, RepoSandboxError, RepoSandboxJob, RepoSandboxPreflight,
     RepositorySnapshot, SnapshotEntry, _digest_entries, _open_source_regular_file,
     _assert_stable_file, _patch_paths_from_diff, executor_posture_digest, limits_digest,
+    _open_trusted_directory, _same_file_metadata,
 )
 
 PROFILE = "repo-node24-npm-v1"
@@ -591,11 +592,38 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 for stream in (process.stdin,process.stdout,process.stderr):
                     if stream and not stream.closed:stream.close()
 
+    def _read_cancel_marker_locked(self, job_id: str) -> tuple[dict[str,Any], os.stat_result]:
+        """Read the exact private marker before a cancellation decision."""
+        directory=_open_trusted_directory(self._job_marker_directory)
+        descriptor=-1
+        try:
+            name=self._job_marker_name(job_id)
+            descriptor=os.open(name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+            opened=os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.getuid()
+                or stat.S_IMODE(opened.st_mode)!=0o600 or opened.st_nlink!=1 or opened.st_size>16*1024):
+                raise RepoSandboxError("Node cancellation marker is not private")
+            raw=os.read(descriptor,16*1024+1)
+            if len(raw)>16*1024:
+                raise RepoSandboxError("Node cancellation marker exceeds its bound")
+            marker=json.loads(raw)
+            named=os.stat(name,dir_fd=directory,follow_symlinks=False)
+            if (not isinstance(marker,dict) or not _same_file_metadata(opened,os.fstat(descriptor))
+                or not _same_file_metadata(opened,named)):
+                raise RepoSandboxError("Node cancellation marker identity changed")
+            return marker,opened
+        finally:
+            if descriptor>=0:os.close(descriptor)
+            os.close(directory)
+
     def cancel(self, *, job_id: str | None=None, authority: Mapping[str,Any] | None=None, **kwargs:Any) -> dict[str,Any]:
         from src.execution.repo_supervisor import exact_signal
         supplied=authority or {};resolved=job_id or str(supplied.get("job_id") or "")
         with self._job_marker_lock(resolved):
-            marker=self._read_job_marker(resolved)
+            try:
+                marker,marker_metadata=self._read_cancel_marker_locked(resolved)
+            except (OSError,ValueError,RepoSandboxError):
+                return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
             if marker is None or marker.get("profile")!=PROFILE:
                 return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
             for key in ("authority_digest","attempt_id","fencing_token"):
@@ -607,6 +635,63 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 return {"status":"unknown_external_effect","reason":"node_supervisor_fence_missing","cleanup_proven":False}
             if "fencing_token" in supplied and type(supplied["fencing_token"]) is not int:
                 return {"status":"unknown_external_effect","reason":"node_supervisor_fence_invalid","cleanup_proven":False}
+            if (marker.get("phase")=="cleanup_verified" or marker.get("cleanup_proven") is True
+                or marker.get("status") in {"cancelled","succeeded","failed","unknown_external_effect"}):
+                # A late API cancel can arrive after the supervisor's original
+                # ECHILD receipt was committed. Do not erase it or signal the
+                # reaped supervisor; ordinary recovery owns capacity release.
+                try:
+                    binding={"executor_kind":"local","job_id":resolved,"authority_digest":marker.get("authority_digest"),
+                             "attempt_id":marker.get("attempt_id"),"fencing_token":marker.get("fencing_token")}
+                    terminal=marker.get("terminal_receipt")
+                    stage_identity=marker.get("stage_identity")
+                    if (marker.get("schema")!="seraph.repo_repair_local_job.v1" or marker.get("job_id")!=resolved
+                        or "executor_kind" in marker and marker["executor_kind"]!="local"
+                        or not isinstance(binding["authority_digest"],str) or not binding["authority_digest"]
+                        or not isinstance(binding["attempt_id"],str) or not binding["attempt_id"]
+                        or type(binding["fencing_token"]) is not int or binding["fencing_token"]<0
+                        or any(not isinstance(marker.get(key),str) or not re.fullmatch(r"[0-9a-f]{64}",marker[key])
+                               for key in ("base_digest","posture_digest"))
+                        or marker.get("stage_binding")!=binding or type(marker["stage_binding"].get("fencing_token")) is not int
+                        or not isinstance(stage_identity,dict) or set(stage_identity)!={"device","inode"}
+                        or any(type(value) is not int or value<0 for value in stage_identity.values())
+                        or not isinstance(terminal,dict) or terminal.get("status")!="cancelled"
+                        or terminal.get("stage_binding")!=binding or type(terminal["stage_binding"].get("fencing_token")) is not int
+                        or not isinstance(terminal.get("manifest_sha256"),str)
+                        or not re.fullmatch(r"[0-9a-f]{64}",terminal["manifest_sha256"])
+                        or terminal.get("manifest_sha256")!=terminal.get("readback_sha256")
+                        or any(key in supplied and supplied[key]!=marker.get(key) for key in ("job_id","base_digest","posture_digest"))):
+                        raise RepoSandboxError("Node terminal cancellation binding is unproven")
+                    posture={"supervisor_source_sha256":hash_file(Path(__file__).with_name("repo_supervisor.py"))}
+                    proof_authority={"base_digest":marker.get("base_digest"),"executor_posture_digest":marker.get("posture_digest"),
+                                     "executor_posture":posture}
+                    if ("executor_posture_digest" in supplied and supplied["executor_posture_digest"]!=marker.get("posture_digest")
+                        or "executor_posture" in supplied and (not isinstance(supplied["executor_posture"],dict)
+                            or supplied["executor_posture"].get("supervisor_source_sha256")!=posture["supervisor_source_sha256"])):
+                        raise RepoSandboxError("Node terminal cancellation posture changed")
+                    readback=self._process_cleanup_readback_locked(job_id=resolved,attempt_id=binding["attempt_id"],
+                        authority_digest=binding["authority_digest"],fencing_token=binding["fencing_token"],authority=proof_authority)
+                    if readback!=hashlib.sha256(json.dumps(marker,sort_keys=True,separators=(",",":")).encode()).hexdigest():
+                        raise RepoSandboxError("Node terminal cancellation marker changed")
+                    token=self._stage_binding_token(binding)
+                    staging=self.workspace_dir/"artifacts"/"repo-sandbox"/"staging"
+                    if marker.get("stage_directory")!=str((staging/token).relative_to(self.workspace_dir)):
+                        raise RepoSandboxError("Node terminal cancellation stage changed")
+                    directory=_open_trusted_directory(staging)
+                    try:
+                        parent=os.fstat(directory)
+                        if parent.st_uid!=os.getuid() or stat.S_IMODE(parent.st_mode)!=0o700:
+                            raise RepoSandboxError("Node terminal cancellation staging parent is untrusted")
+                        try:os.stat(token,dir_fd=directory,follow_symlinks=False)
+                        except FileNotFoundError:pass
+                        else:raise RepoSandboxError("Node terminal cancellation stage cleanup is unproven")
+                    finally:os.close(directory)
+                    checked,checked_metadata=self._read_cancel_marker_locked(resolved)
+                    if checked!=marker or not _same_file_metadata(marker_metadata,checked_metadata):
+                        raise RepoSandboxError("Node terminal cancellation identity changed")
+                except (OSError,ValueError,RepoSandboxError):
+                    return {"status":"unknown_external_effect","reason":"node_terminal_cancellation_unproven","cleanup_proven":False}
+                return {"status":"cancel_requested","cleanup_proven":False,"job_id":resolved}
             self._write_job_marker_locked(resolved,{**marker,"status":"cancellation_requested","cancellation_requested":True,"phase":"cancel_requested"})
             pid=marker.get("pid");start=marker.get("pid_start_identity")
             try:

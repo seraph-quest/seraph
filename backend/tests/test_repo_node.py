@@ -1,6 +1,7 @@
 from __future__ import annotations
 import difflib
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -133,6 +134,132 @@ def test_running_command_cancel_uses_owned_supervisor(tmp_path):
     assert result[0]["status"]=="cancelled"
     assert result[0]["cleanup"]["cleanup_proven"]
     assert supervisor.start_identity(child) is None
+
+
+def test_late_cancel_preserves_committed_node_echild_terminal(tmp_path,monkeypatch):
+    """Pause a genuine terminal publication before its original caller returns."""
+    running=tmp_path/"running"
+    body="require('node:fs').writeFileSync("+json.dumps(str(running))+",String(process.pid));setTimeout(()=>{},10000);"
+    executor,repo,job=make_fixture(tmp_path,script=body)
+    terminal_committed,release_owner=threading.Event(),threading.Event()
+    outcomes=[];errors=[];signals=[]
+    write=executor._write_job_marker
+    def publish(job_id,payload):
+        result=write(job_id,payload)
+        if payload.get("phase")=="cleanup_verified":
+            terminal_committed.set()
+            assert release_owner.wait(10),"late cancellation did not release terminal owner"
+        return result
+    def run():
+        try:outcomes.append(executor.execute_job(job))
+        except BaseException as exc:errors.append(exc)
+    monkeypatch.setattr(executor,"_write_job_marker",publish)
+    thread=threading.Thread(target=run);thread.start()
+    fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+    authority={"job_id":job.job_id,"authority_digest":job.authority_digest}
+    try:
+        deadline=time.monotonic()+10
+        while not running.exists() and time.monotonic()<deadline:time.sleep(.01)
+        assert running.exists()
+        assert fresh.cancel(job_id=job.job_id,authority=authority)["status"]=="cancel_requested"
+        assert terminal_committed.wait(10),errors
+        assert thread.is_alive(),"owner returned before the terminal/cancel interleave"
+        path=executor._job_marker_directory/executor._job_marker_name(job.job_id)
+        original=path.read_bytes();marker=json.loads(original)
+        assert marker["status"]=="cancelled" and marker["cleanup_proven"] is True
+        assert marker["process_cleanup"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
+        assert supervisor.start_identity(marker["pid"]) is None
+        monkeypatch.setattr(supervisor,"exact_signal",lambda *args:signals.append(args) or False)
+        cancelled=fresh.cancel(job_id=job.job_id,authority=authority)
+        assert path.read_bytes()==original,"late cancellation regressed the genuine ECHILD terminal"
+        assert cancelled=={"status":"cancel_requested","cleanup_proven":False,"job_id":job.job_id}
+        assert signals==[],"late cancellation signalled the reaped supervisor"
+        recovered=fresh.reconcile(authority)
+        assert recovered["status"]=="cancelled" and recovered["cleanup_proven"] is True
+        assert recovered["receipt"]["stage_binding"]==marker["stage_binding"]
+        assert not any((executor.workspace_dir/"artifacts/repo-sandbox/staging").iterdir())
+        release_owner.set();thread.join(10)
+        assert not thread.is_alive() and not errors,errors
+        assert outcomes[0]["status"]=="cancelled" and outcomes[0]["cleanup"]["cleanup_proven"] is True
+        assert (repo/"src/app.js").read_text()=="exports.VALUE = 1;\n"
+    finally:
+        release_owner.set();thread.join(10)
+        assert not thread.is_alive(),"native terminal owner did not quiesce"
+
+
+@pytest.mark.parametrize("boundary",["authority","attempt","fence","bool_fence","stage_binding","stage_path",
+    "stage_present","stage_symlink","oracle","cleanup","terminal_hash","terminal_status","supervisor_source",
+    "pid","executor_kind","valid_success","unknown_terminal","malformed","nonmapping","oversize","mode","hardlink","symlink","fifo","read_failure","named_identity"])
+def test_late_node_cancel_rejects_unproven_terminal_without_write_or_signal(tmp_path,monkeypatch,boundary):
+    """Synthetic invalid receipts exercise guards, not actual cleanup acceptance."""
+    workspace=tmp_path/"workspace";workspace.mkdir(mode=0o700)
+    executor=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=workspace)
+    binding={"executor_kind":"local","job_id":"terminal-node","authority_digest":"approved","attempt_id":"attempt-1","fencing_token":3}
+    token=executor._stage_binding_token(binding)
+    stage=executor._trusted_staging_directory()/token
+    marker={"schema":"seraph.repo_repair_local_job.v1","profile":PROFILE,**binding,"base_digest":"a"*64,"posture_digest":"b"*64,
+        "stage_binding":binding,"supervisor_token":token,"stage_directory":str(stage.relative_to(workspace)),
+        "stage_identity":{"device":1,"inode":2},"supervisor_source_sha256":hashlib.sha256(Path(supervisor.__file__).read_bytes()).hexdigest(),
+        "pid":12345,"pid_start_identity":"original-start","status":"cancelled","phase":"cleanup_verified","cleanup_proven":True,
+        "process_cleanup":{"profile":PROFILE,"job_id":binding["job_id"],"token":token,"supervisor_pid":12345,
+            "supervisor_start":"original-start","status":"cancelled","cleanup_proven":True,
+            "process_cleanup":{"cleanup_proven":True,"oracle":"linux_subreaper_waitpid_echild"}},
+        "terminal_receipt":{"status":"cancelled","manifest_sha256":"c"*64,"readback_sha256":"c"*64,"stage_binding":binding}}
+    authority={key:binding[key] for key in ("job_id","authority_digest","attempt_id","fencing_token")}
+    if boundary in {"authority","attempt","fence"}:
+        key={"authority":"authority_digest","attempt":"attempt_id","fence":"fencing_token"}[boundary]
+        authority[key]=4 if boundary=="fence" else "foreign"
+    elif boundary=="bool_fence":marker["fencing_token"]=True
+    elif boundary=="stage_binding":marker["stage_binding"]={**binding,"attempt_id":"foreign"}
+    elif boundary=="stage_path":marker["stage_directory"]="elsewhere"
+    elif boundary=="stage_present":stage.mkdir(mode=0o700)
+    elif boundary=="stage_symlink":stage.symlink_to(tmp_path/"absent")
+    elif boundary=="oracle":marker["process_cleanup"]["process_cleanup"]["oracle"]="not_echild"
+    elif boundary=="cleanup":marker["cleanup_proven"]=False
+    elif boundary=="terminal_hash":marker["terminal_receipt"]["readback_sha256"]="d"*64
+    elif boundary=="terminal_status":marker["status"]="succeeded"
+    elif boundary=="supervisor_source":marker["supervisor_source_sha256"]="e"*64
+    elif boundary=="pid":marker["pid"]=True
+    elif boundary=="executor_kind":marker["executor_kind"]="foreign"
+    elif boundary in {"valid_success","unknown_terminal"}:
+        status="succeeded" if boundary=="valid_success" else "unknown_external_effect"
+        marker["status"]=marker["terminal_receipt"]["status"]=marker["process_cleanup"]["status"]=status
+        if boundary=="unknown_terminal":
+            marker["cleanup_proven"]=False
+            marker["phase"]="worker_started"
+            marker["process_cleanup"]["cleanup_proven"]=False
+            marker["process_cleanup"]["process_cleanup"]["cleanup_proven"]=False
+    executor._write_job_marker(binding["job_id"],marker)
+    path=executor._job_marker_directory/executor._job_marker_name(binding["job_id"])
+    if boundary=="malformed":path.write_bytes(b"not-json")
+    elif boundary=="nonmapping":path.write_bytes(b"[]")
+    elif boundary=="oversize":
+        with path.open('ab') as stream:stream.write(b" "*(16*1024))
+    elif boundary=="mode":path.chmod(0o644)
+    elif boundary=="hardlink":os.link(path,tmp_path/"second-name")
+    elif boundary in {"symlink","fifo"}:
+        path.unlink()
+        if boundary=="symlink":path.symlink_to(tmp_path/"absent")
+        else:os.mkfifo(path,mode=0o600)
+    original=path.read_bytes() if boundary not in {"symlink","fifo"} else None
+    identity=path.lstat()
+    if boundary=="read_failure":
+        def fail_read(*args):raise OSError("fixture marker unavailable")
+        monkeypatch.setattr(os,"read",fail_read)
+    elif boundary=="named_identity":
+        other=tmp_path/"other-marker";other.write_bytes(b"{}");other.chmod(0o600)
+        other_metadata=other.stat();original_stat=os.stat
+        def changed_name(name,*args,**kwargs):
+            if name==path.name and "dir_fd" in kwargs:return other_metadata
+            return original_stat(name,*args,**kwargs)
+        monkeypatch.setattr(os,"stat",changed_name)
+    signals=[];monkeypatch.setattr(supervisor,"exact_signal",lambda *args:signals.append(args) or True)
+    result=executor.cancel(job_id=binding["job_id"],authority=authority)
+    assert result["status"]=="unknown_external_effect" and result["cleanup_proven"] is False
+    assert signals==[]
+    if original is not None:assert path.read_bytes()==original
+    else:
+        current=path.lstat();assert (current.st_dev,current.st_ino,current.st_mode)==(identity.st_dev,identity.st_ino,identity.st_mode)
 
 
 def test_platform_and_pid_reuse_fail_closed(monkeypatch):

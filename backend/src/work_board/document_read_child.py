@@ -9,6 +9,25 @@ import signal
 import struct
 import sys
 
+_IO_URING_SYSCALLS = ("io_uring_setup", "io_uring_enter", "io_uring_register")
+
+
+def _probe_io_uring_denial(syscalls):
+    """Use invalid, contact-free arguments; only actual EPERM proves denial."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    arguments = {
+        "io_uring_setup": (ctypes.c_uint(0), ctypes.c_void_p()),
+        "io_uring_enter": (ctypes.c_int(-1), ctypes.c_uint(0), ctypes.c_uint(0),
+            ctypes.c_uint(0), ctypes.c_void_p(), ctypes.c_size_t(0)),
+        "io_uring_register": (ctypes.c_int(-1), ctypes.c_uint(0), ctypes.c_void_p(), ctypes.c_uint(0)),
+    }
+    for name in _IO_URING_SYSCALLS:
+        ctypes.set_errno(0)
+        result = libc.syscall(ctypes.c_long(syscalls[name]), *arguments[name])
+        if result != -1 or ctypes.get_errno() != errno.EPERM:
+            raise RuntimeError("io_uring confinement ineffective")
+
 
 def confine():
     import resource
@@ -46,16 +65,23 @@ def confine():
         context = library.seccomp_init(0x7fff0000)
         if not context:
             raise RuntimeError("confinement unavailable")
+        io_uring_syscalls = {}
         try:
             for name in ("socket", "socketpair", "connect", "bind", "listen", "accept", "accept4",
-                "sendto", "sendmsg", "recvfrom", "recvmsg", "execve", "execveat", "fork", "vfork", "clone", "clone3"):
+                "sendto", "sendmsg", "recvfrom", "recvmsg", "execve", "execveat", "fork", "vfork", "clone", "clone3",
+                *_IO_URING_SYSCALLS):
                 syscall = library.seccomp_syscall_resolve_name(name.encode())
+                if name in _IO_URING_SYSCALLS:
+                    if syscall < 0:
+                        raise RuntimeError("mandatory io_uring confinement unavailable")
+                    io_uring_syscalls[name] = syscall
                 if syscall >= 0 and library.seccomp_rule_add(context, 0x50000 | errno.EPERM, syscall, 0) != 0:
                     raise RuntimeError("confinement unavailable")
             if library.seccomp_load(context) != 0:
                 raise RuntimeError("confinement unavailable")
         finally:
             library.seccomp_release(context)
+        _probe_io_uring_denial(io_uring_syscalls)
     elif sys.platform == "darwin":
         # Existing native sandbox-exec primitive; no platform receipt implied.
         library = ctypes.CDLL("/usr/lib/libsandbox.dylib")

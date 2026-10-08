@@ -270,12 +270,17 @@ class _TaskOutputGuard:
                 # A guarded inline SSE request must not silently move its
                 # contacted result onto the unbounded shared GET transport.
                 raise MCPTaskOutputLimit("mcp_task_stateless_inline_transport_required")
-        if request.method != "POST" or len(request.content) > TASK_OUTPUT_BYTES + 4096:
+        if request.method != "POST":
             return
         with self.lock:
             active = bool(self.request_bindings)
         if not active:
             return
+        if len(request.content) > TASK_OUTPUT_BYTES + 4096:
+            # Never let an active typed invocation leave this guard merely
+            # because its outgoing JSON representation expanded. Parsing or
+            # sending it would lose exact response collection ownership.
+            raise MCPTaskOutputLimit("mcp_task_output_request_byte_limit")
         message = json.loads(request.content)  # bounded, SDK-owned outgoing envelope
         with self.lock:
             bound = self.request_bindings.get(message.get("id"))

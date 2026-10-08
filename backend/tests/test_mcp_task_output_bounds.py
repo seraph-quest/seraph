@@ -28,10 +28,19 @@ class Chunks(httpx.AsyncByteStream):
         self.closed = True
 
 
-def setup_sdk(monkeypatch, *, mode="json", oversized=False, sessionful=False):
+def setup_sdk(monkeypatch, *, mode="json", oversized=False, sessionful=False, escape_requests=False):
     guard = _TaskOutputGuard()
     calls = []
     guard.fixture_get_contacts = []
+    guard.fixture_request_failures = []
+    owned_request_hook = guard._request_hook
+    async def observe_request_guard(request):
+        try:
+            await owned_request_hook(request)
+        except MCPTaskOutputLimit as exc:
+            guard.fixture_request_failures.append(str(exc))
+            raise
+    guard._request_hook = observe_request_guard
     streams = []
     parsed_fixture = []
     original_parse = JSONRPCMessage.model_validate_json
@@ -63,7 +72,7 @@ def setup_sdk(monkeypatch, *, mode="json", oversized=False, sessionful=False):
         elif method == "tools/list":
             result = {"tools": [{"name": "same_tool", "description": "Local fixture",
                 "inputSchema": {"type": "object", "properties": {
-                    "query": {"type": "string", "maxLength": 100}},
+                    "query": {"type": "string", "maxLength": 30000 if escape_requests else 100}},
                     "required": ["query"], "additionalProperties": False}}]}
         elif method == "tools/call":
             with guard.lock:
@@ -93,13 +102,27 @@ def setup_sdk(monkeypatch, *, mode="json", oversized=False, sessionful=False):
         return httpx.Response(status, headers=headers, stream=stream)
 
     def client_factory(headers=None, timeout=None, auth=None):
-        return httpx.AsyncClient(transport=httpx.MockTransport(local_http), headers=headers,
+        client = httpx.AsyncClient(transport=httpx.MockTransport(local_http), headers=headers,
             timeout=timeout, auth=auth)
+        if escape_requests:
+            async def legal_ascii_json(request):
+                if request.method == "POST":
+                    # Legal equivalent wire representation at the owned
+                    # serializer boundary, before the production guard hook.
+                    message = json.loads(request.content)
+                    content = json.dumps(message, ensure_ascii=True).encode()
+                    request.stream = httpx.ByteStream(content)
+                    request._content = content
+                    request.headers["Content-Length"] = str(len(content))
+                    if message.get("method") == "tools/call":
+                        guard.fixture_wire_size = len(content)
+            client.event_hooks["request"].append(legal_ascii_json)
+        return client
     monkeypatch.setattr("mcp.shared._httpx_utils.create_mcp_http_client", client_factory)
     return guard, calls, streams, parsed_fixture
 
 
-async def invoke_sdk(guard, *, concurrent=False):
+async def invoke_sdk(guard, *, concurrent=False, query="literal", bound=True):
     requests = []
     try:
         async with streamablehttp_client("https://fixture.invalid/mcp",
@@ -109,20 +132,20 @@ async def invoke_sdk(guard, *, concurrent=False):
                 assert guard.bind_session(session)
                 loop = asyncio.get_running_loop()
                 async def call(bound):
-                    scope = guard.scope({"tool_name": "same_tool", "input_digest": digest({"query": "literal"}),
+                    scope = guard.scope({"tool_name": "same_tool", "input_digest": digest({"query": query}),
                         "job_id": "native-job", "fencing_token": 7}) if bound else nullcontext()
                     with scope:
                         # The current MCPAdapt bridge uses this exact API;
                         # exercise ContextVar transfer over that real boundary.
                         async def sdk_call():
                             requests.append(asyncio.current_task())
-                            return await session.call_tool("same_tool", {"query": "literal"})
+                            return await session.call_tool("same_tool", {"query": query})
                         def sync_call():
                             return asyncio.run_coroutine_threadsafe(sdk_call(), loop).result(timeout=2)
                         return await asyncio.to_thread(sync_call)
                 if concurrent:
                     return await asyncio.gather(call(True), call(False))
-                return await call(True)
+                return await call(bound)
     finally:
         # A rejected HTTP header can close the SDK task group before the sync
         # bridge's future observes it. Explicitly drain our two fixture calls.
@@ -156,6 +179,43 @@ async def test_sdk_stops_oversized_inline_stream_before_message_parse(monkeypatc
     assert streams[0].closed and streams[0].reads <= 65
     assert "PRIVATE_FIXTURE_SENTINEL" not in str(failure.value)
     assert guard.request_bindings == {}
+
+
+@pytest.mark.parametrize("query", ["é" * 30000, "漢" * 20000, "😀" * 15000],
+    ids=["latin", "cjk", "astral"])
+async def test_sdk_rejects_escaped_oversized_outgoing_task_before_transport(monkeypatch, query):
+    from src.work_board.general_task import canonical, validate_schema
+    assert len(canonical({"query": query})) < TASK_OUTPUT_BYTES
+    validate_schema({"type": "object", "properties": {"query": {"type": "string", "maxLength": 30000}},
+        "required": ["query"], "additionalProperties": False}, {"query": query})
+    guard, calls, streams, parsed = setup_sdk(monkeypatch, escape_requests=True, oversized=True)
+    with pytest.raises(Exception):
+        await invoke_sdk(guard, query=query)
+    assert guard.fixture_wire_size > TASK_OUTPUT_BYTES + 4096
+    assert calls == [] and streams == [] and parsed == []
+    assert guard.fixture_request_failures == ["mcp_task_output_request_byte_limit"]
+    assert guard.request_bindings == {}
+
+
+async def test_large_escaped_interactive_request_has_no_global_task_cap(monkeypatch):
+    guard, calls, streams, _ = setup_sdk(monkeypatch, escape_requests=True)
+    result = await invoke_sdk(guard, query="é" * 30000, bound=False)
+    assert result.content[0].text == "local result"
+    assert guard.fixture_wire_size > TASK_OUTPUT_BYTES + 4096
+    assert len(calls) == 1 and calls[0]["bounded"] is False
+    assert streams and guard.request_bindings == {}
+
+
+async def test_active_task_on_another_client_does_not_cap_interactive_request(monkeypatch):
+    guarded_connection, calls, streams, _ = setup_sdk(monkeypatch, escape_requests=True)
+    guarded_connection.request_bindings[999] = {"job_id": "another-task"}
+    independent_connection = _TaskOutputGuard()
+    result = await invoke_sdk(independent_connection, query="é" * 30000, bound=False)
+    assert result.content[0].text == "local result"
+    assert guarded_connection.fixture_wire_size > TASK_OUTPUT_BYTES + 4096
+    assert len(calls) == 1 and calls[0]["bounded"] is False
+    assert streams and independent_connection.request_bindings == {}
+    assert 999 in guarded_connection.request_bindings
 
 
 @pytest.mark.parametrize("mode", ["compressed", "deferred"])

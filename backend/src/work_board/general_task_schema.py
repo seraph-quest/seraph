@@ -1,13 +1,15 @@
 """Conservative output-schema implication; never retrieve schema references.
 
 This is admission proof, not a general JSON Schema subsumption engine. Exact
-schemas are compatible. Nonidentical schemas support single types, object
+schemas pass the bounded contradiction guard first. Nonidentical schemas support single types, object
 properties/required/additionalProperties, and finite enum/const outputs. Other
 value assertions must be identical in the producing schema or fail closed.
 """
 from __future__ import annotations
 
 import json
+from fractions import Fraction
+from math import ceil
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -41,6 +43,98 @@ def _supported(schema, depth=0):
             and _supported(schema.get("additionalProperties", True), depth + 1))
 
 
+def _possible(schema, depth=0):
+    """Reject closed, locally provable contradictions before equality proof.
+
+    Finite values are checked against the entire schema. For nonfinite schemas
+    this checks scalar bounds and required object/array members; it does not
+    attempt regex satisfiability or general JSON Schema subsumption.
+    """
+    if depth > 32 or schema is False:
+        return False
+    if schema is True:
+        return True
+    if "const" in schema or "enum" in schema:
+        values = [schema["const"]] if "const" in schema else schema["enum"]
+        return any(Draft202012Validator(schema).is_valid(value) for value in values)
+    if set(schema) - (_SUPPORTED | {"items", "prefixItems", "anyOf"}):
+        return False
+    if "anyOf" in schema:
+        # Do not infer conjunction across alternatives. A local witness must
+        # satisfy the enclosing assertions as well, unless they are absent.
+        if set(schema) - (_ANNOTATIONS | {"anyOf"}):
+            return False
+        return any(_possible(child, depth + 1) for child in schema["anyOf"])
+    kinds = schema.get("type", ["null", "boolean", "string", "number", "object", "array"])
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    return any(_possible_type(schema, kind, depth) for kind in kinds)
+
+
+def _possible_type(schema, kind, depth):
+    if kind in {"null", "boolean"}:
+        values = [None] if kind == "null" else [False, True]
+        return any(Draft202012Validator(schema).is_valid(value) for value in values)
+    if kind == "string":
+        return schema.get("minLength", 0) <= schema.get("maxLength", float("inf"))
+    if kind in {"integer", "number"}:
+        lower = [(Fraction(str(schema[key])), key == "exclusiveMinimum")
+                 for key in ("minimum", "exclusiveMinimum") if key in schema]
+        upper = [(Fraction(str(schema[key])), key == "exclusiveMaximum")
+                 for key in ("maximum", "exclusiveMaximum") if key in schema]
+        lo = max(lower, default=None)
+        hi = min(upper, key=lambda bound: (bound[0], not bound[1]), default=None)
+        if lo and hi and (lo[0] > hi[0] or (lo[0] == hi[0] and (lo[1] or hi[1]))):
+            return False
+        step = Fraction(str(schema.get("multipleOf", 1))) if kind == "integer" or "multipleOf" in schema else None
+        if kind == "integer":
+            step = Fraction(step.numerator)
+        if step and lo and hi:
+            first = ceil(lo[0] / step)
+            if lo[1] and first * step == lo[0]:
+                first += 1
+            return first * step < hi[0] or (first * step == hi[0] and not hi[1])
+        return True
+    if kind == "object":
+        props = schema.get("properties", {})
+        extra = schema.get("additionalProperties", True)
+        required = set(schema.get("required", []))
+        minimum = max(schema.get("minProperties", 0), len(required))
+        if minimum > schema.get("maxProperties", float("inf")):
+            return False
+        if any(not _possible(props.get(name, extra), depth + 1) for name in required):
+            return False
+        if not _possible(extra, depth + 1):
+            return minimum <= sum(_possible(child, depth + 1) for child in props.values())
+        return True
+    if kind == "array":
+        minimum = schema.get("minItems", 0)
+        if minimum > schema.get("maxItems", float("inf")):
+            return False
+        prefix = schema.get("prefixItems", [])
+        if any(not _possible(child, depth + 1) for child in prefix[:minimum]):
+            return False
+        items = schema.get("items", True)
+        if minimum > len(prefix) and not _possible(items, depth + 1):
+            return False
+        if not prefix and schema.get("uniqueItems") and isinstance(items, dict):
+            values = ([items["const"]] if "const" in items else items.get("enum"))
+            if values is None and items.get("type") in ("boolean", "null"):
+                values = [False, True] if items["type"] == "boolean" else [None]
+            if values is not None:
+                valid = []
+                validator = Draft202012Validator(items)
+                for value in values:
+                    if validator.is_valid(value) and not any(
+                        Draft202012Validator({"const": prior}).is_valid(value) for prior in valid
+                    ):
+                        valid.append(value)
+                if minimum > len(valid):
+                    return False
+        return True
+    return False
+
+
 def _implies(source, target):
     if _canonical(source) == _canonical(target) or target is True or target == {} or source is False:
         return True
@@ -55,7 +149,8 @@ def _implies(source, target):
     if "const" in source or "enum" in source:
         values = [source["const"]] if "const" in source else source["enum"]
         producer, consumer = Draft202012Validator(source), Draft202012Validator(target)
-        return all(consumer.is_valid(value) for value in values if producer.is_valid(value))
+        valid = [value for value in values if producer.is_valid(value)]
+        return bool(valid) and all(consumer.is_valid(value) for value in valid)
     if "const" in target or "enum" in target:
         return False
     source_type, target_type = source.get("type"), target.get("type")
@@ -98,6 +193,8 @@ def schema_accepts_output(output_schema: dict, contract_schema: dict) -> bool:
     try:
         Draft202012Validator.check_schema(output_schema)
         Draft202012Validator.check_schema(contract_schema)
+        if not _possible(output_schema) or not _possible(contract_schema):
+            return False
         if _canonical(output_schema) == _canonical(contract_schema):
             return True
         if not _supported(output_schema) or not _supported(contract_schema):

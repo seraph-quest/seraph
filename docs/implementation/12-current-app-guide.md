@@ -618,6 +618,11 @@ unresolved effect and cannot be adopted as an artifact or automatically retried.
 The current task adapter requires a stateless inline identity-encoded MCP
 response; sessionful, compressed or deferred responses and GET resumption are
 blocked through the existing capability/recovery surface.
+While a task guard is active, an oversized outgoing POST on that same MCP
+connection is rejected before contact because its request binding cannot be
+decoded within the bound. This can also reject a concurrent oversized
+interactive POST; ordinary bounded interactive calls and other connections
+remain usable. Without an active task guard, this outgoing restriction is inactive.
 Unavailable or changed contracts block execution. An unknown contacted effect
 is retained for reconciliation instead of automatic replay. Successful output
 is a bounded private artifact with physical hash readback, and the card enters

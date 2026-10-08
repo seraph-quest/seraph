@@ -47,6 +47,9 @@ The approval wait commits its exact binding, no-contact proof and task/Root
 pause together; a fast approval preserves the same continuation. MCP task
 response bytes and parsed output are bounded before result adoption; oversized
 contacted responses retain visible unresolved liability.
+Oversized outgoing POSTs fail before contact while a task guard is active on
+that connection, including oversized concurrent interactive POSTs whose binding
+cannot be decoded within the bound. Bounded calls and other connections remain usable.
 Provider-free isolated integration receipts prove the current native file-read journey,
 mediated MCP approval continuation and replay boundaries, not
 model quality or improved outcomes. Tasks explicitly record no learning.

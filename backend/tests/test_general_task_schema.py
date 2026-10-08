@@ -30,6 +30,64 @@ def no_external_contacts(monkeypatch):
 _OBJECT = {"type": "object", "properties": {"text": {"type": "string"}},
            "required": ["text"], "additionalProperties": False}
 
+_EMPTY_PRODUCERS = [
+    {"type": "string", "const": 1},
+    {"type": "string", "enum": [1, False, None]},
+    {"type": "number", "minimum": 2, "maximum": 1},
+    {"type": "integer", "minimum": 0.1, "maximum": 0.9},
+    {"type": "number", "minimum": 1, "exclusiveMaximum": 1},
+    {"type": "string", "minLength": 2, "maxLength": 1},
+    {"type": "object", "properties": {"text": {"type": "string", "const": 1}},
+     "required": ["text"], "additionalProperties": False},
+    {"type": "object", "required": ["missing"], "additionalProperties": False},
+    {"type": "array", "minItems": 1, "items": {"type": "string", "enum": [1]}},
+    {"type": "array", "minItems": 2, "maxItems": 1},
+    {"type": "integer", "minimum": 1, "maximum": 4, "multipleOf": 2.5},
+    {"type": "array", "minItems": 2, "uniqueItems": True, "items": {"enum": [1, 1.0]}},
+    {"type": "array", "minItems": 3, "uniqueItems": True, "items": {"type": "boolean"}},
+]
+
+
+@pytest.mark.parametrize("source", _EMPTY_PRODUCERS)
+def test_empty_producer_never_proves_exact_or_permissive_contract(source):
+    assert not schema_accepts_output(source, source)
+    assert not schema_accepts_output(source, {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", _EMPTY_PRODUCERS)
+async def test_empty_descriptor_rejected_by_full_admission_without_contact(source):
+    from tests.test_general_task_contract import Registry, request
+    registry = Registry()
+    registry.entries = [registry.entries[0].model_copy(update={"output_schema": source})]
+    value = request(registry)
+    value = value.model_copy(update={
+        "input": value.input.model_copy(update={"requested_output": source}),
+        "plan": value.plan.model_copy(update={"steps": [value.plan.steps[0].model_copy(
+            update={"output_contract": source})]}),
+    })
+    service = GeneralTaskService(registry)
+    service.start()
+    try:
+        with pytest.raises(BoardError, match="registered tool contract"):
+            await service.validate(WorkBoardOwner(principal_id="owner", session_id="session"), value)
+        assert registry.calls == []
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize("schema", [
+    {"type": "string", "enum": [1, "valid"]},
+    {"type": "integer", "minimum": 0.1, "maximum": 1},
+    {"type": "number", "minimum": 1, "maximum": 1},
+    {"type": "array", "maxItems": 0, "items": False},
+    {"type": "object", "properties": {"optional": False}, "additionalProperties": False},
+    {"type": "integer", "minimum": 1, "maximum": 5, "multipleOf": 2.5},
+    {"type": "array", "minItems": 2, "uniqueItems": True, "items": {"enum": [1, True]}},
+])
+def test_nonempty_exact_producers_remain_compatible(schema):
+    assert schema_accepts_output(schema, schema)
+
 
 @pytest.mark.parametrize("source,target,compatible", [
     (_OBJECT, _OBJECT, True),

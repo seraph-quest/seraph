@@ -51,7 +51,7 @@ async def precontact_intent_reusable(jobs, db, run, effects):
                 for item in json.loads(cost.evidence_json)) for cost in rows) for slot, call_id in enumerate(call_ids)))
 
 
-async def bound(db, owner, task_id):
+async def bound(db, owner, task_id, *, verify_group=True):
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id,
         WorkBoardTask.owner_principal_id == owner.principal_id, WorkBoardTask.owner_session_id == owner.session_id,
         WorkBoardTask.capability_id == PARENT_CAPABILITY))
@@ -60,8 +60,16 @@ async def bound(db, owner, task_id):
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
-    if parent is None or not binds(task, attempt, parent):
+    if parent is None or not binds(task, attempt, parent, verify_row_deadline=verify_group):
         raise BoardError("research_binding_unavailable", "The original research admission requires recovery", status_code=409)
+    from src.work_board.research_readback import original_group_binds, original_admission_current
+    if verify_group:
+        try:
+            await original_admission_current(db, task, attempt, parent)
+            from src.work_board.dispatcher import _parse_typed_input
+            await original_group_binds(db, parent, typed_inputs=_parse_typed_input(task))
+        except (ValueError, TypeError, KeyError, OSError):
+            raise BoardError("research_binding_unavailable", "The original research group requires recovery", status_code=409)
     return task, attempt, parent
 
 
@@ -107,7 +115,7 @@ def verified_reserved_output(child, cost, creation, now):
 
 
 async def snapshot(jobs, db, owner, task_id):
-    task, attempt, parent = await bound(db, owner, task_id)
+    task, attempt, parent = await bound(db, owner, task_id, verify_group=False)
     from src.workflows.job_runtime import _serialize
     creation = checkpoint(_serialize(parent), "research:creation")
     children = list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent.run_identity))).all())
@@ -120,6 +128,15 @@ async def snapshot(jobs, db, owner, task_id):
         and not (attempt.ended_at or attempt.cancel_requested_at or parent.lease_owner or parent.lease_expires_at
             or attempt.lease_owner or attempt.lease_expires_at)
         and task.status == WorkBoardStatus.blocked and task.block_reason == parent.failure_reason)
+    from src.work_board.research_readback import original_group_binds, original_admission_current
+    from src.work_board.dispatcher import _parse_typed_input
+    authority_valid = False
+    try:
+        await original_admission_current(db, task, attempt, parent)
+        await original_group_binds(db, parent, typed_inputs=_parse_typed_input(task))
+        authority_valid = True
+    except (ValueError, TypeError, KeyError, OSError):
+        safe = False
     now = datetime.now(timezone.utc)
     safe = safe and all((not (child.lease_owner or child.lease_expires_at) and (
         child.status in {"accepted", "queued", "succeeded"} or child.status == "paused" and child.failure_reason == PROMPT_READY))
@@ -159,7 +176,7 @@ async def snapshot(jobs, db, owner, task_id):
             "bound_microusd": cost.bound_microusd, "actual_cost_microusd": cost.actual_cost_microusd,
             "contact_started": cost.contact_started_at is not None, "reason": cost.recovery_reason} for cost in costs],
         "recoverable": bool(safe), "cancel_available": not attempt.ended_at and parent.status != "succeeded",
-        "report_available": parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
+        "report_available": authority_valid and parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
         "no_learning": True, "semantic_truth_verified": False,
         "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; uncertain contacts remain held."}
 

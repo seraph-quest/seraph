@@ -174,6 +174,10 @@ async def run_direct_local_chat(
 ) -> str:
     """Run one bounded governed completion without invoking the tool loop."""
     messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
+    from src.agent.session import session_manager
+    task_context = await session_manager.get_task_continuity_context(session_id)
+    if task_context:
+        messages[0]["content"] += "\n\n" + task_context
     response = await asyncio.to_thread(
         completion_with_fallback_sync,
         messages=messages,
@@ -209,6 +213,10 @@ async def stream_direct_local_chat(
         )
 
     messages = _direct_local_chat_messages(message, is_onboarding=is_onboarding)
+    from src.agent.session import session_manager
+    task_context = await session_manager.get_task_continuity_context(session_id)
+    if task_context:
+        messages[0]["content"] += "\n\n" + task_context
     context = build_canonical_inference_context(
         runtime_path,
         payload=messages,

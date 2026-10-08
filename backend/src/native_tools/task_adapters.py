@@ -155,6 +155,10 @@ class ToolRegistry:
         mode = policy_snapshot["tool_mode"]
         mcp_mode = policy_snapshot["mcp_mode"]
         entries = {}
+        from src.work_board.document_preparation import descriptor as document_descriptor
+        local_document = document_descriptor()
+        if is_tool_allowed(local_document.tool_id, mode):
+            entries[local_document.tool_id] = (local_document, None, False)
         for tool in (read_file, write_file, web_search, browse_webpage):
             if not is_tool_allowed(tool.name, mode):
                 continue
@@ -242,6 +246,30 @@ class ToolRegistry:
         validate_schema(descriptor.input_schema, inputs)
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
+        if descriptor.tool_id == "document_prepare":
+            from src.work_board.document_preparation import invoke
+            from src.audit.repository import audit_repository
+            from src.security.trust_contract import AuthorityGrant
+            if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants:
+                raise PermissionError("current capability execution permission is required")
+            # This one async native owner accepts only a hexadecimal digest,
+            # has no credential fields and uses task-bound local consent. Keep
+            # the existing audit owner without moving async SQL to a thread.
+            async def audit(event_type, details):
+                await audit_repository.log_event(session_id=principal.session_id,
+                    actor="agent", event_type=event_type, tool_name="document_prepare",
+                    risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
+                    summary="Local document preparation " + event_type,
+                    details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
+            from src.tools.policy import get_task_policy_snapshot
+            await audit("tool_call", {"input_digest": _digest(inputs)})
+            try:
+                result = await invoke(principal, job_id, fencing_token, inputs)
+            except Exception as exc:
+                await audit("tool_failed", {"error_type": type(exc).__name__})
+                raise
+            await audit("tool_result", {"result_digest": _digest(result), "provider_contacts": 0})
+            return result
         # ContextVars are copied by to_thread. Existing wrappers remain the
         # last authority/approval/audit/secret boundary, including MCP calls.
         return await asyncio.to_thread(self._invoke_sync, descriptor, inputs,

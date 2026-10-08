@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import type { GoalInfo, WorkBoardTask } from "../../types";
 import { canResumeGeneralTask, createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan } from "../../lib/generalTask";
 import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan } from "../../lib/generalTask";
+import { parseDocumentPreparationView, type DocumentPreparationView } from "../../lib/documentPreparation";
 
 interface Props {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
@@ -10,6 +13,23 @@ interface Props {
 }
 // Pending intent stays in memory under its original owner, never in browser storage.
 const pendingCreates = new Map<string, GeneralTaskCreateRequest>();
+async function readDocumentPreparation(taskId: string, selectedRefs: string[]): Promise<DocumentPreparationView> {
+  const response = await apiFetch(`${API_URL}/api/documents/preparations/${encodeURIComponent(taskId)}`);
+  if (!response.ok) {
+    let code = "";
+    try {
+      const value: unknown = await response.json();
+      if (value && typeof value === "object" && !Array.isArray(value) && "detail" in value) {
+        const detail = (value as { detail?: unknown }).detail;
+        if (detail && typeof detail === "object" && !Array.isArray(detail) && "code" in detail && typeof (detail as { code?: unknown }).code === "string") code = (detail as { code: string }).code;
+      }
+    } catch { /* The status still gives the operator a bounded recovery path. */ }
+    throw Error(code === "document_preparation_not_completed"
+      ? "Authenticated private preparation is not complete. Review the task's current status and retry this explicit readback later."
+      : `Authenticated private preparation blocked (${response.status}${code ? `, ${code}` : ""}). Refresh the current task plan before retrying.`);
+  }
+  return parseDocumentPreparationView(await response.json(), selectedRefs);
+}
 export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated, onChanged }: Props) {
   const scope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}:${ownerSessionId}` : null;
   const [pending, setPending] = useState<GeneralTaskCreateRequest | null>(() => scope ? pendingCreates.get(scope) ?? null : null);
@@ -19,6 +39,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [egress, setEgress] = useState(pending?.input.inference_egress_acknowledged ?? false);
   const [read, setRead] = useState<GeneralTaskPlanRead | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
+  const [preparationView, setPreparationView] = useState<DocumentPreparationView | null>(null);
   const [ack, setAck] = useState(false);
   const [planDraft, setPlanDraft] = useState("");
   const [pendingEdit, setPendingEdit] = useState<{ expected_revision: number; expected_plan_revision: number; idempotency_key: string; plan: TaskPlan } | null>(null);
@@ -29,7 +50,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   async function refresh() {
     if (!task || !owned) return;
     const version = generation.current;
-    setRead(null); setAck(false); setError(null);
+    setRead(null); setAck(false); setError(null); setPreparationView(null);
     try {
       const value = validateGeneralTaskPlan(await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/plan`), task);
       if (!value.plan) {
@@ -84,6 +105,17 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } catch (e) { if (version === generation.current) { setRead(null); setError((e as Error).message); } }
     finally { if (version === generation.current) setBusy(false); }
   }
+  async function openPrivatePreparation() {
+    const binding = read?.task_input.document_source;
+    if (!task || !read || !binding || busy || !owned) return;
+    const version = generation.current;
+    setBusy(true); setError(null); setPreparationView(null);
+    try {
+      const view = await readDocumentPreparation(task.task_id, binding.citation_refs);
+      if (version === generation.current) setPreparationView(view);
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
   async function resume() {
     if (!task || !read || !owned || busy || !canResumeGeneralTask(read, task)) return;
     const pause = read.approval_pause!, version = generation.current;
@@ -132,8 +164,10 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } }
     finally { if (version === generation.current) setBusy(false); }
   }
-  return <section className="rounded border border-white/15 bg-slate-950 p-4 text-slate-100" aria-label={task ? "Ordinary task plan" : "Describe a task"}>
-    <div className="flex justify-between gap-2"><h2 className="font-semibold">{task ? "Review ordinary task plan" : "Describe a task"}</h2>{onClose && <button type="button" disabled={busy || Boolean(pending)} onClick={onClose}>Close</button>}</div>
+  const documentBinding = read?.task_input.document_source;
+  const documentPreparation = Boolean(documentBinding && read?.plan?.steps.length === 1 && read.plan.steps[0]?.tool_id === "document_prepare");
+  return <section className="rounded border border-white/15 bg-slate-950 p-4 text-slate-100" aria-label={task ? (documentPreparation ? "Local document preparation plan" : "Ordinary task plan") : "Describe a task"}>
+    <div className="flex justify-between gap-2"><h2 className="font-semibold">{task ? (documentPreparation ? "Review local document preparation plan" : "Review ordinary task plan") : "Describe a task"}</h2>{onClose && <button type="button" disabled={busy || Boolean(pending)} onClick={onClose}>Close</button>}</div>
     {!owned && <p role="status">Blocked: current task ownership is required. Recover through Work before changing the task.</p>}
     {error && <p role="alert" className="text-amber-200">{error}</p>}
     {!task && <>
@@ -182,12 +216,22 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
             <details><summary>Typed input and output contract</summary><pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify({ input: step.input, input_schema: descriptor.input_schema, output_contract: step.output_contract, registered_output_schema: descriptor.output_schema }, null, 2)}</pre></details>
           </section>;
         })}
+        {documentPreparation && documentBinding && <section aria-label="Local document preparation" className="mt-3 rounded border border-cyan-500/30 p-2">
+          <p className="font-semibold">Owner-bound local document source</p>
+          <p className="break-all text-xs">{documentBinding.artifact_ref} · source revision {documentBinding.source_revision} · {documentBinding.citation_refs.length} exact citations · selection {documentBinding.selection_digest}</p>
+          <p className="text-xs">Local-use acknowledgement is persisted separately from model egress. The private cited view is opened only by this explicit authenticated readback action.</p>
+          <button type="button" disabled={busy || !owned} onClick={() => void openPrivatePreparation()}>Open authenticated private preparation</button>
+          {preparationView && <section aria-label="Authenticated private cited preparation" className="mt-2 rounded border border-emerald-500/30 p-2">
+            <p role="status">Authenticated private cited preparation · no provider contact · no learning.</p>
+            {preparationView.sections.map((section) => <article key={section.source_ref} className="mt-2"><h4 className="break-all font-mono">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>{(section.formula !== null || section.cached_value !== null) && <dl><dt>Formula (inert)</dt><dd className="whitespace-pre-wrap break-all">{section.formula ?? "none"}</dd><dt>Cached value (freshness unknown)</dt><dd className="whitespace-pre-wrap break-all">{section.cached_value ?? "unavailable"}</dd></dl>}{section.cached_value === null && <p role="status">Cached value unavailable; freshness unknown. Formula remains inert.</p>}</article>)}
+          </section>}
+        </section>}
         {!read.accepted && <>
-          <details className="mt-3"><summary>Edit typed plan steps</summary><p className="text-xs">Edit only registered tool IDs, typed inputs, dependencies and output contracts shown above. Saving creates a new inert revision; permissions and limits stay server owned.</p>
+          {!documentPreparation && <details className="mt-3"><summary>Edit typed plan steps</summary><p className="text-xs">Edit only registered tool IDs, typed inputs, dependencies and output contracts shown above. Saving creates a new inert revision; permissions and limits stay server owned.</p>
             <label>Typed plan steps<textarea aria-label="Typed plan steps" className="cockpit-input w-full font-mono text-xs" rows={12} maxLength={65536} value={planDraft} disabled={busy || !owned || Boolean(pendingEdit)} onChange={e => { setPlanDraft(e.target.value); setAck(false); }} /></label>
             <button type="button" disabled={busy || !owned || (!pendingEdit && planDraft === JSON.stringify(read.plan?.steps ?? [], null, 2))} onClick={() => void savePlan()}>{pendingEdit ? "Reconcile exact plan edit" : "Save inert plan revision"}</button>
-          </details>
-          {pendingEdit && <p role="status">The exact edit has an unconfirmed receipt. Reconcile it before refreshing or accepting.</p>}
+          </details>}
+          {!documentPreparation && pendingEdit && <p role="status">The exact edit has an unconfirmed receipt. Reconcile it before refreshing or accepting.</p>}
           <label className="mt-3 flex gap-2"><input type="checkbox" checked={ack} disabled={busy || !owned || !read.plan || Boolean(pendingEdit) || planDraft !== JSON.stringify(read.plan?.steps ?? [], null, 2)} onChange={e => setAck(e.target.checked)} />I reviewed this exact plan, effects, permissions and limits.</label><button type="button" className="cockpit-feedback-button" disabled={busy || !owned || !read.plan || !ack || Boolean(pendingEdit) || planDraft !== JSON.stringify(read.plan?.steps ?? [], null, 2)} onClick={() => void accept()}>Accept reviewed task plan</button>
         </>}
       </>}

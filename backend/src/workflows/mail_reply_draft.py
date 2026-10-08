@@ -87,7 +87,10 @@ def input_payload(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "reply_intent",
         "style",
     )
-    return {key: inputs[key] for key in keys}
+    result = {key: inputs[key] for key in keys}
+    if inputs.get("connected_sources"):
+        result.update(connected_sources=inputs["connected_sources"], acknowledge_connected_sources=True)
+    return result
 
 
 def input_digest(inputs: Mapping[str, Any]) -> str:
@@ -95,7 +98,7 @@ def input_digest(inputs: Mapping[str, Any]) -> str:
 
 
 def authority_payload(*, task: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "schema_version": 1,
         "capability_id": CAPABILITY_ID,
         "capability_version": CAPABILITY_VERSION,
@@ -117,6 +120,9 @@ def authority_payload(*, task: Any, inputs: Mapping[str, Any]) -> dict[str, Any]
         "runtime_cap_seconds": MAX_RUNTIME_SECONDS,
         "budget_microusd": None,
     }
+    if inputs.get("connected_sources"):
+        result["connected_sources_digest"] = canonical_digest(inputs["connected_sources"])
+    return result
 
 
 def model_payload(

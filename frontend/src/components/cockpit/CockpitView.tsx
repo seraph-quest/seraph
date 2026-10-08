@@ -1,6 +1,7 @@
 import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
+import { DocumentReader } from "./DocumentReader";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
@@ -13,6 +14,8 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { useOptionalOperatorAuth } from "../auth/OperatorAuthGate";
 import { useAttentionNavigation } from "../../hooks/useAttentionNavigation";
+import { RelatedSourcesReview } from "./ConnectionSyncPanel";
+import type { RelatedSources } from "../../lib/connectionSync";
 import { validateCalendarResultPreview } from "../../lib/calendar";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
@@ -6435,6 +6438,7 @@ const BROWSER_RESULT_ATTRIBUTES = new Set([
 const CALENDAR_RESULT_ARTIFACT_TYPE = "calendar_meeting_prep_result" as const;
 
 interface BoardCalendarResultPreview {
+  related_sources?: RelatedSources;
   schema_version: 1;
   capability_id: "calendar.meeting-prep.v1";
   artifact_id: string;
@@ -16210,6 +16214,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <section className="cockpit-inspector-stack-row" aria-label="Verified calendar preparation text">
                   <div className="cockpit-key">summary</div>
                   <pre className="cockpit-inspector-value whitespace-pre-wrap">{selectedCalendarResult.summary}</pre>
+                  {selectedCalendarResult.related_sources && <RelatedSourcesReview related={selectedCalendarResult.related_sources} ownerPrincipalId={operatorAuth.principalId} ownerSessionId={operatorAuth.sessionId} />}
                   {(["agenda", "questions", "risks", "preparation_steps"] as const).map((field) => (
                     <div key={field} className="cockpit-inspector-detail">
                       <div className="cockpit-key">{field.replace(/_/g, " ")}</div>
@@ -16709,6 +16714,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("outputs_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
+                  <DocumentReader
+                    goals={activeGoalsForCockpit}
+                    ownerPrincipalId={operatorAuth.principalId}
+                    ownerSessionId={operatorAuth.sessionId}
+                    onOpenTask={(taskId) => {
+                      setFocusTaskId(taskId);
+                      selectCockpitSection("work");
+                    }}
+                  />
                   <div className="cockpit-list">
                     {artifacts.map((artifact) => {
                       const lineage = resolveArtifactLineage(artifact);

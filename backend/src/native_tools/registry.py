@@ -85,6 +85,11 @@ def canonical_tool_name(tool_name: str) -> str:
 
 
 TOOL_METADATA: dict[str, dict] = {
+    "document_prepare": {
+        "description": "Prepare exact owner-selected document citations locally",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["owner_private_read", "local_compute"],
+    },
     # Phase 1 tools
     "web_search": {
         "description": "Search the web for information",

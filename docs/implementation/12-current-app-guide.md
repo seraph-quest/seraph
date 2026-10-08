@@ -138,6 +138,57 @@ not a native macOS receipt or inference/provider proof. macOS remains a peer
 core-host target; unsupported optional native proofs do not block independent
 core operation.
 
+## Task conversation continuity
+
+The bounded [#1021](https://github.com/seraph-quest/seraph/issues/1021)
+continuation journey is **Shipped** in this milestone contract. Availability
+requires installation of the reviewed milestone merge. The chat list includes a
+task picker. Local context shows canonical status,
+bounded task title and remaining intent, the current blocker, verified output
+references, selected private reference counts, unanswered input,
+the next permitted local review action and unresolved effects separately.
+Missing narrative summaries use a bounded factual canonical timeline; no model
+summary or provider call is needed. Open Work for full history and output controls.
+
+**Continue in new chat** creates an owned conversation referencing the same
+task ID. It does not create another task or change its revision. Selecting
+historical Task and Goal records through ownership recovery permits read-only
+context in a new login; historical transcripts and unselected artifacts remain
+private. Continuing a recovered task renews no grant, approval, budget, effect or
+model-egress permission. Current scope review remains required in Work.
+The assistant context status reports that boundary separately. Existing direct
+and agent chat compilers share one current-authority helper: only the current
+Root's owned task facts and permitted opaque references enter the next prompt.
+Selecting history grants no assistant access to its facts or sources. A selected
+source reference requires current packet adoption and current per-source model
+permission; private-source classification is independent from model permission.
+Up to four corrections recorded through the authenticated operator comment
+endpoint are readable locally with their canonical references. The packet checks
+original task owner/Root authorship and the matching canonical provenance event
+and current body integrity. Worker, review and older unclassified comments remain
+neutral task notes in Work. Correction bodies and integrity hashes remain
+local-only; the assistant receives their opaque IDs and timestamps plus an
+explicit local review requirement. No correction body, source body or historical transcript is
+copied into the task handoff. Ordinary current and recent chat transcript context
+also requires the live current narrowed chat principal, current owned
+conversation and model grant. Unscoped service/report calls receive no transcript
+context; historical Task selection selects no transcript.
+Deleted or changed output bytes invalidate the displayed reference. A stale
+revision prompts context reload without replaying the previous chat action.
+Recovery rollback removes access on the next context read.
+
+Focused proof: `test_task_conversation_continuity.py` covers authenticated
+SQLite links, replay, stale revisions, owner conflicts, selected recovery and
+rollback, local artifact readback/deletion, bounded metadata and additive
+migration. Literal intercepted async and streaming transports confirm the same
+factual handoff and request digest as the agent context compiler; missing grants,
+revoked Roots and recovered history block assistant context. Canonical evidence
+adoption/revocation controls which source refs are included without copying text.
+`SessionList.test.tsx` covers mocked continuation and visible recovery.
+These provider-free mechanical checks establish no model-quality or live-provider
+claim. The Python lifespan owns service activation and shutdown; this journey
+does not introduce a Cordis bridge.
+
 ## Finite public goal programmes
 
 The finite authority controls under [#1003](https://github.com/seraph-quest/seraph/issues/1003)
@@ -297,6 +348,70 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Status:** Partial
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
+
+### Bounded general document reading
+
+**Status:** Partial; availability follows the independently reviewed installed
+revision containing the milestone. [ADR-031](./decisions/031-bounded-general-documents.md) owns the
+separate `document.read.v1` target; invoice comparison above remains unchanged.
+
+The finite local profile selects one PDF, DOCX, XLSX or UTF-8 CSV against a
+current bounded Goal. Reserve its exact byte length/digest, stream the original
+to the authenticated document-source endpoint, seal its encrypted readback, then
+request one explicit bounded selection. The private response includes physical
+PDF page, DOCX paragraph/table or spreadsheet cell references and the immutable
+original digest. Spreadsheet formula literals and cached values remain separate;
+cached freshness is unknown and nothing evaluates a formula or macro.
+Array-formula anchors retain the exact literal text and their inert cached value;
+data-table formulas or formula objects without expression text explicitly block
+the selected extraction, with no object representation returned as evidence.
+Scanned, protected, malformed, external-link and oversized sources show unsupported state
+and recovery instead of invented content. Private evidence never enters generic
+task events, and selection grants no source/model egress or learning authority.
+
+After a successful private read, select at most 16 individual cited paragraphs,
+pages or table cells and acknowledge their local use. “Propose local preparation”
+persists an inert one-step Work task; review and accept it in its existing Work
+card. This path makes no model call and grants no model egress. After execution,
+explicitly open the authenticated private preparation from that same card,
+including after reload. It presents only the exact selected literal excerpts
+with citations and separate inert formula/cached-value fields; cached freshness
+remains unknown. The complete private view is capped at 16 KiB and is never
+truncated. Missing or changed source/Goal/Root, incomplete native execution or
+unverified readback blocks that view. Ordinary artifacts contain references and
+digests, never these excerpts. Response loss offers an explicit retry of the
+same proposal key; selection changes clear it and do not automatically create,
+accept or execute another task.
+
+The source index preserves redacted owned reservations after reload. Explicit
+deletion requires the current revision, tombstones first and frees charged quota
+only after exact private cleanup. It shows whether this host's actual bounded
+cross-process upload-lock proof is ready; an unproved, stopped or changed
+filesystem profile blocks new uploads with a readable recovery state. Restart
+the managed document service to obtain a fresh local proof. That runtime check
+applies on each peer host; this receipt does not establish native macOS execution.
+Interrupted uploads show their upload writer kind and a separate cleanup-only
+reconcile control. Recovery must exclusively acquire the original generation/
+slot/nonce/source/owner-bound private lease inode before releasing the writer;
+it never retries, seals or adopts partial bytes. A held, missing or replaced
+lease remains charged. Unknown parser cleanup holds the host slot
+across new requests and restarts. Original-reader reconciliation accepts only its
+private nonce/job/digest/generation/PID-bound positive wait witness; a reap
+without recorded output does not reconstruct evidence. The same source family
+reuses current canonical input-artifact ownership, encryption and quota owners;
+there is no second store or queue. Independent original deadlines and positive
+supervision bound two lifetime attempts. Local extraction makes no provider call.
+Parser prelaunch filesystem failure does not publish a host slot. After positive
+reap, evidence adoption rechecks current Root and exact active Goal revision in
+the same canonical writer; stale authority releases positively closed parser
+capacity but adopts no evidence. A cancelled or unadopted encrypted candidate
+can remain cleanup-required until exact private deletion, with quota retained.
+
+Linux local format/process receipts establish only their checked mechanics.
+macOS has a named native network-denial adapter but no native execution receipt;
+unavailable resource or network confinement visibly blocks this optional profile
+while the CPU core stays usable. This profile establishes literal extraction,
+not OCR, malware certification, model understanding or general usefulness.
 
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
@@ -1512,6 +1627,109 @@ mechanics; CPU-only/keyless OpenRouter operation, a real Google account, live
 Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
+
+### Scoped connected-source synchronization
+
+Scoped Gmail and Calendar synchronization is **Planned** until reviewed
+integration. Its bounded Python contract extends the existing connection,
+finite source-consent, vault, canonical durable-job and private-artifact owners.
+It introduces no second queue, credential-fetch surface, store or bridge.
+New sync admission requires explicit enrollment through the existing operator
+ownership flow (`POST /api/auth/ownership/enroll`). An unenrolled or revoked
+identity returns `source_sync_operator_continuity_required` before creating a
+job or contacting a provider. Native sync uses a fixed Linux boot/PID/start/namespace
+witness or Darwin boot-session UUID and native PID/start-time witness. Unsupported
+ABI or unavailable lifetime evidence returns `connection_sync_platform_unsupported`
+before admission. Darwin parser and recovery fixtures run on Linux; native macOS
+execution remains unverified. Existing source read-consents remain unchanged.
+
+The existing Mail and Calendar connection routes own `POST /sync` and
+`GET /sync`. `ConnectionSyncInput` contains only `goal_ref`, `connection_ref`,
+`source_scope`, `window` and `max_items`. A request carries its own opaque
+`request_uuid`. Metadata synchronization requires an explicit
+`acknowledge_sync_metadata` grant; upgraded legacy consents retain a zero sync
+limit. The bound is a seven-day fixed window, at most fifty metadata records
+per provider/run and three pages. Gmail remains selected-label and optional
+selected-thread scoped. Calendar uses at most three exact selected calendar
+grants. A seven-day Calendar grant requires the explicit sync acknowledgement;
+existing narrower grants are preserved. Separate private-item acknowledgement
+selects at most ten bodies/details, with Gmail's existing ten-item body grant
+unchanged. No sync operation admits inference, send or reschedule work.
+
+Each connection has one fixed provider/scope digest. Changing it requires an
+explicit cursor reset after the old reservation has been released through normal
+completion or verified physical-only cleanup. Old unresolved effects remain
+visible and unchanged. Before vault/provider contact, a serialized reservation mirrors
+the existing claimed durable root; every contact, adoption and private read
+revalidates the original owner/session, goal, connection, consent and vaulted
+credential binding. The reservation grants no authority independently of the
+canonical root's lease, fence and deadline. Provider contacts have a two-second
+maximum timeout clamped to that original deadline; metadata concurrency is two
+and the entire operation remains bounded by 120 seconds and original consent
+expiry. Fifty is an upper cap, never a completeness guarantee.
+
+`ConnectionCursor` contains exactly `connection_id`, `revision`, `scope_digest`,
+`provider_cursor` and `last_complete_at`. The cursor and provider token remain
+in an encrypted private page artifact; the connection row contains only its
+canonical job/page pointer, CAS revision, scope digest and active-job reference.
+Only complete page adoption with an artifact hash and durable readback advances
+that pointer. Interrupted pages retain the last complete cursor and an explicit
+unknown root. Exact replay cannot repeat an uncertain contact. OAuth refresh
+POSTs and source GETs remain uncertain in the original effect ledger. Explicit
+physical cleanup can release only the connection slot after positive original
+callback quiescence or verified original process death; it does not settle the
+Unknown job, adopt output, decrypt a page, advance the cursor or retry work.
+Elapsed lease time is never proof of physical closure. A single rate-limit response
+may schedule one thirty-second cooldown under the same root/grant/deadline;
+another rate limit or an interruption stays visible for recovery. Restart does
+not replay an unknown contact or clear its reservation by age. Physical-only
+cleanup validates the authenticated stable operator identity and exact original
+root/session/attempt/fence/reservation while preserving all Goal and output
+fences. A changed or revoked Goal never authorizes private readback or output
+adoption; old Unknown roots remain separately visible after a slot is released.
+The fixed cleanup states are running, Unknown, cost liability, failed and succeeded.
+An absent effect remains absent. Succeeded cleanup requires the final adopted
+job/page/cursor revision, exact checkpoint artifact hash and successful readback,
+and a settled ledger; cleanup never reads or adopts the private artifact.
+A fresh Goal and explicit new source grant with acknowledged scope reset can
+rebind a current versioned item. The new citation invalidates old task evidence
+while original jobs, page artifacts, grants and effects remain immutable audit.
+
+Generic citations are `SourceItemRef` values: provider, opaque local identity,
+revision, content digest, privacy and expiry. Public discovery, API status and
+browser persistence receive no provider token, body or calendar private detail.
+`GET /sync` exposes coverage, freshness, the current root/revision, safe failure
+and cooldown metadata, and the exact redacted metadata selection for reload.
+Private readback requires a separate acknowledged owner API read and the original
+grant must still be current. Revocation blocks sync/readback while retaining
+audit. Explicit provider deletions become tombstones; list omission alone does
+not prove deletion. The typed `collect_connected_source_items` callable reads
+exact current citations for the current native Mail reply and Calendar meeting
+preparation tasks without granting model egress. Each task can deliberately
+select at most three connections and ten unique item references, then separately
+acknowledge their use. The task Goal ID/revision must match every original sync
+page. Current grants, connection/item revisions, content digest and expiry are
+checked before the first primary provider/model contact and before final
+adoption, including a metadata-only check in the canonical terminal writer.
+The related reader adds no provider contacts; cached private source bytes and
+references never enter the primary model prompt. Only classified related
+references, coverage and freshness enter the existing result (encrypted Mail
+draft; Calendar metadata). Missing lifecycle binding or stale/revoked authority
+blocks execution without a source-provider fallback. Empty selections preserve
+legacy input and authority digests. These paths record explicit `no_learning`. The app's owned
+shutdown stops Cordis and profiled browser sessions while the current task
+service and its registry remain owned, then releases that task owner before
+stopping the Goal programme and source runtime. This order also covers startup
+cancellation and preceding stop failures; the scheduler stops once in the outer
+cleanup. It clears only the exact source dispatcher pointer before ordinary
+DB shutdown; optional host failures do not replace source authority.
+
+Isolated regression/security checks use disposable SQLite/workspaces, a local
+paginated HTTP source fixture, separate-process reservation contention,
+encrypted artifact readback and negative authority/schema/migration cases.
+They establish these mechanics only. Real Google accounts, production operation
+and model usefulness remain external-unverified; no inference or eval is part
+of implementation or acceptance.
 
 ### Exact owned-calendar reschedule
 

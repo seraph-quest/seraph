@@ -1,5 +1,6 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
+import { normalizeConnectedRequest, relatedSources } from "./connectionSync";
 import type {
   CalendarApiErrorDetail,
   CalendarCadence,
@@ -209,7 +210,7 @@ function verifyResponse(value: unknown): CalendarVerifyResponse {
 
 function consent(value: unknown): CalendarConsentMetadata {
   if (!isRecord(value)) fail("The consent receipt was not an object.");
-  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "allowed_fields", "window_minutes", "max_events", "allow_remote_model", "expires_at", "state", "revision", "consent_digest", "created_at", "updated_at"], "consent");
+  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "allowed_fields", "window_minutes", "max_events", "allow_remote_model", "expires_at", "state", "revision", "consent_digest", "created_at", "updated_at", ...(value.sync_metadata_limit === undefined ? [] : ["sync_metadata_limit"])], "consent");
   const allowedFields = value.allowed_fields;
   if (!Array.isArray(allowedFields) || allowedFields.length === 0 || allowedFields.some((field) => !["summary", "start", "end", "location", "description", "attendees"].includes(String(field)))) {
     fail("The consent allowed fields are invalid.");
@@ -222,7 +223,8 @@ function consent(value: unknown): CalendarConsentMetadata {
     goal_id: requiredString(value.goal_id, "goal ID"),
     goal_revision: positiveInteger(value.goal_revision, "goal revision"),
     allowed_fields: allowedFields as CalendarConsentMetadata["allowed_fields"],
-    window_minutes: boundedInteger(value.window_minutes, "window", 5, 1440),
+    window_minutes: boundedInteger(value.window_minutes, "window", 5, Number(value.sync_metadata_limit) > 0 ? 10080 : 1440),
+    sync_metadata_limit: value.sync_metadata_limit === undefined ? 0 : boundedInteger(value.sync_metadata_limit, "sync metadata limit", 0, 50),
     max_events: boundedInteger(value.max_events, "max events", 1, 50),
     allow_remote_model: booleanValue(value.allow_remote_model, "remote model choice"),
     expires_at: timestamp(value.expires_at, "expiry"),
@@ -499,7 +501,7 @@ export function validateCalendarExecution(value: unknown): CalendarExecutionProj
 
 export function validateCalendarResultPreview(value: unknown): CalendarResultPreview | null {
   if (!isRecord(value)) return null;
-  const keys = ["schema_version", "capability_id", "artifact_id", "readback_id", "file_path", "content_sha256", "event_key", "event_revision", "summary", "agenda", "questions", "risks", "preparation_steps"] as const;
+  const keys = ["schema_version", "capability_id", "artifact_id", "readback_id", "file_path", "content_sha256", "event_key", "event_revision", "summary", "agenda", "questions", "risks", "preparation_steps", ...(value.related_sources === undefined ? [] : ["related_sources"])] as const;
   if (Object.keys(value).sort().join("|") !== [...keys].sort().join("|")) return null;
   if (value.schema_version !== 1 || value.capability_id !== PREP_CAPABILITY) return null;
   const boundedList = (input: unknown): string[] | null => {
@@ -515,6 +517,7 @@ export function validateCalendarResultPreview(value: unknown): CalendarResultPre
   const result = {
     schema_version: 1 as const,
     capability_id: PREP_CAPABILITY,
+    ...(value.related_sources === undefined ? {} : { related_sources: relatedSources(value.related_sources) }),
     artifact_id: requiredString(value.artifact_id, "preview artifact ID"),
     readback_id: requiredString(value.readback_id, "preview readback ID"),
     file_path: requiredString(value.file_path, "preview artifact path", 512),
@@ -565,7 +568,7 @@ export function listCalendarEvents(connectionId: string, consentId: string, sign
 }
 
 export function createCalendarPrep(request: CreateCalendarPrepRequest, signal?: AbortSignal): Promise<CalendarPrepResponse> {
-  return calendarRequest("/api/calendar/prep", { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }, (payload) => {
+  return calendarRequest("/api/calendar/prep", { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...request, input: normalizeConnectedRequest(request.input) }) }, (payload) => {
     const result = validateCalendarPrepResponse(payload);
     if (result.input_artifact.capability_id !== PREP_CAPABILITY
       || result.input_artifact.goal_id !== request.input.goal_id

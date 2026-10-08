@@ -7,10 +7,15 @@ export interface GeneralTaskLimits {
   max_steps: number; max_inference_calls: number; wall_seconds: number;
   depth: 0; max_outstanding_children: number; max_cost_microusd: number;
 }
+export interface DocumentTaskBinding {
+  artifact_ref: string; source_revision: number; metadata_digest: string;
+  citation_refs: string[]; selection_digest: string; acknowledge_local_use: true;
+}
 export interface GeneralTaskInput {
   goal_ref: string; intent: string; evidence_refs: string[];
   requested_output: Record<string, unknown>; limits: GeneralTaskLimits;
   tool_set_digest?: string; inference_egress_acknowledged: boolean;
+  document_source?: DocumentTaskBinding;
 }
 export interface TaskPlan {
   schema_version: 1; revision: number;
@@ -74,10 +79,21 @@ const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof
 const artifactReference = (v: unknown): boolean => record(v) && typeof v.artifact_id === "string"
   && v.artifact_id.length > 0 && v.artifact_id.length <= 128 && typeof v.digest === "string"
   && /^[a-f0-9]{64}$/.test(v.digest) && typeof v.schema_version === "string";
+function validDocumentTaskBinding(value: unknown): value is DocumentTaskBinding {
+  return record(value) && typeof value.artifact_ref === "string" && /^document-source:[0-9a-f-]{36}$/.test(value.artifact_ref)
+    && typeof value.source_revision === "number" && Number.isSafeInteger(value.source_revision) && value.source_revision >= 1
+    && typeof value.metadata_digest === "string" && /^[a-f0-9]{64}$/.test(value.metadata_digest)
+    && Array.isArray(value.citation_refs) && value.citation_refs.length > 0 && value.citation_refs.length <= 16
+    && value.citation_refs.every((ref) => typeof ref === "string" && ref.length > 0 && ref.length <= 512)
+    && new Set(value.citation_refs).size === value.citation_refs.length
+    && typeof value.selection_digest === "string" && /^[a-f0-9]{64}$/.test(value.selection_digest)
+    && value.acknowledge_local_use === true;
+}
 export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): GeneralTaskPlanRead {
   if (!record(value) || value.task_id !== task.task_id || value.task_revision !== task.task_revision
     || typeof value.accepted !== "boolean" || value.no_learning !== true || !record(value.task_input)
     || value.task_input.goal_ref !== task.goal_id || typeof value.task_input.intent !== "string"
+    || (value.task_input.document_source !== undefined && !validDocumentTaskBinding(value.task_input.document_source))
     || !record(value.task_input.limits) || !Array.isArray(value.descriptors) || !record(value.strategy)
     || (value.plan === null ? (value.accepted !== false || typeof value.proposal_error !== "string")
       : (!record(value.plan) || value.plan.schema_version !== 1 || !Number.isSafeInteger(value.plan.revision) || !Array.isArray(value.plan.steps) || !value.plan.steps.length || !value.descriptors.length))) {

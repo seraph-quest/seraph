@@ -1225,6 +1225,29 @@ async def _ensure_calendar_columns(conn) -> None:
         )
 
 
+async def _ensure_connection_sync_columns(conn) -> None:
+    """Rerunnable additive metadata on existing connection and grant owners."""
+    definitions = {
+        "google_service_connections": {
+            "sync_active_job_id": "VARCHAR",
+            "sync_scope_digest": "VARCHAR NOT NULL DEFAULT ''",
+            "sync_cursor_job_id": "VARCHAR",
+            "sync_cursor_page": "INTEGER NOT NULL DEFAULT 0",
+            "sync_cursor_revision": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "mail_read_consents": {"sync_metadata_limit": "INTEGER NOT NULL DEFAULT 0"},
+        "calendar_read_consents": {"sync_metadata_limit": "INTEGER NOT NULL DEFAULT 0"},
+    }
+    for table, definitions_for_table in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+        columns = {row[1] for row in result.fetchall()}
+        if not columns:
+            continue
+        for column, sql_type in definitions_for_table.items():
+            if column not in columns:
+                await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+
+
 async def _ensure_mail_columns(conn) -> None:
     """Install additive Mail columns independently from Calendar migrations.
 
@@ -1865,6 +1888,7 @@ async def init_db() -> None:
         await _ensure_calendar_columns(conn)
         await _ensure_repo_repair_columns(conn)
         await _ensure_mail_columns(conn)
+        await _ensure_connection_sync_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)

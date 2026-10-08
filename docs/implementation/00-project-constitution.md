@@ -19,6 +19,17 @@ executes useful work, remembers outcomes, and explains what it is doing.
 Seraph is not itself an AGI project. It adapts its behavior and capabilities to
 the operator's goals, which may include ambitious research goals.
 
+The self-improving guardian vision means becoming more useful through explicit
+feedback, verified outcomes, and reviewed, reversible changes to memory,
+procedure preferences, and capability assets within their accepted contracts.
+It does not grant autonomous code rewriting, permission expansion, or learning
+from task success alone. Current bounded learning mechanics do not establish
+measured improvement or generalized autonomous learning; their shipped scope
+remains owned by Development Status. In particular, reviewed procedure
+preferences and opportunity feedback follow
+[ADR-015](./decisions/015-reviewed-procedure-preferences.md) and
+[ADR-023](./decisions/023-evidence-bound-guardian-opportunities.md).
+
 This constitution defines the target architecture. It does **not** claim that
 every target capability is shipped. The current implementation is recorded in
 [Development Status](./STATUS.md), while active work lives only in GitHub issues,

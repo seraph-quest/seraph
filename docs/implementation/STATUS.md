@@ -336,8 +336,9 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
-Scoped connected-source synchronization remains **Planned** until reviewed
-integration. Its bounded Python implementation requires existing operator
+Scoped connected-source synchronization is **Partial**: bounded Python source
+synchronization and related-source Mail/Calendar preparation are implemented;
+real-account operation and native macOS execution remain unverified. It requires existing operator
 ownership enrollment and uses explicit metadata grants,
 one fixed scope and canonical root reservation per connection, encrypted page
 cursors with complete-page adoption/readback, fifty metadata items/three pages,

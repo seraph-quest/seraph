@@ -60,6 +60,37 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+## Typed general-task contract
+
+**Shipped** on `develop` revisions containing the independently reviewed
+[#997](https://github.com/seraph-quest/seraph/issues/997) implementation merge: an
+ordinary intent-to-reviewed-plan path in the existing Work panel and API.
+Before that merge, this describes the intended post-merge source scope. The
+[owning operator guide](./12-current-app-guide.md#typed-general-tasks-997)
+describes exact revision acceptance, editable invalid proposals, visible blocked
+reasons, current typed capabilities and owner-scoped idempotency.
+
+One `WorkBoardTask` and existing `WorkflowRunState` remain the canonical task
+and execution owners. Planning uses the governed interactive text consumer
+`general_task_planner`, explicit egress acknowledgment and cost limits; execution
+retains current tool permissions, approvals, descriptor revisions, durable
+effects and private artifact readback. Output contracts are checked before
+effects; mediated approval waits require explicit exact continuation of the
+same attempt and original deadline, with generic resume blocked.
+The approval wait commits its exact binding, no-contact proof and task/Root
+pause together; a fast approval preserves the same continuation. MCP task
+response bytes and parsed output are bounded before result adoption; oversized
+contacted responses retain visible unresolved liability.
+Oversized outgoing POSTs fail before contact while a task guard is active on
+that connection, including oversized concurrent interactive POSTs whose binding
+cannot be decoded within the bound. Bounded calls and other connections remain usable.
+Provider-free isolated integration receipts prove the current native file-read journey,
+mediated MCP approval continuation and replay boundaries, not
+model quality or improved outcomes. Tasks explicitly record no learning.
+The fuller interpreter and specialist delegation in
+[#998](https://github.com/seraph-quest/seraph/issues/998) and
+[#999](https://github.com/seraph-quest/seraph/issues/999) remain **Planned**.
+
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,
 owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native

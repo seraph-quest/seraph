@@ -386,6 +386,20 @@ def canonical_event_key(owner_principal_id: str, connection_id: str, calendar_id
     return "sha256:" + digest((owner_principal_id, connection_id, calendar_id, provider_event_id, recurrence))
 
 
+def _event_response_fields(allowed_fields: set[str]) -> str:
+    # Server-owned consent vocabulary, never a caller-supplied Google selector.
+    mapping = {
+        "summary": "summary", "start": "start(date,dateTime)", "end": "end(date,dateTime)",
+        "location": "location", "description": "description", "attendees": "attendees(displayName,email)",
+    }
+    if not isinstance(allowed_fields, set) or not allowed_fields or any(not isinstance(field, str) or field not in mapping for field in allowed_fields):
+        raise CalendarIntegrationError("calendar_allowed_fields_invalid", "Calendar read fields are invalid", status_code=422)
+    # Recurring instances need the original date to bind the same canonical key;
+    # etag checks that the selected metadata and private read are the same event.
+    identity = ["id", "etag", "recurringEventId", "originalStartTime(date,dateTime)"]
+    return ",".join(identity + [mapping[field] for field in sorted(allowed_fields)])
+
+
 def _selected_event(event: Mapping[str, Any], *, allowed_fields: set[str]) -> dict[str, Any]:
     event_id = _bounded_text(event.get("id"), limit=1024, field="event id")
     if event_id is None:
@@ -1070,6 +1084,8 @@ class GoogleCalendarReadonlyAdapter:
         """
         if not 1 <= max_events <= 50 or not 0 < (_utc(time_max) - _utc(time_min)).total_seconds() <= 7 * 86400:
             raise CalendarIntegrationError("calendar_sync_limit_invalid", "The Calendar sync bound is invalid", status_code=422)
+        if allowed_fields is not None:
+            _event_response_fields(allowed_fields)  # Fail before even the metadata/OAuth contact.
         query = [("timeMin", _utc(time_min).isoformat()), ("timeMax", _utc(time_max).isoformat()), ("singleEvents", "true"), ("showDeleted", "true"), ("maxResults", str(max_events)), ("fields", "items(id,recurringEventId,originalStartTime,status,etag,updated,summary,start,end),nextPageToken")]
         if page_token is not None:
             if not isinstance(page_token, str) or not page_token or len(page_token.encode("utf-8")) > 2048 or _CONTROL.search(page_token):
@@ -1098,7 +1114,7 @@ class GoogleCalendarReadonlyAdapter:
                     fields |= (allowed_fields or set())
                     # Metadata pages never request private details. Read only
                     # the separately selected event through its fixed route.
-                    event = await self.get_event(calendar_id, str(item.get("id")))
+                    event = await self.get_event(calendar_id, str(item.get("id")), allowed_fields=fields)
                     if canonical_event_key(self.owner_principal_id, self.connection.connection_id, calendar_id, event) != key or event.get("etag") != item.get("etag"):
                         raise CalendarIntegrationError("calendar_sync_event_changed", "The selected event changed during private read", status_code=409)
                     item = event
@@ -1108,8 +1124,9 @@ class GoogleCalendarReadonlyAdapter:
         return result, token
 
     async def get_event(self, calendar_id: str, provider_event_id: str, *, allowed_fields: set[str] | None = None) -> dict[str, Any]:
+        query = [] if allowed_fields is None else [("fields", _event_response_fields(allowed_fields))]
         path = f"{EVENTS_PATH}/{_calendar_segment(calendar_id, field='calendar id')}/events/{_calendar_segment(provider_event_id, field='event id')}"
-        return await self._authorized_get(_fixed_url(GOOGLE_API_ORIGIN, path))
+        return await self._authorized_get(_fixed_url(GOOGLE_API_ORIGIN, path, query))
 
 
 @dataclass

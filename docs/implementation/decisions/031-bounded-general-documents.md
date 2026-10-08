@@ -106,11 +106,13 @@ cleanup), capped by the immutable original execution deadline; shutdown and
 cancellation share its remaining allowance. Input has at most 8 KiB request JSON, 16 MiB source pipe input and
 1 MiB plus 4 KiB result-envelope pipe output. Linux uses libseccomp default-allow
 with EPERM denial of socket/socketpair/connect/bind/listen/accept/send/receive,
-exec and process creation syscalls; macOS uses the native libsandbox deny-network,
+exec and process creation syscalls, plus mandatory io_uring_setup,
+io_uring_enter and io_uring_register denial; macOS uses the native libsandbox deny-network,
 deny-process-exec and deny-process-fork profile. These targeted profiles establish
 network/process denial, not a general filesystem confidentiality sandbox; resource
 limits alone establish neither. Inherited descriptors close and credentials never
-enter the fixed child environment. Kernel socket denial is proved before the
+enter the fixed child environment. Kernel socket denial and actual EPERM from
+each of the three Linux io_uring entry points are proved before the
 readiness handshake authorizes delivering private source bytes.
 An owner crash before committing positive reap leaves the source reader unknown
 and charged; elapsed time is not cleanup proof. Explicit bounded original-reader

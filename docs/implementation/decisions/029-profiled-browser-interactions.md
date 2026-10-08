@@ -10,7 +10,8 @@ Current App Guide.
 
 **Decision class:** Target architecture
 
-**Tracked work:** [#1012](https://github.com/seraph-quest/seraph/issues/1012), under
+**Tracked work:** [#1012](https://github.com/seraph-quest/seraph/issues/1012),
+[exact Forgejo forms #1013](https://github.com/seraph-quest/seraph/issues/1013), under
 [#992](https://github.com/seraph-quest/seraph/issues/992).
 
 ## Context
@@ -158,6 +159,80 @@ uncertainty and outputs. It cannot adopt a result, grant success, retry actions,
 reconcile external effects or transfer the original history authority. Exact
 receipt replay deduplicates without releasing any later resource reservation;
 conflicting cleanup proof fails closed.
+
+### Exact authenticated Forgejo profiles
+
+Only `forgejo.issue-create.v1` and `forgejo.issue-comment.v1` extend the
+[ADR-021 title owner](./021-exact-forgejo-issue-title.md). The original title
+transaction and its 245 UTF-8-byte title limit remain unchanged. These profiles
+use the existing Python connection, Vault, canonical jobs, native approvals and
+browser lane. They grant no generic authenticated interaction, API write,
+credential import, token creation, attachment or third-party site permission.
+
+Availability is an additive connection-owned, closed canonical schema with a
+compiled Forgejo 15.0.9 version and reviewed source-manifest digest. The empty
+profile set is the default. An explicit unchecked consent may activate at most
+two sorted unique IDs, comparing connection and form-profile revisions under the
+original Root's serialized writer and current Vault binding. Availability grants
+no POST. Reauthentication, credential replacement and local revocation clear
+availability and advance its revision before any provider contact.
+
+Preparing an ordinary issue binds the exact query-free owned repository form;
+preparing a comment additionally reads the exact numeric ordinary issue. Unknown,
+duplicate, prefilled, template, status, file and attachment controls block the
+selected operation. Fixed profile adapters accept only the pinned native
+successful controls and ordinary unnamed submitter. A source or native DOM
+contradiction blocks the affected adapter until independently reviewed source
+evidence resolves the contract. JavaScript stays disabled during preparation and
+submission. Backend-only web cookies reach exact web paths; Vault-derived Basic
+credentials reach numeric API GETs only. Native Chromium Origin, Referer, frame
+and `Sec-Fetch-Site: same-origin` are required at transport handoff; missing Fetch
+metadata blocks before contact. No synthetic CSRF token is
+created. Cross-origin and challenge responses fail closed.
+
+The initial signed 15.0.9 source signature is separate from native HTML5 form
+ownership. It pins the complete selected source structure, source form ancestry,
+the exact nested branch stub, inactive controls and inert editor template. The
+create native inventory has exactly 29 controls and successful names in order:
+title, content, ref, edit_mode, search, label_ids, milestone_id, project_id,
+assignee_ids. Only title/content change to reviewed literals; other values stay
+blank except the pinned page-derived edit_mode. The source redirect_after_creation
+input must remain empty and natively unowned, and never enters the POST.
+The no-project variant remains blocked. Comment has exactly 21 native controls
+and only content is successful; its separate status and editor controls remain
+unactivated. Both ordinary submitters require unique exact identity and ancestry.
+The lexical script inventories are create four/comment five; both active native
+inventories are four, with the fifth comment script inside the pinned inert
+template. No script or template is activated, ignored or synthesized. Only
+typed original actor/repository/numeric issue/title slots may vary; source or
+ownership drift blocks instead of broadening the grammar.
+
+Exact private review binds account and numeric repository/issue identity, literal
+title/body, native control order, source/form/body digests, ordinary notifications
+and history, and one POST. The content field for these two profiles may contain
+at most 16,384 UTF-8 bytes; the generic 2,048-byte private-field bound remains
+unchanged for every other profile. The complete escaped form is at most 16,384 bytes;
+the original transaction deadline is 180 seconds and at most six provider
+contacts cover preparation, submission and readback. The sole success response
+is HTTP200 with one exact JSON redirect. Create binds a positive issue index;
+comment binds a positive comment ID on the original issue. Readback uses only
+that exact numeric API path and compares actor, parent, IDs and full literal
+fields. A comment's `pull_request_url` must be the empty string.
+
+Lost response remains Unknown with the original liability. Reload and execution
+replay inspect history; they do not POST again or infer identity through listing
+or search. An explicit separate bounded GET-only observation is possible only
+when a trustworthy exact destination ID was retained. It leaves the original
+Unknown unchanged. Missing identity remains unresolved even after positive
+physical cleanup. Every outcome records `no_learning`; literal content remains
+in current-owner protected storage and never becomes a generic model input.
+
+Acceptance requires both complete UI/API/native-browser journeys against an
+actual signed unmodified Forgejo 15.0.9 fixture, including exact approval,
+one-POST/readback, private outcome, lost-response Unknown, restart inspection
+and positive owned cleanup. Source inspection, profile registration and settings
+tests alone do not establish that acceptance. Production Codeberg execution
+remains separately blocked by its account/site/version acceptance boundary.
 
 ## Validation and limitations
 

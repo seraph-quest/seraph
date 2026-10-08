@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { GoalInfo } from "../../types";
+import { ForgejoFormsPanel, type ForgejoFormConnection } from "./ForgejoFormsPanel";
 
 type Target = { owner: string; repository: string; repository_id: number; issue_id: number;
   issue_index: number; old_title: string; new_title: string; updated_at: string; timeline_digest: string };
-type Connection = { configured: boolean; connection_id: string | null; revision: number; state: string;
+type Connection = ForgejoFormConnection & { configured: boolean; connection_id: string | null; revision: number; state: string;
   provider_user_id: number | null; provider_login: string; read_consent_revision: number;
   read_consent_expires_at: string | null; available: boolean; no_learning: true };
 type Job = { job_id: string; revision: number; status: string; deadline_at: string; goal_id: string;
@@ -248,6 +249,9 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     {output?.readback_title && <p>Verified readback title: {output.readback_title} · no_learning</p>}
     {output?.observation_only && <p>GET-only observed title: {output.observed_current_title}. Original write remains Unknown; attribution is uncertain and original capacity is retained.</p>}
     {pending && <div aria-label="Unconfirmed exact Forgejo request"><p>The exact request is retained. Reload performs reads only; no automatic POST or Save replay.</p><button disabled={busy} onClick={() => void act()}>Retry exact retained request</button></div>}
+    <ForgejoFormsPanel connection={connection} goalId={goalId} goalRevision={selectedGoal?.revision}
+      ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+      onConnection={value => setConnection(value as Connection)} />
     <button disabled={!connection?.configured || busy || !!pending} onClick={() => void act({ method: "POST", path: "/connection/revoke", body: { expected_revision: connection?.revision } })}>Revoke backend session</button>
   </section>;
 }

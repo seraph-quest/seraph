@@ -158,8 +158,11 @@ to the authenticated document-source endpoint, seal its encrypted readback, then
 request one explicit bounded selection. The private response includes physical
 PDF page, DOCX paragraph/table or spreadsheet cell references and the immutable
 original digest. Spreadsheet formula literals and cached values remain separate;
-cached freshness is unknown and nothing evaluates a formula or macro. Scanned,
-protected, malformed, external-link and oversized sources show unsupported state
+cached freshness is unknown and nothing evaluates a formula or macro.
+Array-formula anchors retain the exact literal text and their inert cached value;
+data-table formulas or formula objects without expression text explicitly block
+the selected extraction, with no object representation returned as evidence.
+Scanned, protected, malformed, external-link and oversized sources show unsupported state
 and recovery instead of invented content. Private evidence never enters generic
 task events, and selection grants no source/model egress or learning authority.
 

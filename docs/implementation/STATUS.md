@@ -34,7 +34,9 @@ returns exact citations and immutable original digests, and retains encrypted
 private source/evidence readback. Selected-file cockpit intake, bounded isolated
 parsing, unsupported reasons and positive original-reader cleanup share current
 canonical ownership and quota. Local extraction does not authorize model egress
-or learning. OCR, protected/macro/external-linked sources and general question
+or learning. Ordinary and array-anchor formula expressions remain inert literals;
+data-table formulas and objects without literal expression text are unsupported.
+OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
 

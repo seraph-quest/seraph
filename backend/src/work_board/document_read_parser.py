@@ -22,6 +22,22 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
+def spreadsheet_formula_literal(value):
+    """Formula objects are metadata, never evidence through object repr."""
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+    if isinstance(value, DataTableFormula):
+        # This object has input/range attributes but no source expression text.
+        # Converting attributes into an expression would invent a formula.
+        raise DocumentReadError("document_spreadsheet_data_table_formula_unsupported")
+    if isinstance(value, ArrayFormula):
+        value = value.text
+    if not isinstance(value, str) or not value.startswith("=") or len(value) < 2:
+        raise DocumentReadError("document_spreadsheet_formula_literal_unsupported")
+    if len(value.encode("utf-8")) > OUTPUT_LIMIT:
+        raise DocumentReadError("document_output_size_exceeded")
+    return value
+
+
 def office_package(raw):
     """Preflight central directory before libraries expand XML; extract nothing."""
     try:
@@ -164,9 +180,9 @@ def extract(raw, request):
                             count += 1
                             if count > limits["max_cells"]:
                                 raise DocumentReadError("document_populated_cell_limit_exceeded")
-                            formula = str(cell.value) if cell.data_type == "f" else None
+                            formula = spreadsheet_formula_literal(cell.value) if cell.data_type == "f" else None
                             cells.append({"source_ref": ref+f"#sheet={quote(name, safe='')}&cell={cell.coordinate}",
-                                "text": str(cell.value), "formula": formula,
+                                "text": formula if formula is not None else str(cell.value), "formula": formula,
                                 "cached_value": str(value.value) if formula and value.value is not None else None})
                         if cells:
                             add(f"sheet={quote(name, safe='')}&row={row[0].row}", cells=cells)

@@ -135,6 +135,59 @@ async def test_spreadsheet_literal_formula_and_cached_value_are_separate():
     assert "cached value freshness is unknown" in result["evidence"]["warnings"][-1]
 
 
+def formula_fixture(formula_xml):
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(fixture_bytes("xlsx"))) as source, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            raw = source.read(item)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                original = b"<f>SUM(B2:B3)</f><v></v>"
+                assert original in raw
+                raw = raw.replace(original, formula_xml+b"<v>4</v>")
+            target.writestr(item, raw)
+    return output.getvalue()
+
+
+async def test_array_formula_exact_literal_cache_and_deterministic_child_readback():
+    raw = formula_fixture(b'<f t="array" ref="C2:C3">SUM(B2:B3)</f>')
+    service = DocumentService(); await service.start()
+    try:
+        results = [await service.parse(raw, read_request("xlsx")) for _ in range(2)]
+    finally:
+        await service.stop()
+    assert results[0] == results[1]
+    assert results[0]["status"] == "succeeded", results[0]
+    cells = [cell for section in results[0]["evidence"]["sections"] for cell in section["table_cells"]]
+    formula = next(cell for cell in cells if cell["formula"])
+    assert formula["text"] == formula["formula"] == "=SUM(B2:B3)"
+    assert formula["cached_value"] == "4" and "cell=C2" in formula["source_ref"]
+    assert " object at " not in json.dumps(results)
+
+
+@pytest.mark.parametrize("formula_xml,reason", [
+    (b'<f t="dataTable" ref="C2:C3" r1="B2"/>', "document_spreadsheet_data_table_formula_unsupported"),
+    (b'<f t="array" ref="C2:C3"/>', "document_spreadsheet_formula_literal_unsupported"),
+])
+async def test_nonliteral_formula_objects_have_explicit_unsupported_state(formula_xml, reason):
+    service = DocumentService(); await service.start()
+    try:
+        result = await service.parse(formula_fixture(formula_xml), read_request("xlsx"))
+    finally:
+        await service.stop()
+    assert result["status"] == "blocked" and result["reason"] == reason, result
+    assert result["cleanup"] == "wait_reaped" and result["provider_contacts"] == 0
+    assert "evidence" not in result
+
+
+def test_unknown_formula_objects_never_serialize_repr():
+    from src.work_board.document_read_parser import spreadsheet_formula_literal
+    class UnsupportedFormula:
+        def __str__(self):
+            raise AssertionError("formula object repr was consumed")
+    with pytest.raises(DocumentReadError, match="document_spreadsheet_formula_literal_unsupported"):
+        spreadsheet_formula_literal(UnsupportedFormula())
+
+
 @pytest.mark.parametrize("fmt", ["pdf", "docx", "xlsx", "csv", "restart", "cancel"])
 async def test_authenticated_private_source_upload_seal_read_delete(accounting_db, monkeypatch, fmt):
     from config.settings import settings

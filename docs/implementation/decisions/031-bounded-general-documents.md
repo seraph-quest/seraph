@@ -46,6 +46,11 @@ ratio and traversal checks precede Office parsing. Reject protected, malformed,
 scanned/OCR, macro-enabled and external-link packages with specific recovery.
 Read spreadsheet formulas literally and cached values separately; report that
 cached freshness is unknown. Never evaluate formulas, macros or linked sources.
+Ordinary and array-formula anchor cells preserve their literal expression text;
+array ranges are not evaluated or expanded into inferred results. Data-table
+formula objects have no literal expression and are explicitly unsupported, as
+are unknown non-string formula objects and missing expression text. Object
+representations and process addresses never become formula evidence.
 Skipped pages/sheets are named in bounded warnings.
 
 Exact package preflight limits are 2,048 ZIP entries, 16 MiB per expanded member,

@@ -7201,6 +7201,35 @@ class MemoryRepository:
         last_confirmed_at: datetime | None = None,
         composition_authority_check=None,
     ) -> Memory:
+        async with get_session() as db:
+            await _begin_canonical_write(db)
+            return await self._update_memory_control_metadata_in_session(
+                db, memory_id, status=status, content=content, summary=summary,
+                confidence=confidence, importance=importance,
+                reinforcement=reinforcement, metadata_updates=metadata_updates,
+                last_confirmed_at=last_confirmed_at,
+                composition_authority_check=composition_authority_check,
+            )
+
+    async def _update_memory_control_metadata_in_session(
+        self,
+        db,
+        memory_id: str,
+        *,
+        status: MemoryStatus | str | None = None,
+        content: str | None = None,
+        summary: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        reinforcement: float | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        last_confirmed_at: datetime | None = None,
+        composition_authority_check=None,
+        expected_owner_session_id: str | None = None,
+    ) -> Memory:
+        """Use the caller's already-started canonical writer; never commit it."""
+        if not db.in_transaction():
+            raise RuntimeError("memory control requires a caller-owned writer")
         normalized_memory_id = str(memory_id or "").strip()
         if not normalized_memory_id:
             raise ValueError("memory_id must be non-empty")
@@ -7212,113 +7241,118 @@ class MemoryRepository:
                 return value.replace(tzinfo=timezone.utc)
             return value.astimezone(timezone.utc)
 
-        async with get_session() as db:
-            await _begin_canonical_write(db)
-            if composition_authority_check is not None:
-                await composition_authority_check(db)
-            memory = (
-                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
-            ).scalars().first()
-            if memory is None:
-                raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+        if composition_authority_check is not None:
+            await composition_authority_check(db)
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+        ).scalars().first()
+        if memory is None:
+            raise ValueError(f"Unknown memory id: {normalized_memory_id}")
 
-            requested_status = (
-                _coerce_enum(status, MemoryStatus)
-                if status is not None
-                else None
-            )
-            tombstone = (
-                await db.execute(
-                    select(MemoryTombstone).where(
-                        MemoryTombstone.memory_id == normalized_memory_id
-                    )
+        if expected_owner_session_id is not None:
+            if (not expected_owner_session_id.strip()
+                or memory.source_session_id != expected_owner_session_id):
+                raise ValueError("memory does not belong to the original owner session")
+
+        requested_status = (
+            _coerce_enum(status, MemoryStatus)
+            if status is not None
+            else None
+        )
+        tombstone = (
+            await db.execute(
+                select(MemoryTombstone).where(
+                    MemoryTombstone.memory_id == normalized_memory_id
                 )
-            ).scalars().first()
-            if tombstone is not None or _canonical_memory_deletion_marker(memory) is not None:
-                if requested_status is MemoryStatus.active:
-                    raise ValueError(
-                        "cannot reactivate canonical memory after operator delete/export redaction"
-                    )
+            )
+        ).scalars().first()
+        if tombstone is not None or _canonical_memory_deletion_marker(memory) is not None:
+            if requested_status is MemoryStatus.active:
                 raise ValueError(
-                    "cannot mutate canonical memory after operator delete/export redaction"
+                    "cannot reactivate canonical memory after operator delete/export redaction"
                 )
-
-            expected_status = _coerce_enum(memory.status, MemoryStatus)
-            expected_metadata = memory.metadata_json
-            expected_updated_at = _normalize_timestamp(memory.updated_at)
-            expected_metadata_guard = (
-                Memory.metadata_json.is_(None)
-                if expected_metadata is None
-                else Memory.metadata_json == expected_metadata
-            )
-            expected_updated_at_guard = (
-                Memory.updated_at.is_(None)
-                if expected_updated_at is None
-                else Memory.updated_at == expected_updated_at
+            raise ValueError(
+                "cannot mutate canonical memory after operator delete/export redaction"
             )
 
-            if status is not None:
-                memory.status = requested_status
-            if isinstance(content, str):
-                normalized_content = content.strip()
-                if not normalized_content:
-                    raise ValueError("content must be non-empty")
-                memory.content = normalized_content
-            if isinstance(summary, str):
-                memory.summary = summary.strip() or None
-            if confidence is not None:
-                memory.confidence = max(0.0, min(1.0, float(confidence)))
-            if importance is not None:
-                memory.importance = max(0.0, min(1.0, float(importance)))
-            if reinforcement is not None:
-                memory.reinforcement = max(0.0, float(reinforcement))
-            if last_confirmed_at is not None:
-                memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
+        expected_status = _coerce_enum(memory.status, MemoryStatus)
+        expected_metadata = memory.metadata_json
+        expected_updated_at = _normalize_timestamp(memory.updated_at)
+        expected_metadata_guard = (
+            Memory.metadata_json.is_(None)
+            if expected_metadata is None
+            else Memory.metadata_json == expected_metadata
+        )
+        expected_updated_at_guard = (
+            Memory.updated_at.is_(None)
+            if expected_updated_at is None
+            else Memory.updated_at == expected_updated_at
+        )
 
-            metadata: dict[str, Any]
-            try:
-                parsed_metadata = json.loads(memory.metadata_json or "{}")
-            except json.JSONDecodeError:
-                parsed_metadata = {}
-            metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
-            if metadata_updates:
-                metadata.update(metadata_updates)
-                memory.metadata_json = json.dumps(metadata, sort_keys=True)
+        if status is not None:
+            memory.status = requested_status
+        if isinstance(content, str):
+            normalized_content = content.strip()
+            if not normalized_content:
+                raise ValueError("content must be non-empty")
+            memory.content = normalized_content
+        if isinstance(summary, str):
+            memory.summary = summary.strip() or None
+        if confidence is not None:
+            memory.confidence = max(0.0, min(1.0, float(confidence)))
+        if importance is not None:
+            memory.importance = max(0.0, min(1.0, float(importance)))
+        if reinforcement is not None:
+            memory.reinforcement = max(0.0, float(reinforcement))
+        if last_confirmed_at is not None:
+            memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
 
-            memory.updated_at = _now()
-            db.expunge(memory)
-            guarded_update = await db.execute(
-                update(Memory)
-                .where(
-                    Memory.id == normalized_memory_id,
-                    Memory.status == expected_status,
-                    expected_metadata_guard,
-                    expected_updated_at_guard,
-                    _canonical_memory_without_tombstone_clause(),
-                )
-                .values(
-                    status=requested_status or expected_status,
-                    content=memory.content,
-                    summary=memory.summary,
-                    confidence=memory.confidence,
-                    importance=memory.importance,
-                    reinforcement=memory.reinforcement,
-                    last_confirmed_at=memory.last_confirmed_at,
-                    metadata_json=memory.metadata_json,
-                    updated_at=memory.updated_at,
-                )
+        metadata: dict[str, Any]
+        try:
+            parsed_metadata = json.loads(memory.metadata_json or "{}")
+        except json.JSONDecodeError:
+            parsed_metadata = {}
+        metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
+        if metadata_updates:
+            metadata.update(metadata_updates)
+            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+
+        memory.updated_at = _now()
+        db.expunge(memory)
+        guarded_update = await db.execute(
+            update(Memory)
+            .where(
+                Memory.id == normalized_memory_id,
+                Memory.status == expected_status,
+                *([Memory.source_session_id == expected_owner_session_id]
+                  if expected_owner_session_id is not None else []),
+                expected_metadata_guard,
+                expected_updated_at_guard,
+                _canonical_memory_without_tombstone_clause(),
             )
-            if guarded_update.rowcount != 1:
-                raise ValueError(
-                    "memory changed before control update; canonical deletion or another memory control won"
-                )
-            memory = (
-                await db.execute(
-                    select(Memory).where(Memory.id == normalized_memory_id)
-                )
-            ).scalars().one()
-            db.expunge(memory)
-            return memory
+            .values(
+                status=requested_status or expected_status,
+                content=memory.content,
+                summary=memory.summary,
+                confidence=memory.confidence,
+                importance=memory.importance,
+                reinforcement=memory.reinforcement,
+                last_confirmed_at=memory.last_confirmed_at,
+                metadata_json=memory.metadata_json,
+                updated_at=memory.updated_at,
+            )
+        )
+        if guarded_update.rowcount != 1:
+            raise ValueError(
+                "memory changed before control update; canonical deletion or another memory control won"
+            )
+        memory = (
+            await db.execute(
+                select(Memory).where(Memory.id == normalized_memory_id)
+            )
+        ).scalars().one()
+        db.expunge(memory)
+        return memory
 
     async def rollback_memory_if_unchanged(
         self,

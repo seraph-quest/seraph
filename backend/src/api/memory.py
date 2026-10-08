@@ -699,6 +699,7 @@ async def forget_memory_item(memory_id: str, http_request: Request, request: Mem
         return await forget_memory(
             memory_id=memory_id,
             actor=context.actor,
+            owner_session_id=context.session_id,
             reason=request.reason,
             mode=request.mode,
             privacy_boundary=request.privacy_boundary,

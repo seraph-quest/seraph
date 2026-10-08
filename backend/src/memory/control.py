@@ -12,7 +12,8 @@ from sqlmodel import select
 
 from src.audit.repository import audit_repository
 from src.db.engine import get_session
-from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
+from src.db.session_refs import ensure_sessions_exist
+from src.db.models import Session, Memory, MemoryEdgeType, MemoryKind, MemoryStatus, StrategyDelta
 from src.memory.decay import (
     DecayMaintenanceResult,
     apply_memory_decay_policies,
@@ -24,6 +25,7 @@ from src.memory.repository import (
     _CANONICAL_MEMORY_DELETE_CONTENT,
     _CANONICAL_MEMORY_REDACTED_STATE,
     _canonical_memory_deletion_marker,
+    _begin_canonical_write,
     _recovery_authority,
     memory_repository,
 )
@@ -797,6 +799,52 @@ async def forget_memory(
     mode: str = "archive",
     privacy_boundary: str | None = None,
     composition_authority_check=None,
+    owner_session_id: str | None = None,
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await _begin_canonical_write(db)
+        if owner_session_id is not None:
+            return await _forget_memory_in_session(
+                db, owner_session_id=owner_session_id, memory_id=memory_id,
+                actor=actor, reason=reason, mode=mode,
+                privacy_boundary=privacy_boundary,
+                composition_authority_check=composition_authority_check,
+            )
+        return await _forget_memory_in_writer(
+            db, memory_id=memory_id, actor=actor, reason=reason, mode=mode,
+            privacy_boundary=privacy_boundary,
+            composition_authority_check=composition_authority_check,
+        )
+
+
+async def _forget_memory_in_session(
+    db, *, owner_session_id: str, memory_id: str, actor: str = "operator",
+    reason: str | None = None, mode: str = "archive",
+    privacy_boundary: str | None = None, composition_authority_check=None,
+) -> dict[str, Any]:
+    """Strict existing-owner forget in the caller's original writer."""
+    if not db.in_transaction():
+        raise RuntimeError("memory forget requires a caller-owned writer")
+    if (not isinstance(owner_session_id, str) or not owner_session_id.strip()
+        or await db.get(Session, owner_session_id) is None):
+        raise ValueError("original owner Session is required for memory forget")
+    return await _forget_memory_in_writer(
+        db, memory_id=memory_id, actor=actor, reason=reason, mode=mode,
+        privacy_boundary=privacy_boundary,
+        composition_authority_check=composition_authority_check,
+        expected_owner_session_id=owner_session_id,
+    )
+
+
+async def _forget_memory_in_writer(
+    db, *,
+    memory_id: str,
+    actor: str = "operator",
+    reason: str | None = None,
+    mode: str = "archive",
+    privacy_boundary: str | None = None,
+    composition_authority_check=None,
+    expected_owner_session_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_mode = "redact" if str(mode or "").strip().lower() == "redact" else "archive"
     boundary = _normalize_privacy_boundary(privacy_boundary)
@@ -819,10 +867,17 @@ async def forget_memory(
     if normalized_mode == "redact":
         update_kwargs["content"] = "[forgotten by operator]"
         update_kwargs["summary"] = "[forgotten by operator]"
-    memory = await memory_repository.update_memory_control_metadata(memory_id, composition_authority_check=composition_authority_check, **update_kwargs)
-    audit_event = await audit_repository.log_event(
+    memory = await memory_repository._update_memory_control_metadata_in_session(
+        db, memory_id, composition_authority_check=composition_authority_check,
+        expected_owner_session_id=expected_owner_session_id, **update_kwargs
+    )
+    if expected_owner_session_id is None:
+        # Legacy control calls preserve their existing Session-FK behavior.
+        # The strict caller-session entry point never creates an owner.
+        await ensure_sessions_exist(db, [memory.source_session_id])
+    audit_event = await audit_repository._log_event_in_session(
+        db,
         actor=actor,
-        composition_authority_check=composition_authority_check,
         event_type="memory_forgotten",
         tool_name="memory_control",
         risk_level="medium" if normalized_mode == "redact" else "low",
@@ -948,6 +1003,7 @@ async def apply_memory_operator_control(
         return await forget_memory(
             memory_id=memory_id,
             actor=actor,
+            owner_session_id=session_id,
             reason=note,
             privacy_boundary=privacy_boundary,
         )

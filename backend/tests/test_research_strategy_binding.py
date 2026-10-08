@@ -78,6 +78,20 @@ def test_closed_strategy_rejects_unrecoverable_or_foreign_data(mutation):
     with pytest.raises(ValueError): strategy_projection(value)
 
 
+@pytest.mark.parametrize("mutation", ["tuple", "path"])
+def test_typed_binding_preserves_original_non_json_data_until_rejection(mutation):
+    from pathlib import Path
+    from src.work_board.contracts import TaskStrategyBinding
+    value = active()
+    if mutation == "tuple": value["typed_data"]["query_templates"] = ("Find official evidence",)
+    else: value["typed_data"]["query_templates"] = [Path("official-evidence")]
+    binding = TaskStrategyBinding.model_validate(value)
+    # Its JSON dump would hide the forbidden native tuple/path conversion.
+    assert binding.model_dump(mode="json")["typed_data"]["query_templates"] == [
+        "Find official evidence" if mutation == "tuple" else "official-evidence"]
+    with pytest.raises(ValueError): strategy_projection(binding)
+
+
 @pytest.mark.asyncio
 async def test_active_native_projection_survives_only_exact_owner_proof(accounting_db):
     jobs, task, attempt, spec, parent, creation = await create_kernel(accounting_db)

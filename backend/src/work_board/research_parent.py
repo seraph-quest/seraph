@@ -41,7 +41,7 @@ def strategy_projection(value):
     from src.work_board.contracts import TaskStrategyBinding
     from src.memory.task_lessons import ResearchStrategy
     if isinstance(value, TaskStrategyBinding):
-        value = value.model_dump(mode="json")
+        value = value.model_dump(mode="python")
     fields = {"schema_version", "status", "method_id", "version", "digest", "typed_data", "reason"}
     if (type(value) is not dict or set(value) != fields
         or type(value["schema_version"]) is not int or value["schema_version"] != 1

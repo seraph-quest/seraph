@@ -336,7 +336,8 @@ def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
     assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
-def test_run_command_cancel_event_kills_in_flight_process_within_bound():
+def test_run_command_cancel_event_kills_in_flight_process_within_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     script_name = _write_script(
         "wave_process_cancellation.py",
         """

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from fractions import Fraction
-from math import ceil
+from math import ceil, floor
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -43,12 +43,14 @@ def _supported(schema, depth=0):
             and _supported(schema.get("additionalProperties", True), depth + 1))
 
 
-def _possible(schema, depth=0):
+def _possible(schema, depth=0, *, producer=True):
     """Reject closed, locally provable contradictions before equality proof.
 
     Finite values are checked against the entire schema. For nonfinite schemas
     this checks scalar bounds and required object/array members; it does not
-    attempt regex satisfiability or general JSON Schema subsumption.
+    attempt regex satisfiability or general JSON Schema subsumption. A required
+    nonfinite regex producer has unknown inhabitation and fails closed. Consumer
+    patterns may still be proved by validating actual finite producer members.
     """
     if depth > 32 or schema is False:
         return False
@@ -64,18 +66,24 @@ def _possible(schema, depth=0):
         # satisfy the enclosing assertions as well, unless they are absent.
         if set(schema) - (_ANNOTATIONS | {"anyOf"}):
             return False
-        return any(_possible(child, depth + 1) for child in schema["anyOf"])
+        return any(_possible(child, depth + 1, producer=producer) for child in schema["anyOf"])
     kinds = schema.get("type", ["null", "boolean", "string", "number", "object", "array"])
     if isinstance(kinds, str):
         kinds = [kinds]
-    return any(_possible_type(schema, kind, depth) for kind in kinds)
+    return any(_possible_type(schema, kind, depth, producer=producer) for kind in kinds)
 
 
-def _possible_type(schema, kind, depth):
+def _possible_type(schema, kind, depth, *, producer):
     if kind in {"null", "boolean"}:
         values = [None] if kind == "null" else [False, True]
         return any(Draft202012Validator(schema).is_valid(value) for value in values)
     if kind == "string":
+        if producer and "pattern" in schema:
+            # The sole reviewed nonfinite regex subset has a constructive
+            # witness. Check every assertion, not merely the pattern/bounds.
+            # This grants no runtime result validity or caller-supplied proof.
+            return (schema["pattern"] == "^[a-f0-9]{64}$"
+                    and Draft202012Validator(schema).is_valid("0" * 64))
         return schema.get("minLength", 0) <= schema.get("maxLength", float("inf"))
     if kind in {"integer", "number"}:
         lower = [(Fraction(str(schema[key])), key == "exclusiveMinimum")
@@ -102,37 +110,70 @@ def _possible_type(schema, kind, depth):
         minimum = max(schema.get("minProperties", 0), len(required))
         if minimum > schema.get("maxProperties", float("inf")):
             return False
-        if any(not _possible(props.get(name, extra), depth + 1) for name in required):
+        if any(not _possible(props.get(name, extra), depth + 1, producer=producer) for name in required):
             return False
-        if not _possible(extra, depth + 1):
-            return minimum <= sum(_possible(child, depth + 1) for child in props.values())
+        if not _possible(extra, depth + 1, producer=producer):
+            return minimum <= sum(_possible(child, depth + 1, producer=producer) for child in props.values())
         return True
     if kind == "array":
         minimum = schema.get("minItems", 0)
         if minimum > schema.get("maxItems", float("inf")):
             return False
         prefix = schema.get("prefixItems", [])
-        if any(not _possible(child, depth + 1) for child in prefix[:minimum]):
+        if any(not _possible(child, depth + 1, producer=producer) for child in prefix[:minimum]):
             return False
         items = schema.get("items", True)
-        if minimum > len(prefix) and not _possible(items, depth + 1):
+        if minimum > len(prefix) and not _possible(items, depth + 1, producer=producer):
             return False
-        if not prefix and schema.get("uniqueItems") and isinstance(items, dict):
-            values = ([items["const"]] if "const" in items else items.get("enum"))
-            if values is None and items.get("type") in ("boolean", "null"):
-                values = [False, True] if items["type"] == "boolean" else [None]
-            if values is not None:
-                valid = []
-                validator = Draft202012Validator(items)
-                for value in values:
-                    if validator.is_valid(value) and not any(
-                        Draft202012Validator({"const": prior}).is_valid(value) for prior in valid
-                    ):
-                        valid.append(value)
-                if minimum > len(valid):
-                    return False
+        if schema.get("uniqueItems") and minimum > 1:
+            # Distinctness of heterogeneous prefix domains is outside this
+            # proof subset. Homogeneous finite domains have a closed capacity.
+            if prefix:
+                return False
+            capacity = _domain_capacity(items)
+            if capacity is None or minimum > capacity:
+                return False
         return True
     return False
+
+
+def _domain_capacity(schema):
+    """Exact capacity for closed finite domains; None means no proof.
+
+    An integer lattice unbounded on either side has infinite capacity. No
+    enumeration of numeric ranges, string search or caller witness is used.
+    """
+    if isinstance(schema, bool):
+        return float("inf") if schema else 0
+    values = [schema["const"]] if "const" in schema else schema.get("enum")
+    if values is None and schema.get("type") in ("boolean", "null"):
+        values = [False, True] if schema["type"] == "boolean" else [None]
+    if values is None and schema.get("type") == "string" and schema.get("maxLength") == 0:
+        values = [""]
+    if values is not None:
+        valid = []
+        validator = Draft202012Validator(schema)
+        for value in values:
+            if validator.is_valid(value) and not any(
+                Draft202012Validator({"const": prior}).is_valid(value) for prior in valid
+            ):
+                valid.append(value)
+        return len(valid)
+    if schema.get("type") == "integer":
+        lower = [(Fraction(str(schema[key])), key == "exclusiveMinimum")
+                 for key in ("minimum", "exclusiveMinimum") if key in schema]
+        upper = [(Fraction(str(schema[key])), key == "exclusiveMaximum")
+                 for key in ("maximum", "exclusiveMaximum") if key in schema]
+        if not lower or not upper:
+            return float("inf")
+        lo = max(lower)
+        hi = min(upper, key=lambda bound: (bound[0], not bound[1]))
+        step = Fraction(str(schema.get("multipleOf", 1))).numerator
+        first, last = ceil(lo[0] / step), floor(hi[0] / step)
+        first += int(lo[1] and first * step == lo[0])
+        last -= int(hi[1] and last * step == hi[0])
+        return max(0, last - first + 1)
+    return None
 
 
 def _implies(source, target):
@@ -193,7 +234,7 @@ def schema_accepts_output(output_schema: dict, contract_schema: dict) -> bool:
     try:
         Draft202012Validator.check_schema(output_schema)
         Draft202012Validator.check_schema(contract_schema)
-        if not _possible(output_schema) or not _possible(contract_schema):
+        if not _possible(output_schema) or not _possible(contract_schema, producer=False):
             return False
         if _canonical(output_schema) == _canonical(contract_schema):
             return True

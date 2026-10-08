@@ -1,5 +1,6 @@
 """Schema admission mechanics and physical-file nonexecution; no inference."""
 import socket
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +16,7 @@ from src.work_board.general_task import GeneralTaskService, digest
 from src.work_board.general_task_schema import schema_accepts_output
 from src.work_board.repository import BoardError
 from tests.test_general_task_persistence import task_runtime
+from tests.test_general_task_adapters import registry, mcp_registry
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
 
@@ -45,6 +47,17 @@ _EMPTY_PRODUCERS = [
     {"type": "integer", "minimum": 1, "maximum": 4, "multipleOf": 2.5},
     {"type": "array", "minItems": 2, "uniqueItems": True, "items": {"enum": [1, 1.0]}},
     {"type": "array", "minItems": 3, "uniqueItems": True, "items": {"type": "boolean"}},
+    {"type": "string", "maxLength": 8, "pattern": "a^"},
+    {"type": "string", "minLength": 9, "maxLength": 8, "pattern": "a^"},
+    {"type": "object", "properties": {"text": {
+        "type": "string", "maxLength": 8, "pattern": "a^"}},
+     "required": ["text"], "additionalProperties": False},
+    {"type": "array", "minItems": 1, "maxItems": 2,
+     "items": {"type": "string", "maxLength": 8, "pattern": "a^"}},
+    {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": True,
+     "items": {"type": "integer", "minimum": 1, "maximum": 2}},
+    {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+     "items": {"type": "string", "maxLength": 0}},
 ]
 
 
@@ -84,9 +97,108 @@ async def test_empty_descriptor_rejected_by_full_admission_without_contact(sourc
     {"type": "object", "properties": {"optional": False}, "additionalProperties": False},
     {"type": "integer", "minimum": 1, "maximum": 5, "multipleOf": 2.5},
     {"type": "array", "minItems": 2, "uniqueItems": True, "items": {"enum": [1, True]}},
+    {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+     "items": {"type": "integer", "minimum": 1, "maximum": 2}},
+    {"type": "array", "minItems": 1, "maxItems": 1, "uniqueItems": True,
+     "items": {"type": "string", "maxLength": 0}},
 ])
 def test_nonempty_exact_producers_remain_compatible(schema):
     assert schema_accepts_output(schema, schema)
+
+
+@pytest.mark.parametrize("source", [
+    {"type": "string", "const": "safe", "maxLength": 8, "pattern": "^safe$"},
+    {"type": "string", "enum": [1, "safe"], "maxLength": 8, "pattern": "^safe$"},
+])
+def test_finite_regex_producer_proves_exact_and_regex_consumer(source):
+    assert schema_accepts_output(source, source)
+    assert schema_accepts_output(source, {"type": "string", "maxLength": 8, "pattern": "^safe$"})
+
+
+def test_optional_unknown_regex_property_can_be_omitted():
+    schema = {"type": "object", "properties": {"optional": {
+        "type": "string", "maxLength": 8, "pattern": "a^"}}, "additionalProperties": False}
+    assert schema_accepts_output(schema, schema)
+
+
+def test_example_and_default_do_not_prove_regex_producer():
+    schema = {"type": "string", "maxLength": 8, "pattern": "^safe$",
+              "default": "safe", "examples": ["safe"]}
+    assert not schema_accepts_output(schema, schema)
+
+
+@pytest.mark.parametrize("extras,compatible", [
+    ({}, True), ({"minLength": 64, "maxLength": 64}, True),
+    ({"maxLength": 63}, False), ({"minLength": 65}, False),
+])
+def test_reviewed_sha_pattern_fixed_witness_checks_entire_schema(extras, compatible):
+    schema = {"type": "string", "pattern": "^[a-f0-9]{64}$", **extras}
+    assert schema_accepts_output(schema, schema) is compatible
+
+
+@pytest.mark.parametrize("schema", [
+    {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+     "items": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+     "items": {"type": "string", "maxLength": 8}},
+])
+def test_unknown_unique_domain_capacity_fails_closed(schema):
+    assert not schema_accepts_output(schema, schema)
+
+
+@pytest.mark.parametrize("items,minimum,compatible", [
+    ({"type": "integer", "minimum": 1, "maximum": 10, "multipleOf": 2.5}, 2, True),
+    ({"type": "integer", "minimum": 1, "maximum": 10, "multipleOf": 2.5}, 3, False),
+    ({"type": "integer", "exclusiveMinimum": 1, "exclusiveMaximum": 4}, 2, True),
+    ({"type": "integer", "exclusiveMinimum": 1, "exclusiveMaximum": 4}, 3, False),
+    ({"type": "integer", "minimum": 1.1, "maximum": 2.9}, 2, False),
+    ({"type": "integer", "minimum": 1, "multipleOf": 2.5}, 20, True),
+])
+def test_unique_integer_capacity_respects_exact_lattice_and_bounds(items, minimum, compatible):
+    schema = {"type": "array", "minItems": minimum, "maxItems": minimum,
+              "uniqueItems": True, "items": items}
+    assert schema_accepts_output(schema, schema) is compatible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source,compatible", [(source, False) for source in _EMPTY_PRODUCERS[-6:]] + [
+    ({"type": "string", "const": "safe", "maxLength": 8, "pattern": "^safe$"}, True),
+    ({"type": "string", "enum": [1, "safe"], "maxLength": 8, "pattern": "^safe$"}, True),
+    ({"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+      "items": {"type": "integer", "minimum": 1, "maximum": 2}}, True),
+    ({"type": "array", "minItems": 1, "maxItems": 1, "uniqueItems": True,
+      "items": {"type": "string", "maxLength": 0}}, True),
+    ({"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$"}, True),
+])
+async def test_registered_mcp_regex_contract_admission_without_wrapper_contact(mcp_registry, source, compatible):
+    current, manager, tool, path, declaration = mcp_registry
+    # This schema is genuinely advertised by the existing guarded MCP registry;
+    # registration's bounded-schema check alone cannot establish inhabitation.
+    tool.output_schema = source
+    declaration["output_schema"] = source
+    content = json.loads(path.read_text())
+    content["task_tools"][tool.name] = declaration
+    path.write_text(json.dumps(content))
+    descriptors = current.descriptors()
+    selected = next(item for item in descriptors if item.server_id == "local")
+    assert selected.output_schema == source
+    value = GeneralTaskCreate(goal_revision=1, idempotency_key="deny-regex-mcp", expected_plan_revision=1,
+        input=GeneralTaskInput(goal_ref="goal-1", intent="Read the bounded result",
+            requested_output=source,
+            tool_set_digest=digest([item.model_dump(mode="json") for item in descriptors])),
+        plan=PlanSpec(revision=1, steps=[{"step_id": "read", "tool_id": selected.tool_id,
+            "input": {"query": "local"}, "output_contract": source}]))
+    service = GeneralTaskService(current)
+    service.start()
+    try:
+        if compatible:
+            await service.validate(WorkBoardOwner(principal_id="owner", session_id="session"), value)
+        else:
+            with pytest.raises(BoardError, match="registered tool contract"):
+                await service.validate(WorkBoardOwner(principal_id="owner", session_id="session"), value)
+        assert tool.calls == 0
+    finally:
+        service.stop()
 
 
 @pytest.mark.parametrize("source,target,compatible", [

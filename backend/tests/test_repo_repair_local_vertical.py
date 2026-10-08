@@ -714,7 +714,7 @@ def _publication_worker_blocked_diagnostic(error: BaseException) -> dict[str, An
                     frame = traceback.tb_frame
                     if (frame.f_code is _PUBLICATION_ORIGINAL_EXECUTE_CODE
                         and frame.f_globals.get("__name__") == "src.execution.repo_sandbox"
-                        and frame.f_code.co_name == "execute_job" and traceback.tb_lineno == 3478):
+                        and frame.f_code.co_name == "execute_job" and traceback.tb_lineno == 3573):
                         return _publication_worker_receipt_projection(
                             frame.f_locals.get("raw_manifest"), frame.f_locals.get("raw_readback"))
                     traceback = traceback.tb_next

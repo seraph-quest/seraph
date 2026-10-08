@@ -32,7 +32,8 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
   const readySetup = loadedScope === scope ? setup : null;
   const goal = goals.find(item => item.id === goalId && nearTextGoalEligible(item, ownerSessionId));
   const eligible = Boolean(owned && task && nearTextOutputEligible(task));
-  const liability = Boolean(task && (task.block_kind === "cost_liability" || task.block_reason?.includes("cost_liability")));
+  const liability = Boolean(task && (task.block_kind === "cost_liability" || task.block_reason?.includes("cost_liability")
+    || (task.status === "blocked" && task.block_reason === "near_cost_readback_required")));
   useEffect(() => {
     const version = ++generation.current;
     controller.current?.abort(); controller.current = null;
@@ -102,7 +103,7 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
     </>}
     {task && <>
       <div role="status">Work: {task.status} · local readback: {task.readback_status} · no_learning</div>
-      {liability && <div role="alert">The provider charge is unresolved. The answer was discarded and cannot be previewed or recovered. Settle the existing debt; settlement does not resend the question or restore its answer.</div>}
+      {liability && <div role="alert">The answer is unavailable and cannot be previewed or recovered. Any received answer was discarded. Inspect the original accounting for any remaining debt. Settlement does not resend the question or restore its answer.</div>}
       {!eligible && !liability && <p className="text-xs">An answer is available only after the original job succeeds, its charge settles and current local readback passes. Human review remains separate.</p>}
       {onOpenAccounting && (liability || task.status === "blocked") && <button type="button" onClick={onOpenAccounting}>Open existing cost settlement</button>}
       <button type="button" disabled={busy || !eligible} onClick={() => void readAnswer()}>Read NEAR answer</button>

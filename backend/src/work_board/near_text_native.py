@@ -314,19 +314,24 @@ async def execute(task,attempt,inputs,*,jobs,runner,admission_only,session_provi
             raise BoardError('near_owner_outstanding_limit','Only one NEAR operation may be outstanding for this owner')
         await recheck_provider_contact(db,run,witness=witness,require_lease=False)
     if projection is None:
-        with policy_lock(witness):
-            projection=await jobs.admit_job(spec,admission_authority_check=native_guard)
+        with native_policy_scope(witness,'admit') as scope:
+            projection=await jobs.admit_job(spec,admission_authority_check=native_guard,
+                near_text_policy_scope=scope)
     elif (projection.get('input_digest')!=digest(spec.inputs) or projection.get('run_fingerprint')!=spec.run_fingerprint):
         raise BoardError('near_native_binding_changed','The original native admission changed')
     if admission_only or projection.get('status')=='succeeded':return {**projection,'admission_only':admission_only}
     if projection.get('status') not in {'accepted','queued'}:
         raise BoardError('near_original_attempt_required','Inspect the original attempt; inference cannot be replayed')
     if projection['status']=='accepted':
-        with policy_lock(witness):
-            projection=await jobs.queue_job(spec.identity.job_id,expected_revision=projection['revision'],near_text_witness=witness)
-    with policy_lock(witness):
+        with native_policy_scope(witness,'queue') as scope:
+            projection=await jobs.queue_job(spec.identity.job_id,expected_revision=projection['revision'],
+                near_text_witness=witness,near_text_policy_scope=scope)
+    with native_policy_scope(witness,'claim') as scope:
+        async def claim_guard(db,run):
+            enter_native_policy_scope(scope,db=db,run_or_identity=run,phase='claim')
+            await native_guard(db,run)
         projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=120,
-            expected_revision=projection['revision'],expected_fencing_token=projection.get('fencing_token'),claim_authority_check=native_guard)
+            expected_revision=projection['revision'],expected_fencing_token=projection.get('fencing_token'),claim_authority_check=claim_guard)
     fence=projection['lease']['fencing_token']
     # Native and board bindings are canonicalized by the existing dispatcher before execution.
     async with session_provider() as db:
@@ -375,12 +380,13 @@ async def execute(task,attempt,inputs,*,jobs,runner,admission_only,session_provi
             verified_at=now().isoformat(),status='succeeded',details={'verified':True,'no_learning':True},owner=runner,fencing_token=fence)
         await validate_current()
         async def terminal_guard(db,run):
+            enter_native_policy_scope(scope,db=db,run_or_identity=run,phase='terminal')
             await recheck_provider_contact(db,run,witness=witness)
             await _ledger(db,receipt,job=witness.job_id)
             checkpoints=json.loads(run.checkpoint_receipts_json or '[]')
             if not any(c.get('checkpoint_id')=='near-private-output' and c.get('payload',{}).get('plaintext_sha256')==digest(content) for c in checkpoints):
                 raise BoardError('near_output_unverified','The staged output checkpoint changed')
-        with policy_lock(witness):
+        with native_policy_scope(witness,'terminal') as scope:
             result=await jobs.transition_job(witness.job_id,'succeeded',owner=runner,fencing_token=fence,
                 terminal_authority_check=terminal_guard,result={'no_learning':True,'output_digest':digest(content)},
                 result_summary='NEAR HTTPS answer retained privately; settled cost; no_learning')
@@ -442,7 +448,92 @@ def assert_policy(witness):
         or witness.max_output_tokens>config.near_text.max_output_tokens):
         raise BoardError('near_policy_changed','The original current witnessed policy changed')
 
-from contextlib import contextmanager
+from contextlib import contextmanager,ExitStack
+
+_POLICY_SCOPE_SEAL=object()
+
+@dataclass
+class _NearPolicyScope:
+    witness: NearContactWitness=field(repr=False)
+    phase: str
+    seal: object
+    stack: ExitStack=field(default_factory=ExitStack)
+    active: bool=True
+    entered: bool=False
+    closed: bool=False
+    db: object=None
+    owner: object=field(default=None,repr=False)
+
+def _policy_scope_owner():
+    import asyncio,threading
+    try:
+        task=asyncio.current_task()
+    except RuntimeError:
+        task=None
+    return threading.get_ident(),task
+
+def _scope_invalid():
+    raise BoardError('near_policy_scope_invalid','The original active transaction policy scope is required')
+
+def _validate_scope_owner(scope):
+    if (type(scope) is not _NearPolicyScope or scope.seal is not _POLICY_SCOPE_SEAL
+        or not scope.active or scope.closed
+        or scope.owner!=_policy_scope_owner()
+        or type(scope.witness) is not NearContactWitness or scope.witness.seal is not SEAL):
+        _scope_invalid()
+
+@contextmanager
+def native_policy_scope(witness,phase):
+    if (type(witness) is not NearContactWitness or witness.seal is not SEAL
+        or type(phase) is not str or phase not in {'admit','queue','claim','terminal'}):
+        _scope_invalid()
+    scope=_NearPolicyScope(witness,phase,_POLICY_SCOPE_SEAL,owner=_policy_scope_owner())
+    try:
+        yield scope
+    finally:
+        try:
+            scope.stack.close()
+        finally:
+            scope.active=False
+            scope.closed=True
+
+def validate_native_policy_scope(scope,*,run_or_identity,phase,witness=None):
+    _validate_scope_owner(scope)
+    if type(run_or_identity) is DurableJobIdentity:
+        kind,identity=run_or_identity.job_kind,run_or_identity.job_id
+    elif type(run_or_identity) is WorkflowRunState:
+        kind,identity=run_or_identity.job_kind,run_or_identity.run_identity
+    else:
+        _scope_invalid()
+    if (scope.entered or scope.phase!=phase or type(phase) is not str or phase not in {'admit','queue','claim','terminal'}
+        or kind!=CAPABILITY or identity!=scope.witness.job_id
+        or (phase=='queue' and witness is not scope.witness)
+        or (witness is not None and witness is not scope.witness)):
+        _scope_invalid()
+
+def enter_native_policy_scope(scope,*,db,run_or_identity,phase,witness=None):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    validate_native_policy_scope(scope,run_or_identity=run_or_identity,phase=phase,witness=witness)
+    # The repository's controlled call site must have completed the same
+    # session's real BEGIN IMMEDIATE. A transaction flag alone is not a writer.
+    if not isinstance(db,AsyncSession) or not db.in_transaction():
+        _scope_invalid()
+    scope.db=db
+    scope.entered=True
+    scope.stack.enter_context(policy_lock(scope.witness))
+
+def release_admission_scope_after_rollback(scope,*,db):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    _validate_scope_owner(scope)
+    if (scope.phase!='admit' or not scope.entered or scope.db is not db
+        or not isinstance(db,AsyncSession) or db.in_transaction()):
+        _scope_invalid()
+    try:
+        scope.stack.close()
+    finally:
+        scope.active=False
+        scope.closed=True
+
 @contextmanager
 def policy_lock(witness):
     from config.settings import settings

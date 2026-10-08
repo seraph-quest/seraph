@@ -2314,11 +2314,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         selected_context_admission=None,
         admission_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         opportunity_preference_witness=None,
+        near_text_policy_scope=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if near_text_policy_scope is not None:
+            from src.work_board.near_text_native import validate_native_policy_scope
+            validate_native_policy_scope(near_text_policy_scope, run_or_identity=identity, phase="admit")
         if identity.job_kind == "selected_context_v1":
             from src.workflows.selected_context_runtime import AdmissionProof
             if not isinstance(selected_context_admission, AdmissionProof) or not spec.source_task_id:
@@ -2733,6 +2737,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # Server-only capability guard shares the canonical Goal and
                 # new-row insert transaction. Exact immutable replay above
                 # performs no new authority-bearing admission or callback.
+                if near_text_policy_scope is not None:
+                    if dialect_name != "sqlite" or not transaction_started:
+                        raise DurableJobAdmissionDenied("near_policy_writer_required")
+                    from src.work_board.near_text_native import enter_native_policy_scope
+                    enter_native_policy_scope(near_text_policy_scope, db=db,
+                        run_or_identity=identity, phase="admit")
                 await admission_authority_check(db, run)
             db.add(run)
             try:
@@ -2743,6 +2753,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # idempotent when it supplied the same immutable contract, yet
                 # still rejects a conflicting job or identity collision.
                 await db.rollback()
+                if near_text_policy_scope is not None:
+                    # The failed insert published no new authority. Release
+                    # only after real rollback, before the immutable reread
+                    # can open a fresh database transaction.
+                    from src.work_board.near_text_native import release_admission_scope_after_rollback
+                    release_admission_scope_after_rollback(near_text_policy_scope, db=db)
                 existing = (
                     await db.execute(
                         select(WorkflowRunState).where(
@@ -3097,6 +3113,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         opportunity_preference_witness=None,
         near_text_witness=None,
+        near_text_policy_scope=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3108,6 +3125,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
+            if near_queue_guard or near_text_policy_scope is not None:
+                if to_status != "queued":
+                    raise DurableJobTransitionError("NEAR policy scope is only valid for queueing")
+                from src.work_board.near_text_native import validate_native_policy_scope
+                validate_native_policy_scope(near_text_policy_scope, run_or_identity=preflight_run,
+                    phase="queue", witness=near_text_witness)
             if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES and cancellation_authority_check is None:
                 # Exact historical replay admits no contact/source use. Keep
                 # the original canonical Goal fence, then return the existing
@@ -3125,20 +3149,25 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dependency_guard = (preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
-            near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
             guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
             preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
+            near_writer_started = False
             if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
+                    near_writer_started = near_queue_guard
             run = await self._fetch(db, job_id)
             if near_queue_guard:
-                from src.work_board.near_text_native import recheck_native_queue
+                if not near_writer_started:
+                    raise DurableJobTransitionError("near_policy_writer_required")
+                from src.work_board.near_text_native import enter_native_policy_scope, recheck_native_queue
+                enter_native_policy_scope(near_text_policy_scope, db=db, run_or_identity=run,
+                    phase="queue", witness=near_text_witness)
                 await recheck_native_queue(db,run,witness=near_text_witness)
             if preference_guard:
                 from src.work_board.opportunity_preference_native import recheck_native

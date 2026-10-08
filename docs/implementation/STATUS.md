@@ -72,7 +72,8 @@ inference, produces a verified reference-only artifact, and exposes at most 16
 selected leaf citations in a complete authenticated private view capped at 16 KiB.
 Reload uses explicit private readback from the existing task card; late authority
 or fence changes cannot adopt a successful preparation. These local mechanics
-remain Partial pending independent whole-journey review and integration.
+remain Partial: general question answering and model synthesis are outside this
+local-only profile.
 Selected-file cockpit intake, bounded isolated
 parsing, unsupported reasons and positive original-reader cleanup share current
 canonical ownership and quota. Local extraction does not authorize model egress
@@ -88,6 +89,25 @@ data-table formulas and objects without literal expression text are unsupported.
 OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
+
+## Task conversation continuity
+
+**Shipped** within the bounded
+[#1021](https://github.com/seraph-quest/seraph/issues/1021) milestone contract;
+availability requires installation of the reviewed milestone merge:
+same-task continuation into a new owned chat, bounded current task intent and
+factual references, selected read-only historical recovery, locally readable
+authenticated operator corrections with opaque ID/time-only assistant handoff,
+separate next actions/questions
+and Unknown state. Existing chat paths consume the same bounded current-owner
+factual/reference handoff; selected recovered history stays blocked for assistant
+egress. Guardian transcript context requires the live current chat principal and
+model grant; unscoped service/report callers receive no transcript context.
+Worker/review notes are not operator corrections; correction body hashes stay
+local. No task ownership, execution authority or model egress is renewed.
+The [operator contract](./12-current-app-guide.md#task-conversation-continuity)
+names the isolated authenticated SQLite/local artifact and mocked UI checks.
+
 ## Typed general-task contract
 
 **Shipped** on `develop` revisions containing the independently reviewed

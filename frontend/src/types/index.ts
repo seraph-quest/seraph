@@ -75,6 +75,7 @@ export type AmbientState = "idle" | "has_insight" | "goal_behind" | "on_track" |
 export interface SessionInfo {
   id: string;
   title: string;
+  continuity_task_id?: string | null;
   created_at: string;
   updated_at: string;
   last_message: string | null;

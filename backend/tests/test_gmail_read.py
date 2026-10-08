@@ -29,7 +29,7 @@ from sqlmodel import SQLModel
 from src.api import mail as mail_api
 from src.api.mail import ConnectionCreate, ModelConsent
 from src.auth.service import AuthenticatedOperator
-from src.db.models import Goal, GoogleServiceConnection, MailMessageBinding, MailReadConsent, Session, WorkflowRunState
+from src.db.models import Goal, GoogleServiceConnection, MailMessageBinding, MailReadConsent, Session, WorkBoardTask, WorkflowRunState
 from src.db.engine import _ensure_mail_columns
 from src.integrations.gmail_controls import (
     GmailControlError,
@@ -154,7 +154,8 @@ async def durable_job_db(monkeypatch):
         await connection.run_sync(
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
-                tables=[Session.__table__, WorkflowRunState.__table__],
+                # Include the table referenced by Session.continuity_task_id.
+                tables=[Session.__table__, WorkBoardTask.__table__, WorkflowRunState.__table__],
             )
         )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

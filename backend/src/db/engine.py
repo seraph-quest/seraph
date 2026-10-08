@@ -392,8 +392,12 @@ async def _ensure_legacy_columns(conn) -> None:
 
     session_columns = await _add_missing_columns(
         "sessions",
-        {"owner_principal_id": "VARCHAR"},
+        {"owner_principal_id": "VARCHAR", "continuity_task_id": "VARCHAR REFERENCES work_board_tasks(task_id)"},
     )
+    if "continuity_task_id" in session_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_continuity_task_id ON sessions (continuity_task_id)"
+        )
     if "owner_principal_id" in session_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_sessions_owner_principal_id "

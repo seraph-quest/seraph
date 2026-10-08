@@ -1,6 +1,7 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, Field
 
 from src.agent.session import (
@@ -8,10 +9,51 @@ from src.agent.session import (
     SessionNotFoundError,
     session_manager,
 )
+from src.conversation.task_context import ContinueTaskRequest
+from src.db.engine import get_session
+from src.work_board.repository import BoardError
+from src.auth.service import AuthFailure
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _continuity_service(request):
+    service = getattr(request.app.state, "task_continuity", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail={"code": "task_continuity_unavailable"})
+    return service
+
+
+@router.get("/sessions/task-context/{task_id}")
+async def read_task_context(task_id: str, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    operator, _ = _require_operator_owner(request)
+    try:
+        async with get_session() as db:
+            return await _continuity_service(request).packet(db, operator, task_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "task_context_storage_unavailable"}) from exc
+
+
+@router.post("/sessions/continue-task")
+async def continue_task(body: ContinueTaskRequest, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    operator, _ = _require_operator_owner(request)
+    try:
+        async with get_session() as db:
+            return await _continuity_service(request).continue_task(db, operator, body)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "task_context_storage_unavailable"}) from exc
 
 
 class SessionUpdate(BaseModel):

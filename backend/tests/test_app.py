@@ -382,15 +382,9 @@ async def test_runtime_status_awaits_current_cordis_readback_not_cached_ready(cl
     refresh.assert_awaited_once_with()
 
 
-@pytest.mark.asyncio
-async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_runs_owned_stop(client, monkeypatch, tmp_path):
-    """Execute actual lifespan wiring with unrelated startup owners isolated."""
+def _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    import src.app as app_module
-
-    host = CordisHost(node_path=tmp_path / "absent-node")
-    monkeypatch.setattr(app_module, "cordis_host", host)
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(app_module, name, AsyncMock())
@@ -408,6 +402,94 @@ async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_run
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
     monkeypatch.setattr("src.observer.manager.context_manager.refresh", AsyncMock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["continuity_factory", "continuity_start", "ensure_soul", "mcp_config", "goal_start"])
+async def test_pre_yield_startup_failure_stops_and_unbinds_owned_continuity(client, monkeypatch, tmp_path, failure_point):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    import src.app as app_module
+    import src.conversation.task_context as continuity_module
+    from src.agent.session import session_manager
+    from src.guardian.goal_programmes import goal_programme_service
+    from src.work_board.dispatcher import _dispatcher
+
+    _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path)
+    host = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    created, stopped, bound = [], [], []
+    real_type = continuity_module.TaskContinuityService
+    real_start, real_stop = real_type.start, real_type.stop
+    real_bind = session_manager.bind_task_continuity
+    real_goal_start, real_goal_stop = goal_programme_service.start, goal_programme_service.stop
+    monkeypatch.setattr(goal_programme_service, "_running", False)
+
+    class StartupFailure(RuntimeError):
+        pass
+
+    def factory(repository):
+        if failure_point == "continuity_factory":
+            raise StartupFailure(failure_point)
+        service = real_type(repository)
+        created.append(service)
+        return service
+
+    async def start(service):
+        await real_start(service)
+        if failure_point == "continuity_start":
+            raise StartupFailure(failure_point)
+
+    async def stop(service):
+        await real_stop(service)
+        stopped.append(service)
+
+    def bind(service):
+        bound.append(service)
+        real_bind(service)
+
+    async def goal_start():
+        await real_goal_start()
+        raise StartupFailure(failure_point)
+
+    monkeypatch.setattr(continuity_module, "TaskContinuityService", factory)
+    monkeypatch.setattr(real_type, "start", start)
+    monkeypatch.setattr(real_type, "stop", stop)
+    monkeypatch.setattr(session_manager, "bind_task_continuity", bind)
+    goal_stop = AsyncMock(side_effect=real_goal_stop)
+    monkeypatch.setattr(goal_programme_service, "stop", goal_stop)
+    if failure_point == "ensure_soul":
+        monkeypatch.setattr(app_module, "ensure_soul_exists", Mock(side_effect=StartupFailure(failure_point)))
+    elif failure_point == "mcp_config":
+        monkeypatch.setattr(app_module.mcp_manager, "load_config", Mock(side_effect=StartupFailure(failure_point)))
+    elif failure_point == "goal_start":
+        monkeypatch.setattr(goal_programme_service, "start", AsyncMock(side_effect=goal_start))
+
+    with pytest.raises(StartupFailure, match=failure_point):
+        async with app_module.lifespan(client._transport.app):
+            pytest.fail("Failed startup must not yield a live application")
+    assert session_manager._task_continuity is None
+    assert stopped == created
+    assert all(not service._started for service in created)
+    assert bound.count(None) == 1
+    assert sum(service is not None for service in bound) == (0 if failure_point in {"continuity_factory", "continuity_start"} else 1)
+    assert not goal_programme_service._running
+    goal_stop.assert_awaited_once()
+    app_module.shutdown_scheduler.assert_called_once()
+    host.start.assert_not_awaited()
+    host.stop.assert_not_awaited()
+    assert _dispatcher.general_tasks is None
+    assert not client._transport.app.state.connection_sync_runtime.started
+    assert _dispatcher.connection_sync_runtime is None
+
+
+@pytest.mark.asyncio
+async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_runs_owned_stop(client, monkeypatch, tmp_path):
+    """Execute actual lifespan wiring with unrelated startup owners isolated."""
+    import src.app as app_module
+    host = CordisHost(node_path=tmp_path / "absent-node")
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path)
     async with app_module.lifespan(client._transport.app):
         assert host.snapshot()["state"] == "blocked"
         assert host.reason == "node_missing"
@@ -489,6 +571,9 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     observed_stop_owners = []
     actual_host_stop = host.stop
     async def stop_with_late_failure(*args, **kwargs):
+        from src.agent.session import session_manager
+        assert session_manager._task_continuity is None
+        assert client._transport.app.state.task_continuity._started
         assert _dispatcher.general_tasks is not None
         assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
         observed_stop_owners.append(_dispatcher.general_tasks)
@@ -508,6 +593,9 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         assert _dispatcher.general_tasks is not None
         assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
         started = await actual_host_start(*args, **kwargs)
+        from src.agent.session import session_manager
+        assert client._transport.app.state.task_continuity._started
+        assert session_manager._task_continuity is client._transport.app.state.task_continuity
         startup_resources.append((host.process, host.boot_nonce))
         if host_failure == "cancel":
             import asyncio
@@ -519,6 +607,9 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     monkeypatch.setattr(host, "start", start_with_late_failure)
     async def goal_stop_after_browser():
         assert not browser_service.started and browser_service.active == {}
+        from src.agent.session import session_manager
+        assert not client._transport.app.state.task_continuity._started
+        assert session_manager._task_continuity is None
         assert source_runtimes[-1].started
         assert _dispatcher.connection_sync_runtime is source_runtimes[-1]
         assert _dispatcher.general_tasks is None
@@ -579,6 +670,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         if host_failure == "cancel":
             process, boot_nonce = startup_resources[-1]
             try:
+                assert not client._transport.app.state.task_continuity._started
                 assert not browser_service.started and browser_service.active == {}
                 assert host.snapshot()["cleanup"]["process_reaped"] is True
             finally:
@@ -597,10 +689,13 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
             lane.release()
             receipts.append({"host_failure":"cancel", "process_exit_code":process.returncode,
                 "process_reaped":True, "browser_started":False, "browser_contexts":0,
-                "browser_jobs":0, "shared_lane_available":True, "cancellation_propagated":True, "task_owner_released":True,
-                "task_service_and_registry_stopped":True, "goal_and_scheduler_stopped":True})
+                "browser_jobs":0, "shared_lane_available":True, "cancellation_propagated":True,
+                "continuity_unbound_and_stopped":True, "task_owner_released":True,
+                "task_service_and_registry_stopped":True, "goal_and_scheduler_stopped":True,
+                "source_owner_stopped_and_pointer_cleared":True})
             continue
         assert not browser_service.started and browser_service.active == {}
+        assert not client._transport.app.state.task_continuity._started
         assert page.page.is_closed() and not page.resources.browser.is_connected()
         cleanup_row = await browser_service.jobs.get_job(job_id)
         assert cleanup_row["status"] == "blocked"
@@ -618,8 +713,10 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                          "fresh_boot":True, "process_exit_code":process.returncode,
                          "owned_pid_absent":True, "browser_positive_cleanup":True,
                          "browser_durable_status":cleanup_row["status"], "host_failure":host_failure,
+                         "continuity_unbound_and_stopped":True,
                          "task_owner_released":True, "task_service_and_registry_stopped":True,
-                         "goal_and_scheduler_stopped":True})
+                         "goal_and_scheduler_stopped":True,
+                         "source_owner_stopped_and_pointer_cleared":True})
     assert len(source_runtimes) == 2 and all(not runtime.started for runtime in source_runtimes)
     assert _dispatcher.connection_sync_runtime is None
     assert goal_programme_service.stop.await_count == 2
@@ -637,6 +734,8 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
     import src.app as application
     import src.integrations.connection_sync as sources
     import src.guardian.goal_programmes as programmes
+    from src.agent.session import session_manager
+    from src.conversation.task_context import TaskContinuityService
     from src.work_board.dispatcher import _dispatcher
 
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
@@ -671,6 +770,17 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
     original_goal_start, original_goal_stop = service.start, service.stop
     original_source_start, original_source_stop = sources.ConnectionSyncService.start, sources.ConnectionSyncService.stop
     source_owners, task_owners = [], []
+    continuity_owners = []
+    real_bind = session_manager.bind_task_continuity
+    def observed_bind(continuity):
+        if continuity is not None:
+            continuity_owners.append(continuity)
+        real_bind(continuity)
+    monkeypatch.setattr(session_manager, "bind_task_continuity", observed_bind)
+    continuity_stop = AsyncMock(side_effect=TaskContinuityService.stop)
+    async def observed_continuity_stop(continuity):
+        await continuity_stop(continuity)
+    monkeypatch.setattr(TaskContinuityService, "stop", observed_continuity_stop)
     stops = {"goal": 0, "source": 0}
 
     def fail():
@@ -702,6 +812,8 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
     async def goal_stop():
         stops["goal"] += 1
         assert _dispatcher.general_tasks is None
+        assert session_manager._task_continuity is None
+        assert all(not continuity._started for continuity in continuity_owners)
         if source_owners:
             assert source_owners[-1].started
         await original_goal_stop()
@@ -730,6 +842,9 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
     assert _dispatcher.connection_sync_runtime is prior_pointer
     assert _dispatcher.general_tasks is None
     assert all(not task.started and not task.registry.started for task in task_owners)
+    assert session_manager._task_continuity is None
+    assert all(not continuity._started for continuity in continuity_owners)
+    assert continuity_stop.await_count == len(continuity_owners)
     application.shutdown_scheduler.assert_called_once()
     host.start.assert_not_awaited()
     host.stop.assert_not_awaited()

@@ -350,16 +350,24 @@ async def lifespan(app: FastAPI):
         workspace_owner = runtime_workspace_owner(settings.workspace_dir)
         workspace_owner.__enter__()
     await init_db()
+    from src.conversation.task_context import TaskContinuityService
+    from src.work_board.repository import WorkBoardRepository
+    from src.agent.session import session_manager
+    from src.work_board.general_task import current_task_service
     from src.integrations.connection_sync import ConnectionSyncService
-
     from src.work_board.dispatcher import _dispatcher
     from src.guardian.goal_programmes import goal_programme_service
+    continuity = None
     connection_sync_runtime = None
     try:
         connection_sync_runtime = ConnectionSyncService()
         await connection_sync_runtime.start()
         app.state.connection_sync_runtime = connection_sync_runtime
         _dispatcher.connection_sync_runtime = connection_sync_runtime
+        continuity = TaskContinuityService(WorkBoardRepository())
+        app.state.task_continuity = continuity
+        await continuity.start()
+        session_manager.bind_task_continuity(app.state.task_continuity)
         # Hydrate the trusted OpenRouter vault credential before any scheduler or
         # canonical inference path resolves a provider profile.  Failure remains
         # visible as configuration_required through the normal status surfaces;
@@ -476,7 +484,6 @@ async def lifespan(app: FastAPI):
             os.path.join(settings.workspace_dir, "starter-packs.json"),
             manifest_roots=manifest_roots,
         )
-        from src.work_board.general_task import current_task_service
         await goal_programme_service.start()
         with current_task_service():
             init_scheduler()
@@ -496,23 +503,29 @@ async def lifespan(app: FastAPI):
                     logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
                 yield
             finally:
+                session_manager.bind_task_continuity(None)
                 try:
                     await cordis_host.stop()
                 finally:
                     await profiled_interaction_sessions.stop()
     finally:
+        session_manager.bind_task_continuity(None)
         try:
-            await goal_programme_service.stop()
+            if continuity is not None:
+                await continuity.stop()
         finally:
             try:
-                if connection_sync_runtime is not None:
-                    await connection_sync_runtime.stop()
+                await goal_programme_service.stop()
             finally:
                 try:
-                    if connection_sync_runtime is not None and _dispatcher.connection_sync_runtime is connection_sync_runtime:
-                        _dispatcher.connection_sync_runtime = None
+                    if connection_sync_runtime is not None:
+                        await connection_sync_runtime.stop()
                 finally:
-                    shutdown_scheduler()
+                    try:
+                        if connection_sync_runtime is not None and _dispatcher.connection_sync_runtime is connection_sync_runtime:
+                            _dispatcher.connection_sync_runtime = None
+                    finally:
+                        shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:

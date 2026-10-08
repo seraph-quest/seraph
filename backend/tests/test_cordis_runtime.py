@@ -88,11 +88,30 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.runtime_plugins.composition.shutil.which", return_value=None), patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
             self.assertFalse(await host.start()); spawn.assert_not_called()
             self.assertEqual(host.snapshot()["reason"], "node_missing")
-        node = Path(os.environ.get("SERAPH_CORDIS_TEST_NODE") or shutil.which("node") or "/usr/bin/python3")
-        with patch("src.runtime_plugins.composition.subprocess.run", return_value=Mock(stdout=b"v22.11.0\n")), patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
-            host = CordisHost(node_path=node)
-            self.assertFalse(await host.start()); spawn.assert_not_called()
-            self.assertEqual(host.snapshot()["reason"], "node_unsupported")
+        # Version rejection must reach the version probe independently of the
+        # ambient Node installation's ownership and permission metadata.
+        with tempfile.TemporaryDirectory(prefix="seraph-node-version-") as directory:
+            node = Path(directory) / "node"
+            node.write_text("version probe is mocked; this fixture never executes\n")
+            node.chmod(0o700)
+            with patch("src.runtime_plugins.composition.subprocess.run", return_value=Mock(stdout=b"v22.11.0\n")) as version_probe, patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+                host = CordisHost(node_path=node)
+                self.assertFalse(await host.start()); spawn.assert_not_called()
+                self.assertEqual(host.snapshot()["reason"], "node_unsupported")
+                version_probe.assert_called_once_with([str(node), "--version"],
+                    env=CHILD_ENV, close_fds=True, capture_output=True, timeout=1, check=True)
+
+    async def test_untrusted_node_blocks_before_version_probe_or_child(self):
+        with tempfile.TemporaryDirectory(prefix="seraph-node-untrusted-") as directory:
+            node = Path(directory) / "node"
+            node.write_text("untrusted fixture must never execute\n")
+            node.chmod(0o777)
+            with patch("src.runtime_plugins.composition.subprocess.run") as version_probe, patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+                host = CordisHost(node_path=node)
+                self.assertFalse(await host.start())
+                self.assertEqual(host.snapshot()["reason"], "unreviewed_runtime_path")
+                version_probe.assert_not_called()
+                spawn.assert_not_called()
 
     async def test_unknown_cleanup_retains_capacity_and_blocks_restart(self):
         process = Mock(returncode=None, stdin=None)

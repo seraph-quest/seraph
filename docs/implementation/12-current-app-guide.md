@@ -794,6 +794,78 @@ Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Task lesson drafts (proposal-only)
+
+The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary
+completed or failed task with a verified current attempt and recorded native
+tool steps or an exact current formatter capability contract snapshot. The
+formatter draft preserves its registered identity, version and typed contract
+digests; it never copies the task's JSON input or output. The source-discovery
+endpoint returns the authoritative task
+revision, attempt, references and Goal scope. An ordinary text correction can
+draft a closed `TaskMethod.v1`: an existence check before using the source,
+a verified-readback check, or preservation of source attribution. Unsupported
+corrections and missing method receipts return explicit `no_change`; they are
+preserved as private correction evidence and do not become executable steps.
+
+The Inspector separates the observed outcome, explicit correction and inferred
+draft, and displays the exact old and new method. `ResearchStrategy.v1` and
+`TaskMethod.v1` are closed data schemas; candidate input cannot install tools,
+change permissions, runtime limits, providers or credentials. Candidate content
+is a private artifact; the existing `MemoryProposal` owns the inert review row,
+and `EvolutionRuntime` records only content-free lesson receipts. Neither a
+successful task nor a failure creates a positive preference vote. Changes to
+the task, Goal, run, receipts or method steps block the old preview.
+
+Automatic proposals require a separate per-task opt-in bound to the original
+current operator, task intent and Goal revision. Enable and disable require the
+exact authoritative policy revision; a stale request cannot overwrite a later
+consent change. The terminal dispatcher callback
+reauthenticates that exact Root without renewing it. Automatic creation uses only
+the finite missing-source failure rule and is limited to two durable proposal starts per UTC
+day across the owner; consent renewal does not renew that cap. It performs no
+inference, source-body projection or trace egress. The callback is bounded to
+five seconds and cannot undo an ordinary task's committed result. Private
+staging runs off the event loop in a single retained worker. Timeout stops
+proposal progression, records a content-free outcome for the exact original
+attempt even after Root revocation, and retains staging capacity until the
+actual worker finishes. Thread cancellation is never treated as cleanup.
+After restart, recovery requires proof that the original process ended and
+checks the exact private artifact; it records no-change and releases the
+original slot without making a proposal. Replays and recovered starts still
+count toward the daily cap.
+Linux recovery uses the original kernel boot/process identity. macOS uses the
+fixed native boot-session UUID and exact PID start seconds/microseconds; a
+missing PID or failed native read remains unknown. A same-process retained
+worker can complete even when native witness acquisition is unavailable.
+Unknown restart witnesses retain capacity and expose `restart_witness_unknown`;
+manual lesson review remains available. Native macOS execution was not verified
+on the Linux validation host; finite ABI and recovery fixtures cover its contract.
+Automatic outcomes have content-free, original-owner task events; source
+discovery returns the latest matching outcome, including no-change, cap and
+failure states. Automatic completion uses the canonical proposal and task event
+receipt and performs no evolution-file work. Explicit inspection or manual
+request replay repairs a missing evolution receipt off-loop from the canonical
+proposal without another daily-cap charge; mirror work is capped at 1 MiB and
+4096 entries. The canonical proposal remains inspectable if this advisory mirror
+is oversized or unavailable; readback exposes a degraded mirror status and
+preserves its existing bytes for recovery through the evolution owner.
+Model reflection remains unavailable because no existing consent authorizes task-trace
+egress. No model call or spend is needed to draft a supported lesson.
+
+This section records the intended supported scope after merge; it makes no
+pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
+remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
+change task execution. Isolated local checks establish these mechanics, not
+learned quality or general usefulness.
+
+The actual authenticated formatter-to-lesson failure journey is verified on the
+implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
+permitted`, process cleanup is proven, no formatted output is adopted, and an
+explicit correction creates an inspectable private inert method. The positive
+formatter journey remains blocked by that host sandbox limitation; this receipt
+does not establish successful formatter execution or lesson quality.
+
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
 [ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow

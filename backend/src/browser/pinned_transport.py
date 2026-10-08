@@ -829,3 +829,90 @@ __all__ = [
     "safe_url",
     "url_digest",
 ]
+
+
+class ProfiledPreparationTransport:
+    """One registered document contact, then an enforced offline DOM phase.
+
+    Deliberately separate from the v1 transport: no method relaxation or caller
+    URL is introduced. The constructor seam is trusted test wiring only.
+    """
+
+    def __init__(self, *, request=None, source_digest=None):
+        from src.security.http_transport import _TransportLifecycleMarker, request_pinned_https
+        from .interaction_contracts import SOURCE_SHA256
+        self._request = request or request_pinned_https
+        self.source_digest = source_digest or SOURCE_SHA256
+        self.lifecycle = _TransportLifecycleMarker()
+        self.phase = "document"
+        self.contact_started = False
+        self.denials = 0
+        self.failure_reason = None
+
+    def check(self, url, method, body, resource_type):
+        from .interaction_contracts import DOCUMENT_URL, InteractionError
+        if (self.phase != "document" or url != DOCUMENT_URL or method != "GET"
+            or body not in (None, b"") or resource_type != "document"):
+            raise InteractionError("browser_request_contract_denied")
+
+    async def install(self, context, page, *, authority, contact_intent, contact_result):
+        from .interaction_contracts import InteractionError
+
+        async def handler(route, request):
+            try:
+                body = request.post_data_buffer
+                self.check(request.url, request.method, body, request.resource_type)
+                if request.frame != page.main_frame or self.contact_started:
+                    raise InteractionError("browser_document_contact_already_spent")
+                if any(k.lower() in {"cookie", "authorization", "proxy-authorization"}
+                       for k in request.headers):
+                    raise InteractionError("browser_ambient_credentials_denied")
+                if not evaluate_site_access(request.url).allowed:
+                    raise InteractionError("browser_site_policy_denied")
+                await authority()
+                # Persist possible-contact intent before spending the only slot.
+                await contact_intent()
+                self.contact_started = True
+
+                async def recheck():
+                    self.check(request.url, request.method, body, request.resource_type)
+                    if not evaluate_site_access(request.url).allowed:
+                        raise InteractionError("browser_site_policy_denied")
+                    await authority()
+
+                response = await self._request(request.url, method="GET",
+                    max_bytes=65536, timeout_seconds=10,
+                    _lifecycle_marker=self.lifecycle,
+                    authority_check=recheck, handoff_check=recheck)
+                await recheck()
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                if (response.status_code != 200 or "set-cookie" in headers
+                    or "location" in headers
+                    or headers.get("content-type", "").split(";", 1)[0] != "text/html"):
+                    raise InteractionError("browser_profile_document_response_denied")
+                if (len(response.content) > 65536
+                    or hashlib.sha256(response.content).hexdigest() != self.source_digest):
+                    raise InteractionError("browser_profile_source_version_changed")
+                await contact_result(hashlib.sha256(response.content).hexdigest())
+                await route.fulfill(status=200, body=response.content,
+                    headers={"content-type": "text/html; charset=utf-8",
+                             "content-security-policy": "default-src 'none'; form-action 'none'"})
+            except Exception as exc:
+                self.denials += 1
+                self.failure_reason = getattr(exc, "code", "browser_profile_transport_denied")
+                await route.abort("blockedbyclient")
+
+        async def deny_socket(route):
+            self.denials += 1
+            await route.close()
+
+        if not callable(getattr(context, "route_web_socket", None)):
+            raise InteractionError("browser_websocket_guard_unavailable")
+        await context.route_web_socket("**/*", deny_socket)
+        await context.route("**/*", handler)
+
+    def preparation(self):
+        self.phase = "preparation"
+
+    def quiescent(self):
+        return self.lifecycle.snapshot()["status"] == "verified"

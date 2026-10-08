@@ -478,15 +478,20 @@ async def lifespan(app: FastAPI):
                 await context_manager.refresh()
             except Exception:
                 logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-            # The optional Cordis host does not replace this Python owner.
+            from src.browser.sessions import profiled_interaction_sessions
             try:
-                await cordis_host.start()
-            except Exception:
-                logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
-            try:
+                await profiled_interaction_sessions.start()
+                # Optional native owners remain inside the current Python lifecycle.
+                try:
+                    await cordis_host.start()
+                except Exception:
+                    logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
                 yield
             finally:
-                await cordis_host.stop()
+                try:
+                    await cordis_host.stop()
+                finally:
+                    await profiled_interaction_sessions.stop()
     finally:
         try:
             await goal_programme_service.stop()

@@ -40,6 +40,49 @@ class NodeProcessCleanupSettlement:
     dispatch: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class NativePhysicalCleanupBinding:
+    """Internal exact original resource identity; never a browser proof body."""
+    job_id: str
+    expected_revision: int
+    original_owner_principal_id: str
+    original_operator_session_id: str
+    original_session_id: str
+    input_digest: str
+    authority_digest: str
+    run_fingerprint: str
+    attempt_count: int
+    lease_owner: str
+    fencing_token: int
+    resource_claim: str
+    witness_digest: str
+
+
+@dataclass(frozen=True)
+class NativePhysicalCleanupProof:
+    """Actual resource-owner callback result, not operator-asserted evidence."""
+    witness_digest: str
+    proof_kind: str
+    succeeded_adoption_verified: bool = False
+
+
+@dataclass(frozen=True)
+class ConnectedSourcePhysicalCleanupOwner:
+    """Fixed source owner: local proof recheck and same-writer pointer release."""
+    verify_cleanup: Callable[..., Awaitable[NativePhysicalCleanupProof]]
+    release_pointer: Callable[..., Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class BrowserPhysicalCleanupOwner:
+    """Fixed browser owner: nonblocking local lane proof recheck only."""
+    verify_cleanup: Callable[..., Awaitable[NativePhysicalCleanupProof]]
+
+
+def native_physical_cleanup_binding_payload(binding: NativePhysicalCleanupBinding) -> dict[str, Any]:
+    return {key: value for key, value in vars(binding).items() if key != "expected_revision"}
+
+
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
 
 # A repair execution reservation is a safety boundary rather than ordinary
@@ -50,6 +93,8 @@ _REPO_REPAIR_RESERVATION_CHECKPOINT_IDS = frozenset(
     {
         "repo-repair-execution-reservation",
         "repo-repair-execution-release",
+        "native-physical-resource-reservation",
+        "native-physical-resource-cleanup",
     }
 )
 
@@ -291,6 +336,58 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _native_physical_witness(kind: str, witness: Any, binding: NativePhysicalCleanupBinding) -> None:
+    """Closed native platform provenance; fixed owner checks physical truth."""
+    source_common = {"platform", "boot_id", "pid", "runtime_nonce", "connection_id",
+                     "scope_digest", "original_cursor_revision"}
+    source_linux = source_common | {"pid_start_ticks", "pid_namespace"}
+    source_darwin = source_common | {"pid_start_sec", "pid_start_usec"}
+    browser = {"schema_version", "pid", "process_nonce", "context_nonce", "job_digest",
+               "root_path_digest", "root_device", "root_inode", "lock_device", "lock_inode",
+               "boot_platform", "boot_session_id", "positive_cleanup_required"}
+    if not isinstance(witness, dict):
+        raise DurableJobTransitionError("native physical witness schema changed")
+    platform = witness.get("platform" if kind == "connection_source_sync" else "boot_platform")
+    if not isinstance(platform, str) or platform not in {"linux", "darwin"}:
+        raise DurableJobTransitionError("native physical platform is unknown")
+    expected = (source_linux if platform == "linux" else source_darwin) if kind == "connection_source_sync" else browser
+    if set(witness) != expected:
+        raise DurableJobTransitionError("native physical witness schema changed")
+    import uuid
+    boot = witness["boot_id"] if kind == "connection_source_sync" else witness["boot_session_id"]
+    try:
+        if not isinstance(boot, str) or str(uuid.UUID(boot)) != boot or uuid.UUID(boot).int == 0:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise DurableJobTransitionError("native physical boot identity is invalid") from None
+    integers = (["pid", "original_cursor_revision", "pid_namespace"] if platform == "linux" else
+                ["pid", "original_cursor_revision", "pid_start_sec", "pid_start_usec"]) if kind == "connection_source_sync" else ["pid", "root_device", "root_inode", "lock_device", "lock_inode"]
+    for key in integers:
+        minimum = 1 if key in {"pid", "pid_namespace", "pid_start_sec", "root_inode", "lock_inode"} else 0
+        if type(witness[key]) is not int or witness[key] < minimum:
+            raise DurableJobTransitionError("native physical integer identity is invalid")
+    if witness["pid"] > 2147483647:
+        raise DurableJobTransitionError("native physical PID is invalid")
+    nonces = ["runtime_nonce"] if kind == "connection_source_sync" else ["process_nonce", "context_nonce"]
+    if any(not isinstance(witness[key], str) or re.fullmatch(r"[0-9a-f]{32}", witness[key]) is None for key in nonces):
+        raise DurableJobTransitionError("native physical owner nonce is invalid")
+    if kind == "connection_source_sync":
+        if (not isinstance(witness["connection_id"], str) or not 0 < len(witness["connection_id"]) <= 128
+            or binding.resource_claim != "connection-sync:" + witness["connection_id"]
+            or not isinstance(witness["scope_digest"], str) or re.fullmatch(r"[0-9a-f]{64}", witness["scope_digest"]) is None):
+            raise DurableJobTransitionError("native source scope witness is invalid")
+        if platform == "linux" and (not isinstance(witness["pid_start_ticks"], str)
+            or re.fullmatch(r"[0-9]{1,32}", witness["pid_start_ticks"]) is None):
+            raise DurableJobTransitionError("native Linux process witness is invalid")
+        if platform == "darwin" and witness["pid_start_usec"] >= 1000000:
+            raise DurableJobTransitionError("native Darwin process witness is invalid")
+    elif (type(witness["schema_version"]) is not int or witness["schema_version"] != 4
+          or witness["positive_cleanup_required"] is not True
+          or witness["job_digest"] != hashlib.sha256(binding.job_id.encode()).hexdigest()
+          or not isinstance(witness["root_path_digest"], str) or re.fullmatch(r"[0-9a-f]{64}", witness["root_path_digest"]) is None):
+        raise DurableJobTransitionError("native browser scope witness is invalid")
+
+
 def durable_lease_id(job_id: str, fencing_token: int) -> str:
     """Derive the stable identity for one persisted lease epoch.
 
@@ -457,6 +554,16 @@ def _job_has_unsafe_effects(effects: Any) -> bool:
             ):
                 return True
     return False
+
+
+def native_external_effect_state(run: WorkflowRunState) -> str:
+    """Redacted canonical liability projection; physical cleanup changes none."""
+    if run.job_kind not in {"connection_source_sync", "browser_interact_v2"}:
+        raise DurableJobTransitionError("native external-state projection kind is invalid")
+    effects = _effect_ledger_or_raise(run.effect_receipts_json)
+    if _job_has_unsafe_effects(effects):
+        return "unknown"
+    return "settled" if effects else "none"
 
 
 def _effect_is_unresolved(item: Any) -> bool:
@@ -1970,6 +2077,158 @@ class DurableJobSpec:
 class DurableJobRepository(InferenceAccountingRepositoryMixin):
     """Persistence operations for the one canonical workflow job record."""
 
+    async def reserve_native_physical_resource(
+        self, binding: NativePhysicalCleanupBinding, *, witness: dict[str, Any],
+        current_owner, authenticated_token_hash: str,
+    ) -> dict[str, Any]:
+        """Persist typed original provenance through normal execution fences."""
+        if type(binding) is not NativePhysicalCleanupBinding:
+            raise DurableJobTransitionError("native physical reservation binding is invalid")
+        payload = {"binding": native_physical_cleanup_binding_payload(binding), "witness": witness}
+        return await self.record_checkpoint(binding.job_id,
+            checkpoint_id="native-physical-resource-reservation", state=payload, checkpoint_payload=payload,
+            owner=binding.lease_owner, fencing_token=binding.fencing_token,
+            expected_revision=binding.expected_revision,
+            native_physical_reservation=(binding, current_owner, authenticated_token_hash))
+
+    async def record_native_physical_cleanup(
+        self, binding: NativePhysicalCleanupBinding, *, current_owner,
+        authenticated_token_hash: str,
+        proof_kind: str,
+        cleanup_owner: ConnectedSourcePhysicalCleanupOwner | BrowserPhysicalCleanupOwner,
+    ) -> dict[str, Any]:
+        """Release exact native physical capacity without reconciling effects.
+
+        Fixed resource owners retain the physical lock while their callback
+        checks actual teardown. Pointer changes compose in this writer; external
+        locks may be released only after this transaction returns committed.
+        Original Root/Goal validity is deliberately irrelevant to negative local
+        cleanup. Their immutable provenance and current bearer ownership are not.
+        """
+        from src.db.models import OperatorIdentity, OperatorSession
+
+        if (type(binding) is not NativePhysicalCleanupBinding
+            or type(binding.expected_revision) is not int or binding.expected_revision < 1
+            or type(binding.attempt_count) is not int or binding.attempt_count < 1
+            or type(binding.fencing_token) is not int or binding.fencing_token < 1
+            or not isinstance(authenticated_token_hash, str) or not authenticated_token_hash):
+            raise DurableJobTransitionError("native physical cleanup binding is invalid")
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, binding.job_id)
+            kinds = {"connection_source_sync": "connection-sync-v1", "browser_interact_v2": "2"}
+            eligible = {"connection_source_sync": {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"},
+                        "browser_interact_v2": {"running", "unknown_external_effect", "cost_liability"}}
+            expected = native_physical_cleanup_binding_payload(binding)
+            actual = {
+                "job_id": run.run_identity, "original_owner_principal_id": run.owner_principal_id,
+                "original_operator_session_id": run.operator_session_id,
+                "original_session_id": run.session_id, "input_digest": run.input_digest,
+                "authority_digest": run.authority_digest, "run_fingerprint": run.run_fingerprint,
+                "attempt_count": run.attempt_count, "lease_owner": binding.lease_owner,
+                "fencing_token": run.fencing_token, "resource_claim": binding.resource_claim,
+                "witness_digest": binding.witness_digest,
+            }
+            authority = _json_load(run.declared_authority_json, {})
+            if (run.job_kind not in kinds or run.capability_version != kinds[run.job_kind]
+                or run.owner_kind != "user" or actual != expected
+                or run.status not in eligible.get(run.job_kind, set())
+                or run.operator_session_id != run.session_id
+                or _revision(run) != binding.expected_revision
+                or run.lease_owner not in {None, binding.lease_owner}
+                or not binding.lease_owner or not binding.run_fingerprint
+                or not isinstance(authority, dict) or _digest(authority) != run.authority_digest
+                or authority.get("principal") != run.owner_principal_id
+                or authority.get("session_id") != run.operator_session_id
+                or authority.get("goal_id") != run.goal_id or authority.get("goal_revision") != run.goal_revision
+                or _json_load(run.resource_claims_json, []) != [binding.resource_claim]):
+                raise DurableJobLeaseError("native original physical reservation changed")
+            if (run.job_kind == "browser_interact_v2" and
+                (binding.resource_claim != "browser-task-lane" or authority.get("capability_id") != "browser.interact.v2")):
+                raise DurableJobTransitionError("native browser cleanup kind changed")
+            if (run.job_kind == "connection_source_sync" and
+                (binding.resource_claim != "connection-sync:" + str(authority.get("connection_id", ""))
+                 or authority.get("capability_id") not in {"mail.messages.read", "calendar.events.read"})):
+                raise DurableJobTransitionError("native source cleanup kind changed")
+            current = await db.get(OperatorSession, current_owner.session_id)
+            original = await db.get(OperatorSession, binding.original_operator_session_id)
+            now = _utc_now()
+            if (current is None or current.principal_id != current_owner.principal_id
+                or current.token_hash != authenticated_token_hash or current.revoked_at is not None
+                or current.replaced_by_id is not None or current.is_bearer_tombstone
+                or _as_utc(current.idle_expires_at) <= now or _as_utc(current.absolute_expires_at) <= now
+                or original is None or original.principal_id != binding.original_owner_principal_id
+                or not original.operator_identity_id or original.operator_identity_id != current.operator_identity_id):
+                raise DurableJobTransitionError("native cleanup authenticated operator changed")
+            identity = await db.get(OperatorIdentity, original.operator_identity_id)
+            if identity is None or identity.revoked_at is not None:
+                raise DurableJobTransitionError("native cleanup stable operator is unavailable")
+            history = _json_load(run.checkpoint_receipts_json, None)
+            if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+                raise DurableJobTransitionError("native physical journal is malformed")
+            reservations = [item for item in history if item.get("checkpoint_id") == "native-physical-resource-reservation"]
+            if len(reservations) != 1:
+                raise DurableJobTransitionError("native original physical reservation is missing")
+            reservation = reservations[0].get("payload")
+            if (not isinstance(reservation, dict) or set(reservation) != {"binding", "witness"}
+                or reservation["binding"] != expected or not isinstance(reservation["witness"], dict)
+                or _digest(reservation["witness"]) != binding.witness_digest
+                or reservations[0].get("fencing_token") != binding.fencing_token
+                or reservations[0].get("safe") is not True
+                or reservations[0].get("state_digest") != _digest(reservation)):
+                raise DurableJobTransitionError("native original physical witness changed")
+            _native_physical_witness(run.job_kind, reservation["witness"], binding)
+            # A well-formed empty ledger remains none, never settlement proof.
+            effect_state = native_external_effect_state(run)
+            platform = reservation["witness"]["platform" if run.job_kind == "connection_source_sync" else "boot_platform"]
+            allowed = {"owned_positive_close", platform + "_boot_changed"}
+            if run.job_kind == "connection_source_sync":
+                allowed.add("positive_process_death")
+                if type(cleanup_owner) is not ConnectedSourcePhysicalCleanupOwner or not callable(cleanup_owner.release_pointer):
+                    raise DurableJobTransitionError("native source cleanup owner is required")
+            elif type(cleanup_owner) is not BrowserPhysicalCleanupOwner:
+                raise DurableJobTransitionError("native browser cleanup owner is required")
+            else:
+                allowed.add("owned_no_child")
+            if proof_kind == "owned_no_child" and effect_state != "none":
+                raise DurableJobTransitionError("native prechild cleanup has contact evidence")
+            if not isinstance(proof_kind, str) or proof_kind not in allowed or not callable(cleanup_owner.verify_cleanup):
+                raise DurableJobTransitionError("native physical proof kind is invalid")
+            receipt = {"kind": "native_physical_cleanup", "scope": "physical_cleanup_only",
+                       "witness_digest": binding.witness_digest, "proof_kind": proof_kind,
+                       "binding_digest": _digest(expected), "no_learning": True}
+            prior = [item for item in history if item.get("checkpoint_id") == "native-physical-resource-cleanup"]
+            if prior:
+                if (len(prior) != 1 or prior[0].get("payload") != receipt or prior[0].get("safe") is not True
+                    or prior[0].get("state_digest") != _digest(receipt) or prior[0].get("fencing_token") != binding.fencing_token):
+                    raise DurableJobTransitionError("native physical cleanup replay changed")
+                return {"job_id": binding.job_id, "revision": _revision(run),
+                        "status": run.status, "receipt": {**receipt, "deduped": True}}
+            # Fixed owners do only bounded local/DB rechecks here. Actual task
+            # awaiting and lane acquisition complete before entering this writer.
+            proof = await cleanup_owner.verify_cleanup(db, run, reservation)
+            if (type(proof) is not NativePhysicalCleanupProof or proof.witness_digest != binding.witness_digest
+                or proof.proof_kind != proof_kind or type(proof.succeeded_adoption_verified) is not bool
+                or proof.succeeded_adoption_verified is not (run.job_kind == "connection_source_sync" and run.status == "succeeded")):
+                raise DurableJobTransitionError("native positive physical cleanup is unproven")
+            checkpoint = {"checkpoint_id": "native-physical-resource-cleanup", "safe": True,
+                          "fencing_token": binding.fencing_token, "recorded_at": now.isoformat(),
+                          "state_digest": _digest(receipt), "payload": receipt}
+            history.append(checkpoint)
+            changed = await db.execute(update(WorkflowRunState).where(
+                WorkflowRunState.id == run.id, WorkflowRunState.revision == binding.expected_revision,
+                WorkflowRunState.fencing_token == binding.fencing_token,
+                WorkflowRunState.attempt_count == binding.attempt_count,
+            ).values(checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(history)), revision=WorkflowRunState.revision + 1))
+            if changed.rowcount != 1:
+                raise DurableJobLeaseError("native physical cleanup CAS is stale")
+            if type(cleanup_owner) is ConnectedSourcePhysicalCleanupOwner:
+                await cleanup_owner.release_pointer(db, run)
+            await db.commit()
+            return {"job_id": binding.job_id, "revision": binding.expected_revision + 1,
+                    "status": run.status, "receipt": receipt}
+
     async def complete_mail_observation_in_session(
         self, db, run, *, owner: str, fencing_token: int, observation: Mapping[str, Any],
     ) -> None:
@@ -3426,7 +3685,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
             if to_status in {"succeeded", "degraded"}:
-                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and terminal_authority_check is None:
+                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and terminal_authority_check is None:
                     raise DurableJobTransitionError("Forgejo terminalization requires its fixed native authority callback")
                 if run.job_kind == "guardian_opportunity_assess" and terminal_authority_check is None:
                     raise DurableJobTransitionError("Opportunity terminalization requires its fixed native authority callback")
@@ -3974,7 +4233,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
-            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and claim_authority_check is None:
+            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
                 raise DurableJobLeaseError("Opportunity claims require the fixed native authority callback")
@@ -4004,7 +4263,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
-                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1"}:
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(
@@ -4574,7 +4833,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         safe: bool = True,
         expected_revision: int | None = None,
         opportunity_preference_witness=None,
+        native_physical_reservation=None,
     ) -> dict[str, Any]:
+        if checkpoint_id == "native-physical-resource-cleanup":
+            raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         async with self._session() as db:
@@ -4627,7 +4889,43 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # A caller that has already passed its capability-specific
                 # checkpoint policy may retain a bounded, JSON-safe payload
                 # for recovery.  The legacy/default path remains digest-only.
-                receipt["payload"] = _safe_structure(checkpoint_payload)
+                if checkpoint_id == "native-physical-resource-reservation":
+                    from src.db.models import OperatorSession
+                    if (not isinstance(native_physical_reservation, tuple) or len(native_physical_reservation) != 3):
+                        raise DurableJobTransitionError("native typed physical reservation is required")
+                    binding, authenticated_owner, token_hash = native_physical_reservation
+                    if type(binding) is not NativePhysicalCleanupBinding:
+                        raise DurableJobTransitionError("native typed physical binding is required")
+                    claims = _json_load(run.resource_claims_json, [])
+                    if (run.job_kind not in {"connection_source_sync", "browser_interact_v2"}
+                        or run.capability_version != {"connection_source_sync":"connection-sync-v1", "browser_interact_v2":"2"}[run.job_kind]
+                        or run.owner_kind != "user" or run.status != "running"
+                        or run.operator_session_id != run.session_id or len(claims) != 1
+                        or run.owner_principal_id != authenticated_owner.principal_id
+                        or run.operator_session_id != authenticated_owner.session_id):
+                        raise DurableJobTransitionError("native original physical execution changed")
+                    root = await db.get(OperatorSession, authenticated_owner.session_id)
+                    now = _utc_now()
+                    if (root is None or root.principal_id != authenticated_owner.principal_id
+                        or not token_hash or root.token_hash != token_hash or root.revoked_at is not None
+                        or root.replaced_by_id is not None or root.is_bearer_tombstone
+                        or _as_utc(root.idle_expires_at) <= now or _as_utc(root.absolute_expires_at) <= now):
+                        raise DurableJobTransitionError("native original physical Root is inactive")
+                    witness = checkpoint_payload.get("witness") if isinstance(checkpoint_payload, dict) else None
+                    actual = NativePhysicalCleanupBinding(run.run_identity, _revision(run), run.owner_principal_id,
+                        run.operator_session_id, run.session_id, run.input_digest, run.authority_digest,
+                        run.run_fingerprint, run.attempt_count, run.lease_owner, run.fencing_token,
+                        claims[0], _digest(witness))
+                    if (binding != actual or checkpoint_payload != {"binding": native_physical_cleanup_binding_payload(binding), "witness": witness}
+                        or state != checkpoint_payload
+                        or any(item.get("checkpoint_id") == checkpoint_id for item in _json_load(run.checkpoint_receipts_json, []))):
+                        raise DurableJobTransitionError("native original physical reservation cannot be replaced")
+                    _native_physical_witness(run.job_kind, witness, binding)
+                    receipt["payload"] = checkpoint_payload
+                else:
+                    receipt["payload"] = _safe_structure(checkpoint_payload)
+            elif checkpoint_id == "native-physical-resource-reservation":
+                raise DurableJobTransitionError("native physical reservation must be safe and typed")
             # Repair reservation history is part of the physical execution
             # fence.  Do not let the generic checkpoint writer treat malformed
             # JSON as an empty legacy history and evict that fence.

@@ -34,7 +34,14 @@ returns exact citations and immutable original digests, and retains encrypted
 private source/evidence readback. Selected-file cockpit intake, bounded isolated
 parsing, unsupported reasons and positive original-reader cleanup share current
 canonical ownership and quota. Local extraction does not authorize model egress
-or learning. Ordinary and array-anchor formula expressions remain inert literals;
+or learning. A bounded per-start local cross-process lock proof gates new general
+uploads on the actual filesystem; missing/stale proof blocks admission without
+requiring a new invoice lifecycle service. Interrupted uploads reconcile only
+their exact positively closed private lease, never partial-byte adoption or
+clock-based release. Known prelaunch filesystem failure cannot retain a parser
+slot; late Root/Goal changes or cancellation permit positive cleanup only and
+do not adopt evidence. Unknown private output absence stays charged and visible.
+Ordinary and array-anchor formula expressions remain inert literals;
 data-table formulas and objects without literal expression text are unsupported.
 OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native

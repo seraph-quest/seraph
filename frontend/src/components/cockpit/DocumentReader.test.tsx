@@ -7,7 +7,7 @@ vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
 const props = { ownerPrincipalId: "operator", ownerSessionId: "session" };
 const goal = { id: "goal", title: "Owned Goal", status: "active", revision: 3, owner_session_id: "session" } as GoalInfo;
 const digest = "00".repeat(32), id = "11111111-1111-4111-8111-111111111111";
-const source = { artifact_id: id, artifact_ref: `document-source:${id}`, revision: 1, state: "reserved", format: "csv", source_digest: digest, goal_id: "goal", goal_revision: 3, reason_code: null, cleanup: "quiescent", no_learning: true, provider_contacts: 0 };
+const source = { artifact_id: id, artifact_ref: `document-source:${id}`, revision: 1, state: "reserved", format: "csv", source_digest: digest, goal_id: "goal", goal_revision: 3, reason_code: null, cleanup: "quiescent", writer_kind: null, no_learning: true, provider_contacts: 0 };
 const response = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); Object.defineProperty(crypto, "subtle", { configurable: true, value: { digest: vi.fn().mockResolvedValue(new Uint8Array(32).buffer) } }); });
 function fill() {
@@ -58,7 +58,7 @@ it("requires current owner Goal and explicit private upload acknowledgment", () 
   expect(apiFetch).not.toHaveBeenCalled();
 });
 it("discovers retained private receipts after reload and requires cleanup witness for the original parser", async () => {
-  vi.mocked(apiFetch).mockResolvedValueOnce(response({ sources: [{ ...source, revision: 9, state: "sealed", cleanup: "unknown_writer_retained" }], next_offset: null, no_learning: true })).mockResolvedValueOnce(response({}, 409));
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ sources: [{ ...source, revision: 9, state: "sealed", cleanup: "unknown_writer_retained", writer_kind: "parser" }], next_offset: null, no_learning: true })).mockResolvedValueOnce(response({}, 409));
   render(<DocumentReader {...props} goals={[goal]} />);
   fireEvent.click(screen.getByRole("button", { name: "Refresh retained document sources" }));
   const retained = await screen.findByRole("button", { name: /csv · sealed · document-source:/ }); fireEvent.click(retained);
@@ -68,4 +68,26 @@ it("discovers retained private receipts after reload and requires cleanup witnes
   expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/reconcile?expected_revision=9");
   expect(screen.getByText(/cleanup unknown_writer_retained/)).toBeInTheDocument();
   expect(vi.mocked(apiFetch).mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+});
+it("reconciles the exact upload writer without offering parser recovery or restarting upload", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ sources: [{ ...source, revision: 6, state: "uploading", cleanup: "unknown_writer_retained", writer_kind: "upload" }], next_offset: null, no_learning: true }))
+    .mockResolvedValueOnce(response({ ...source, revision: 7, state: "cleanup_required" }));
+  render(<DocumentReader {...props} goals={[goal]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh retained document sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: /csv · uploading · document-source:/ }));
+  expect(screen.queryByRole("button", { name: "Reconcile original document reader cleanup" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile original document upload cleanup" }));
+  await screen.findByText(/Source cleanup_required/);
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/reconcile-upload?expected_revision=6");
+  expect(vi.mocked(apiFetch).mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+  expect(screen.getByRole("button", { name: "Read cited document evidence" })).toBeDisabled();
+});
+it("shows unavailable upload proof while retained source inspection and local reading remain usable", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ sources: [{ ...source, state: "sealed" }], next_offset: null, no_learning: true, upload_readiness: "blocked" }));
+  render(<DocumentReader {...props} goals={[goal]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh retained document sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: /csv · sealed · document-source:/ }));
+  expect(screen.getByText(/New uploads are blocked until this host proves/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Inspect document source" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Read cited document evidence" })).toBeEnabled();
 });

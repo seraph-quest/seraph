@@ -31,6 +31,30 @@ another selection requires a fresh reservation. Evidence is immutable encrypted
 private output with exact readback. Deletion tombstones before physical cleanup
 and returns capacity only after positive absence; unknown writers remain charged.
 
+Upload writers hold an exclusive kernel lock on one stable private generation/
+slot lease inode before publishing `live_writer`, through awaited stream closure,
+source filesystem I/O and canonical settlement. The immutable active binding
+includes owner, workspace, nonce, source digest, generation and slot plus exact
+device/inode identity. Cancellation awaits positive settlement; a crashed owner
+retains capacity until cleanup-only reconciliation exclusively acquires that
+same verified inode and commits the exact binding CAS. It does not resume, seal
+or adopt a partial upload. Missing, replaced, symlinked or held leases remain
+unknown. A precommit orphan can reuse that one stable inode only while the
+canonical writer proves no live binding and exclusive acquisition proves
+quiescence; no TTL, PID absence or fresh filename substitutes for closure.
+
+The existing document lifecycle runs one bounded local lock-contract probe per
+start, outside SQL writers, with an empty-environment fixed child, independent
+open descriptors, real cross-process exclusion/release and positive wait within
+a two-second original bound. Its private readiness receipt binds the canonical
+workspace, source-directory device/inode, process and boot nonce; stop, restart,
+directory/workspace change or an unproved profile blocks new general-source
+uploads with visible recovery. Each host must execute this runtime check;
+macOS is a peer host, not categorically excluded by a Linux receipt. Native
+macOS acceptance remains unexecuted. These locks enforce the cooperative writer
+protocol, not filesystem confidentiality or hostile-host isolation. The existing
+invoice profile gains bounded writer cleanup without a new boot prerequisite.
+
 `DocumentReadInput` declares `artifact_ref`, `format` (pdf/docx/xlsx/csv),
 `selection`, and `page_sheet_limits`. `DocumentEvidence` contains source-linked
 sections (`source_ref`, `text`, `table_cells`), warnings and `source_digest`.
@@ -96,6 +120,15 @@ output remains visibly unavailable and is never invented from a reap receipt.
 Two lifetime parser attempts share one original 70-second execution window capped
 by the source/Goal/budget and authenticated Root expiry; replay never renews it.
 Private completed-output reads use current owner/Root/Goal authority separately.
+Fallible parent-directory preparation precedes the parser reservation commit;
+known no-child failures release only the exact original binding. After launch,
+positive supervised wait remains mandatory. Evidence adoption checks the exact
+writer/generation/attempt/deadline, current authenticated Root and freshly read
+active Goal revision in the same canonical writer. Stale authority or late
+cancellation permits cleanup only, never an evidence receipt. Unadopted encrypted
+output is removed through exact ciphertext/inode checks and positive absence
+outside the SQL writer, or retained as explicitly charged cleanup-required
+output; unknown cleanup does not make that output readable.
 
 Local extraction performs no inference or learning. Returning private evidence
 to the selecting authenticated owner is separate from source/model egress.

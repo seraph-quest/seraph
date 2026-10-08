@@ -196,13 +196,27 @@ task events, and selection grants no source/model egress or learning authority.
 
 The source index preserves redacted owned reservations after reload. Explicit
 deletion requires the current revision, tombstones first and frees charged quota
-only after exact private cleanup. Unknown parser cleanup holds the host slot
+only after exact private cleanup. It shows whether this host's actual bounded
+cross-process upload-lock proof is ready; an unproved, stopped or changed
+filesystem profile blocks new uploads with a readable recovery state. Restart
+the managed document service to obtain a fresh local proof. That runtime check
+applies on each peer host; this receipt does not establish native macOS execution.
+Interrupted uploads show their upload writer kind and a separate cleanup-only
+reconcile control. Recovery must exclusively acquire the original generation/
+slot/nonce/source/owner-bound private lease inode before releasing the writer;
+it never retries, seals or adopts partial bytes. A held, missing or replaced
+lease remains charged. Unknown parser cleanup holds the host slot
 across new requests and restarts. Original-reader reconciliation accepts only its
 private nonce/job/digest/generation/PID-bound positive wait witness; a reap
 without recorded output does not reconstruct evidence. The same source family
 reuses current canonical input-artifact ownership, encryption and quota owners;
 there is no second store or queue. Independent original deadlines and positive
 supervision bound two lifetime attempts. Local extraction makes no provider call.
+Parser prelaunch filesystem failure does not publish a host slot. After positive
+reap, evidence adoption rechecks current Root and exact active Goal revision in
+the same canonical writer; stale authority releases positively closed parser
+capacity but adopts no evidence. A cancelled or unadopted encrypted candidate
+can remain cleanup-required until exact private deletion, with quota retained.
 
 Linux local format/process receipts establish only their checked mechanics.
 macOS has a named native network-denial adapter but no native execution receipt;

@@ -5,20 +5,25 @@ import type { GoalInfo } from "../../types";
 
 type Format = "pdf" | "docx" | "xlsx" | "csv";
 interface Source { artifact_id: string; artifact_ref: string; revision: number; state: string; format: Format;
-  source_digest: string; goal_id: string; goal_revision: number; reason_code: string | null; cleanup: string; no_learning: true; provider_contacts: 0 }
+  source_digest: string; goal_id: string; goal_revision: number; reason_code: string | null; cleanup: string; writer_kind: "parser" | "upload" | null; no_learning: true; provider_contacts: 0 }
 interface Evidence { sections: { source_ref: string; text: string; table_cells: { source_ref: string; text: string; formula: string | null; cached_value: string | null }[] }[];
   warnings: string[]; source_digest: string; no_learning: true }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
 async function request(path: string, method = "GET", body?: BodyInit, headers?: HeadersInit): Promise<unknown> {
   const response = await apiFetch(`${API_URL}/api/documents${path}`, { method, body, headers });
-  if (!response.ok) throw Error(`Document operation blocked (${response.status}). Inspect the retained source and cleanup state before retrying.`);
+  if (!response.ok) {
+    let code = "";
+    try { const result = await response.json(); if (record(result) && record(result.detail) && typeof result.detail.code === "string" && /^[a-z_]{1,100}$/.test(result.detail.code)) code = ` ${result.detail.code}.`; } catch { /* The HTTP status remains useful through a partial error payload. */ }
+    throw Error(`Document operation blocked (${response.status}).${code} Inspect the retained source and cleanup state before retrying.`);
+  }
   return response.json();
 }
 function sourceRead(value: unknown): Source {
   if (!record(value) || typeof value.artifact_id !== "string" || typeof value.artifact_ref !== "string" || !/^document-source:[0-9a-f-]{36}$/.test(value.artifact_ref)
     || !Number.isSafeInteger(value.revision) || typeof value.state !== "string" || !["pdf", "docx", "xlsx", "csv"].includes(String(value.format))
     || typeof value.source_digest !== "string" || !/^[a-f0-9]{64}$/.test(value.source_digest) || typeof value.goal_id !== "string"
-    || !Number.isSafeInteger(value.goal_revision) || value.no_learning !== true || value.provider_contacts !== 0 || typeof value.cleanup !== "string") throw Error("Private source readback is invalid. Inspect the original receipt before continuing.");
+    || !Number.isSafeInteger(value.goal_revision) || value.no_learning !== true || value.provider_contacts !== 0 || typeof value.cleanup !== "string"
+    || ![null, "parser", "upload"].includes(value.writer_kind as null | string)) throw Error("Private source readback is invalid. Inspect the original receipt before continuing.");
   return value as unknown as Source;
 }
 export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { goals: GoalInfo[]; ownerPrincipalId?: string | null; ownerSessionId?: string | null }) {
@@ -27,10 +32,11 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [ack, setAck] = useState(false);
   const [pages, setPages] = useState(""), [sheets, setSheets] = useState("");
   const [retained, setRetained] = useState<Source[]>([]), [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [uploadReadiness, setUploadReadiness] = useState<"ready" | "blocked" | "unknown">("unknown");
   const pending = useRef<{ request: string; file: File; digest: string; goal: GoalInfo } | null>(null), generation = useRef(0);
   const eligible = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
   const goal = eligible.find(g => g.id === goalId), owned = Boolean(ownerPrincipalId && ownerSessionId);
-  useEffect(() => { ++generation.current; setFile(null); setGoalId(""); setSource(null); setEvidence(null); setRetained([]); setNextOffset(null); setError(null); setBusy(false); setAck(false); pending.current = null; return () => { ++generation.current; }; }, [ownerPrincipalId, ownerSessionId]);
+  useEffect(() => { ++generation.current; setFile(null); setGoalId(""); setSource(null); setEvidence(null); setRetained([]); setNextOffset(null); setUploadReadiness("unknown"); setError(null); setBusy(false); setAck(false); pending.current = null; return () => { ++generation.current; }; }, [ownerPrincipalId, ownerSessionId]);
   const body = (value: unknown) => JSON.stringify(value);
   async function selectAndUpload() {
     if (!owned || busy || (!pending.current && (!file || !goal?.revision || !ack))) return;
@@ -73,14 +79,14 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
       if (!record(result) || result.no_learning !== true || !Array.isArray(result.sources) || result.sources.length > 50
         || !(result.next_offset === null || Number.isSafeInteger(result.next_offset))) throw Error("Retained source discovery is unavailable.");
       const values = result.sources.map(sourceRead);
-      if (version === generation.current) { setRetained(offset === 0 ? values : previous => [...previous, ...values]); setNextOffset(result.next_offset as number | null); }
+      if (version === generation.current) { setRetained(offset === 0 ? values : previous => [...previous, ...values]); setNextOffset(result.next_offset as number | null); setUploadReadiness(result.upload_readiness === "ready" || result.upload_readiness === "blocked" ? result.upload_readiness : "unknown"); }
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
   }
   async function reconcile() {
     if (!source || busy) return;
     const version = generation.current; setBusy(true); setError(null); setEvidence(null);
-    try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}/reconcile?expected_revision=${source.revision}`, "POST")); if (version === generation.current) setSource(result); }
+    try { const action = source.writer_kind === "upload" ? "reconcile-upload" : "reconcile"; const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}/${action}?expected_revision=${source.revision}`, "POST")); if (version === generation.current) setSource(result); }
     catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
   }
@@ -113,6 +119,7 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
   return <details className="mb-3 rounded border border-white/10 p-2 text-xs"><summary>Read a local document</summary><section aria-label="Local document reader">
     <p>Select a private file for bounded CPU extraction into cited evidence. File content stays local; no provider contact and no learning.</p>
     <button type="button" disabled={busy || !owned} onClick={() => void discover()}>Refresh retained document sources</button>
+    {uploadReadiness === "blocked" && <p role="status">New uploads are blocked until this host proves private writer exclusion. Restart the managed document service and refresh. Retained sources remain inspectable.</p>}
     {retained.length > 0 && <ul aria-label="Retained private document sources">{retained.map(item => <li key={item.artifact_id}><button type="button" disabled={busy} onClick={() => { setSource(item); setEvidence(null); setError(null); setFile(null); setAck(false); setPages(""); setSheets(""); pending.current = null; }}>{item.format} · {item.state} · {item.artifact_ref} · Goal {item.goal_id}</button></li>)}</ul>}
     {nextOffset !== null && <button type="button" disabled={busy} onClick={() => void discover(nextOffset)}>Load more retained document sources</button>}
     {error && <p role="alert" className="text-amber-200">{error}</p>}
@@ -126,12 +133,12 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
       <p role="status">Source {source.state} · {source.reason_code ?? "no active block"} · cleanup {source.cleanup}</p>
       <p className="font-mono break-all">{source.artifact_ref} · revision {source.revision} · SHA-256 {source.source_digest}</p>
       <button type="button" disabled={busy} onClick={() => void inspect()}>Inspect document source</button>
-      {source.cleanup === "unknown_writer_retained" && <><p>Cleanup is unknown. The original parser must prove it was reaped; upload writers remain held when no positive witness exists.</p><button type="button" disabled={busy} onClick={() => void reconcile()}>Reconcile original document reader cleanup</button></>}
+      {source.cleanup === "unknown_writer_retained" && <><p>Cleanup is unknown. The original {source.writer_kind === "upload" ? "upload lease must prove its writer is closed" : "parser must prove it was reaped"}. Capacity remains held until exact positive closure.</p><button type="button" disabled={busy} onClick={() => void reconcile()}>{source.writer_kind === "upload" ? "Reconcile original document upload cleanup" : "Reconcile original document reader cleanup"}</button></>}
       {source.format === "pdf" && <label>Physical PDF pages (comma separated)<input aria-label="Physical PDF pages" disabled={busy} value={pages} onChange={e => { setPages(e.target.value); setEvidence(null); }} /></label>}
       {source.format === "xlsx" && <label>XLSX sheets (one per line)<textarea aria-label="XLSX sheets" disabled={busy} value={sheets} onChange={e => { setSheets(e.target.value); setEvidence(null); }} /></label>}
       <button type="button" disabled={busy || source.state !== "sealed" || source.cleanup === "unknown_writer_retained"} onClick={() => void read()}>Read cited document evidence</button>
       <button type="button" disabled={busy || source.state === "deleted"} onClick={() => void remove()}>Delete private source and verify cleanup</button>
-      {source.state !== "sealed" && source.state !== "deleted" && <p>Inspect an interrupted upload before taking another action. If it cannot be sealed safely, delete this retained source, verify cleanup, then explicitly select the file again.</p>}
+      {source.state !== "sealed" && source.state !== "deleted" && <p>Inspect an interrupted upload before taking another action. Reconcile its exact writer closure first; then delete this retained source, verify cleanup, and explicitly select the file again. Recovery never resumes or seals a partial upload.</p>}
     </>}
     {evidence && <div aria-label="Cited document evidence" role="region">
       {evidence.warnings.map((warning, i) => <p key={i} role="status">{warning}</p>)}

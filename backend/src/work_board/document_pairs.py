@@ -6,10 +6,13 @@ generation and quota; elapsed time never proves a descriptor was closed.
 from __future__ import annotations
 from datetime import timedelta
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import re
+import sys
+import time
 import uuid
 from sqlalchemy import func, select
 from config.settings import settings
@@ -28,6 +31,83 @@ PREFIX = "artifacts/work-board/document-pairs"
 CHARGE = 16 * 1024 * 1024
 SOURCE_CAPABILITY = "document.read.v1"
 SOURCE_PREFIX = "artifacts/work-board/document-sources"
+
+
+async def probe_upload_profile():
+    """One bounded local kernel-contract probe owned by the document lifecycle."""
+    root = dict(root_binding())
+    path = canonical_workspace_root(settings.workspace_dir)/SOURCE_PREFIX/".upload-profile.lock"
+    parent = fd = -1
+    process = None
+    positively_waited = False
+    deadline = time.monotonic()+2
+    try:
+        parent, leaf = _open_input_artifact_parent(path, create=True)
+        try: fd = os.open(leaf, os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        except FileExistsError: fd = os.open(leaf, os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+        facts = os.fstat(fd)
+        if not _private_input_file_metadata(facts) or facts.st_size != 0:
+            raise OSError("profile lock metadata changed")
+        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # This child uses only local descriptors and stdlib kernel calls. It has
+        # an empty environment, no source content and no provider transport.
+        code = """import fcntl,os,signal,sys
+signal.alarm(2)
+fd=os.open(sys.argv[2],os.O_RDWR|os.O_NOFOLLOW,dir_fd=int(sys.argv[1]))
+facts=os.fstat(fd)
+if (facts.st_dev,facts.st_ino)!=(int(sys.argv[3]),int(sys.argv[4])): sys.exit(3)
+try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+except BlockingIOError: print('excluded',flush=True)
+else: sys.exit(4)
+if sys.stdin.buffer.read(1)!=b'x': sys.exit(5)
+fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+print('acquired',flush=True)
+os.close(fd)
+"""
+        async with asyncio.timeout(max(.001, deadline-time.monotonic()-.5)):
+            process = await asyncio.create_subprocess_exec(sys.executable, "-I", "-c", code,
+                str(parent), leaf, str(facts.st_dev), str(facts.st_ino), env={}, close_fds=True,
+                pass_fds=(parent,), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            if await process.stdout.readline() != b"excluded\n": raise OSError("cross-process exclusion unavailable")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            process.stdin.write(b"x"); await process.stdin.drain(); process.stdin.close()
+            if await process.stdout.readline() != b"acquired\n": raise OSError("cross-process lock release unavailable")
+            if await process.wait() != 0: raise OSError("profile child failed")
+            positively_waited = True
+        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        named = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        if named.st_dev != facts.st_dev or named.st_ino != facts.st_ino: raise OSError("profile name changed")
+        os.unlink(leaf, dir_fd=parent); os.fsync(parent)
+        directory = os.fstat(parent)
+        return {"root": root, "directory_device": directory.st_dev, "directory_inode": directory.st_ino,
+            "boot_nonce": uuid.uuid4().hex, "process_id": os.getpid(), "cross_process": True,
+            "probe_inode": facts.st_ino, "positive_wait": True, "active": True}
+    finally:
+        try:
+            if process is not None and not positively_waited:
+                if process.returncode is None: process.kill()
+                await asyncio.wait_for(process.wait(), max(.001, deadline-time.monotonic()))
+        finally:
+            if fd >= 0: os.close(fd)
+            if parent >= 0: os.close(parent)
+
+
+def validate_upload_profile(profile):
+    if (not isinstance(profile, dict) or profile.get("active") is not True or profile.get("process_id") != os.getpid()
+        or profile.get("cross_process") is not True or profile.get("positive_wait") is not True
+        or not re.fullmatch(r"[0-9a-f]{32}", str(profile.get("boot_nonce", "")))
+        or profile.get("root") != dict(root_binding())):
+        raise BoardError("document_upload_profile_unproved", "Restart the managed document service to prove this host's private upload lock profile", status_code=503)
+    path = canonical_workspace_root(settings.workspace_dir)/SOURCE_PREFIX/".upload-profile.lock"
+    try:
+        parent, _leaf = _open_input_artifact_parent(path, create=False)
+        try: facts = os.fstat(parent)
+        finally: os.close(parent)
+        if facts.st_dev != profile["directory_device"] or facts.st_ino != profile["directory_inode"]:
+            raise OSError("profile directory changed")
+    except (OSError, KeyError):
+        raise BoardError("document_upload_profile_unproved", "The original private filesystem profile changed; restart the document service", status_code=503) from None
 
 
 def metadata(row):
@@ -68,6 +148,9 @@ async def owned(db, owner, identifier, *, revision=None, capability=CAPABILITY):
 async def authority(db, owner, row, value, staged_root, *, ingest=False):
     if value["root"] != staged_root:
         raise BoardError("document_pair_root_changed", "The original workspace changed", status_code=409)
+    # Long-lived readers must not adopt against a cached pre-execution Goal.
+    from src.db.models import Goal
+    await db.get(Goal, row.goal_id, populate_existing=True)
     goal = await WorkBoardRepository._validate_goal(db, owner, goal_id=row.goal_id, goal_revision=row.goal_revision)
     from src.goals.repository import deserialize_admission_budget
     budget = deserialize_admission_budget(goal)
@@ -179,7 +262,125 @@ def read_private(path, receipt, *, maximum):
     return plaintext
 
 
-async def acquire_upload(db, owner, identifier, revision, slot, *, capability=CAPABILITY):
+def upload_lease(row, value, slot, token, *, profile=None):
+    """Own the same private inode before publishing canonical writer ownership."""
+    path = source_path(row, value, slot)
+    parent, _leaf = _open_input_artifact_parent(path, create=True)
+    name = f"g{value['generation']}-{slot}.upload-lock"
+    binding = {"schema": "document-upload-lease.v1", "artifact_id": row.artifact_id,
+        "owner_principal_id": row.owner_principal_id, "owner_session_id": row.owner_session_id,
+        "generation": value["generation"], "slot": slot, "nonce": token,
+        "source_digest": value["input"][slot]["sha256"], "root_digest": sha256(canonical(value["root"]))}
+    fd = -1
+    try:
+        if row.capability_id == SOURCE_CAPABILITY and os.fstat(parent).st_dev != profile["directory_device"]:
+            raise OSError("upload filesystem differs from proved profile")
+        created = True
+        try:
+            fd = os.open(name, os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        except FileExistsError:
+            created = False
+            fd = os.open(name, os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if not created:
+            facts = os.fstat(fd)
+            if value.get("live_writer") or not _private_input_file_metadata(facts) or not 0 < facts.st_size <= 2048:
+                raise OSError("orphan lease reuse unproven")
+            previous = json.loads(os.read(fd, 2049))
+            if (set(previous) != set(binding) or not re.fullmatch(r"[0-9a-f]{32}", str(previous.get("nonce", "")))
+                or {**previous, "nonce": token} != binding):
+                raise OSError("orphan lease binding changed")
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if named.st_dev != facts.st_dev or named.st_ino != facts.st_ino:
+                raise OSError("orphan lease name changed")
+            os.lseek(fd, 0, os.SEEK_SET); os.ftruncate(fd, 0)
+        raw = canonical(binding)
+        if os.write(fd, raw) != len(raw):
+            raise OSError("upload lease write incomplete")
+        os.fsync(fd); os.fsync(parent)
+        probe = os.open(name, os.O_RDWR|os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise OSError("filesystem upload exclusion unavailable")
+        finally:
+            os.close(probe)
+        facts = os.fstat(fd)
+        if not _private_input_file_metadata(facts):
+            raise OSError("upload lease metadata invalid")
+        return fd, {"file": name, "device": facts.st_dev, "inode": facts.st_ino, "binding": binding}
+    except BaseException:
+        if fd >= 0: os.close(fd)
+        raise
+    finally:
+        os.close(parent)
+
+
+def original_upload_lease(row, value):
+    """Exclusive acquisition proves quiescence only under the exact lease protocol."""
+    lease = value["upload_binding"]
+    writer = value["live_writer"]
+    expected = {"schema": "document-upload-lease.v1", "artifact_id": row.artifact_id,
+        "owner_principal_id": row.owner_principal_id, "owner_session_id": row.owner_session_id,
+        "generation": value["generation"], "slot": writer["slot"], "nonce": writer["token"],
+        "source_digest": value["input"][writer["slot"]]["sha256"], "root_digest": sha256(canonical(value["root"]))}
+    name = f"g{value['generation']}-{writer['slot']}.upload-lock"
+    if lease["binding"] != expected or lease["file"] != name or not re.fullmatch(r"g[12]-(source|pdf|csv)\.upload-lock", name):
+        raise ValueError("upload lease binding changed")
+    parent, _leaf = _open_input_artifact_parent(source_path(row, value, writer["slot"]), create=False)
+    fd = -1
+    try:
+        fd = os.open(name, os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+        facts = os.fstat(fd)
+        if (not _private_input_file_metadata(facts) or facts.st_size != len(canonical(expected))
+            or facts.st_dev != lease["device"] or facts.st_ino != lease["inode"]):
+            raise ValueError("upload lease inode changed")
+        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if os.read(fd, 2049) != canonical(expected):
+            raise ValueError("upload lease content changed")
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if current.st_dev != facts.st_dev or current.st_ino != facts.st_ino:
+            raise ValueError("upload lease name changed")
+        return fd
+    except BaseException:
+        if fd >= 0: os.close(fd)
+        raise
+    finally:
+        os.close(parent)
+
+
+async def reconcile_upload(db, owner, identifier, revision, *, capability=SOURCE_CAPABILITY):
+    row, value = await owned(db, owner, identifier, revision=revision, capability=capability)
+    if value["root"] != dict(root_binding()):
+        raise BoardError("document_pair_root_changed", "Cleanup uses the original workspace", status_code=409)
+    if not value.get("live_writer") or value["live_writer"].get("slot") not in {"source", "pdf", "csv"}:
+        raise BoardError("document_original_upload_required", "There is no original upload writer to reconcile", status_code=409)
+    try:
+        lease_fd = original_upload_lease(row, value)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise BoardError("document_upload_quiescence_unknown", "The exact original upload lease is held or unavailable; retain capacity", status_code=409) from None
+    try:
+        await _begin_immediate(db)
+        fresh, current = await owned(db, owner, identifier, revision=revision, capability=capability)
+        if current != value:
+            raise BoardError("document_upload_fence_changed", "The original upload binding changed", status_code=409)
+        current["live_writer"] = None
+        current["phase"] = "cleanup_required"
+        current["reason"] = "document_original_upload_closed_cleanup_required"
+        current["upload_cleanup"] = {"binding_digest": sha256(canonical(value["upload_binding"])), "positive_exclusive_lock": True}
+        fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
+        await db.commit()
+        return projection(fresh)
+    finally:
+        os.close(lease_fd)
+
+
+async def acquire_upload(db, owner, identifier, revision, slot, *, capability=CAPABILITY, upload_profile=None):
+    # Lifecycle proof is checked before acquiring the canonical SQL writer.
+    if capability == SOURCE_CAPABILITY: validate_upload_profile(upload_profile)
     staged_root=dict(root_binding()); token=uuid.uuid4().hex
     await _begin_immediate(db)
     row,value=await owned(db,owner,identifier,revision=revision,capability=capability)
@@ -190,15 +391,26 @@ async def acquire_upload(db, owner, identifier, revision, slot, *, capability=CA
     active=[r for r in rows if metadata(r).get("live_writer")]
     if value.get("live_writer") or len(active)>=2 or any(r.owner_principal_id==owner.principal_id for r in active):
         raise BoardError("document_upload_writer_busy", "A private upload writer is already held", status_code=409)
-    value["phase"]="uploading"; value["live_writer"]={"token":token,"slot":slot}
-    row.document_metadata_json=canonical(value).decode(); row.revision+=1
-    await db.commit()
-    return row,value,token
+    try:
+        lease_fd, lease = upload_lease(row, value, slot, token, profile=upload_profile)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise BoardError("document_upload_lock_unavailable", "Private filesystem exclusion is unavailable; upload remains blocked", status_code=503) from None
+    try:
+        value["phase"]="uploading"; value["live_writer"]={"token":token,"slot":slot}
+        value["upload_binding"] = lease
+        row.document_metadata_json=canonical(value).decode(); row.revision+=1
+        await db.commit()
+        return row,value,token,lease_fd
+    except BaseException:
+        os.close(lease_fd)
+        raise
 
 
-async def upload(db,owner,identifier,revision,slot,stream,*,capability=CAPABILITY):
-    row,value,token=await acquire_upload(db,owner,identifier,revision,slot,capability=capability)
+async def upload(db,owner,identifier,revision,slot,stream,*,capability=CAPABILITY,upload_profile=None):
+    row,value,token,lease_fd=await acquire_upload(db,owner,identifier,revision,slot,capability=capability,upload_profile=upload_profile)
     descriptor=value["input"][slot]; data=bytearray(); result=None; reason=None
+    request_task = asyncio.current_task()
+    fresh = None
     try:
         remaining=(utc(__import__('datetime').datetime.fromisoformat(value['ingest_deadline']))-now()).total_seconds()
         async with asyncio.timeout(max(0,remaining)):
@@ -214,19 +426,45 @@ async def upload(db,owner,identifier,revision,slot,stream,*,capability=CAPABILIT
             raise ValueError("document_source_readback_failed")
     except Exception:
         reason="document_upload_failed_cleanup_required"
-    # Reached only after the actual awaited stream and held descriptors close.
-    # Cancellation/BaseException skips this writer; unknown remains held.
-    staged_root=dict(root_binding()); await _begin_immediate(db)
-    fresh,current=await owned(db,owner,identifier,capability=capability)
-    if current.get("live_writer")!={"token":token,"slot":slot}:
-        raise BoardError("document_upload_fence_changed", "The original writer needs reconciliation",status_code=409)
-    current["live_writer"]=None
-    if result is not None and reason is None:
-        current["sources"][slot]=result
-    else:
-        current["phase"]="cleanup_required"; current["reason"]=reason
-    fresh.document_metadata_json=canonical(current).decode(); fresh.revision+=1
-    await db.commit()
+    except BaseException:
+        reason="document_upload_failed_cleanup_required"
+        raise
+    finally:
+        # No detached I/O exists: stream consumption is awaited and private I/O
+        # is synchronous. Cancellation must also finish closing its iterator.
+        try:
+            async def settle_upload():
+                nonlocal fresh, reason
+                async with asyncio.timeout(10):
+                    close = getattr(stream, "aclose", None)
+                    if close is not None: await close()
+                    staged_root = dict(root_binding())
+                    await _begin_immediate(db)
+                    fresh,current=await owned(db,owner,identifier,capability=capability)
+                    if current.get("live_writer")!={"token":token,"slot":slot} or current.get("upload_binding") != value["upload_binding"]:
+                        raise BoardError("document_upload_fence_changed", "The original writer needs reconciliation",status_code=409)
+                    current["live_writer"]=None
+                    if request_task.cancelling():
+                        reason = "document_upload_failed_cleanup_required"
+                    if result is not None and reason is None:
+                        from src.auth.service import AuthFailure
+                        try:
+                            await authority(db,owner,fresh,current,staged_root,ingest=True)
+                            if capability == SOURCE_CAPABILITY:
+                                from src.work_board.documents import current_source_root
+                                await current_source_root(db, owner, None)
+                        except (BoardError, AuthFailure):
+                            reason = "document_upload_authority_changed_cleanup_required"
+                        else:
+                            current["sources"][slot]=result
+                    if reason is not None:
+                        current["phase"]="cleanup_required"; current["reason"]=reason
+                    fresh.document_metadata_json=canonical(current).decode(); fresh.revision+=1
+                    await db.commit()
+            from src.work_board.documents import shield_positive_cleanup
+            await shield_positive_cleanup(settle_upload())
+        finally:
+            os.close(lease_fd)
     if reason: raise BoardError(reason,"The private upload failed; its generation remains charged",status_code=409)
     return projection(fresh)
 
@@ -276,6 +514,7 @@ def cleanup_generation(row,value):
     try:parent,_leaf=_open_input_artifact_parent(path,create=False)
     except FileNotFoundError:parent=-1
     if parent>=0:
+        held_leases = []
         try:
             names=os.listdir(parent)
             if len(names)>8:raise OSError("document cleanup fragment bound")
@@ -285,14 +524,19 @@ def cleanup_generation(row,value):
             witness = re.compile(r"^[0-9a-f]{32}\.witness\.json$") if general else None
             checked=[]
             for name in names:
-                if not expected.fullmatch(name) and not fragment.fullmatch(name) and not (witness and witness.fullmatch(name)):raise OSError("document cleanup foreign generation")
+                lease = re.compile(rf"^g{value['generation']}-({slots})\.upload-lock$")
+                if not expected.fullmatch(name) and not fragment.fullmatch(name) and not lease.fullmatch(name) and not (witness and witness.fullmatch(name)):raise OSError("document cleanup foreign generation")
                 fd=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent)
                 try:
+                    if lease.fullmatch(name):
+                        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+                        held_leases.append(fd)
                     stat=os.fstat(fd)
                     if not _private_input_file_metadata(stat) or stat.st_size>(34 if general else 6)*1024*1024:
                         raise OSError("document cleanup file metadata")
                     checked.append((name,stat))
-                finally:os.close(fd)
+                finally:
+                    if fd not in held_leases: os.close(fd)
             # Final name identity checks precede unlink, after actual writers
             # are positively closed and the canonical tombstone is durable.
             for name,original in checked:
@@ -302,7 +546,9 @@ def cleanup_generation(row,value):
                 os.unlink(name,dir_fd=parent)
             os.fsync(parent)
             if os.listdir(parent):raise OSError("document cleanup directory not empty")
-        finally:os.close(parent)
+        finally:
+            for descriptor in held_leases: os.close(descriptor)
+            os.close(parent)
     from src.work_board.input_artifacts import _cleanup_private_input_file, _InputArtifactCleanupUnverified
     try:
         _cleanup_private_input_file(_payload_path(row),expected_digest=row.payload_sha256,expected_size=row.size_bytes)

@@ -3,6 +3,8 @@ import asyncio
 import hashlib
 import io
 import json
+import os
+import sys
 import zipfile
 
 import httpx
@@ -38,6 +40,34 @@ def fixture_bytes(fmt):
 def read_request(fmt, identifier="00000000-0000-0000-0000-000000000000"):
     return DocumentReadInput(artifact_ref="document-source:"+identifier, format=fmt,
         selection={"sheets": ["Inputs"], "pages": []} if fmt == "xlsx" else {"pages": [], "sheets": []})
+
+
+async def test_upload_profile_failed_child_is_reaped_and_restart_proves_real_filesystem(accounting_db, monkeypatch):
+    from src.work_board import document_pairs as sources
+    from src.work_board.repository import BoardError
+    original_spawn = asyncio.create_subprocess_exec
+    children = []
+    async def silent_child(*args, **kwargs):
+        process = await original_spawn(sys.executable, "-I", "-c", "import signal,time; signal.alarm(2); time.sleep(5)", **kwargs)
+        children.append(process)
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", silent_child)
+    service = DocumentService()
+    try:
+        await service.start()
+        assert service._started and service._upload_profile is None
+        assert len(children) == 1 and children[0].returncode is not None
+        with pytest.raises(BoardError) as absent: sources.validate_upload_profile(service._upload_profile)
+        assert absent.value.code == "document_upload_profile_unproved"
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", original_spawn)
+        await service.start()
+        proven = service._upload_profile
+        assert proven["cross_process"] and proven["positive_wait"]
+        sources.validate_upload_profile(proven)
+        await service.stop()
+        with pytest.raises(BoardError): sources.validate_upload_profile(proven)
+    finally:
+        await service.stop()
 
 
 @pytest.mark.parametrize("fmt", ["pdf", "docx", "xlsx", "csv"])
@@ -188,7 +218,10 @@ def test_unknown_formula_objects_never_serialize_repr():
         spreadsheet_formula_literal(UnsupportedFormula())
 
 
-@pytest.mark.parametrize("fmt", ["pdf", "docx", "xlsx", "csv", "restart", "cancel"])
+@pytest.mark.parametrize("fmt", ["pdf", "docx", "xlsx", "csv", "restart", "cancel",
+    "upload_cancel", "upload_restart", "upload_inode", "upload_symlink", "parent_open",
+    "root_revoke", "root_expire", "goal_pause", "goal_revision", "original_deadline", "late_cancel",
+    "profile_missing", "profile_moved", "profile_stop", "upload_orphan"])
 async def test_authenticated_private_source_upload_seal_read_delete(accounting_db, monkeypatch, fmt):
     from config.settings import settings
     from src.api import auth, documents
@@ -197,7 +230,7 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
     from src.vault import crypto
     from src.db.models import WorkBoardInputArtifact
     mode = fmt
-    if fmt in {"restart", "cancel"}:
+    if fmt not in {"pdf", "docx", "xlsx", "csv"}:
         fmt = "csv"
     root, _engine, factory = accounting_db
     monkeypatch.setattr(documents, "get_session", factory.accounting_sessions)
@@ -238,6 +271,131 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                 "goal_id": goal.json()["id"], "goal_revision": 1, "idempotency_key": "selected", "no_learning": True})
             assert reserved.status_code == 200, reserved.text
             state = reserved.json(); identifier = state["artifact_id"]
+            if mode.startswith("profile_"):
+                service = app.state.document_service
+                old_directory = None
+                if mode == "profile_missing": service._upload_profile = None
+                elif mode == "profile_stop": await service.stop()
+                else:
+                    source_directory = root/"artifacts/work-board/document-sources"
+                    old_directory = source_directory.with_name("original-source-directory")
+                    source_directory.rename(old_directory); source_directory.mkdir(mode=0o700)
+                try:
+                    refused = await client.put(f"/api/documents/sources/{identifier}/content", params={"expected_revision": state["revision"]},
+                        content=raw, headers={"content-type": "application/octet-stream"})
+                    assert refused.status_code == 503 and refused.json()["detail"]["code"] == "document_upload_profile_unproved"
+                    retained_index = await client.get("/api/documents/sources")
+                    assert retained_index.status_code == 200 and retained_index.json()["upload_readiness"] == "blocked"
+                    assert retained_index.json()["sources"][0]["artifact_id"] == identifier
+                    async with factory.accounting_sessions() as db:
+                        unchanged = await db.get(WorkBoardInputArtifact, identifier)
+                        assert unchanged.revision == state["revision"] and json.loads(unchanged.document_metadata_json)["live_writer"] is None
+                    assert contacts == []
+                finally:
+                    if old_directory is not None:
+                        source_directory.rmdir(); old_directory.rename(source_directory)
+                return
+            if mode == "upload_orphan":
+                from src.work_board import document_pairs as sources
+                from src.work_board.contracts import WorkBoardOwner
+                async with factory.accounting_sessions() as db:
+                    source_row = await db.get(WorkBoardInputArtifact, identifier)
+                    orphan_owner = WorkBoardOwner(principal_id=source_row.owner_principal_id, session_id=source_row.owner_session_id)
+                lease_inode = None
+                for _ in range(3):
+                    async with factory() as db:
+                        async def crash_commit(): raise RuntimeError("isolated owner failure before upload reservation commit")
+                        monkeypatch.setattr(db, "commit", crash_commit)
+                        with pytest.raises(RuntimeError):
+                            await sources.acquire_upload(db, orphan_owner, identifier, state["revision"], "source", capability=sources.SOURCE_CAPABILITY,
+                                upload_profile=app.state.document_service._upload_profile)
+                        await db.rollback()
+                    leases = list(root.glob(f"artifacts/work-board/document-sources/{identifier}/*.upload-lock"))
+                    assert len(leases) == 1
+                    if lease_inode is None: lease_inode = leases[0].stat().st_ino
+                    assert leases[0].stat().st_ino == lease_inode
+                    async with factory.accounting_sessions() as db:
+                        unchanged = await db.get(WorkBoardInputArtifact, identifier)
+                        assert unchanged.revision == state["revision"] and json.loads(unchanged.document_metadata_json)["live_writer"] is None
+            if mode.startswith("upload_") and mode != "upload_orphan":
+                from src.work_board import document_pairs as sources
+                from src.work_board.contracts import WorkBoardOwner
+                entered, closed = asyncio.Event(), asyncio.Event()
+                async with factory.accounting_sessions() as db:
+                    row = await db.get(WorkBoardInputArtifact, identifier)
+                    owner = WorkBoardOwner(principal_id=row.owner_principal_id, session_id=row.owner_session_id)
+                if mode == "upload_cancel":
+                    async def interrupted_stream():
+                        try:
+                            yield raw[:1]
+                            entered.set()
+                            await asyncio.Event().wait()
+                        finally:
+                            closed.set()
+                    async def active_upload():
+                        async with factory.accounting_sessions() as db:
+                            await sources.upload(db, owner, identifier, state["revision"], "source", interrupted_stream(), capability=sources.SOURCE_CAPABILITY,
+                                upload_profile=app.state.document_service._upload_profile)
+                    running_upload = asyncio.create_task(active_upload())
+                    await asyncio.wait_for(entered.wait(), 5)
+                    live = (await client.get(f"/api/documents/sources/{identifier}")).json()
+                    assert live["writer_kind"] == "upload"
+                    refused = await client.post(f"/api/documents/sources/{identifier}/reconcile-upload", params={"expected_revision": live["revision"]})
+                    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "document_upload_quiescence_unknown"
+                    running_upload.cancel()
+                    with pytest.raises(asyncio.CancelledError): await asyncio.wait_for(running_upload, 5)
+                    assert closed.is_set()
+                    settled = (await client.get(f"/api/documents/sources/{identifier}")).json()
+                    assert settled["cleanup"] == "quiescent" and settled["state"] == "cleanup_required"
+                else:
+                    async with factory.accounting_sessions() as db:
+                        upload_row, upload_value, _token, lease_fd = await sources.acquire_upload(db, owner, identifier, state["revision"], "source", capability=sources.SOURCE_CAPABILITY,
+                            upload_profile=app.state.document_service._upload_profile)
+                    # Transfer the original open file description to a real
+                    # process; its death releases the exact kernel-held lease.
+                    holder = await asyncio.create_subprocess_exec(sys.executable, "-I", "-c",
+                        "import sys; print('holding',flush=True); sys.stdin.buffer.read()",
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL, pass_fds=(lease_fd,), close_fds=True, env={})
+                    os.close(lease_fd)
+                    try:
+                        assert await asyncio.wait_for(holder.stdout.readline(), 5) == b"holding\n"
+                        live = (await client.get(f"/api/documents/sources/{identifier}")).json()
+                        refused = await client.post(f"/api/documents/sources/{identifier}/reconcile-upload", params={"expected_revision": live["revision"]})
+                        assert refused.status_code == 409
+                        refused_delete = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": live["revision"]})
+                        assert refused_delete.status_code == 409
+                    finally:
+                        if holder.returncode is None: holder.kill()
+                        await asyncio.wait_for(holder.wait(), 5)
+                    lease_path = sources.source_path(upload_row, upload_value, "source").parent / upload_value["upload_binding"]["file"]
+                    if mode in {"upload_inode", "upload_symlink"}:
+                        saved = lease_path.with_name("saved-original")
+                        lease_path.rename(saved)
+                        if mode == "upload_inode":
+                            lease_path.write_bytes(saved.read_bytes()); lease_path.chmod(0o600)
+                        else:
+                            lease_path.symlink_to(saved)
+                        refused = await client.post(f"/api/documents/sources/{identifier}/reconcile-upload", params={"expected_revision": live["revision"]})
+                        assert refused.status_code == 409
+                        async with factory.accounting_sessions() as db:
+                            retained_row = await db.get(WorkBoardInputArtifact, identifier)
+                            assert retained_row.document_reserved_bytes == 32*1024*1024 and sources.metadata(retained_row)["live_writer"]
+                        lease_path.unlink(); saved.rename(lease_path)
+                    settled_response = await client.post(f"/api/documents/sources/{identifier}/reconcile-upload", params={"expected_revision": live["revision"]})
+                    assert settled_response.status_code == 200, settled_response.text
+                    settled = settled_response.json()
+                    assert settled["state"] == "cleanup_required" and settled["cleanup"] == "quiescent"
+                async with factory.accounting_sessions() as db:
+                    retained_row = await db.get(WorkBoardInputArtifact, identifier)
+                    assert retained_row.document_reserved_bytes == 32*1024*1024 and not sources.metadata(retained_row)["sources"]
+                assert (await client.post(f"/api/documents/sources/{identifier}/seal", params={"expected_revision": settled["revision"]})).status_code == 409
+                deleted = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": settled["revision"]})
+                assert deleted.status_code == 200 and deleted.json()["state"] == "deleted", deleted.text
+                async with factory.accounting_sessions() as db:
+                    assert (await db.get(WorkBoardInputArtifact, identifier)).document_reserved_bytes == 0
+                assert contacts == []
+                return
             for route in ("/api/documents/sources/"+identifier,):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"origin": "http://localhost:3001"}) as other:
                     assert (await other.get(route)).status_code == 401
@@ -342,12 +500,82 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                 assert second_result.json()["status"] == "succeeded", second_result.text
                 second_state = (await client.get(f"/api/documents/sources/{second_id}")).json()
                 assert (await client.delete(f"/api/documents/sources/{second_id}", params={"expected_revision": second_state["revision"]})).status_code == 200
+            if mode == "parent_open":
+                from src.work_board import documents as document_service
+                original_open = document_service._open_input_artifact_parent
+                def denied_parent(*args, **kwargs): raise OSError("isolated prelaunch descriptor failure")
+                monkeypatch.setattr(document_service, "_open_input_artifact_parent", denied_parent)
+                denied = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
+                assert denied.status_code == 409
+                async with factory.accounting_sessions() as db:
+                    current_row = await db.get(WorkBoardInputArtifact, identifier)
+                    retained_value = json.loads(current_row.document_metadata_json)
+                    assert retained_value["live_writer"] is None and retained_value.get("parser_attempts", 0) == 0
+                assert not app.state.document_service._processes
+                monkeypatch.setattr(document_service, "_open_input_artifact_parent", original_open)
+            if mode in {"root_revoke", "root_expire", "goal_pause", "goal_revision", "original_deadline", "late_cancel"}:
+                from datetime import datetime, timedelta, timezone
+                from src.db.models import Goal, OperatorSession
+                original_parse = app.state.document_service.parse
+                original_deadline = None
+                async def change_after_positive_parse(*args, **kwargs):
+                    nonlocal original_deadline
+                    parsed = await original_parse(*args, **kwargs)
+                    assert parsed["status"] == "succeeded" and parsed["cleanup"] == "wait_reaped"
+                    async with factory.accounting_sessions() as db:
+                        source_row = await db.get(WorkBoardInputArtifact, identifier)
+                        stored = json.loads(source_row.document_metadata_json)
+                        original_deadline = stored["execution_deadline"]
+                        if mode.startswith("root_"):
+                            root_row = await db.get(OperatorSession, source_row.owner_session_id)
+                            if mode == "root_revoke": root_row.revoked_at = datetime.now(timezone.utc)
+                            else: root_row.absolute_expires_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+                        elif mode.startswith("goal_"):
+                            goal_row = await db.get(Goal, source_row.goal_id)
+                            if mode == "goal_pause": goal_row.status = "paused"
+                            else: goal_row.revision += 1
+                        elif mode == "original_deadline":
+                            from src.work_board import pipelines
+                            expired_clock = datetime.fromisoformat(original_deadline)+timedelta(seconds=1)
+                            class ExpiredClock(datetime):
+                                @classmethod
+                                def now(cls, tz=None): return expired_clock
+                            monkeypatch.setattr(pipelines, "datetime", ExpiredClock)
+                    if mode == "late_cancel": asyncio.current_task().cancel()
+                    return parsed
+                monkeypatch.setattr(app.state.document_service, "parse", change_after_positive_parse)
+                if mode == "late_cancel":
+                    from src.work_board.contracts import WorkBoardOwner
+                    async def native_read():
+                        async with factory.accounting_sessions() as db:
+                            source_row = await db.get(WorkBoardInputArtifact, identifier)
+                            native_owner = WorkBoardOwner(principal_id=source_row.owner_principal_id, session_id=source_row.owner_session_id)
+                            return await app.state.document_service.read(db, native_owner, read_request(fmt, identifier))
+                    cancelled_read = asyncio.create_task(native_read())
+                    with pytest.raises(asyncio.CancelledError): await asyncio.wait_for(cancelled_read, 5)
+                else:
+                    refused = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
+                    assert refused.status_code in {401, 409}, refused.text
+                async with factory.accounting_sessions() as db:
+                    source_row = await db.get(WorkBoardInputArtifact, identifier)
+                    retained_value = json.loads(source_row.document_metadata_json)
+                    assert not retained_value.get("evidence")
+                    assert source_row.document_reserved_bytes == 32*1024*1024
+                    assert retained_value["live_writer"] is None
+                    assert retained_value["execution_deadline"] == original_deadline
+                    if mode == "late_cancel":
+                        assert retained_value["reason"] == "document_output_cleanup_required"
+                    else:
+                        assert not list(root.glob(f"artifacts/work-board/document-sources/{identifier}/g*-evidence.fernet"))
+                assert contacts == []
+                return
             result = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
             assert result.status_code == 200, result.text
             assert result.json()["status"] == "succeeded", result.text
             readback = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
             assert readback.json() == result.json()
             listed = await client.get("/api/documents/sources")
+            assert listed.json()["upload_readiness"] == "ready"
             assert [source["artifact_ref"] for source in listed.json()["sources"]] == [state["artifact_ref"]]
             assert contacts == []
             if mode == "csv":

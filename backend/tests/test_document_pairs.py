@@ -156,7 +156,10 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
         overwrite=await client.put(f'/api/work-board/document-pairs/{identifier}/sources/pdf',params={"expected_revision":pair['revision']},content=sources['pdf'],headers={"content-type":"application/octet-stream"})
         assert overwrite.status_code==409 and overwrite.json()['detail']['code']=='document_pair_slot_unavailable'
         files=list((root/'artifacts/work-board/document-pairs'/identifier).glob('*'))
-        assert len(files)==2 and all(p.stat().st_mode&0o777==0o600 for p in files)
+        encrypted=[p for p in files if p.suffix=='.fernet']
+        leases=[p for p in files if p.suffix=='.upload-lock']
+        assert len(encrypted)==2 and len(leases)==2 and len(files)==4
+        assert all(p.stat().st_mode&0o777==0o600 for p in files)
         assert all(b'%PDF-' not in p.read_bytes() and b'PEN-01' not in p.read_bytes() for p in files)
         task=await client.post('/api/work-board/tasks',json={"title":"Private invoice comparison",
             "body":"Compare only selected immutable PDF and CSV","goal_id":goal_id,"goal_revision":1,

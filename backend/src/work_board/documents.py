@@ -20,6 +20,7 @@ from src.work_board.document_read_parser import canonical, SOURCE_LIMIT, OUTPUT_
 from src.work_board.input_artifacts import _begin_immediate, _metadata_digest
 from src.work_board.input_artifacts import _open_input_artifact_parent, _private_input_file_metadata
 from src.work_board.pipelines import root_binding
+from src.auth.service import AuthFailure
 
 CAPABILITY = "document.read.v1"
 
@@ -108,6 +109,7 @@ def projection(row):
         "goal_revision": row.goal_revision, "reason_code": value.get("reason"),
         "ingest_deadline": value["ingest_deadline"], "no_learning": True,
         "cleanup": "unknown_writer_retained" if value.get("live_writer") else "quiescent",
+        "writer_kind": ("parser" if value["live_writer"].get("slot") == "parser" else "upload") if value.get("live_writer") else None,
         "provider_contacts": 0}
 
 
@@ -174,6 +176,51 @@ async def current_source_root(db, owner, operator):
     return root
 
 
+def remove_unadopted_output(path, receipt):
+    """Remove only the exact unpublished ciphertext, with positive absence."""
+    parent, leaf = _open_input_artifact_parent(path, create=False)
+    fd = -1
+    try:
+        fd = os.open(leaf, os.O_RDONLY|os.O_NOFOLLOW, dir_fd=parent)
+        facts = os.fstat(fd)
+        if not _private_input_file_metadata(facts) or facts.st_size != receipt["cipher_size"] or facts.st_size > (OUTPUT_LIMIT+1024)*2:
+            raise OSError("unadopted output metadata changed")
+        raw = bytearray()
+        while len(raw) < facts.st_size:
+            chunk = os.read(fd, min(65536, facts.st_size-len(raw)))
+            if not chunk: raise OSError("unadopted output truncated")
+            raw.extend(chunk)
+        if sources.sha256(bytes(raw)) != receipt["cipher_sha256"]:
+            raise OSError("unadopted output digest changed")
+        current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        if any(getattr(current, key) != getattr(facts, key) for key in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_nlink")):
+            raise OSError("unadopted output name changed")
+        os.unlink(leaf, dir_fd=parent); os.fsync(parent)
+        try: os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError: return
+        raise OSError("unadopted output absence unproven")
+    finally:
+        if fd >= 0: os.close(fd)
+        os.close(parent)
+
+
+async def shield_positive_cleanup(operation):
+    """Await real cleanup even through direct asyncio and AnyIO cancellation."""
+    async def run():
+        with anyio.CancelScope(shield=True):
+            return await operation
+    cleanup = asyncio.create_task(run())
+    cancelled = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    value = cleanup.result()
+    if cancelled is not None: raise cancelled
+    return value
+
+
 class DocumentService:
     """One CPU extraction at a time; no inference lane, queue or global activation."""
     def __init__(self):
@@ -182,12 +229,21 @@ class DocumentService:
         self._supervisors = set()
         self._process_deadlines = {}
         self._capacity = asyncio.Lock()
+        self._upload_profile = None
 
     async def start(self):
+        if self._upload_profile is not None: self._upload_profile["active"] = False
+        self._upload_profile = None
+        try:
+            self._upload_profile = await sources.probe_upload_profile()
+        except (OSError, ValueError, TimeoutError):
+            self._upload_profile = None
         self._started = True
 
     async def stop(self):
         self._started = False
+        if self._upload_profile is not None: self._upload_profile["active"] = False
+        self._upload_profile = None
         for process in tuple(self._processes):
             if process.returncode is None:
                 if process in self._supervisors:
@@ -337,13 +393,23 @@ class DocumentService:
         binding = {"job_id": identifier, "input_digest": request_digest, "generation": current["generation"], "nonce": token}
         current["parser_binding"] = binding
         current["read_request_digest"] = request_digest
-        fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
-        fresh.metadata_digest = _metadata_digest(fresh)
-        await db.commit()
+        # All fallible filesystem preparation precedes durable parser ownership.
+        directory, _leaf = _open_input_artifact_parent(sources.source_path(fresh, current, "source"), create=False)
+        try:
+            fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
+            fresh.metadata_digest = _metadata_digest(fresh)
+            await db.commit()
+        except BaseException:
+            os.close(directory)
+            raise
         result = None
         receipt = None
-        directory, _leaf = _open_input_artifact_parent(sources.source_path(fresh, current, "source"), create=False)
+        ready_binding = binding
+        adoption_error = None
+        request_task = asyncio.current_task()
+        final = latest = None
         async def ready(handshake):
+            nonlocal ready_binding
             staged_root = dict(root_binding())
             await _begin_immediate(db)
             ready_row, ready_value = await sources.owned(db, owner, identifier, capability=CAPABILITY)
@@ -353,7 +419,8 @@ class DocumentService:
             await current_source_root(db, owner, operator)
             if (datetime.fromisoformat(ready_value["execution_deadline"])-now()).total_seconds() < 35:
                 raise BoardError("document_original_execution_window_expired", "The original parser window cannot cover execution and cleanup", status_code=409)
-            ready_value["parser_binding"] = {**binding, "supervisor_pid": handshake["supervisor_pid"], "parser_pid": handshake["parser_pid"]}
+            ready_binding = {**binding, "supervisor_pid": handshake["supervisor_pid"], "parser_pid": handshake["parser_pid"]}
+            ready_value["parser_binding"] = ready_binding
             ready_row.document_metadata_json = canonical(ready_value).decode(); ready_row.revision += 1
             ready_row.metadata_digest = _metadata_digest(ready_row)
             await db.commit()
@@ -370,29 +437,65 @@ class DocumentService:
             result = {"status": "blocked", "reason": "document_output_cleanup_required",
                 "cleanup": "wait_reaped", "no_learning": True, "provider_contacts": 0}
         except BoardError as exc:
-            if exc.code not in {"document_parser_not_started", "document_service_inactive"}:
+            if exc.code not in {"document_parser_not_started", "document_service_inactive", "document_parser_capacity_held", "document_source_size_exceeded"}:
                 raise
             result = {"status": "blocked", "reason": exc.code,
                 "cleanup": "not_launched", "no_learning": True, "provider_contacts": 0}
         finally:
             os.close(directory)
+            adoption_workspace_root = dict(root_binding())
             # Cancellation has already positively waited in parse(). A crash of
             # this owner before this commit leaves unknown capacity visibly held.
-            with anyio.CancelScope(shield=True):
+            async def settle():
+                nonlocal final, latest, adoption_error
                 async with asyncio.timeout(10):
                     await _begin_immediate(db)
                     final, latest = await sources.owned(db, owner, identifier, capability=CAPABILITY)
-                    if latest.get("live_writer") != {"token": token, "slot": "parser"}:
+                    if (latest.get("live_writer") != {"token": token, "slot": "parser"}
+                        or latest.get("generation") != binding["generation"]
+                        or latest.get("parser_binding") != ready_binding
+                        or latest.get("parser_attempts") != attempts+1
+                        or latest.get("execution_deadline") != current["execution_deadline"]):
                         raise BoardError("document_reader_fence_changed", "Reconcile the original reader", status_code=409)
                     if not (result and result.get("cleanup") == "not_launched"):
                         latest["witness_digest"] = read_witness(final, latest)
                     latest["live_writer"] = None
                     latest["reason"] = result.get("reason") if result else "document_reader_interrupted"
                     if receipt is not None:
-                        latest["evidence"] = receipt
+                        try:
+                            await sources.authority(db, owner, final, latest, adoption_workspace_root)
+                            await current_source_root(db, owner, operator)
+                            if request_task.cancelling():
+                                raise BoardError("document_reader_cancelled_cleanup_only", "Only the original positive cleanup remains authorized", status_code=409)
+                            if not self._started or datetime.fromisoformat(latest["execution_deadline"]) <= now():
+                                raise BoardError("document_original_execution_window_expired", "Only cleanup remains authorized", status_code=409)
+                        except (BoardError, AuthFailure) as exc:
+                            adoption_error = exc
+                            latest["reason"] = "document_output_cleanup_required"
+                        else:
+                            latest["evidence"] = receipt
                     final.document_metadata_json = canonical(latest).decode(); final.revision += 1
                     final.metadata_digest = _metadata_digest(final)
                     await db.commit()
+            await shield_positive_cleanup(settle())
+        if adoption_error is not None:
+            # Stale authority already committed cleanup-only. Physical removal
+            # happens outside the SQL writer; unknown absence remains charged.
+            try:
+                remove_unadopted_output(sources.source_path(final, latest, "evidence"), receipt)
+            except OSError:
+                pass
+            else:
+                cleanup_revision = final.revision
+                await _begin_immediate(db)
+                closed, closed_value = await sources.owned(db, owner, identifier, revision=cleanup_revision, capability=CAPABILITY)
+                if closed_value != latest or closed_value.get("live_writer") or closed_value.get("evidence"):
+                    raise BoardError("document_reader_fence_changed", "Inspect the original cleanup receipt", status_code=409)
+                closed_value["reason"] = "document_authority_changed_output_discarded"
+                closed.document_metadata_json = canonical(closed_value).decode(); closed.revision += 1
+                closed.metadata_digest = _metadata_digest(closed)
+                await db.commit()
+            raise adoption_error
         # Revalidate current owner/Goal after extraction and before private return.
         final, latest = await sources.owned(db, owner, identifier, capability=CAPABILITY)
         await sources.authority(db, owner, final, latest, dict(root_binding()))

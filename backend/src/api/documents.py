@@ -31,6 +31,12 @@ async def list_sources(request: Request, limit: int = Query(default=50, ge=1, le
     from sqlalchemy import select
     from src.db.models import WorkBoardInputArtifact
     owner = _owner(_operator(request))
+    service = getattr(request.app.state, "document_service", None)
+    try:
+        sources.validate_upload_profile(service._upload_profile if service is not None else None)
+        upload_readiness = "ready"
+    except BoardError:
+        upload_readiness = "blocked"
     async with get_session() as db:
         rows = list((await db.scalars(select(WorkBoardInputArtifact).where(
             WorkBoardInputArtifact.owner_principal_id == owner.principal_id,
@@ -40,7 +46,8 @@ async def list_sources(request: Request, limit: int = Query(default=50, ge=1, le
             .order_by(WorkBoardInputArtifact.created_at, WorkBoardInputArtifact.artifact_id)
             .limit(limit+1).offset(offset))).all())
         return {"sources": [projection(row) for row in rows[:limit]],
-            "next_offset": offset+limit if len(rows) > limit else None, "no_learning": True}
+            "next_offset": offset+limit if len(rows) > limit else None, "no_learning": True,
+            "upload_readiness": upload_readiness}
 
 
 @router.post("/sources")
@@ -71,7 +78,9 @@ async def upload_source(request: Request, identifier: str, expected_revision: in
     try:
         async with get_session() as db:
             owner = _owner(_operator(request))
-            await sources.upload(db, owner, identifier, expected_revision, "source", request.stream(), capability=CAPABILITY)
+            service = getattr(request.app.state, "document_service", None)
+            await sources.upload(db, owner, identifier, expected_revision, "source", request.stream(), capability=CAPABILITY,
+                upload_profile=service._upload_profile if service is not None else None)
             row, _ = await sources.owned(db, owner, identifier, capability=CAPABILITY)
             return projection(row)
     except BoardError as exc:
@@ -128,5 +137,17 @@ async def reconcile_source_reader(request: Request, identifier: str, expected_re
     try:
         async with get_session() as db:
             return await reconcile_reader(db, _owner(_operator(request)), identifier, expected_revision)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/sources/{identifier}/reconcile-upload")
+async def reconcile_source_upload(request: Request, identifier: str, expected_revision: int = Query(ge=1)):
+    try:
+        async with get_session() as db:
+            owner = _owner(_operator(request))
+            await sources.reconcile_upload(db, owner, identifier, expected_revision, capability=CAPABILITY)
+            row, _ = await sources.owned(db, owner, identifier, capability=CAPABILITY)
+            return projection(row)
     except BoardError as exc:
         _raise_board_error(exc)

@@ -32,9 +32,13 @@ owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
 tool steps or the exact registered formatter contract and explicit corrections,
 truthful failed-task provenance (including the host-blocked actual formatter),
 authoritative source discovery and separately opted-in automatic proposals
-limited to two per owner/UTC day. Unsupported corrections produce explicit
+limited to two durable starts per owner/UTC day. Unsupported corrections produce explicit
 no-change. Automatic outcomes have content-free task receipts; exact replay
-repairs a missing evolution receipt without duplicate proposals. It makes no
+repairs a missing evolution receipt off-loop without duplicate proposals.
+Automatic completion avoids evolution-file writes, retains one off-loop private
+staging worker until positive completion, and exposes exact-attempt timeout and
+restart recovery outcomes without allowing a cancelled callback to progress
+into proposal commit. It makes no
 inference call, grants no trace-egress permission and
 does not infer a positive preference from success. Strategy adoption and
 next-task reuse (#1001) remain **Planned**. The named proof is an actual

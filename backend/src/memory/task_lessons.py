@@ -8,9 +8,12 @@ from typing import Annotated, Literal
 import re
 from uuid import UUID
 from dataclasses import dataclass
+import asyncio
+import os
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, exists
+from sqlalchemy.orm import aliased
 
 from config.settings import settings
 from src.db import engine as db_engine
@@ -20,6 +23,128 @@ from src.work_board.repository import BoardError, _begin_sqlite_immediate
 
 PROPOSAL_SCHEMA = "task_method_proposal.v1"
 _STAGE_SEAL = object()
+_AUTOMATIC_IO = {}
+_AUTOMATIC_CALLBACKS = {}
+_IO_STARTED = "task_lesson.automatic_io.started.v1"
+_IO_FINISHED = "task_lesson.automatic_io.finished.v1"
+_IO_CANCELLED = "task_lesson.automatic_io.cancelled.v1"
+_MAX_LESSON_BYTES = 64 * 1024
+
+
+def _process_identity():
+    from pathlib import Path
+    return {"pid": os.getpid(), "start": Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19],
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+
+
+def _process_ended(identity):
+    from pathlib import Path
+    if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != identity["boot_id"]:
+        return True
+    try:
+        actual = Path(f"/proc/{identity['pid']}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except FileNotFoundError:
+        return True
+    return actual != identity["start"]
+
+
+async def _io_event(db, start, kind):
+    previous = (await db.execute(select(WorkBoardEvent).where(
+        WorkBoardEvent.kind == kind, WorkBoardEvent.mutation_request_digest == start.mutation_request_digest))).scalar_one_or_none()
+    if previous is None:
+        db.add(WorkBoardEvent(task_id=start.task_id, owner_principal_id=start.owner_principal_id,
+            owner_session_id=start.owner_session_id, actor_principal_id="service:task-lesson-status",
+            actor_session_id=None, kind=kind, mutation_request_digest=start.mutation_request_digest,
+            metadata_json=start.metadata_json))
+
+
+async def _finish_io(start):
+    # This is status provenance only: expiry/revocation cannot mint proposal authority.
+    async with db_engine.get_session() as db:
+        await _begin_sqlite_immediate(db)
+        await _io_event(db, start, _IO_FINISHED)
+    _AUTOMATIC_IO.pop(start.mutation_request_digest, None)
+
+
+async def _recover_ended_io():
+    """Recover an original terminated process; missing registry is not proof."""
+    finished = aliased(WorkBoardEvent)
+    async with db_engine.get_session() as db:
+        pending = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_STARTED,
+            ~exists(select(finished.event_id).where(finished.kind == _IO_FINISHED,
+                finished.mutation_request_digest == WorkBoardEvent.mutation_request_digest))).limit(1))).scalar_one_or_none()
+        if pending is None:
+            return
+        retained = _AUTOMATIC_IO.get(pending.mutation_request_digest)
+        task = await _task(db, pending.task_id)
+        metadata = json.loads(pending.metadata_json)
+    if retained is not None:
+        if retained.done() and not retained.cancelled():
+            await _finish_io(pending)
+        return
+    if not await asyncio.to_thread(_process_ended, metadata["process"]):
+        return
+    # Positive original-process termination prevents a surviving staging writer.
+    # An immutable staged artifact remains private; it is never auto-adopted.
+    try:
+        await asyncio.to_thread(read_private_proof, metadata["artifact_ref"], metadata["candidate_digest"])
+        reason = "automatic_lesson_recovered_private_stage_no_change"
+    except (OSError, ValueError, BoardError):
+        reason = "automatic_lesson_recovered_stage_unavailable_no_change"
+    async with db_engine.get_session() as db:
+        await _begin_sqlite_immediate(db)
+        await _io_event(db, pending, _IO_CANCELLED)
+        await _io_event(db, pending, _IO_FINISHED)
+    original = task.model_copy(update={"task_revision": metadata["task_revision"]})
+    await _record_automatic_outcome(None, original, {"status": "blocked", "result": "no_change",
+        "reason_code": reason, "behavior_changed": False}, metadata["attempt_id"], status_only=True)
+
+
+async def _reserve_io(operator, request, token, binding, relative, sha, policy, staged):
+    async with db_engine.get_session() as db:
+        await _begin_sqlite_immediate(db)
+        task, _, _, current = await _source(db, operator, request, automatic=True, staged=staged)
+        current["method_receipt"] = staged.method_token
+        if current != token or await _automatic_policy(db, operator, task) != policy:
+            raise BoardError("lesson_source_changed", "Refresh the exact source and automatic policy")
+        original = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_STARTED,
+            WorkBoardEvent.mutation_request_digest == binding))).scalar_one_or_none()
+        if original is not None:
+            return original, False
+        finished = aliased(WorkBoardEvent)
+        pending = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_STARTED,
+            ~exists(select(finished.event_id).where(finished.kind == _IO_FINISHED,
+                finished.mutation_request_digest == WorkBoardEvent.mutation_request_digest))).limit(1))).scalar_one_or_none()
+        if pending is not None:
+            raise BoardError("automatic_lesson_io_pending", "The original private staging operation retains capacity")
+        midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        starts = list((await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_STARTED,
+            WorkBoardEvent.owner_principal_id == task.owner_principal_id, WorkBoardEvent.created_at >= midnight))).scalars())
+        legacy = list((await db.execute(select(MemoryProposal).where(MemoryProposal.schema_version == PROPOSAL_SCHEMA,
+            MemoryProposal.owner_principal_id == task.owner_principal_id, MemoryProposal.created_at >= midnight))).scalars())
+        counted = {event.mutation_request_digest for event in starts}
+        counted.update(row.request_binding_digest for row in legacy if json.loads(row.provenance_json).get("automatic"))
+        if len(counted) >= 2:
+            raise BoardError("automatic_lesson_daily_cap", "The owner daily automatic proposal-start cap is reached")
+        start = WorkBoardEvent(task_id=task.task_id, owner_principal_id=task.owner_principal_id,
+            owner_session_id=task.owner_session_id, actor_principal_id=operator.principal.principal_id,
+            actor_session_id=operator.session_id, kind=_IO_STARTED, mutation_request_digest=binding,
+            metadata_json=canonical({"task_revision": task.task_revision, "attempt_id": request.attempt_id,
+                "source_digest": digest(token), "artifact_ref": relative, "candidate_digest": sha,
+                "policy_revision": policy["policy_revision"], "process": _process_identity()}))
+        db.add(start)
+        await db.commit()
+        await db.refresh(start)
+        return start, True
+
+
+def _write_lesson(relative, raw, sha):
+    from src.workspace import canonical_workspace_root
+    from src.work_board.input_artifacts import _write_payload
+    if len(raw) > _MAX_LESSON_BYTES:
+        raise ValueError("task lesson artifact exceeds byte limit")
+    _write_payload(canonical_workspace_root(settings.workspace_dir) / relative, raw)
+    return read_private_proof(relative, sha)
 
 
 @dataclass(frozen=True)
@@ -372,7 +497,8 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             MemoryProposal.owner_session_id == task.owner_session_id,
             MemoryProposal.request_binding_digest == binding))).scalar_one_or_none()
         if previous:
-            _reconcile_lesson_receipt(previous)
+            if not _automatic:
+                await asyncio.to_thread(_reconcile_lesson_receipt, previous)
             return {**proposal_projection(previous), "idempotent_replay": True}
         candidate = _correct_method(old, correction)
         reason = ("observed_failure_candidate" if _automatic else "explicit_correction") if candidate else "insufficient_method_evidence" if old is None else "no_explicit_correction" if not correction else "unsupported_correction_no_change"
@@ -387,10 +513,55 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         sha = hashlib.sha256(raw).hexdigest()
         relative = f"artifacts/memory/task-lessons/{binding}.json"
         staged_task_revision = task.task_revision
-    from src.workspace import canonical_workspace_root
-    from src.work_board.input_artifacts import _write_payload
-    _write_payload(canonical_workspace_root(settings.workspace_dir) / relative, raw)
-    read_private_proof(relative, sha)
+    if _automatic:
+        try:
+            io_start, newly_started = await _reserve_io(operator, request, token, binding, relative, sha, policy, staged)
+        except BoardError as exc:
+            if exc.code in {"automatic_lesson_daily_cap", "automatic_lesson_io_pending"}:
+                return {"status": "blocked", "reason_code": exc.code, "result": "no_change", "behavior_changed": False}
+            raise
+        if not newly_started:
+            original_worker = _AUTOMATIC_IO.get(binding)
+            if original_worker is not None or binding in _AUTOMATIC_CALLBACKS:
+                return {"status": "blocked", "reason_code": "automatic_lesson_io_pending", "result": "no_change", "behavior_changed": False}
+            metadata = json.loads(io_start.metadata_json)
+            if not await asyncio.to_thread(_process_ended, metadata["process"]):
+                # A completed same-process marker is recoverable only with its
+                # positive completion event, never by an empty worker registry.
+                async with db_engine.get_session() as db:
+                    finished = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_FINISHED,
+                        WorkBoardEvent.mutation_request_digest == binding))).scalar_one_or_none()
+                if finished is None:
+                    return {"status": "blocked", "reason_code": "automatic_lesson_io_pending", "result": "no_change", "behavior_changed": False}
+            try:
+                await asyncio.to_thread(read_private_proof, relative, sha)
+                recovered_reason = "automatic_lesson_cancelled_staged_artifact"
+            except (OSError, ValueError, BoardError):
+                recovered_reason = "automatic_lesson_cancelled_artifact_unavailable"
+            async with db_engine.get_session() as db:
+                await _begin_sqlite_immediate(db)
+                await _io_event(db, io_start, _IO_CANCELLED)
+                await _io_event(db, io_start, _IO_FINISHED)
+            return {"status": "blocked", "reason_code": recovered_reason, "result": "no_change", "behavior_changed": False}
+        worker = asyncio.create_task(asyncio.to_thread(_write_lesson, relative, raw, sha))
+        _AUTOMATIC_IO[binding] = worker
+        _AUTOMATIC_CALLBACKS[binding] = asyncio.current_task()
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Cancellation cannot stop a thread. Retain its single slot until
+            # positive completion; the thread has no DB/proposal capability.
+            def completed(done):
+                if not done.cancelled():
+                    done.exception()
+                    asyncio.create_task(_finish_io(io_start))
+            worker.add_done_callback(completed)
+            raise
+        finally:
+            if worker.done() and not worker.cancelled():
+                await _finish_io(io_start)
+    else:
+        await asyncio.to_thread(_write_lesson, relative, raw, sha)
     async with db_engine.get_session() as db:
         await _begin_sqlite_immediate(db)
         task, attempt, run, current = await _source(db, operator, request, automatic=_automatic, staged=staged)
@@ -409,19 +580,22 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         if previous:
             # Release the SQLite writer before touching the independent mirror.
             await db.commit()
-            _reconcile_lesson_receipt(previous)
+            if not _automatic:
+                await asyncio.to_thread(_reconcile_lesson_receipt, previous)
             return {**proposal_projection(previous), "idempotent_replay": True}
         if _automatic:
             current_policy = await _automatic_policy(db, operator, task)
             if current_policy != policy or not current_policy["enabled"]:
                 raise BoardError("lesson_policy_changed", "Automatic proposal consent changed during staging")
-            midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            today = list((await db.execute(select(MemoryProposal).where(
-                MemoryProposal.owner_principal_id == task.owner_principal_id,
-                MemoryProposal.schema_version == PROPOSAL_SCHEMA,
-                MemoryProposal.created_at >= midnight))).scalars().all())
-            if sum(json.loads(item.provenance_json).get("automatic") is True for item in today) >= 2:
-                return {"status": "blocked", "reason_code": "automatic_lesson_daily_cap", "result": "no_change", "behavior_changed": False}
+            authoritative_start = await db.get(WorkBoardEvent, io_start.event_id, populate_existing=True)
+            if (authoritative_start is None or authoritative_start.kind != _IO_STARTED
+                or authoritative_start.mutation_request_digest != binding
+                or authoritative_start.metadata_json != io_start.metadata_json):
+                raise BoardError("automatic_lesson_start_changed", "The exact original staging reservation changed")
+            cancelled = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_CANCELLED,
+                WorkBoardEvent.mutation_request_digest == binding))).scalar_one_or_none()
+            if cancelled is not None or asyncio.current_task().cancelling():
+                raise BoardError("automatic_lesson_cancelled", "The original automatic callback cannot commit after cancellation")
         row = MemoryProposal(schema_version=PROPOSAL_SCHEMA, owner_principal_id=task.owner_principal_id,
             owner_session_id=task.owner_session_id, source_task_id=task.task_id,
             source_task_revision=task.task_revision, source_attempt_id=attempt.attempt_id,
@@ -441,7 +615,9 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         await db.commit()
         await db.refresh(row)
         payload = proposal_projection(row)
-    _reconcile_lesson_receipt(row)
+    _AUTOMATIC_CALLBACKS.pop(binding, None)
+    if not _automatic:
+        await asyncio.to_thread(_reconcile_lesson_receipt, row)
     return payload
 
 
@@ -454,9 +630,11 @@ def _reconcile_lesson_receipt(row):
         proposal_revision=row.revision, result=proposal_projection(row)["result"])
 
 
-async def propose_automatic_task_lesson(operator, task_id):
+async def propose_automatic_task_lesson(operator, task_id, attempt_id=None):
     """Current authenticated owner callback; finite failure-derived proposals only."""
     source = await eligible_lesson_source(operator, task_id, _automatic=True)
+    if attempt_id is not None and source["attempt_id"] != attempt_id:
+        return {"status": "blocked", "reason_code": "lesson_attempt_changed", "result": "no_change", "behavior_changed": False}
     if not source["eligible"]:
         return {"status": "blocked", "reason_code": source["reason_code"], "result": "no_change", "behavior_changed": False}
     async with db_engine.get_session() as db:
@@ -475,36 +653,57 @@ async def propose_automatic_task_lesson(operator, task_id):
         scope=LessonScope.model_validate(source["scope"]), expected_revision=source["expected_revision"]), _automatic=True)
 
 
-async def maybe_propose_automatic_lesson(task):
+async def maybe_propose_automatic_lesson(task, attempt_id):
     """Called only after committed terminal projection; exact Root, no renewal."""
     from src.auth.service import authenticate_session
-    operator = await authenticate_session(task.owner_session_id, touch=False)
-    if operator.principal.principal_id != task.owner_principal_id:
-        raise BoardError("lesson_owner_mismatch", "The original task owner changed", status_code=403)
     try:
-        outcome = await propose_automatic_task_lesson(operator, task.task_id)
+        operator = await authenticate_session(task.owner_session_id, touch=False)
+        if operator.principal.principal_id != task.owner_principal_id:
+            raise BoardError("lesson_owner_mismatch", "The original task owner changed", status_code=403)
+        await _recover_ended_io()
+        outcome = await propose_automatic_task_lesson(operator, task.task_id, attempt_id)
+    except asyncio.CancelledError:
+        async with db_engine.get_session() as db:
+            await _begin_sqlite_immediate(db)
+            starts = list((await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == _IO_STARTED,
+                WorkBoardEvent.task_id == task.task_id, WorkBoardEvent.owner_principal_id == task.owner_principal_id,
+                WorkBoardEvent.owner_session_id == task.owner_session_id))).scalars())
+            for start in starts:
+                metadata = json.loads(start.metadata_json)
+                if metadata["attempt_id"] == attempt_id and metadata["task_revision"] == task.task_revision:
+                    await _io_event(db, start, _IO_CANCELLED)
+        await _record_automatic_outcome(None, task, {"status": "blocked", "result": "no_change",
+            "reason_code": "automatic_lesson_timeout_or_cancelled", "behavior_changed": False}, attempt_id, status_only=True)
+        raise
     except Exception as exc:
         outcome = {"status": "blocked", "result": "no_change", "reason_code": "automatic_lesson_unavailable",
             "error_type": type(exc).__name__, "behavior_changed": False}
-        await _record_automatic_outcome(operator, task, outcome)
+        await _record_automatic_outcome(None, task, outcome, attempt_id, status_only=True)
         raise
-    await _record_automatic_outcome(operator, task, outcome)
-    return outcome
+    else:
+        await _record_automatic_outcome(operator, task, outcome, attempt_id)
+        return outcome
+    finally:
+        for binding, callback in list(_AUTOMATIC_CALLBACKS.items()):
+            if callback is asyncio.current_task():
+                _AUTOMATIC_CALLBACKS.pop(binding, None)
 
 
-async def _record_automatic_outcome(operator, original_task, outcome):
+async def _record_automatic_outcome(operator, original_task, outcome, attempt_id, *, status_only=False):
     """Append safe outcome metadata under the still-current original owner."""
     async with db_engine.get_session() as db:
         await _begin_sqlite_immediate(db)
-        await _assert_owner(db, operator, automatic=True)
+        if not status_only:
+            await _assert_owner(db, operator, automatic=True)
         task = await _task(db, original_task.task_id)
-        if task is None or (task.owner_principal_id, task.owner_session_id, task.task_revision) != (
-            original_task.owner_principal_id, original_task.owner_session_id, original_task.task_revision):
+        if task is None or (task.owner_principal_id, task.owner_session_id) != (
+            original_task.owner_principal_id, original_task.owner_session_id):
             raise BoardError("lesson_task_changed", "Automatic outcome belongs to an older task revision")
         payload = {key: outcome[key] for key in ("status", "result", "reason_code", "proposal_id", "candidate_digest", "error_type") if key in outcome}
-        payload.update({"task_revision": task.task_revision, "behavior_changed": False, "provider_contacts": 0})
-        attempt = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
-            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none()
+        payload.update({"task_revision": original_task.task_revision, "behavior_changed": False, "provider_contacts": 0})
+        attempt = await db.get(WorkBoardAttempt, attempt_id)
+        if attempt is None or attempt.task_id != task.task_id:
+            raise BoardError("lesson_attempt_unverified", "The automatic outcome must bind the original attempt")
         if attempt is not None:
             payload.update({"attempt_id": attempt.attempt_id, "workflow_run_id": attempt.workflow_run_id,
                 "source_digest": digest({"attempt_id": attempt.attempt_id, "fence": attempt.fencing_token,
@@ -523,8 +722,9 @@ async def _record_automatic_outcome(operator, original_task, outcome):
         if any(json.loads(event.metadata_json).get("outcome_binding") == binding for event in rows):
             return
         db.add(WorkBoardEvent(task_id=task.task_id, owner_principal_id=task.owner_principal_id,
-            owner_session_id=task.owner_session_id, actor_principal_id=operator.principal.principal_id,
-            actor_session_id=operator.session_id, kind="task_lesson.automatic_outcome.v1",
+            owner_session_id=task.owner_session_id,
+            actor_principal_id="service:task-lesson-status" if status_only else operator.principal.principal_id,
+            actor_session_id=None if status_only else operator.session_id, kind="task_lesson.automatic_outcome.v1",
             metadata_json=canonical({**payload, "outcome_binding": binding})))
 
 
@@ -537,7 +737,8 @@ async def inspect_task_lesson(operator, proposal_id):
             raise BoardError("lesson_owner_mismatch", "The lesson belongs to another operator", status_code=403)
         payload = proposal_projection(row)
         ref, sha = row.artifact_ref, row.artifact_digest
-    raw = read_private_proof(ref, sha)
+    raw = await asyncio.to_thread(read_private_proof, ref, sha)
+    await asyncio.to_thread(_reconcile_lesson_receipt, row)
     envelope = json.loads(raw)
     request = LessonRequest(task_id=payload["task_id"], attempt_id=payload["attempt_id"],
         correction=envelope["correction"], source_refs=envelope["source_refs"], scope=LessonScope.model_validate(envelope["scope"]),

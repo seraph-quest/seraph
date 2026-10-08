@@ -10192,7 +10192,7 @@ class WorkBoardDispatcher:
             # propose cannot undo or interrupt the committed ordinary task.
             try:
                 from src.memory.task_lessons import maybe_propose_automatic_lesson
-                await asyncio.wait_for(maybe_propose_automatic_lesson(projected.task), timeout=5)
+                await asyncio.wait_for(maybe_propose_automatic_lesson(projected.task, projected.attempt.attempt_id), timeout=5)
             except Exception as exc:
                 logger.info("automatic task lesson unavailable for %s: %s", projected.task.task_id, type(exc).__name__)
         return projected

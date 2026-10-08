@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 import json
 import socket
 import hashlib
+import asyncio
+import threading
+import subprocess
+import sys
 from uuid import uuid4
 
 import pytest
@@ -116,14 +120,18 @@ async def test_committed_proposal_receipt_is_repaired_once_by_exact_replay(async
     def unavailable(*args, **kwargs):
         raise OSError("declared postcommit receipt write failure")
     monkeypatch.setattr(EvolutionRuntime, "record_task_lesson", unavailable)
+    automatic = await create_task_lesson(operator, request, _automatic=True)
+    # Completion uses only canonical receipts. Explicit inspection owns mirror
+    # repair, so its failure cannot hold the terminal dispatcher hot path.
     with pytest.raises(OSError, match="postcommit"):
-        await create_task_lesson(operator, request, _automatic=True)
+        await inspect_task_lesson(operator, automatic["proposal_id"])
     async with async_db() as db:
         committed = (await db.execute(select(MemoryProposal))).scalar_one()
         identity = (committed.proposal_id, committed.revision, committed.source_context_digest, committed.artifact_digest)
     monkeypatch.setattr(EvolutionRuntime, "record_task_lesson", actual)
     repaired = await create_task_lesson(operator, request, _automatic=True)
     repeated = await create_task_lesson(operator, request, _automatic=True)
+    await inspect_task_lesson(operator, automatic["proposal_id"])
     assert repaired["idempotent_replay"] is repeated["idempotent_replay"] is True
     assert repaired["proposal_id"] == repeated["proposal_id"] == identity[0]
     receipt_path = EvolutionRuntime.default_path(settings.workspace_dir)
@@ -158,13 +166,13 @@ async def test_terminal_automatic_failure_and_replay_are_visible_without_private
         raise OSError("private diagnostic must not enter public event")
     monkeypatch.setattr(task_lessons, "propose_automatic_task_lesson", unavailable)
     with pytest.raises(OSError):
-        await maybe_propose_automatic_lesson(task)
+        await maybe_propose_automatic_lesson(task, "attempt")
     blocked = await eligible_lesson_source(operator, "task")
     assert blocked["automatic_outcome"]["reason_code"] == "automatic_lesson_unavailable"
     assert blocked["automatic_outcome"]["error_type"] == "OSError"
     monkeypatch.setattr(task_lessons, "propose_automatic_task_lesson", actual)
-    result = await maybe_propose_automatic_lesson(task)
-    replay = await maybe_propose_automatic_lesson(task)
+    result = await maybe_propose_automatic_lesson(task, "attempt")
+    replay = await maybe_propose_automatic_lesson(task, "attempt")
     assert result["proposal_id"] == replay["proposal_id"]
     visible = await eligible_lesson_source(operator, "task")
     assert visible["automatic_outcome"]["proposal_id"] == result["proposal_id"]
@@ -173,7 +181,8 @@ async def test_terminal_automatic_failure_and_replay_are_visible_without_private
     async with async_db() as db:
         events = list((await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1"))).scalars())
         assert len(events) == 2
-        assert all(event.actor_principal_id == operator.principal.principal_id for event in events)
+        assert all(event.owner_principal_id == operator.principal.principal_id for event in events)
+        assert {event.actor_principal_id for event in events} == {operator.principal.principal_id, "service:task-lesson-status"}
         assert "private diagnostic" not in json.dumps([event.metadata_json for event in events])
         assert "Check source existence" not in json.dumps([event.metadata_json for event in events])
         assert len(list((await db.execute(select(MemoryProposal))).scalars())) == 1
@@ -192,6 +201,145 @@ async def test_unresolved_effect_sibling_states_deny_failed_task_learning(async_
         assert (await eligible_lesson_source(operator, "task"))["eligible"] is False
     async with async_db() as db:
         assert not list((await db.execute(select(MemoryProposal))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_exact_timeout_retains_single_io_until_positive_finish_and_never_late_commits(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    async with async_db() as db:
+        task = await _task(db, "task")
+    from src.memory import task_lessons
+    actual_write = task_lessons._write_lesson
+    entered, release = threading.Event(), threading.Event()
+    writes = []
+    def blocked_write(*args):
+        writes.append(args[0])
+        entered.set()
+        assert release.wait(10), "test must release the actual retained worker"
+        return actual_write(*args)
+    monkeypatch.setattr(task_lessons, "_write_lesson", blocked_write)
+    callback = asyncio.create_task(asyncio.wait_for(maybe_propose_automatic_lesson(task, "attempt"), timeout=5))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        # A blocked physical operation does not block an unrelated event-loop
+        # tick or task-source inspection. No thread cancellation is claimed.
+        await asyncio.wait_for(asyncio.sleep(.01), timeout=.1)
+        with pytest.raises(TimeoutError):
+            await callback
+        visible = await eligible_lesson_source(operator, "task")
+        assert visible["automatic_outcome"]["reason_code"] == "automatic_lesson_timeout_or_cancelled"
+        assert visible["automatic_outcome"]["attempt_id"] == "attempt"
+        assert len(task_lessons._AUTOMATIC_IO) == 1
+        async with async_db() as db:
+            assert not list((await db.execute(select(MemoryProposal))).scalars())
+        duplicate = await maybe_propose_automatic_lesson(task, "attempt")
+        assert duplicate["reason_code"] == "automatic_lesson_io_pending"
+        assert len(writes) == 1
+    finally:
+        release.set()
+        for _ in range(100):
+            if not task_lessons._AUTOMATIC_IO:
+                break
+            await asyncio.sleep(.01)
+    assert not task_lessons._AUTOMATIC_IO
+    recovered = await maybe_propose_automatic_lesson(task, "attempt")
+    assert recovered["reason_code"] == "automatic_lesson_cancelled_staged_artifact"
+    async with async_db() as db:
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(Memory))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_timeout_status_survives_revocation_and_binds_original_attempt(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    async with async_db() as db:
+        task = await _task(db, "task")
+    entered = asyncio.Event()
+    async def blocked(*args):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr("src.memory.task_lessons.propose_automatic_task_lesson", blocked)
+    callback = asyncio.create_task(asyncio.wait_for(maybe_propose_automatic_lesson(task, "attempt"), timeout=.2))
+    await entered.wait()
+    async with async_db() as db:
+        original_root = await db.get(OperatorSession, operator.session_id)
+        original_root.revoked_at = datetime.now(timezone.utc)
+        current_task = await _task(db, "task")
+        current_task.task_revision = 2
+        db.add(WorkBoardAttempt(attempt_id="new-attempt", task_id="task", fencing_token=2,
+            started_at=datetime.now(timezone.utc)))
+    with pytest.raises(TimeoutError):
+        await callback
+    from src.db.models import WorkBoardEvent
+    async with async_db() as db:
+        receipt = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1"))).scalar_one()
+        payload = json.loads(receipt.metadata_json)
+        assert payload["attempt_id"] == "attempt" and payload["task_revision"] == 1
+        assert receipt.actor_principal_id == "service:task-lesson-status" and receipt.actor_session_id is None
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_uses_positive_process_exit_and_exact_private_stage(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    async with async_db() as db:
+        task = await _task(db, "task")
+    from src.memory import task_lessons
+    from pathlib import Path
+    # Actual local process identity/exit witness for the declared restart seam.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    identity = {"pid": child.pid, "start": Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[19],
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+    original_identity, original_finish = task_lessons._process_identity, task_lessons._finish_io
+    monkeypatch.setattr(task_lessons, "_process_identity", lambda: identity)
+    async def crash_before_completion_event(*args):
+        raise OSError("declared private-stage-complete before durable completion crash")
+    monkeypatch.setattr(task_lessons, "_finish_io", crash_before_completion_event)
+    try:
+        with pytest.raises(OSError, match="durable completion"):
+            await maybe_propose_automatic_lesson(task, "attempt")
+        assert len(task_lessons._AUTOMATIC_IO) == 1
+        assert all(future.done() for future in task_lessons._AUTOMATIC_IO.values())
+    finally:
+        child.terminate()
+        child.wait(timeout=2)
+    # Restart loses the in-memory registry, but not canonical start/artifact.
+    task_lessons._AUTOMATIC_IO.clear()
+    monkeypatch.setattr(task_lessons, "_finish_io", original_finish)
+    monkeypatch.setattr(task_lessons, "_process_identity", original_identity)
+    await task_lessons._recover_ended_io()
+    recovered = await eligible_lesson_source(operator, "task")
+    assert recovered["automatic_outcome"]["reason_code"] == "automatic_lesson_recovered_private_stage_no_change"
+    replay = await maybe_propose_automatic_lesson(task, "attempt")
+    assert replay["result"] == "no_change"
+    async with async_db() as db:
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+    # The recovered start still consumes its daily slot; only one fresh opt-in
+    # start remains, and a third cannot bypass the cap via recovery/replay.
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    assert (await maybe_propose_automatic_lesson(task, "attempt"))["result"] == "candidate_inert"
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lesson_daily_cap"
+
+
+def test_evolution_mirror_byte_and_entry_bounds_preserve_original_state(async_db, tmp_path):
+    from src.evolution.runtime import EvolutionRuntime, EvolutionRuntimeError
+    state = tmp_path / "bounded-mirror.json"
+    runtime = EvolutionRuntime(state)
+    values = {"proposal_id": "proposal", "owner_id": "operator", "source_digest": "a" * 64,
+        "candidate_digest": "b" * 64, "result": "candidate_inert"}
+    for payload, error in ((b" " * (1024 * 1024 + 1), "byte limit"),
+        (json.dumps({"schema_version": 1, "proposals": {}, "task_lesson_receipts": {str(i): {} for i in range(4097)}}).encode(), "entry limit")):
+        state.write_bytes(payload)
+        with pytest.raises(EvolutionRuntimeError, match=error):
+            runtime.record_task_lesson(**values)
+        assert state.read_bytes() == payload
 
 
 @pytest.mark.asyncio
@@ -266,27 +414,27 @@ async def test_automatic_requires_explicit_policy_and_is_idempotent_without_posi
     assert source["automatic_policy"]["enabled"] is True
     async with async_db() as db:
         task = await _task(db, "task")
-    result = await maybe_propose_automatic_lesson(task)
+    result = await maybe_propose_automatic_lesson(task, "attempt")
     assert result["result"] == "candidate_inert"
     inspected = await inspect_task_lesson(operator, result["proposal_id"])
     assert inspected["correction_provenance"] == "observed_failure_rule"
     assert inspected["positive_preference_vote"] is False
-    replay = await maybe_propose_automatic_lesson(task)
+    replay = await maybe_propose_automatic_lesson(task, "attempt")
     assert replay["idempotent_replay"] is True
     # Renewing proposal consent never renews the owner-wide daily cap.
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
         enabled=True, expected_revision=1, mutation_uuid=str(uuid4())))
-    assert (await maybe_propose_automatic_lesson(task))["result"] == "candidate_inert"
+    assert (await maybe_propose_automatic_lesson(task, "attempt"))["result"] == "candidate_inert"
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
         enabled=True, expected_revision=1, mutation_uuid=str(uuid4())))
-    assert (await maybe_propose_automatic_lesson(task))["reason_code"] == "automatic_lesson_daily_cap"
+    assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lesson_daily_cap"
     async with async_db() as db:
         rows = list((await db.execute(select(MemoryProposal))).scalars())
         assert sum(json.loads(row.provenance_json).get("automatic") is True for row in rows) == 2
     disabled = await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
         enabled=False, expected_revision=1, mutation_uuid=str(uuid4())))
     assert disabled["enabled"] is False
-    assert (await maybe_propose_automatic_lesson(task))["reason_code"] == "automatic_lessons_not_opted_in"
+    assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lessons_not_opted_in"
 
 
 @pytest.mark.asyncio

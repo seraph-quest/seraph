@@ -34,7 +34,9 @@ reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
 mechanics with zero inference/provider spend. Business-form usefulness, production
 HTTPBin availability and macOS execution remain unverified. The owning
 [operator flow](./12-current-app-guide.md#profiled-public-form-preparation-1012)
-records bounds and the unsupported lost-process cleanup recovery limit.
+records bounds, changed-native-boot cleanup after an operator-managed reboot,
+and the same-boot lost-owner recovery limit. Physical cleanup preserves the
+original unresolved job and effects; it cannot adopt output or retry old work.
 
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the

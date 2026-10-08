@@ -15,7 +15,7 @@ from src.work_board.research_contracts import PARENT_CAPABILITY, PARENT_KIND, Re
 from src.work_board.research_parent import job_id
 
 
-def binds(task, attempt, run, *, typed_inputs=None):
+def binds(task, attempt, run, *, typed_inputs=None, allow_unlinked_admission=False, verify_row_deadline=True):
     """Recompute fixed input, authority and fingerprint from admitted input."""
     from src.work_board.dispatcher import _parse_typed_input
     from src.workflows.job_runtime import _digest
@@ -25,7 +25,8 @@ def binds(task, attempt, run, *, typed_inputs=None):
         bound = authority["research_slot_allowance_microusd"]
         ceiling = authority["research_owner_ceiling_microusd"]
         if (task.capability_id != PARENT_CAPABILITY or run.job_kind != PARENT_KIND or run.capability_version != "1"
-            or run.run_identity != job_id(task, attempt) or attempt.workflow_run_id != run.run_identity
+            or run.run_identity != job_id(task, attempt)
+            or (attempt.workflow_run_id != run.run_identity and not (allow_unlinked_admission and attempt.workflow_run_id is None))
             or run.owner_kind != "user" or run.service_id or run.owner_principal_id != task.owner_principal_id
             or run.session_id != task.owner_session_id or run.operator_session_id != task.owner_session_id
             or run.goal_id != task.goal_id or run.goal_revision != task.goal_revision
@@ -47,7 +48,8 @@ def binds(task, attempt, run, *, typed_inputs=None):
                 return False
             expected_authority = authority_projection(task, inputs,
                 policy_digest=authority["model_policy_digest"], policy_revision=authority["model_policy_revision"],
-                bound=bound, ceiling=ceiling, strategy=strategy_projection(authority["task_strategy_binding"]))
+                bound=bound, ceiling=ceiling, strategy=strategy_projection(authority["task_strategy_binding"]),
+                original_deadline_at=authority["original_deadline_at"], original_runtime_seconds=authority["original_runtime_seconds"])
             expected_fingerprint = fingerprint(task, attempt, expected_inputs, expected_authority)
         else:
             expected_authority = dict(base)
@@ -56,6 +58,10 @@ def binds(task, attempt, run, *, typed_inputs=None):
             expected_fingerprint = fingerprint(task, attempt, expected_inputs, base)
         if (authority != expected_authority or run.input_digest != _digest(expected_inputs)
             or run.authority_digest != _digest(expected_authority) or run.run_fingerprint != expected_fingerprint):
+            return False
+        if marker == 2:
+            original_cutoff(task, attempt, run, verify_row_deadline=verify_row_deadline)
+        elif allow_unlinked_admission:
             return False
         history = json.loads(run.checkpoint_receipts_json)
         if type(history) is not list or any(type(item) is not dict for item in history):
@@ -94,11 +100,14 @@ def creation_binds(run, creation, marker):
         "creation_job_fence", "parent_input_digest", "live_root_digest", "child_ids",
         "model_policy_digest", "no_learning", "creation_digest"}
     if marker == 2:
-        fields |= {"parent_authority_digest", "parent_run_fingerprint", "research_authority_schema_version"}
+        fields |= {"parent_authority_digest", "parent_run_fingerprint", "research_authority_schema_version",
+            "original_deadline_at", "research_admission_digest"}
         if (type(creation.get("research_authority_schema_version")) is not int
             or creation["research_authority_schema_version"] != 2
             or creation.get("parent_authority_digest") != run.authority_digest
-            or creation.get("parent_run_fingerprint") != run.run_fingerprint):
+            or creation.get("parent_run_fingerprint") != run.run_fingerprint
+            or creation.get("original_deadline_at") != authority.get("original_deadline_at")
+            or creation.get("research_admission_digest") != _digest(_checkpoint(run, "research:admission"))):
             return False
     return (set(creation) == fields and type(creation.get("schema_version")) is int
         and creation["schema_version"] == (2 if marker == 2 else 1)
@@ -124,6 +133,11 @@ async def original_group_binds(db, run, *, typed_inputs):
     model = ResearchDossierInput.model_validate(typed_inputs)
     authority = json.loads(run.declared_authority_json)
     creation = _checkpoint(run, "research:creation")
+    if authority.get("research_authority_schema_version") == 2:
+        from src.db.models import WorkBoardTask, WorkBoardAttempt
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == creation["board_task_id"]))
+        attempt = await db.get(WorkBoardAttempt, creation["board_attempt_id"])
+        await original_admission_current(db, task, attempt, run)
     if (not creation_binds(run, creation, authority.get("research_authority_schema_version"))
         or len(creation["child_ids"]) != len(model.perspectives)):
         raise ValueError("research creation binding unavailable")
@@ -189,6 +203,7 @@ async def verified_dossier(db, task, attempt, run):
     """Reopen exact files, child schemas, lineage and the existing cost witness."""
     if run is None or run.status != "succeeded" or not binds(task, attempt, run):
         raise ValueError("research completed root binding changed")
+    await original_admission_current(db, task, attempt, run)
     return await _materialized_dossier(db, task, attempt, run)
 
 
@@ -198,6 +213,7 @@ async def _materialized_dossier(db, task, attempt, run):
     from src.work_board.dispatcher import _parse_typed_input
     from src.workflows.job_runtime import DurableJobRepository, _digest
     from src.workflows.inference_accounting import _continuity_lock
+    await original_admission_current(db, task, attempt, run)
     inputs = ResearchDossierInput.model_validate(_parse_typed_input(task))
     await original_group_binds(db, run, typed_inputs=inputs)
     creation = _checkpoint(run, "research:creation")
@@ -276,3 +292,60 @@ async def _materialized_dossier(db, task, attempt, run):
         and item.get("target_path") == dossier["file_path"] and item.get("content_sha256") == dossier["content_sha256"] for item in effects):
         raise ValueError("research dossier lacks its actual settled readback effect")
     return dossier, raw
+
+
+def original_cutoff(task, attempt, run, *, verify_row_deadline=True):
+    """Exact admission cutoff; legacy identity alone supplies no execution window."""
+    from src.work_board.research_parent import canonical_time, utc_time
+    from datetime import timedelta
+    if task is None or attempt is None or run is None:
+        raise ValueError("research original canonical admission unavailable")
+    authority = json.loads(run.declared_authority_json)
+    runtime = authority.get("original_runtime_seconds")
+    if (type(authority.get("research_authority_schema_version")) is not int
+        or authority["research_authority_schema_version"] != 2
+        or type(runtime) is not int or not 1 <= runtime <= 300):
+        raise ValueError("research original cutoff proof unavailable")
+    cutoff = canonical_time(authority["original_deadline_at"], require_canonical=True)
+    admission = _checkpoint(run, "research:admission")
+    record = next(item for item in json.loads(run.checkpoint_receipts_json) if item["checkpoint_id"] == "research:admission")
+    if type(record.get("fencing_token")) is not int or record["fencing_token"] != 0:
+        raise ValueError("research original admission fence changed")
+    fields = {"schema_version", "parent_job_id", "board_task_id", "board_attempt_id",
+        "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "goal_admission_budget_digest",
+        "original_attempt_started_at", "original_runtime_seconds", "original_deadline_at", "parent_input_digest",
+        "parent_authority_digest", "parent_run_fingerprint", "research_authority_schema_version",
+        "live_root_digest", "model_policy_digest", "no_learning"}
+    expected = {"schema_version": 1, "parent_job_id": run.run_identity,
+        "board_task_id": task.task_id, "board_attempt_id": attempt.attempt_id,
+        "owner_principal_id": task.owner_principal_id, "owner_session_id": task.owner_session_id,
+        "goal_id": task.goal_id, "goal_revision": task.goal_revision,
+        "goal_admission_budget_digest": admission.get("goal_admission_budget_digest"),
+        "original_attempt_started_at": canonical_time(attempt.started_at),
+        "original_runtime_seconds": runtime, "original_deadline_at": cutoff,
+        "parent_input_digest": run.input_digest, "parent_authority_digest": run.authority_digest,
+        "parent_run_fingerprint": run.run_fingerprint, "research_authority_schema_version": 2,
+        "live_root_digest": authority["live_root_digest"], "model_policy_digest": authority["model_policy_digest"],
+        "no_learning": True}
+    if (set(admission) != fields or admission != expected
+        or type(admission["schema_version"]) is not int or type(admission["goal_revision"]) is not int
+        or type(admission["research_authority_schema_version"]) is not int
+        or type(admission["original_runtime_seconds"]) is not int or admission["no_learning"] is not True
+        or not re.fullmatch(r"[0-9a-f]{64}", admission["goal_admission_budget_digest"])
+        or canonical_time(utc_time(attempt.started_at)+timedelta(seconds=runtime)) != cutoff
+        or (verify_row_deadline and canonical_time(run.deadline_at) != cutoff)):
+        raise ValueError("research original cutoff proof changed")
+    return utc_time(cutoff)
+
+
+async def original_admission_current(db, task, attempt, run):
+    from src.db.models import Goal
+    from src.work_board.research_parent import admission_payload
+    original_cutoff(task, attempt, run)
+    authority = json.loads(run.declared_authority_json)
+    goal = await db.get(Goal, task.goal_id)
+    fresh = admission_payload(task, attempt, goal, authority=authority, parent_id=run.run_identity,
+        input_digest=run.input_digest, run_fingerprint=run.run_fingerprint)
+    if fresh != _checkpoint(run, "research:admission"):
+        raise ValueError("research original Goal/grant identity changed")
+    return fresh

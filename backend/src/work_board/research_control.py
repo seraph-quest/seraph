@@ -60,11 +60,12 @@ async def bound(db, owner, task_id, *, verify_group=True):
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
-    if parent is None or not binds(task, attempt, parent):
+    if parent is None or not binds(task, attempt, parent, verify_row_deadline=verify_group):
         raise BoardError("research_binding_unavailable", "The original research admission requires recovery", status_code=409)
-    from src.work_board.research_readback import original_group_binds
+    from src.work_board.research_readback import original_group_binds, original_admission_current
     if verify_group:
         try:
+            await original_admission_current(db, task, attempt, parent)
             from src.work_board.dispatcher import _parse_typed_input
             await original_group_binds(db, parent, typed_inputs=_parse_typed_input(task))
         except (ValueError, TypeError, KeyError, OSError):
@@ -127,10 +128,13 @@ async def snapshot(jobs, db, owner, task_id):
         and not (attempt.ended_at or attempt.cancel_requested_at or parent.lease_owner or parent.lease_expires_at
             or attempt.lease_owner or attempt.lease_expires_at)
         and task.status == WorkBoardStatus.blocked and task.block_reason == parent.failure_reason)
-    from src.work_board.research_readback import original_group_binds
+    from src.work_board.research_readback import original_group_binds, original_admission_current
     from src.work_board.dispatcher import _parse_typed_input
+    authority_valid = False
     try:
+        await original_admission_current(db, task, attempt, parent)
         await original_group_binds(db, parent, typed_inputs=_parse_typed_input(task))
+        authority_valid = True
     except (ValueError, TypeError, KeyError, OSError):
         safe = False
     now = datetime.now(timezone.utc)
@@ -172,7 +176,7 @@ async def snapshot(jobs, db, owner, task_id):
             "bound_microusd": cost.bound_microusd, "actual_cost_microusd": cost.actual_cost_microusd,
             "contact_started": cost.contact_started_at is not None, "reason": cost.recovery_reason} for cost in costs],
         "recoverable": bool(safe), "cancel_available": not attempt.ended_at and parent.status != "succeeded",
-        "report_available": parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
+        "report_available": authority_valid and parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
         "no_learning": True, "semantic_truth_verified": False,
         "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; uncertain contacts remain held."}
 

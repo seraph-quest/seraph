@@ -3012,6 +3012,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 artifact_receipts_json="[]",
                 effect_receipts_json="[]",
             )
+            if identity.job_kind == research_parent_kind:
+                from src.work_board.research_parent import recheck_native_admission
+                admission = await recheck_native_admission(db, run, native_research_projection)
+                run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "research:admission",
+                    "payload": admission, "state_digest": _digest(admission), "state_keys": sorted(admission),
+                    "safe": True, "fencing_token": 0, "recorded_at": now.isoformat()}])
             await recheck_run_dependencies(db, run, admission_dependencies)
             if identity.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")

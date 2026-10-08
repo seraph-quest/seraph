@@ -1,7 +1,7 @@
 """Server-derived fixed research parent identity and admission contract."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Mapping, Any
 
@@ -89,14 +89,17 @@ class NativeResearchProjection:
     """Private owner-produced unchanged strategy proof, never a wire field."""
     authority_digest: str
     kind: str
+    admission_json: str | None
 
-    def __init__(self, authority, kind, seal):
+    def __init__(self, authority, kind, seal, *, admission=None):
         if seal is not _PROJECTION_SEAL:
             raise ValueError("native research projection owner required")
         from src.workflows.job_runtime import _digest
         strategy_projection(authority["task_strategy_binding"])
         object.__setattr__(self, "authority_digest", _digest(authority))
         object.__setattr__(self, "kind", kind)
+        from src.workflows.job_runtime import _canonical
+        object.__setattr__(self, "admission_json", _canonical(admission) if admission is not None else None)
 
     def matches(self, authority, kind):
         from src.workflows.job_runtime import _digest
@@ -114,7 +117,8 @@ async def stage_native_projection(db, spec, *, task, attempt, inputs):
     authority = spec.declared_authority
     expected = authority_projection(task, model, policy_digest=authority["model_policy_digest"],
         policy_revision=authority["model_policy_revision"], bound=authority["research_slot_allowance_microusd"],
-        ceiling=authority["research_owner_ceiling_microusd"], strategy=authority["task_strategy_binding"])
+        ceiling=authority["research_owner_ceiling_microusd"], strategy=authority["task_strategy_binding"],
+        original_deadline_at=authority["original_deadline_at"], original_runtime_seconds=authority["original_runtime_seconds"])
     if (spec.identity.job_id != job_id(task, attempt)
         or spec.identity.owner_kind != "user" or spec.identity.owner_principal_id != task.owner_principal_id
         or spec.identity.idempotency_scope != "work-board-attempt"
@@ -129,7 +133,13 @@ async def stage_native_projection(db, spec, *, task, attempt, inputs):
         or spec.run_fingerprint != fingerprint(task, attempt, spec.inputs, expected)):
         raise ValueError("research original owner projection mismatch")
     await secret_safe_strategy_projection(db, spec.declared_authority["task_strategy_binding"])
-    return NativeResearchProjection(spec.declared_authority, PARENT_KIND, _PROJECTION_SEAL)
+    from src.db.models import Goal
+    goal = await db.get(Goal, task.goal_id)
+    admission = admission_payload(task, attempt, goal, authority=authority,
+        parent_id=spec.identity.job_id, input_digest=_digest_value(spec.inputs), run_fingerprint=spec.run_fingerprint)
+    if canonical_time(spec.deadline_at) != admission["original_deadline_at"]:
+        raise ValueError("research original specification cutoff changed")
+    return NativeResearchProjection(spec.declared_authority, PARENT_KIND, _PROJECTION_SEAL, admission=admission)
 
 
 async def secret_safe_strategy_projection(db, value):
@@ -165,7 +175,8 @@ def fixed_child_projection(parent, authority):
     return NativeResearchProjection(authority, CHILD_KIND, _PROJECTION_SEAL)
 
 
-def authority_projection(task, model, *, policy_digest, policy_revision, bound, ceiling, strategy=None):
+def authority_projection(task, model, *, policy_digest, policy_revision, bound, ceiling, strategy=None,
+        original_deadline_at=None, original_runtime_seconds=None):
     authority = {"principal": task.owner_principal_id, "owner_kind": "user",
         "session_id": task.owner_session_id, "goal_id": task.goal_id,
         "goal_revision": task.goal_revision, "capability_id": PARENT_CAPABILITY,
@@ -180,6 +191,10 @@ def authority_projection(task, model, *, policy_digest, policy_revision, bound, 
     if strategy is not None:
         authority["task_strategy_binding"] = strategy_projection(strategy)
         authority["research_authority_schema_version"] = 2
+        if type(original_runtime_seconds) is not int or not 1 <= original_runtime_seconds <= 300:
+            raise ValueError("research original runtime unavailable")
+        authority["original_deadline_at"] = canonical_time(original_deadline_at, require_canonical=True)
+        authority["original_runtime_seconds"] = original_runtime_seconds
     return authority
 
 
@@ -199,9 +214,14 @@ def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime, st
     if type(bound) is not int or bound <= 0 or bound*len(model.perspectives) > setup.spend_ceiling_microusd:
         raise ValueError("fixed research slots exceed the existing reviewed allowance")
     safe_inputs = input_projection(task, model)
+    start, cutoff = utc_time(attempt.started_at), utc_time(deadline)
+    seconds = (cutoff-start).total_seconds()
+    if not seconds.is_integer() or not 1 <= seconds <= 300:
+        raise ValueError("research original attempt window unavailable")
     authority = authority_projection(task, model, policy_digest=policy_digest,
         policy_revision=configured.egress_revision, bound=bound, ceiling=setup.spend_ceiling_microusd,
-        strategy=strategy if strategy is not None else TaskStrategyBinding(status="none", reason="baseline"))
+        strategy=strategy if strategy is not None else TaskStrategyBinding(status="none", reason="baseline"),
+        original_deadline_at=canonical_time(cutoff), original_runtime_seconds=int(seconds))
     return DurableJobSpec(identity=DurableJobIdentity(job_id=job_id(task, attempt), owner_kind="user",
         owner_principal_id=task.owner_principal_id, job_kind=PARENT_KIND, capability_version="1",
         idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}"),
@@ -210,3 +230,94 @@ def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime, st
         declared_authority=authority, deadline_at=deadline, max_attempts=1,
         max_outstanding_jobs=1, budget_microusd=0,
         run_fingerprint=fingerprint(task, attempt, safe_inputs, authority))
+
+
+def utc_time(value):
+    """Canonical UTC identity, accepting DB datetimes but no coerced wire data."""
+    if type(value) is str:
+        value = datetime.fromisoformat(value)
+    if type(value) is not datetime:
+        raise ValueError("research original timestamp unavailable")
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def canonical_time(value, *, require_canonical=False):
+    encoded = utc_time(value).isoformat(timespec="microseconds")
+    if require_canonical and (type(value) is not str or value != encoded):
+        raise ValueError("research original timestamp is not canonical")
+    return encoded
+
+
+def _digest_value(value):
+    from src.workflows.job_runtime import _digest
+    return _digest(value)
+
+
+def goal_budget_digest(goal):
+    import json
+    return _digest_value(json.loads(goal.admission_budget_json) if goal.admission_budget_json else None)
+
+
+def admission_payload(task, attempt, goal, *, authority, parent_id, input_digest, run_fingerprint):
+    """Closed original facts; neither current settings nor a replay window."""
+    runtime = authority["original_runtime_seconds"]
+    cutoff = canonical_time(authority["original_deadline_at"], require_canonical=True)
+    if (type(runtime) is not int or not 1 <= runtime <= 300
+        or canonical_time(utc_time(attempt.started_at)+timedelta(seconds=runtime)) != cutoff
+        or attempt.task_id != task.task_id or parent_id != job_id(task, attempt)
+        or goal is None or goal.id != task.goal_id or goal.revision != task.goal_revision
+        or goal.owner_principal_id != task.owner_principal_id or goal.owner_session_id != task.owner_session_id):
+        raise ValueError("research original admission facts changed")
+    if goal.admission_budget_json:
+        import json
+        from src.goals.contracts import GoalAdmissionBudget
+        original_budget = GoalAdmissionBudget.model_validate(json.loads(goal.admission_budget_json))
+        if runtime > min(300, original_budget.max_runtime_seconds):
+            raise ValueError("research original runtime exceeds its selected Goal grant")
+    return {"schema_version": 1, "parent_job_id": parent_id,
+        "board_task_id": task.task_id, "board_attempt_id": attempt.attempt_id,
+        "owner_principal_id": task.owner_principal_id, "owner_session_id": task.owner_session_id,
+        "goal_id": task.goal_id, "goal_revision": task.goal_revision,
+        "goal_admission_budget_digest": goal_budget_digest(goal),
+        "original_attempt_started_at": canonical_time(attempt.started_at),
+        "original_runtime_seconds": runtime, "original_deadline_at": cutoff,
+        "parent_input_digest": input_digest, "parent_authority_digest": _digest_value(authority),
+        "parent_run_fingerprint": run_fingerprint, "research_authority_schema_version": 2,
+        "live_root_digest": authority["live_root_digest"], "model_policy_digest": authority["model_policy_digest"],
+        "no_learning": True}
+
+
+async def recheck_native_admission(db, run, proof):
+    """Pure canonical recheck inside the existing native parent insert writer."""
+    import json
+    from sqlalchemy import select
+    from src.db.models import Goal, WorkBoardTask, WorkBoardAttempt, WorkBoardStatus
+    from src.workflows.job_runtime import DurableJobAdmissionDenied
+    if type(proof) is not NativeResearchProjection or not proof.matches(json.loads(run.declared_authority_json), PARENT_KIND) or proof.admission_json is None:
+        raise DurableJobAdmissionDenied("research_original_admission_proof_required")
+    staged = json.loads(proof.admission_json)
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == staged["board_task_id"]))
+    attempt = await db.get(WorkBoardAttempt, staged["board_attempt_id"])
+    goal = await db.get(Goal, run.goal_id)
+    authority = json.loads(run.declared_authority_json)
+    now = datetime.now(timezone.utc)
+    if (task is None or attempt is None or task.status != WorkBoardStatus.running
+        or task.capability_id != PARENT_CAPABILITY or attempt.task_id != task.task_id
+        or attempt.ended_at or attempt.cancel_requested_at or not attempt.lease_owner
+        or attempt.lease_expires_at is None or utc_time(attempt.lease_expires_at) <= now
+        or attempt.workflow_run_id not in {None, run.run_identity}
+        or task.owner_principal_id != run.owner_principal_id or task.owner_session_id != run.session_id
+        or task.goal_id != run.goal_id or task.goal_revision != run.goal_revision
+        or authority["typed_input_digest"] != task.typed_input_digest
+        or authority["input_artifact_id"] != task.input_artifact_id
+        or canonical_time(run.deadline_at) != staged["original_deadline_at"]):
+        raise DurableJobAdmissionDenied("research_original_admission_changed")
+    latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    if latest != attempt.attempt_id or type(attempt.fencing_token) is not int or attempt.fencing_token <= 0:
+        raise DurableJobAdmissionDenied("research_original_attempt_changed")
+    fresh = admission_payload(task, attempt, goal, authority=authority, parent_id=run.run_identity,
+        input_digest=run.input_digest, run_fingerprint=run.run_fingerprint)
+    if fresh != staged or type(staged.get("schema_version")) is not int or staged["schema_version"] != 1:
+        raise DurableJobAdmissionDenied("research_original_admission_changed")
+    return staged

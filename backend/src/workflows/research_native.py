@@ -56,16 +56,18 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
             "input": model.model_dump(mode="json", exclude_none=True)}
         if hashlib.sha256(_canonical_json(envelope)).hexdigest() != task.typed_input_digest:
             raise DurableJobLeaseError("research child group must use the exact admitted source input")
-        from src.work_board.research_readback import binds
+        from src.work_board.research_readback import binds, original_admission_current
         if not binds(task, attempt, parent, typed_inputs=model):
             raise DurableJobLeaseError("research original parent identity changed")
+        admission = await original_admission_current(db, task, attempt, parent)
         creation = {"schema_version": 2, "board_task_id": task_id, "board_attempt_id": attempt_id,
             "creation_board_fence": board_fence, "creation_job_fence": runtime_fence,
             "parent_input_digest": parent.input_digest, "live_root_digest": authority["live_root_digest"],
             "child_ids": [f"{parent_id}:child:{slot}" for slot in range(len(model.perspectives))],
             "model_policy_digest": authority["model_policy_digest"], "no_learning": True}
         creation.update(parent_authority_digest=parent.authority_digest,
-            parent_run_fingerprint=parent.run_fingerprint, research_authority_schema_version=2)
+            parent_run_fingerprint=parent.run_fingerprint, research_authority_schema_version=2,
+            original_deadline_at=admission["original_deadline_at"], research_admission_digest=_digest(admission))
         creation["creation_digest"] = _digest(creation)
         history = json.loads(parent.checkpoint_receipts_json)
         existing = [item for item in history if item.get("checkpoint_id") == "research:creation"]
@@ -132,7 +134,7 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
                     dedupe_key=identity.idempotency_key), priority=parent.priority,
                 resource_claims_json=_canonical(["remote_inference"]), declared_authority_json=_canonical(safe_authority),
                 deadline_at=child_deadline.replace(tzinfo=None), max_attempts=1, fencing_token=0, revision=1, attempt_count=0))
-        history.append({"checkpoint_id": "research:creation", "state_digest": _digest(creation),
+        history.insert(0, {"checkpoint_id": "research:creation", "state_digest": _digest(creation),
             "state_keys": sorted(creation), "safe": True, "payload": creation,
             "recorded_at": now.isoformat(), "fencing_token": runtime_fence})
         conditions = [WorkflowRunState.run_identity == parent_id, WorkflowRunState.status == "running",

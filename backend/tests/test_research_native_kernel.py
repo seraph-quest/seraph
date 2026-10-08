@@ -38,9 +38,16 @@ def inputs():
         "source_egress_acknowledged":True,"no_learning":True}
 
 
-async def create_kernel(accounting_db):
+async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepare_only=False, reviewed_route=False):
     _root,_engine,factory=accounting_db
-    setup_configuration()
+    configured = setup_configuration()
+    if reviewed_route:
+        from dataclasses import replace
+        from src.api import model_fabric_settings
+        from src.model_fabric.configuration import write_model_fabric_configuration
+        write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
+            replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
+            egress_revision=configured.egress_revision+1))
     jobs=DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     from src.auth.service import create_session
@@ -51,10 +58,15 @@ async def create_kernel(accounting_db):
     task=WorkBoardTask(task_id="research-task",owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,goal_id="research-goal",goal_revision=1,
         capability_id=PARENT_CAPABILITY,status=WorkBoardStatus.running,
-        idempotency_key="kernel-task",idempotency_binding="kernel-binding",
-        input_artifact_id="kernel-input",typed_input_ref="artifacts/work-board/kernel-input.json",
+        idempotency_key="kernel-task",idempotency_binding=None if admit_only else "kernel-binding",
+        input_artifact_id="kernel-input",typed_input_ref="workspace-json:artifacts/work-board/kernel-input.json",
         typed_input_digest=hashlib.sha256(_canonical_json({"schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
             "capability_id": PARENT_CAPABILITY, "input": inputs()})).hexdigest(),task_revision=1)
+    input_path = _root / "artifacts/work-board/kernel-input.json"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(_canonical_json({"schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
+        "capability_id": PARENT_CAPABILITY, "input": inputs()}))
+    input_path.chmod(0o600)
     attempt=WorkBoardAttempt(attempt_id="research-attempt",task_id=task.task_id,
         lease_owner="research-kernel",lease_expires_at=(now+timedelta(seconds=120)).replace(tzinfo=None),
         fencing_token=1,started_at=now.replace(tzinfo=None))
@@ -64,11 +76,15 @@ async def create_kernel(accounting_db):
             admission_budget_json=serialize_admission_budget(GoalAdmissionBudget(reviewed_grant=True,
                 grant_id="kernel-review",max_outstanding_jobs=1,max_attempts=1,max_runtime_seconds=300))))
         db.add(task);db.add(attempt)
-    spec=spec_for(task,attempt,inputs(),deadline=now+timedelta(seconds=300))
+    spec=spec_for(task,attempt,inputs(),deadline=now+timedelta(seconds=300),strategy=strategy)
+    if prepare_only:
+        return jobs,task,attempt,spec,None,None
     from src.work_board.research_parent import stage_native_projection
     async with factory.accounting_sessions() as db:
         original_projection = await stage_native_projection(db, spec, task=task, attempt=attempt, inputs=inputs())
-    await jobs.admit_job(spec, native_research_projection=original_projection)
+    admitted = await jobs.admit_job(spec, native_research_projection=original_projection)
+    if admit_only:
+        return jobs,task,attempt,spec,admitted,None
     await jobs.queue_job(spec.identity.job_id)
     parent=await jobs.claim_job(spec.identity.job_id,owner="research-kernel",lease_seconds=120)
     async with factory.accounting_sessions() as db:

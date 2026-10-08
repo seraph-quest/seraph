@@ -104,10 +104,17 @@ async def create_and_pause(journey, *, steps=1, expected_status="pending"):
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
         attempt = await db.get(WorkBoardAttempt, pause["attempt_id"])
         assert task.status.value == "blocked"
-        assert task.block_reason == "awaiting_approval"
+        assert task.block_reason == "general_task_approval_required"
         assert task.block_kind == "needs_input"
         assert attempt.ended_at is None and attempt.lease_owner is None
-        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 1
+        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 2
+    child = await journey.jobs.get_job(pause["child_job_id"])
+    assert child["parent_job_id"] == root["job_id"]
+    assert child["status"] == "paused" and child["attempt_count"] == 1
+    assert child["failure_reason"] == "general_task_approval_required"
+    assert child["lease"]["owner"] is None
+    assert all(item["status"] == "succeeded" and item["details"]["never_contacted"] for item in child["effects"])
+    root["approval_child"] = child
     return task_id, plan, root
 
 
@@ -120,22 +127,50 @@ async def get_plan(journey, task_id):
 def resume_body(plan):
     pause = plan["approval_pause"]
     return {"expected_revision": plan["task_revision"], "expected_plan_revision": plan["plan"]["revision"],
-        **{key: pause[key] for key in ("workflow_run_id", "attempt_id", "fencing_token", "workflow_revision", "approval_id")}}
+        **{key: pause[key] for key in ("workflow_run_id", "attempt_id", "fencing_token", "workflow_revision", "approval_id", "child_job_id", "expected_manifest_revision")}}
 
 
 async def resume(journey, task_id, body):
     return await journey.client.post(f"/api/work-board/tasks/{task_id}/plan/resume", json=body)
 
 
-def verified_file(journey, root, step_id):
-    artifact = next(item["payload"] for item in root["checkpoints"]
-        if item["checkpoint_id"] == "general:verified:" + step_id)
+async def verified_file(journey, root, step_id):
+    from tests.test_general_task_persistence import actual_output_checkpoints
+    artifacts = [item["payload"] for item in actual_output_checkpoints(root)
+        if item["checkpoint_id"] == "general:verified:" + step_id]
+    if not artifacts:
+        # Before fixed parent assembly, output belongs to the original native child.
+        async with journey.sessions() as db:
+            children = list((await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.parent_job_id == root["job_id"]))).scalars())
+        matches = [(child, item["payload"]) for child in children
+            for item in json.loads(child.checkpoint_receipts_json)
+            if item["checkpoint_id"] == "general:artifact:" + step_id]
+        assert len(matches) == 1
+        child, artifact = matches[0]
+        assert child.status == "succeeded" and child.attempt_count == 1
+        assert any(item.get("effect_type") == "general_tool_call"
+            and item.get("status") == "succeeded" and item.get("content_sha256") == artifact["content_sha256"]
+            for item in json.loads(child.effect_receipts_json))
+    else:
+        assert len(artifacts) == 1
+        artifact = artifacts[0]
     path = journey.workspace / artifact["file_path"]
     content = path.read_bytes()
     assert hashlib.sha256(content).hexdigest() == artifact["content_sha256"]
     assert json.loads(content)["output"] == {"value": "local repository readback"}
     assert path.stat().st_mode & 0o077 == 0
     return path, content
+
+
+async def no_verified_output(journey):
+    from tests.test_general_task_persistence import actual_output_checkpoints
+    async with journey.sessions() as db:
+        runs = list((await db.execute(select(WorkflowRunState))).scalars())
+        assert not any(actual_output_checkpoints(run) for run in runs)
+        # Native admission evidence is durable even when contact/output is refused.
+        assert not any(item.get("effect_type") == "general_task_artifact_readback"
+            for run in runs for item in json.loads(run.effect_receipts_json))
 
 
 @pytest.mark.asyncio
@@ -160,9 +195,9 @@ async def test_api_exact_approval_continues_same_root_attempt_once(approval_jour
     assert root["status"] == "succeeded"
     assert root["attempt_count"] == 1
     assert root["deadline_at"] == original["deadline_at"]
-    assert root["lease"]["fencing_token"] == original["lease"]["fencing_token"] + 1
+    assert root["lease"]["fencing_token"] == original["lease"]["fencing_token"] + 2
     assert journey.tool.calls == 1
-    _path, content = verified_file(journey, root, "read-0")
+    _path, content = await verified_file(journey, root, "read-0")
     artifact_hash = hashlib.sha256(content).hexdigest()
     proof = journey.dispatcher._workflow_readback(root, original["job_id"])
     assert proof["content_sha256"] == artifact_hash
@@ -176,7 +211,11 @@ async def test_api_exact_approval_continues_same_root_attempt_once(approval_jour
     async with journey.sessions() as db:
         roots = list((await db.execute(select(WorkflowRunState))).scalars())
         attempts = list((await db.execute(select(WorkBoardAttempt))).scalars())
-        assert len(roots) == len(attempts) == 1
+        assert len(roots) == 2 and len(attempts) == 1
+        child = next(item for item in roots if item.parent_job_id == original["job_id"])
+        assert child.run_identity == body["child_job_id"] and child.attempt_count == 1
+        assert child.status == "succeeded" and child.fencing_token == 2
+        assert child.deadline_at.isoformat() == original["approval_child"]["deadline_at"].replace("+00:00", "")
         assert attempts[0].attempt_id == body["attempt_id"]
         assert attempts[0].workflow_run_id == original["job_id"]
         assert (await db.get(ApprovalRequest, body["approval_id"])).status == "consumed"
@@ -197,7 +236,7 @@ async def test_fast_approval_before_wait_publication_continues_same_attempt(appr
         request = await create(**kwargs)
         root = await journey.jobs.get_job(json.loads(request.details_json)["workflow_run_identity"])
         assert root["status"] == "running"
-        assert not any(item.get("payload", {}).get("phase") == "approval_precontact" for item in root["checkpoints"])
+        assert not any(item.get("payload", {}).get("phase") in {"approval_precontact", "approval_wait"} for item in root["checkpoints"])
         inspected.update(fingerprint=request.fingerprint, details=json.loads(request.details_json),
             summary=request.summary, risk_level=request.risk_level, expires_at=request.expires_at)
         # Actual durable decision in the interval between request creation
@@ -222,7 +261,7 @@ async def test_fast_approval_before_wait_publication_continues_same_attempt(appr
     assert root["status"] == "succeeded" and root["attempt_count"] == 1
     assert root["deadline_at"] == original["deadline_at"]
     assert journey.tool.calls == 1
-    verified_file(journey, root, "read-0")
+    await verified_file(journey, root, "read-0")
     assert (await resume(journey, task_id, resume_body(plan))).status_code == 409
     assert journey.tool.calls == 1
 
@@ -257,7 +296,7 @@ async def test_fast_noncurrent_decision_never_publishes_resumable_wait(approval_
                     elif race == "fingerprint":
                         current.fingerprint = "0" * 64
                     else:
-                        root = (await db.execute(select(WorkflowRunState))).scalar_one()
+                        root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id.is_(None)))).scalar_one()
                         if race == "root_input":
                             root.input_digest = "0" * 64
                         elif race == "root_authority":
@@ -274,17 +313,23 @@ async def test_fast_noncurrent_decision_never_publishes_resumable_wait(approval_
         return request
     monkeypatch.setattr(approval_repository, "get_or_create_pending", change_before_publication)
     task_id, _result = await create_and_run(journey)
-    plan = await get_plan(journey, task_id)
-    assert plan["approval_pause"] is None
+    response = await journey.client.get(f"/api/work-board/tasks/{task_id}/plan")
+    if race in {"root_input", "root_authority", "root_deadline"}:
+        # A native immutable manifest cannot project a changed original binding.
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "general_task_manifest_binding_changed"
+    else:
+        assert response.status_code == 200, response.text
+        assert response.json()["approval_pause"] is None
     assert journey.tool.calls == 0
     async with journey.sessions() as db:
-        root = (await db.execute(select(WorkflowRunState))).scalar_one()
+        root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id.is_(None)))).scalar_one()
         request = (await db.execute(select(ApprovalRequest))).scalar_one()
         assert "general_task_wait_binding" not in json.loads(request.details_json)
-        assert not any(item.get("payload", {}).get("phase") == "approval_precontact"
+        assert not any(item.get("payload", {}).get("phase") in {"approval_precontact", "approval_wait"}
             for item in json.loads(root.checkpoint_receipts_json))
         assert request.status != "consumed"
-    assert not list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))
+    await no_verified_output(journey)
 
 
 @pytest.mark.asyncio
@@ -301,57 +346,54 @@ async def test_wait_publication_rolls_back_and_retries_only_retained_proof(appro
             fired = True
             raise PublicationInterrupted()
     if barrier == "binding":
-        original = approval_repository.attach_general_task_wait_binding_in_session
+        original = approval_repository.attach_general_task_native_child_wait_binding_in_session
         async def attach(*args, **kwargs):
             result = await original(*args, **kwargs)
             await interrupt()
             return result
-        monkeypatch.setattr(approval_repository, "attach_general_task_wait_binding_in_session", attach)
-    elif barrier == "job":
+        monkeypatch.setattr(approval_repository, "attach_general_task_native_child_wait_binding_in_session", attach)
+    else:
         original = AsyncSession.execute
         async def execute(db, statement, *args, **kwargs):
             result = await original(db, statement, *args, **kwargs)
-            if str(statement).startswith("UPDATE workflow_run_states") and statement.compile().params.get("failure_reason") == "general_task_approval_required":
+            params = statement.compile().params
+            is_wait = params.get("failure_reason") == "general_task_approval_required"
+            if barrier == "board":
+                selected = str(statement).startswith("UPDATE work_board_tasks") and params.get("block_reason") == "general_task_approval_required"
+            elif barrier == "job":
+                selected = str(statement).startswith("UPDATE workflow_run_states") and is_wait and "checkpoint_receipts_json" not in params
+            else:
+                # The old repository event was replaced by canonical protected
+                # parent proof publication in the same native wait transaction.
+                selected = str(statement).startswith("UPDATE workflow_run_states") and is_wait and "checkpoint_receipts_json" in params
+            if selected:
                 await interrupt()
             return result
         monkeypatch.setattr(AsyncSession, "execute", execute)
-    elif barrier == "board":
-        original = journey.service.repository._cas_task_update
-        async def board(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            if kwargs["values"].get("block_reason") == "awaiting_approval":
-                await interrupt()
-            return result
-        monkeypatch.setattr(journey.service.repository, "_cas_task_update", board)
-    else:
-        original = journey.service.repository._event
-        async def event(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            if kwargs["kind"] == "task.approval_wait":
-                await interrupt()
-            return result
-        monkeypatch.setattr(journey.service.repository, "_event", event)
-    publish = journey.dispatcher.jobs.pause_general_task_for_approval
-    async def retained_proof_retry(**kwargs):
+    publish = journey.dispatcher.jobs.wait_general_task_native_approval
+    async def retained_proof_retry(*args, **kwargs):
         try:
-            return await publish(**kwargs)
+            return await publish(*args, **kwargs)
         except PublicationInterrupted:
             # The owner still holds the actual wrapper proof. This retries
             # publication only, never the tool invocation or an approved row.
             async with journey.sessions() as db:
                 row = (await db.execute(select(ApprovalRequest))).scalar_one()
-                root = (await db.execute(select(WorkflowRunState))).scalar_one()
+                root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id.is_(None)))).scalar_one()
                 task = (await db.execute(select(WorkBoardTask))).scalar_one()
                 attempt = (await db.execute(select(WorkBoardAttempt))).scalar_one()
                 assert "general_task_wait_binding" not in json.loads(row.details_json)
-                assert root.status == "running" and task.status.value == "running"
-                assert attempt.lease_owner and attempt.ended_at is None
-                assert all(item["status"] == "intent" for item in json.loads(root.effect_receipts_json))
-                assert not any(item.get("payload", {}).get("phase") == "approval_precontact"
+                child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == root.run_identity))
+                assert root.status == "paused" and root.failure_reason == "general_task_native_wait"
+                assert task.status.value == "blocked" and task.block_reason == "general_task_native_wait"
+                assert attempt.lease_owner is None and attempt.ended_at is None
+                assert child.status == "running" and child.lease_owner
+                assert all(item["status"] == "intent" for item in json.loads(child.effect_receipts_json))
+                assert not any(item.get("payload", {}).get("phase") in {"approval_precontact", "approval_wait"}
                     for item in json.loads(root.checkpoint_receipts_json))
             assert journey.tool.calls == 0
-            return await publish(**kwargs)
-    monkeypatch.setattr(journey.dispatcher.jobs, "pause_general_task_for_approval", retained_proof_retry)
+            return await publish(*args, **kwargs)
+    monkeypatch.setattr(journey.dispatcher.jobs, "wait_general_task_native_approval", retained_proof_retry)
     task_id, plan, root = await create_and_pause(journey)
     assert fired
     await approval_repository.resolve(plan["approval_pause"]["approval_id"], "approved")
@@ -360,7 +402,7 @@ async def test_wait_publication_rolls_back_and_retries_only_retained_proof(appro
     assert completed["status"] == "succeeded" and completed["attempt_count"] == 1
     assert completed["deadline_at"] == root["deadline_at"]
     assert journey.tool.calls == 1
-    verified_file(journey, completed, "read-0")
+    await verified_file(journey, completed, "read-0")
 
 
 @pytest.mark.asyncio
@@ -371,20 +413,31 @@ async def test_oversized_contacted_mcp_output_preserves_liability_without_replay
     await approval_repository.resolve(plan["approval_pause"]["approval_id"], "approved")
     current = await get_plan(journey, task_id)
     response = await resume(journey, task_id, resume_body(current))
-    assert response.status_code == 409, response.text
+    # The native API acknowledges the original transition and projects blocked
+    # uncertainty; this response must never claim a verified output.
+    assert response.status_code == 200, response.text
+    assert response.json()["task"]["status"] == "blocked"
+    assert response.json()["task"]["result_refs"] == []
+    assert response.json()["task"]["artifact_refs"] == []
+    assert response.json()["task"]["readback_status"] != "verified"
     detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
     assert detail.status_code == 200
     assert detail.json()["task"]["status"] == "blocked"
     assert journey.tool.calls == 1
     root = await journey.jobs.get_job(original["job_id"])
-    assert any(item["status"] in {"intent", "unknown", "dispatched"} for item in root["effects"])
-    assert not any(item["checkpoint_id"].startswith("general:verified:") for item in root["checkpoints"])
-    assert not list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))
+    child = await journey.jobs.get_job(original["approval_child"]["job_id"])
+    assert child["status"] == "unknown_external_effect"
+    assert child["attempt_count"] == 1
+    assert child["deadline_at"] == original["approval_child"]["deadline_at"]
+    assert any(item["status"] == "unknown" and item["details"]["reconciliation_required"] for item in child["effects"])
+    from tests.test_general_task_persistence import actual_output_checkpoints
+    assert not actual_output_checkpoints(root)
+    await no_verified_output(journey)
     assert (await resume(journey, task_id, resume_body(current))).status_code == 409
     await journey.dispatcher.run_pass()
     assert journey.tool.calls == 1
     async with journey.sessions() as db:
-        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 1
+        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 2
 
 
 @pytest.mark.asyncio
@@ -397,7 +450,7 @@ async def test_approved_wait_attachment_is_exact_and_idempotent(approval_journey
         assert await approval_repository.resolve(request.id, "approved")
         return request
     monkeypatch.setattr(approval_repository, "get_or_create_pending", fast_approve)
-    attach = approval_repository.attach_general_task_wait_binding_in_session
+    attach = approval_repository.attach_general_task_native_child_wait_binding_in_session
     async def attach_and_check(*args, **kwargs):
         request = await attach(*args, **kwargs)
         assert request is not None and request.status == "approved"
@@ -405,10 +458,17 @@ async def test_approved_wait_attachment_is_exact_and_idempotent(approval_journey
         repeated = await attach(*args, **kwargs)
         assert repeated is not None and repeated.details_json == original_details
         changed = dict(kwargs)
-        changed["binding"] = {**kwargs["binding"], field: "unrelated"}
+        binding = kwargs["binding"]
+        if field == "effect_id":
+            changed["binding"] = binding.model_copy(update={"no_contact_effect_digest": "0" * 64})
+        else:
+            native_field = "native_deadline_at" if field == "deadline_at" else field
+            value = datetime.now(timezone.utc) + timedelta(minutes=10) if field == "deadline_at" else ("0" * 64 if field.endswith("digest") else "unrelated")
+            changed["binding"] = binding.model_copy(update={"original_binding":
+                binding.original_binding.model_copy(update={native_field: value})})
         assert await attach(*args, **changed) is None
         return request
-    monkeypatch.setattr(approval_repository, "attach_general_task_wait_binding_in_session", attach_and_check)
+    monkeypatch.setattr(approval_repository, "attach_general_task_native_child_wait_binding_in_session", attach_and_check)
     task_id, plan, original = await create_and_pause(journey, expected_status="approved")
     assert (await resume(journey, task_id, resume_body(plan))).status_code == 200
     assert journey.tool.calls == 1
@@ -424,18 +484,25 @@ async def test_lost_precontact_proof_is_visible_and_cannot_resume_from_approved_
         assert await approval_repository.resolve(request.id, "approved")
         return request
     monkeypatch.setattr(approval_repository, "get_or_create_pending", fast_approve)
-    async def lose_publication(**kwargs):
+    async def lose_publication(*args, **kwargs):
         raise RuntimeError("owner interrupted before publication")
-    monkeypatch.setattr(journey.dispatcher.jobs, "pause_general_task_for_approval", lose_publication)
+    monkeypatch.setattr(journey.dispatcher.jobs, "wait_general_task_native_approval", lose_publication)
     task_id, _result = await create_and_run(journey)
     detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
     assert detail.json()["task"]["status"] == "blocked"
-    assert detail.json()["task"]["block_reason"] == "reconcile_external_effect"
+    assert detail.json()["task"]["block_reason"] == "general_task_native_wait"
     assert (await get_plan(journey, task_id))["approval_pause"] is None
     async with journey.sessions() as db:
         request = (await db.execute(select(ApprovalRequest))).scalar_one()
         assert request.status == "approved"
         assert "general_task_wait_binding" not in json.loads(request.details_json)
+        child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.parent_job_id.is_not(None)))
+        assert child.status == "unknown_external_effect" and child.attempt_count == 1
+        effects = json.loads(child.effect_receipts_json)
+        assert len(effects) == 1 and effects[0]["status"] == "unknown"
+        assert effects[0]["effect_type"] == "general_tool_call"
+        assert not any(item["checkpoint_id"].startswith("general:artifact:")
+            for item in json.loads(child.checkpoint_receipts_json))
     fresh = WorkBoardDispatcher(session_provider=journey.sessions, general_tasks=journey.service)
     await fresh.run_pass()
     assert journey.tool.calls == 0
@@ -468,7 +535,7 @@ async def test_two_approval_steps_preserve_first_verified_output(approval_journe
     assert pause["workflow_run_id"] == first["approval_pause"]["workflow_run_id"]
     assert pause["attempt_id"] == first["approval_pause"]["attempt_id"]
     root = await journey.jobs.get_job(original["job_id"])
-    path, initial_bytes = verified_file(journey, root, "read-0")
+    path, initial_bytes = await verified_file(journey, root, "read-0")
     await approval_repository.resolve(pause["approval_id"], "approved")
     completed = await resume(journey, task_id, resume_body(await get_plan(journey, task_id)))
     assert completed.status_code == 200, completed.text
@@ -477,10 +544,10 @@ async def test_two_approval_steps_preserve_first_verified_output(approval_journe
     root = await journey.jobs.get_job(original["job_id"])
     assert root["attempt_count"] == 1 and root["deadline_at"] == original["deadline_at"]
     assert path.read_bytes() == initial_bytes
-    verified_file(journey, root, "read-1")
-    assert len(list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))) == 2
+    await verified_file(journey, root, "read-1")
+    assert len([item for item in root["checkpoints"] if item["checkpoint_id"].startswith("general:verified:")]) == 2
     async with journey.sessions() as db:
-        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 1
+        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 3
         attempts = list((await db.execute(select(WorkBoardAttempt))).scalars())
         assert len(attempts) == 1 and attempts[0].attempt_id == pause["attempt_id"]
 
@@ -515,14 +582,15 @@ async def test_changed_approval_or_binding_denies_without_contact(approval_journ
         elif changed == "fingerprint":
             approval.fingerprint = "f" * 64
         elif changed == "input_checkpoint":
-            checkpoints = json.loads(root.checkpoint_receipts_json)
-            pending = next(item for item in checkpoints if item["checkpoint_id"] == "general:step:read-0")
-            pending["payload"]["input_digest"] = "0" * 64
-            root.checkpoint_receipts_json = json.dumps(checkpoints)
+            child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == body["child_job_id"]))
+            inputs = json.loads(child.arguments_json)
+            inputs["tool_input_digest"] = "0" * 64
+            child.arguments_json = json.dumps(inputs)
         elif changed == "unknown_effect":
-            effects = json.loads(root.effect_receipts_json)
+            child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == body["child_job_id"]))
+            effects = json.loads(child.effect_receipts_json)
             effects[0]["status"] = "unknown"
-            root.effect_receipts_json = json.dumps(effects)
+            child.effect_receipts_json = json.dumps(effects)
         elif changed == "root_owner":
             root.owner_principal_id = "operator:root:unrelated"
         elif changed == "root_deadline":
@@ -540,7 +608,7 @@ async def test_changed_approval_or_binding_denies_without_contact(approval_journ
     assert root["status"] == "paused"
     assert root["attempt_count"] == 1 and root["revision"] == original["revision"]
     assert root["lease"]["fencing_token"] == original["lease"]["fencing_token"]
-    assert not list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))
+    await no_verified_output(journey)
     async with journey.sessions() as db:
         attempts = list((await db.execute(select(WorkBoardAttempt))).scalars())
         assert len(attempts) == 1 and attempts[0].ended_at is None
@@ -562,7 +630,7 @@ async def test_concurrent_exact_resumes_make_one_contact(approval_journey):
     root = await journey.jobs.get_job(original["job_id"])
     assert root["status"] == "succeeded" and root["attempt_count"] == 1
     assert root["deadline_at"] == original["deadline_at"]
-    verified_file(journey, root, "read-0")
+    await verified_file(journey, root, "read-0")
 
 
 @pytest.mark.asyncio
@@ -577,7 +645,7 @@ async def test_corrupt_prior_physical_output_blocks_second_contact(approval_jour
     assert second["approval_pause"]["step_id"] == "read-1"
     assert await approval_repository.resolve(second["approval_pause"]["approval_id"], "approved")
     root = await journey.jobs.get_job(original["job_id"])
-    path, _initial_bytes = verified_file(journey, root, "read-0")
+    path, _initial_bytes = await verified_file(journey, root, "read-0")
     before = await get_plan(journey, task_id)
     assert before["approval_pause"]["can_resume"] is True
     body = resume_body(before)
@@ -589,5 +657,49 @@ async def test_corrupt_prior_physical_output_blocks_second_contact(approval_jour
     assert unchanged["status"] == "paused" and unchanged["revision"] == root["revision"]
     assert unchanged["deadline_at"] == original["deadline_at"]
     assert unchanged["attempt_count"] == 1
-    assert not any(item["checkpoint_id"] == "general:verified:read-1" for item in unchanged["checkpoints"])
-    assert len(list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))) == 1
+    from tests.test_general_task_persistence import actual_output_checkpoints
+    assert not any(item["checkpoint_id"] == "general:verified:read-1" for item in actual_output_checkpoints(unchanged))
+    async with journey.sessions() as db:
+        children = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == root["job_id"]))).scalars())
+        assert sum(item["checkpoint_id"].startswith("general:artifact:") for child in children
+            for item in json.loads(child.checkpoint_receipts_json)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["stale_task", "stale_plan", "stale_workflow", "stale_fence",
+    "stale_manifest", "missing_native_binding", "foreign_child", "foreign_approval", "goal_ref", "cancel"])
+async def test_public_native_resume_requires_all_original_fences(approval_journey, changed):
+    journey = approval_journey
+    task_id, plan, root = await create_and_pause(journey)
+    approval_id = plan["approval_pause"]["approval_id"]
+    assert await approval_repository.resolve(approval_id, "approved")
+    body = resume_body(plan)
+    fence_fields = {"stale_task": "expected_revision", "stale_plan": "expected_plan_revision",
+        "stale_workflow": "workflow_revision", "stale_fence": "fencing_token",
+        "stale_manifest": "expected_manifest_revision"}
+    if changed in fence_fields:
+        body[fence_fields[changed]] += 1
+    elif changed == "missing_native_binding":
+        del body["child_job_id"]
+        del body["expected_manifest_revision"]
+    elif changed == "foreign_child":
+        body["child_job_id"] = "foreign-native-child"
+    elif changed == "foreign_approval":
+        body["approval_id"] = "foreign-approval"
+    else:
+        async with journey.sessions() as db:
+            if changed == "goal_ref":
+                task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+                task.goal_id = "foreign-goal"
+            else:
+                attempt = await db.get(WorkBoardAttempt, body["attempt_id"])
+                attempt.cancel_requested_at = datetime.now(timezone.utc)
+    before_parent = await journey.jobs.get_job(root["job_id"])
+    before_child = await journey.jobs.get_job(plan["approval_pause"]["child_job_id"])
+    denied = await resume(journey, task_id, body)
+    assert denied.status_code == 409, (changed, denied.text)
+    assert journey.tool.calls == 0
+    assert await journey.jobs.get_job(root["job_id"]) == before_parent
+    assert await journey.jobs.get_job(before_child["job_id"]) == before_child
+    assert (await approval_repository.get(approval_id)).status == "approved"
+    await no_verified_output(journey)

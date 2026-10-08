@@ -430,18 +430,23 @@ async def test_generated_mismatch_stays_editable_without_root_or_write(task_runt
     invoke = AsyncMock(wraps=registry.invoke)
     monkeypatch.setattr(registry, "invoke", invoke)
     bad = native_request(registry, step_schema={"type": "string"})
-    planner = type("Planner", (), {"propose": AsyncMock(return_value=bad.plan)})()
+    from tests.general_task_test_transport import prepare_literal_planner
+    planner, transport = await prepare_literal_planner(sessions, workspace, monkeypatch, owner, bad.plan)
     service = GeneralTaskService(registry, planner=planner)
     service.start()
     generated = GeneralTaskCreate(goal_revision=bad.goal_revision,
-        idempotency_key=bad.idempotency_key, input=bad.input)
+        idempotency_key=bad.idempotency_key, input=bad.input.model_copy(update={
+            "inference_egress_acknowledged": True,
+            "limits": bad.input.limits.model_copy(update={"max_inference_calls": 2, "max_cost_microusd": 100000})}))
     async with sessions() as db:
         task = (await service.create(db, owner, generated)).task
         assert task.status == WorkBoardStatus.triage
         plan = await service.plan(db, owner, task.task_id)
         assert plan["plan"] is None
         assert plan["proposal_error"] == "general_task_plan_invalid"
-        assert list((await db.execute(select(WorkflowRunState))).scalars()) == []
+        jobs = list((await db.execute(select(WorkflowRunState))).scalars())
+        assert len(jobs) == 1 and jobs[0].job_kind == "model_inference_ephemeral_v1"
+        assert len(transport["contacts"]) == 1
     valid = native_request(registry)
     async with sessions() as db:
         edited = await service.update_plan(db, owner, task.task_id, GeneralTaskPlanUpdate(

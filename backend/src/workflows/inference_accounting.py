@@ -478,6 +478,7 @@ class InferenceAccountingRepositoryMixin:
                                      payload_digest: str, policy_digest: str, runtime_path: str,
                                      profile_id: str, bound_microusd: int, owner_ceiling_microusd: int | None,
                                      priority: int, deadline_at: float, owner: str, fencing_token: int,
+                                     general_task_binding: object = None,
                                      now: datetime | None = None) -> dict[str, object]:
         bound = integer_amount(bound_microusd, positive=True)
         if owner_ceiling_microusd is not None:
@@ -516,6 +517,11 @@ class InferenceAccountingRepositoryMixin:
                         await self._persist_accounting_witness(db, workspace, account, rows)
                         return _operation_payload(prior)
                     raise InferenceAccountingError("accounting_operation_already_reserved")
+                task_group_entry = None
+                if general_task_binding is not None:
+                    from src.workflows.general_task_accounting import reserve_entry
+                    task_group_entry = await reserve_entry(db, run, rows, general_task_binding,
+                        operation_id=operation_id, bound=bound, runtime_path=runtime_path)
                 period = period_id(observed)
                 from src.workspace.accounting_witness import period_state, unreviewed_overruns
                 owner_data, operations = account.model_dump(mode="json"), [_operation_payload(item) for item in rows]
@@ -541,7 +547,8 @@ class InferenceAccountingRepositoryMixin:
                     owner_ceiling_microusd=owner_ceiling_microusd, sequence=account.revision + 1,
                     priority=priority, deadline_at=deadline.replace(tzinfo=None),
                     job_fencing_token=fencing_token, created_at=observed.replace(tzinfo=None), updated_at=observed.replace(tzinfo=None),
-                    evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}]),
+                    evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}]
+                        + ([task_group_entry] if task_group_entry else [])),
                 )
                 db.add(row)
                 rows.append(row)
@@ -594,6 +601,10 @@ class InferenceAccountingRepositoryMixin:
                 if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
                     raise InferenceAccountingError("accounting_contact_fence_invalid")
                 opportunity_denial = None
+                from src.workflows.general_task_accounting import entry_for, validate_contact
+                general_entry = entry_for(row)
+                if general_entry is not None:
+                    await validate_contact(db, run, row, rows)
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import guard_linked_plan_provider_contact
                     from src.guardian.opportunity_contracts import OpportunityError

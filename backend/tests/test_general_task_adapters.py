@@ -36,6 +36,35 @@ def descriptor(registry, name):
     return next(item for item in registry.descriptors() if item.tool_id == name)
 
 
+def test_capacity_proof_uses_actual_wrapper_and_denies_forged_or_changed_source(registry, monkeypatch):
+    from dataclasses import replace
+    from src.native_tools.task_adapters import verify_task_tool_capacity
+    from src.work_board.general_task import digest
+    selected = descriptor(registry, "read_file")
+    witness = registry.compile_capacity(selected)
+    assert verify_task_tool_capacity(witness, descriptor_digest=digest(selected.model_dump(mode="json"))) == (
+        False, witness.classifier_digest)
+    for forged in (replace(witness, _seal=object()), replace(witness, approval_possible=True),
+        replace(witness, classifier_digest="0" * 64), replace(witness, descriptor_digest="0" * 64)):
+        with pytest.raises(PermissionError):
+            verify_task_tool_capacity(forged, descriptor_digest=witness.descriptor_digest)
+    monkeypatch.setattr(registry, "_invoke_sync", lambda *args: None)
+    assert registry.compile_capacity(selected).approval_possible is True
+    with pytest.raises(PermissionError, match="policy changed"):
+        verify_task_tool_capacity(witness, descriptor_digest=witness.descriptor_digest)
+
+
+def test_capacity_proof_rechecks_actual_approval_wrapper_selection(registry, monkeypatch):
+    from src.native_tools.task_adapters import verify_task_tool_capacity
+    from src.tools import approval
+    selected = descriptor(registry, "read_file")
+    witness = registry.compile_capacity(selected)
+    monkeypatch.setattr(approval, "wrap_tools_for_approval", approval.wrap_tools_with_forced_approval)
+    assert registry.compile_capacity(selected).approval_possible is True
+    with pytest.raises(PermissionError, match="policy changed"):
+        verify_task_tool_capacity(witness, descriptor_digest=witness.descriptor_digest)
+
+
 async def test_real_filesystem_wrappers_and_readback(registry, principal, tmp_path):
     # Actual bundled tools and actual effect journal, never a success fixture.
     written = await registry.invoke(descriptor(registry, "write_file"),
@@ -122,6 +151,7 @@ def mcp_registry(tmp_path, registry):
         "required": ["query"], "additionalProperties": False}, "output_schema": tool.output_schema,
         "effects": ["external_read"], "permissions": ["capability_execute"],
         "verifier": "json_schema.v1", "deadline": 10}
+    tool.seraph_advertised_input_schema = json.loads(json.dumps(declaration["input_schema"]))
     path = tmp_path / "mcp.yaml"
     path.write_text(json.dumps({"name": "local", "url": source["url"],
                                "task_tools": {tool.name: declaration}}))
@@ -264,6 +294,25 @@ def test_mcp_unknown_missing_changed_contracts_are_excluded(mcp_registry):
     manager._status["local"] = {"status": "connected", "error": None}
     manager._connection_revisions["local"] = 2
     assert not [item for item in registry.descriptors() if item.server_id]
+
+
+@pytest.mark.parametrize("change", ["required", "minimum", "maximum", "additional_properties"])
+def test_mcp_declared_input_must_equal_actual_advertisement(mcp_registry, change):
+    registry, manager, tool, path, declaration = mcp_registry
+    original = json.loads(json.dumps(tool.seraph_advertised_input_schema))
+    assert descriptor(registry, "mcp:local:repo_read")
+    schema = declaration["input_schema"]
+    if change == "required":
+        schema["required"] = []
+    elif change == "minimum":
+        schema["properties"]["query"]["minLength"] = 1
+    elif change == "maximum":
+        schema["properties"]["query"]["maxLength"] = 99
+    else:
+        schema["additionalProperties"] = True
+    path.write_text(json.dumps({"task_tools": {tool.name: declaration}}))
+    assert not [item for item in registry.descriptors() if item.server_id]
+    assert tool.seraph_advertised_input_schema == original and tool.calls == 0
 
 
 def test_sessionful_transport_exclusion_has_operator_visible_reason(mcp_registry):

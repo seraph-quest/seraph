@@ -653,6 +653,7 @@ def validate_capability_input(
     raw: Mapping[str, Any],
     *,
     allow_scheduler: bool = False,
+    general_task_publication=None,
 ) -> dict[str, Any]:
     """Validate and canonicalize one registered capability input.
 
@@ -670,7 +671,16 @@ def validate_capability_input(
         raise TypedInputError("typed_input_category_invalid", "the capability is not executable as a task")
     if not isinstance(raw, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must be an object")
-    _reject_authority_input_keys(raw, allow_connected_citations=normalized_capability in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
+    scan = raw
+    if normalized_capability == "agent.task.v1" and general_task_publication is None and any(
+        key in raw for key in ("proposal_group", "proposal_provenance")):
+        raise TypedInputError("typed_input_authority_field", "Proposal provenance is server-owned")
+    if general_task_publication is not None:
+        if normalized_capability != "agent.task.v1":
+            raise TypedInputError("typed_input_authority_field", "Task provenance cannot bind another capability")
+        from src.work_board.general_task_proposal import publication_scan_input
+        scan = publication_scan_input(general_task_publication, raw)
+    _reject_authority_input_keys(scan, allow_connected_citations=normalized_capability in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     model_type = _typed_input_model(normalized_capability)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the capability input model is unavailable")
@@ -1484,7 +1494,11 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
     try:
-        _reject_authority_input_keys(raw_input, allow_connected_citations=capability_id in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
+        if capability_id == "agent.task.v1" and _text(task.input_artifact_id):
+            from src.work_board.general_task_proposal import stored_scan_input
+            _reject_authority_input_keys(stored_scan_input(task, raw_input))
+        else:
+            _reject_authority_input_keys(raw_input, allow_connected_citations=capability_id in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     except TypedInputError as exc:
         # Preserve the legacy workspace-envelope contract.  Older callers and
         # their operator receipts intentionally expose one generic invalid
@@ -3481,6 +3495,44 @@ class WorkBoardDispatcher:
         task = detail["task"]
         if task.task_revision != int(expected_revision):
             raise BoardError("stale_revision", "The task changed before cancellation", status_code=409)
+        if task.capability_id == "agent.task.v1":
+            # Cancellation uses its fixed authority-reducing compiler, never
+            # an execution lease or the generic no-process cleanup adapter.
+            latest = detail["attempts"][0] if detail["attempts"] else None
+            if latest is None or not latest.workflow_run_id:
+                raise BoardError("admission_reconcile_required", "The original task admission must be reconciled before cancellation", status_code=409)
+            try:
+                cancelled = await self.jobs.cancel_general_task_native_parent(latest.workflow_run_id,
+                    operator_owner=owner, expected_task_revision=expected_revision)
+            except BoardError:
+                raise
+            except Exception as exc:
+                raise BoardError("general_task_cancel_blocked", "Refresh the original cancellation state; missing or changed evidence requires reconciliation", status_code=409) from exc
+            if self.general_tasks is not None:
+                try:
+                    await self.general_tasks.observe_native_cancellation(self.jobs, latest.workflow_run_id)
+                except Exception as exc:
+                    logger.info("native cancellation retains original recovery: %s", type(exc).__name__)
+            async with self.session_provider() as db:
+                current_task = await self.repository.get_task(db, owner, task_id)
+                current_attempt = await db.get(WorkBoardAttempt, cancelled["attempt"].attempt_id)
+                if current_attempt is None or current_attempt.workflow_run_id != latest.workflow_run_id:
+                    raise BoardError("general_task_cancel_blocked", "Inspect the original cancellation binding", status_code=409)
+                from src.workflows.general_task_guard import read_general_task_native_cancel
+                try:
+                    read_general_task_native_cancel(await self.jobs._fetch(db, latest.workflow_run_id), current_task, current_attempt)
+                except Exception as exc:
+                    raise BoardError("general_task_cancel_blocked", "Refresh the original cancellation state; changed evidence requires reconciliation", status_code=409) from exc
+                event = cancelled["event"]
+                if event is None:
+                    replay_detail = await self.repository.get_detail(db, owner, task_id)
+                    cancel_key = f"work-board-cancel:{task_id}:{current_attempt.attempt_id}"
+                    event = next((item for item in replay_detail.get("events", [])
+                        if item.kind == "attempt.cancel_requested"
+                        and _load_json_mapping(item.metadata_json).get("cancel_key") == cancel_key), None)
+                    if event is None:
+                        raise BoardError("general_task_cancel_blocked", "The original cancellation action receipt is unavailable", status_code=409)
+            return BoardAttemptProjection(current_task, current_attempt, event)
         if task.status is not WorkBoardStatus.running:
             raise BoardError("illegal_transition", "Only a running task can be cancelled", status_code=409)
         active = next((attempt for attempt in detail["attempts"] if attempt.ended_at is None), None)
@@ -4785,7 +4837,12 @@ class WorkBoardDispatcher:
             safe_inputs["parent_handoff_digest"] = _text(attempt.parent_handoff_digest)
         deadline = self.now() + timedelta(seconds=runtime_seconds)
         if general:
-            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+            from src.work_board.contracts import GeneralTaskEnvelope
+            envelope = GeneralTaskEnvelope.model_validate(inputs)
+            if envelope.proposal_group is None:
+                raise TypedInputError("general_task_provenance_missing", "Original task deadline requires proposal provenance")
+            deadline = min(envelope.proposal_group.original_deadline_at,
+                _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds))
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
                 job_id=job_id,
@@ -4821,9 +4878,9 @@ class WorkBoardDispatcher:
     ) -> dict[str, Any]:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
-        runtime_seconds = await self._effective_runtime(task)
         if _text(task.capability_id) == "work.research-dossier.v1":
-            return await self._admit_execute_research(claim, runtime_seconds=min(300, runtime_seconds))
+            return await self._admit_execute_research(claim)
+        runtime_seconds = await self._effective_runtime(task)
         if _text(task.capability_id) == "browser.public-task.v1":
             max_attempts, max_outstanding_jobs = await self._effective_browser_limits(task)
             return await self._admit_execute_browser(
@@ -4951,9 +5008,17 @@ class WorkBoardDispatcher:
                 parent_fence=parent_fence,
                 runtime_seconds=runtime_seconds,
             )
+            if task.capability_id == "agent.task.v1":
+                task, attempt, parent_runtime_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
+                board_revision = task.task_revision
             if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
                 projection = await self.jobs.get_job(job_id)
                 await self._pause_general_task(task, attempt, projection)
+                result["blocked"] = True
+                return result
+            if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
+                # Native wait already owns the paired blocked state and its
+                # original child liability. Generic settlement cannot renew it.
                 result["blocked"] = True
                 return result
             await self._settle_parent(
@@ -5713,28 +5778,44 @@ class WorkBoardDispatcher:
                     raise
         return await finish_cancel(self.jobs, owner, task_id, request)
 
-    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int) -> dict[str, Any]:
+    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int | None = None) -> dict[str, Any]:
         """Admit the fixed native root before any source or model operation."""
         from src.work_board.research_parent import spec_for, expected_identity
         from src.workflows.research_coordinator import start_parent, continue_parent, freeze_quiescent
         from src.workflows.research_native import checkpoint
         from src.work_board.research_artifacts import read
         task, attempt = claim.task, claim.attempt
-        strategy = await self._research_strategy(task)
         inputs = _parse_typed_input(task)
-        # The immutable original Board attempt bounds first admission and
-        # recovery. A later pass cannot grant another execution window.
-        deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
-        spec = spec_for(task, attempt, inputs, deadline=deadline)
-        # The resolver is an optional current-owner dependency. Its absence
-        # records baseline behavior and creates no task-method import or grant.
-        spec = replace(spec, declared_authority={**spec.declared_authority,
-            "task_strategy_binding": strategy.model_dump(mode="json")})
-        projection = await self.jobs.admit_job(spec)
-        expected = expected_identity(task, attempt, spec)
+        original = await self._original_research_admission(task, attempt=attempt)
+        if original is not None:
+            projection, expected = original
+            parent_id = projection["job_id"]
+            if checkpoint(projection, "research:creation") is not None:
+                # Existing materialized work stays on its explicit operator
+                # recovery path; no new queue/claim/window/provider operation.
+                if projection["status"] == "succeeded":
+                    async with self.session_provider() as db:
+                        from src.work_board.research_readback import verified_dossier
+                        run = await self.jobs._fetch(db, parent_id)
+                        await verified_dossier(db, task, attempt, run)
+                    return {"admitted": True, "completed": True, "blocked": False}
+                return {"admitted": True, "completed": False, "blocked": True}
+        else:
+            from src.work_board.research_parent import stage_native_projection
+            strategy = await self._research_strategy(task)
+            if runtime_seconds is None:
+                runtime_seconds = min(300, await self._effective_runtime(task))
+            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+            spec = spec_for(task, attempt, inputs, deadline=deadline, strategy=strategy)
+            async with self.session_provider() as strategy_db:
+                original_projection = await stage_native_projection(strategy_db, spec,
+                    task=task, attempt=attempt, inputs=inputs)
+            projection = await self.jobs.admit_job(spec, native_research_projection=original_projection)
+            expected = expected_identity(task, attempt, spec)
+            parent_id = spec.identity.job_id
         async with self.session_provider() as db:
             linked = await self.repository.link_attempt_workflow_run(db, task.task_id, attempt.attempt_id,
-                workflow_run_id=spec.identity.job_id, expected_revision=task.task_revision,
+                workflow_run_id=parent_id, expected_revision=task.task_revision,
                 board_fence=attempt.fencing_token, lease_owner=self.runner_id,
                 workflow_projection=projection, expected_identity=expected,
                 actor_principal_id=self.runner_id, actor_session_id=self.runner_session)
@@ -5743,13 +5824,13 @@ class WorkBoardDispatcher:
         self._active_worker_tasks[key] = asyncio.current_task()
         phase_binding = {}
         try:
-            await self.jobs.queue_job(spec.identity.job_id)
-            parent = await self.jobs.claim_job(spec.identity.job_id, owner=self.runner_id, lease_seconds=30)
-            _creation, phase_binding = await start_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+            await self.jobs.queue_job(parent_id)
+            parent = await self.jobs.claim_job(parent_id, owner=self.runner_id, lease_seconds=30)
+            _creation, phase_binding = await start_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
                 board_task=task, board_attempt=attempt, inputs=inputs)
-            completed = await continue_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+            completed = await continue_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
                 phase_binding=phase_binding)
-            await self._complete_research_projection(spec.identity.job_id, completed)
+            await self._complete_research_projection(parent_id, completed)
             return {"admitted": True, "completed": True, "blocked": False}
         except BaseException as error:
             # The awaited finite worker group has returned before this writer
@@ -5758,9 +5839,9 @@ class WorkBoardDispatcher:
             frames = [(Path(frame.filename).name, frame.lineno, frame.name)
                 for frame in traceback.extract_tb(error.__traceback__)[-8:]]
             logger.warning("research bounded execution blocked: code=%s frames=%s", _safe_error_code(error), frames)
-            parent = await self.jobs.get_job(spec.identity.job_id)
+            parent = await self.jobs.get_job(parent_id)
             if checkpoint(parent, "research:creation") is not None:
-                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=spec.identity.job_id,
+                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=parent_id,
                     owner=self.runner_id, phase_binding=phase_binding, expected_parent_revision=parent["revision"],
                     reason="research_execution_requires_recovery"))
             else:
@@ -5769,9 +5850,78 @@ class WorkBoardDispatcher:
         finally:
             self._active_worker_tasks.pop(key, None)
 
+    async def _original_research_admission(self, task, *, attempt=None):
+        """Lookup the original fixed identity before any mutable resolver/runtime."""
+        from src.work_board.research_parent import job_id, canonical_time
+        from src.work_board.research_readback import binds, original_admission_current, original_group_binds
+        from src.workflows.research_native import checkpoint
+        from src.workflows.research_guard import assert_research_operator_session
+        from src.workflows.job_runtime import _serialize, _assert_canonical_goal_fence
+        async with self.session_provider() as db:
+            latest = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+            if latest is None:
+                return None
+            canonical_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
+            if canonical_task is None or any(getattr(canonical_task, field) != getattr(task, field) for field in (
+                "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id",
+                "typed_input_digest", "typed_input_ref", "input_artifact_id")):
+                raise BoardError("research_binding_unavailable", "Original research Task/input changed", status_code=409)
+            selected = attempt or latest
+            if selected.attempt_id != latest.attempt_id:
+                raise BoardError("research_binding_unavailable", "Original research attempt changed", status_code=409)
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id(task, selected)))
+            if run is None:
+                if selected.workflow_run_id:
+                    raise BoardError("research_binding_unavailable", "Original research row is missing", status_code=409)
+                return None
+            try:
+                if (canonical_time(selected.started_at) != canonical_time(latest.started_at)
+                    or not binds(task, latest, run, typed_inputs=_parse_typed_input(task), allow_unlinked_admission=True)):
+                    raise ValueError("original research identity changed")
+                await original_admission_current(db, task, latest, run)
+                await assert_research_operator_session(db, run, now=_utc_datetime(self.now()))
+                await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                    owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
+                    session_id=run.session_id, authority=run.declared_authority_json)
+                from src.model_fabric.effective_policy import current_inference_policy
+                authority = json.loads(run.declared_authority_json)
+                if authority["model_policy_digest"] != current_inference_policy()[1]:
+                    raise ValueError("original research model policy changed")
+                projection = _serialize(run)
+                if checkpoint(projection, "research:creation") is not None:
+                    await original_group_binds(db, run, typed_inputs=_parse_typed_input(task))
+                else:
+                    if (run.status not in {"accepted", "queued"} or run.attempt_count != 0 or run.fencing_token != 0
+                        or run.lease_owner or run.lease_expires_at or latest.ended_at or latest.cancel_requested_at
+                        or json.loads(run.effect_receipts_json) != [] or json.loads(run.artifact_receipts_json) != []
+                        or await db.scalar(select(WorkflowRunState.id).where(WorkflowRunState.parent_job_id == run.run_identity).limit(1))):
+                        raise ValueError("research admitted parent is not originally unclaimed")
+                    from src.work_board.research_parent import utc_time
+                    if utc_time(run.deadline_at) <= _utc_datetime(self.now()):
+                        raise ValueError("original research cutoff expired")
+                expected = {"job_id": run.run_identity, "job_kind": run.job_kind,
+                    "owner_kind": run.owner_kind, "owner_principal_id": run.owner_principal_id,
+                    "session_id": run.session_id, "operator_session_id": run.operator_session_id,
+                    "capability_id": "work.research-dossier.v1", "capability_version": run.capability_version,
+                    "goal_id": run.goal_id, "goal_revision": run.goal_revision,
+                    "input_digest": run.input_digest, "authority_digest": run.authority_digest,
+                    "run_fingerprint": run.run_fingerprint, "idempotency_scope": run.idempotency_scope,
+                    "idempotency_key": run.idempotency_key}
+                return projection, expected
+            except (ValueError, TypeError, KeyError, OSError) as error:
+                raise BoardError("research_binding_unavailable", "The original research admission requires reconciliation", status_code=409) from error
+
     async def _research_strategy(self, task):
         from src.work_board.contracts import TaskStrategyBinding
         import inspect
+        original = await self._original_research_admission(task)
+        if original is not None:
+            binding = TaskStrategyBinding.model_validate(original[0]["declared_authority"]["task_strategy_binding"])
+            from src.work_board.research_parent import secret_safe_strategy_projection
+            async with self.session_provider() as db:
+                await secret_safe_strategy_projection(db, binding)
+            return binding
         binding = TaskStrategyBinding(status="none", reason="baseline")
         if self.strategy_resolver is not None:
             binding = self.strategy_resolver.resolve(WorkBoardOwner(
@@ -5779,9 +5929,15 @@ class WorkBoardDispatcher:
                 task.goal_id, "work.research-dossier.v1")
             if inspect.isawaitable(binding):
                 binding = await binding
+            original_binding = binding
             binding = TaskStrategyBinding.model_validate(binding)
+        else:
+            original_binding = binding
         if binding.status == "blocked":
             raise BoardError("task_strategy_blocked", binding.reason, status_code=409)
+        from src.work_board.research_parent import secret_safe_strategy_projection
+        async with self.session_provider() as db:
+            await secret_safe_strategy_projection(db, original_binding)
         return binding
 
     async def _admit_execute_direct(
@@ -10006,6 +10162,7 @@ class WorkBoardDispatcher:
         parent_runtime_owner: str,
         parent_fence: int,
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
+        resume_child=None,
     ) -> dict[str, Any]:
         capability_id = _text(task.capability_id)
         if capability_id == "agent.task.v1":
@@ -10018,7 +10175,7 @@ class WorkBoardDispatcher:
             envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
             return await self.general_tasks.execute(self.jobs, job_id=job_id,
                 owner=parent_runtime_owner, fence=parent_fence, envelope=envelope,
-                principal=operator.principal)
+                principal=operator.principal, **({"resume_child": resume_child} if resume_child is not None else {}))
         if capability_id != GOAL_SNAPSHOT_CAPABILITY:
             return {
                 "verified": False,
@@ -10179,6 +10336,25 @@ class WorkBoardDispatcher:
             )
         return result
 
+    async def _refresh_general_task_dispatch(self, task, attempt, job_id):
+        """Read the current paired native phase, preserving the original attempt."""
+        from src.workflows.general_task_guard import _current, _assert_joint_manifest, read_manifest
+        from src.work_board.repository import _begin_sqlite_immediate
+        async with self.session_provider() as db:
+            await _begin_sqlite_immediate(db)
+            parent = await self.jobs._fetch(db, job_id)
+            if read_manifest(parent) is None:
+                return task, attempt, parent.lease_owner, parent.fencing_token
+            parent, current_task, current_attempt, manifest, _envelope = await _current(self.jobs, db, job_id)
+            _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+            if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                or current_task.owner_principal_id != task.owner_principal_id
+                or current_task.owner_session_id != task.owner_session_id
+                or current_task.typed_input_digest != task.typed_input_digest
+                or current_task.goal_id != task.goal_id or current_task.goal_revision != task.goal_revision):
+                raise DurableJobError("general_task_original_dispatch_binding_changed")
+            return current_task, current_attempt, parent.lease_owner, parent.fencing_token
+
     async def _settle_parent(
         self,
         job_id: str,
@@ -10273,6 +10449,16 @@ class WorkBoardDispatcher:
         lease_owner: str | None = None,
     ) -> BoardAttemptProjection:
         async with self.session_provider() as db:
+            if task.capability_id == "agent.task.v1" and attempt.workflow_run_id:
+                from src.workflows.general_task_guard import _current, _assert_joint_manifest, read_manifest
+                parent = await self.jobs._fetch(db, attempt.workflow_run_id)
+                if read_manifest(parent) is not None:
+                    parent, current_task, current_attempt, manifest, _envelope = await _current(self.jobs, db, attempt.workflow_run_id)
+                    _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                    if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                        or current_task.task_revision != board_revision
+                        or current_attempt.fencing_token != attempt.fencing_token):
+                        raise DurableJobError("general_task_current_projection_binding_changed")
             projected = await self.repository.project_attempt(
                 db,
                 task.task_id,
@@ -10317,6 +10503,18 @@ class WorkBoardDispatcher:
             # Native approval publication already committed the joint wait.
             # Read it back without applying the stale pre-publication revision.
             from src.work_board.repository import BoardAttemptProjection
+            from src.workflows.general_task_guard import _current, _assert_joint_manifest, read_manifest
+            parent = await self.jobs._fetch(db, attempt.workflow_run_id)
+            if read_manifest(parent) is not None:
+                parent, current_task, current_attempt, manifest, _envelope = await _current(self.jobs, db, attempt.workflow_run_id)
+                _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                if (manifest.phase != "approval_wait" or parent.status != "paused"
+                    or current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                    or current_task.status is not WorkBoardStatus.blocked
+                    or current_task.block_reason != "general_task_approval_required"
+                    or current_attempt.lease_owner is not None):
+                    raise DurableJobError("general_task_native_approval_pause_changed")
+                return BoardAttemptProjection(current_task, current_attempt, None)
             current_task = await db.scalar(select(WorkBoardTask).where(
                 WorkBoardTask.task_id == task.task_id))
             current_attempt = await db.get(WorkBoardAttempt, attempt.attempt_id)
@@ -10346,6 +10544,12 @@ class WorkBoardDispatcher:
         from src.work_board.general_task_approval import prepare_resume_witness
         if self.general_tasks is None:
             raise BoardError("general_task_inactive", "Restore the task service", status_code=503)
+        if request.child_job_id is not None:
+            return await self._resume_native_general_task(owner, task_id, request)
+        async with self.session_provider() as db:
+            from src.workflows.general_task_guard import read_manifest
+            if read_manifest(await self.jobs._fetch(db, request.workflow_run_id)) is not None:
+                raise BoardError("general_task_resume_binding_changed", "Native child and manifest readback are required", status_code=409)
         projection = await self.jobs.get_job(request.workflow_run_id)
         async with self.session_provider() as db:
             witness = await prepare_resume_witness(self.general_tasks, db, owner, task_id,
@@ -10372,9 +10576,12 @@ class WorkBoardDispatcher:
             outcome = await self._execute_registered(task, attempt, _parse_typed_input(task),
                 job_id=request.workflow_run_id, parent_runtime_owner=parent_owner,
                 parent_fence=parent_fence, runtime_seconds=await self._effective_runtime(task))
+            task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, request.workflow_run_id)
             projection = await self.jobs.get_job(request.workflow_run_id)
             if outcome.get("awaiting_approval"):
                 return (await self._pause_general_task(task, attempt, projection)).task
+            if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
+                return task
             await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
             projection = await self.jobs.get_job(request.workflow_run_id)
             proof = self._workflow_readback(projection, request.workflow_run_id)
@@ -10386,6 +10593,131 @@ class WorkBoardDispatcher:
         except Exception:
             await self._reconcile_linked_failure(claim, request.workflow_run_id)
             raise BoardError("general_task_continuation_blocked", "Read the exact original task recovery state", status_code=409)
+
+    async def revise_paused_general_task(self, owner, task_id, request):
+        """Select the original paused parent; the fixed writer owns its CAS."""
+        if self.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        async with self.session_provider() as db:
+            task = await self.repository.get_task(db, owner, task_id)
+            if task.capability_id != "agent.task.v1":
+                raise BoardError("unsupported_action", "Plan revisions apply only to a general task", status_code=422)
+            if task.task_revision != request.expected_revision:
+                raise BoardError("stale_revision", "Refresh the original paused task", status_code=409)
+            attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+            if attempt is None or not attempt.workflow_run_id:
+                raise BoardError("general_task_revision_unavailable", "Safely pause the original admitted task first", status_code=409)
+            parent_id = attempt.workflow_run_id
+        await self.jobs.revise_general_task_operator_paused_parent(parent_id,
+            operator_owner=owner, request=request, service=self.general_tasks)
+        task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
+        return task, attempt
+
+    async def control_general_task(self, owner, task_id, *, expected_revision, action):
+        """Operator controls derive every native execution binding server-side."""
+        from src.workflows.general_task_guard import _current, _assert_joint_manifest
+        from src.work_board.repository import _begin_sqlite_immediate
+        if action not in {"pause", "resume"} or self.general_tasks is None:
+            raise BoardError("general_task_control_unavailable", "Restore the original native task service", status_code=409)
+        async with self.session_provider() as db:
+            await _begin_sqlite_immediate(db)
+            selected = await self.repository.get_task(db, owner, task_id)
+            if selected.capability_id != "agent.task.v1":
+                raise BoardError("unsupported_action", "Pause and resume apply only to a native general task", status_code=422)
+            attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+            if attempt is None or not attempt.workflow_run_id:
+                raise BoardError("general_task_control_unavailable", "The original native task has not been admitted", status_code=409)
+            parent, task, attempt, manifest, _envelope = await _current(self.jobs, db, attempt.workflow_run_id)
+            _assert_joint_manifest(parent, task, attempt, manifest)
+            if (task.task_id != task_id or task.owner_principal_id != owner.principal_id
+                or task.owner_session_id != owner.session_id or task.task_revision != expected_revision):
+                raise BoardError("stale_revision", "Refresh the original task before this control", status_code=409)
+            parent_id, parent_revision = parent.run_identity, parent.revision
+            manifest_revision = manifest.manifest_revision
+            if action == "resume" and manifest.phase != "operator_paused":
+                raise BoardError("general_task_control_unavailable", "Only a safely paused original task may resume", status_code=409)
+        if action == "pause":
+            await self.jobs.pause_general_task_native_parent(parent_id, operator_owner=owner,
+                expected_task_revision=expected_revision, expected_revision=parent_revision,
+                expected_manifest_revision=manifest_revision)
+            task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
+            return task, attempt
+        await self.jobs.resume_general_task_native_parent(parent_id,
+            owner=f"{self.runner_id}:{attempt.attempt_id}", expected_revision=parent_revision,
+            expected_manifest_revision=manifest_revision)
+        task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
+        outcome = await self._execute_registered(task, attempt, _parse_typed_input(task), job_id=parent_id,
+            parent_runtime_owner=parent_owner, parent_fence=parent_fence,
+            runtime_seconds=await self._effective_runtime(task))
+        task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
+        if outcome.get("awaiting_approval"):
+            observed = await self._pause_general_task(task, attempt, await self.jobs.get_job(parent_id))
+            return observed.task, observed.attempt
+        if not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
+            return task, attempt
+        await self._settle_parent(parent_id, parent_owner, parent_fence, outcome)
+        projection = await self.jobs.get_job(parent_id)
+        proof = self._workflow_readback(projection, parent_id)
+        if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:
+            raise DurableJobError("general_task_readback_missing")
+        projected = await self._project(task, attempt, board_revision=task.task_revision,
+            status=WorkBoardStatus.review, outcome="verified", proof=proof,
+            result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))
+        return projected.task, projected.attempt
+
+    async def _resume_native_general_task(self, owner, task_id, request):
+        from src.workflows.general_task_guard import _current, _assert_joint_manifest, child_binding
+        from src.work_board.repository import _begin_sqlite_immediate
+        async with self.session_provider() as db:
+            await _begin_sqlite_immediate(db)
+            parent, task, attempt, manifest, _envelope = await _current(self.jobs, db, request.workflow_run_id)
+            _assert_joint_manifest(parent, task, attempt, manifest)
+            history = json.loads(parent.checkpoint_receipts_json or "[]")
+            if (not isinstance(history, list) or any(isinstance(item, dict)
+                and str(item.get("checkpoint_id", "")).startswith("general:step:") for item in history)):
+                raise BoardError("general_task_legacy_intent_reconciliation",
+                    "Reconcile the original historical tool intent before any continuation", status_code=409)
+            child = await self.jobs._fetch(db, request.child_job_id)
+            binding = child_binding(child)
+            if (task.task_id != task_id or task.owner_principal_id != owner.principal_id
+                or task.owner_session_id != owner.session_id or attempt.attempt_id != request.attempt_id
+                or task.task_revision != request.expected_revision or manifest.plan_revision != request.expected_plan_revision
+                or attempt.fencing_token != request.fencing_token or parent.revision != request.workflow_revision
+                or manifest.manifest_revision != request.expected_manifest_revision
+                or binding.parent_job_id != parent.run_identity or binding.attempt_id != attempt.attempt_id
+                or manifest.phase != "approval_wait"):
+                raise BoardError("general_task_resume_binding_changed", "Refresh the exact native child approval", status_code=409)
+            await self.general_tasks.validate_native_resume(db, owner, task, attempt,
+                parent, manifest, _envelope, child, binding, request)
+        resumed = await self.jobs.resume_general_task_native_approval(request.child_job_id,
+            operator_owner=owner, expected_task_revision=request.expected_revision,
+            expected_parent_revision=request.workflow_revision,
+            expected_manifest_revision=request.expected_manifest_revision, approval_id=request.approval_id,
+            service=self.general_tasks, request=request)
+        claim = BoardDispatchClaim(task, attempt, None)
+        try:
+            outcome = await self._execute_registered(task, attempt, _parse_typed_input(task),
+                job_id=request.workflow_run_id, parent_runtime_owner=f"{self.runner_id}:{attempt.attempt_id}",
+                parent_fence=request.fencing_token, runtime_seconds=await self._effective_runtime(task),
+                resume_child={"binding": binding, "runtime_owner": resumed["runtime_owner"]})
+            task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, request.workflow_run_id)
+            if outcome.get("awaiting_approval"):
+                return (await self._pause_general_task(task, attempt, await self.jobs.get_job(request.workflow_run_id))).task
+            if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
+                return task
+            await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
+            projection = await self.jobs.get_job(request.workflow_run_id)
+            proof = self._workflow_readback(projection, request.workflow_run_id)
+            if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:
+                raise DurableJobError("general_task_readback_missing")
+            return (await self._project(task, attempt, board_revision=task.task_revision,
+                status=WorkBoardStatus.review, outcome="verified", proof=proof,
+                result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))).task
+        except Exception:
+            await self._reconcile_linked_failure(claim, request.workflow_run_id)
+            raise BoardError("general_task_continuation_blocked", "Inspect the original native task; never replay an uncertain child", status_code=409)
 
     async def _pause_routine_for_operator(
         self,
@@ -10567,6 +10899,18 @@ class WorkBoardDispatcher:
 
         try:
             current = await self._refresh_claim(claim)
+            if current.task.capability_id == "agent.task.v1" and current.attempt.cancel_requested_at is not None:
+                try:
+                    if self.general_tasks is not None:
+                        await self.general_tasks.observe_native_cancellation(self.jobs, workflow_run_id)
+                    from src.workflows.general_task_guard import read_general_task_native_cancel
+                    async with self.session_provider() as db:
+                        read_general_task_native_cancel(await self.jobs._fetch(db, workflow_run_id),
+                            await db.get(WorkBoardTask, current.task.task_id),
+                            await db.get(WorkBoardAttempt, current.attempt.attempt_id))
+                except Exception as exc:
+                    logger.info("native cancellation retains Unknown recovery: %s", type(exc).__name__)
+                return True
             projection = await self.jobs.get_job(workflow_run_id)
             if not isinstance(projection, Mapping):
                 await self._project_blocked(current, "unknown_effect", "reconcile_admission_binding")
@@ -10709,6 +11053,28 @@ class WorkBoardDispatcher:
         if lookup is None:
             raise DurableJobError("durable_binding_lookup_unavailable")
         capability_id = _text(task.capability_id)
+        if capability_id == "agent.task.v1":
+            # Native phase changes advance the live fences without changing
+            # the original admission. Resolve that persisted admission rather
+            # than rebuilding a spec, deadline or authority during recovery.
+            from src.workflows.general_task_guard import _current, _assert_joint_manifest
+            expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
+            async with self.session_provider() as db:
+                parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
+                _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                    or current_task.task_revision != task.task_revision
+                    or current_attempt.fencing_token != attempt.fencing_token):
+                    raise DurableJobIdempotencyConflict("original native board binding changed")
+                expected = dict(owner_principal_id=parent.owner_principal_id,
+                    goal_id=parent.goal_id, goal_revision=parent.goal_revision,
+                    idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+                    expected_job_id=expected_job_id, owner_kind="user", service_id=None,
+                    session_id=parent.session_id, operator_session_id=parent.operator_session_id,
+                    job_kind="agent.task.v1", capability_version="1", input_digest=parent.input_digest,
+                    authority_digest=parent.authority_digest, run_fingerprint=parent.run_fingerprint)
+            found = await lookup(**expected)
+            return expected_job_id if isinstance(found, Mapping) else None
         if capability_id == "browser.public-task.v1":
             projection = await self.jobs.get_job(f"browser-task:{task.task_id}:{attempt.attempt_id}")
             if not isinstance(projection, Mapping):
@@ -10853,6 +11219,23 @@ class WorkBoardDispatcher:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
                 continue
+            if task.capability_id == "agent.task.v1" and attempt.cancel_requested_at is not None:
+                # Cancelled native work has no execution authority. Missing or
+                # corrupt proof remains its visible Unknown recovery; generic
+                # cleanup, tree cancellation and output projection cannot act.
+                try:
+                    if self.general_tasks is not None:
+                        await self.general_tasks.observe_native_cancellation(self.jobs, job_id)
+                    from src.workflows.general_task_guard import read_general_task_native_cancel
+                    async with self.session_provider() as db:
+                        parent = await self.jobs._fetch(db, job_id)
+                        current_task = await db.get(WorkBoardTask, task.task_id)
+                        current_attempt = await db.get(WorkBoardAttempt, attempt.attempt_id)
+                        read_general_task_native_cancel(parent, current_task, current_attempt)
+                except Exception as exc:
+                    logger.info("native cancellation %s retains Unknown recovery: %s", task.task_id, type(exc).__name__)
+                recovered.append(job_id)
+                continue
             if getattr(attempt, "ended_at", None) is not None:
                 # An explicit owning readback may settle an ended unknown
                 # GitHub attempt. This branch never prepares or executes work.
@@ -10971,6 +11354,36 @@ class WorkBoardDispatcher:
                     and projection.get("failure_reason") == "general_task_approval_required"):
                     if task.status is WorkBoardStatus.running:
                         await self._pause_general_task(task, attempt, projection)
+                    recovered.append(job_id)
+                    continue
+                if (task.capability_id == "agent.task.v1" and status == "paused"
+                    and projection.get("failure_reason") in {"general_task_native_wait", "general_task_operator_paused"}):
+                    # The native owner may continue only an original unclaimed
+                    # child or positively closed completed work. Operator pause,
+                    # active callbacks and Unknown remain their existing waits.
+                    if projection.get("failure_reason") == "general_task_operator_paused":
+                        recovered.append(job_id)
+                        continue
+                    try:
+                        task, attempt, _owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
+                        outcome = await self._execute_registered(task, attempt, inputs, job_id=job_id,
+                            parent_runtime_owner=f"{self.runner_id}:{attempt.attempt_id}",
+                            parent_fence=parent_fence, runtime_seconds=await self._effective_runtime(task))
+                        task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
+                        if outcome.get("awaiting_approval"):
+                            await self._pause_general_task(task, attempt, await self.jobs.get_job(job_id))
+                        elif outcome.get("verified"):
+                            await self._settle_parent(job_id, parent_owner, parent_fence, outcome)
+                            settled = await self.jobs.get_job(job_id)
+                            proof = self._workflow_readback(settled, job_id)
+                            if settled.get("status") != "succeeded" or proof is None:
+                                raise DurableJobError("general_task_readback_missing")
+                            await self._project(task, attempt, board_revision=task.task_revision,
+                                status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+                                outcome="verified", proof=proof,
+                                result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))
+                    except Exception as exc:
+                        logger.info("native task %s retains original wait: %s", task.task_id, type(exc).__name__)
                     recovered.append(job_id)
                     continue
                 if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
@@ -11106,8 +11519,13 @@ class WorkBoardDispatcher:
                             parent_fence=parent_fence,
                             runtime_seconds=await self._effective_runtime(task),
                         )
+                        if task.capability_id == "agent.task.v1":
+                            task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
                         if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
                             await self._pause_general_task(task, attempt, await self.jobs.get_job(job_id))
+                            recovered.append(job_id)
+                            continue
+                        if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
                             recovered.append(job_id)
                             continue
                         await self._settle_parent(job_id, parent_owner, parent_fence, outcome)

@@ -9,7 +9,7 @@ import sqlite3
 import pytest
 from sqlalchemy import event, select
 
-from src.db.models import Goal, WorkflowRunState
+from src.db.models import Goal, WorkBoardAttempt, WorkflowRunState
 from src.work_board import near_text_native as native
 from src.work_board.repository import BoardError
 from tests.test_inference_accounting import accounting_db
@@ -130,6 +130,16 @@ async def _drive_until_marker(dispatcher, marker):
     assert marker, 'target negative fixture did not execute within four normal passes'
 
 
+async def _assert_original_binding(factory, task_id, bindings, expected):
+    assert len(bindings) == expected and all(binding == bindings[0] for binding in bindings)
+    original_task, original_attempt, original_job = bindings[0]
+    assert original_task == task_id
+    assert original_job == 'near-text:' + native.digest([task_id, original_attempt])[:40]
+    async with factory.accounting_sessions() as db:
+        attempts = list((await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id))).all())
+        assert len(attempts) == 1 and attempts[0].attempt_id == original_attempt
+
+
 def _paths(engine):
     from config.settings import settings
     from src.workspace.production import ProductionWorkspace
@@ -226,12 +236,14 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
     original_sessions = factory.accounting_sessions
     original_guard = native.recheck_provider_contact
     failures = []
+    bindings = []
     rolled_back = []
 
     async def guard(*args, **kwargs):
         result = await original_guard(*args, **kwargs)
         scope = scopes[-1] if scopes else None
         if failure == 'guard' and scope is not None and scope.entered and scope.phase == phase:
+            bindings.append((scope.witness.task_id, scope.witness.attempt_id, scope.witness.job_id))
             failures.append('guard')
             raise BoardError('near_policy_changed', 'fixture authority race after original check')
         return result
@@ -249,11 +261,13 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
             if scope is None or not scope.entered or scope.phase != phase or scope.db is not db:
                 return
             if failure == 'cancel':
+                bindings.append((scope.witness.task_id, scope.witness.attempt_id, scope.witness.job_id))
                 failures.append('cancel')
                 asyncio.current_task().cancel()
                 await asyncio.sleep(0)
             elif failure == 'commit':
                 def fail_commit(_session):
+                    bindings.append((scope.witness.task_id, scope.witness.attempt_id, scope.witness.job_id))
                     failures.append('commit')
                     raise BoardError('near_policy_changed', 'fixture failure during original commit')
                 event.listen(db.sync_session, 'before_commit', fail_commit, once=True)
@@ -265,8 +279,10 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
             await asyncio.wait_for(_drive_until_marker(dispatcher, failures), 35)
     else:
         await asyncio.wait_for(_drive_until_marker(dispatcher, failures), 35)
-    assert failures == [failure]
-    assert rolled_back == ['busy']
+    expected = 2 if phase == 'admit' and failure in {'guard', 'commit'} else 1
+    assert failures == [failure] * expected
+    assert rolled_back == ['busy'] * expected
+    await _assert_original_binding(factory, task_id, bindings, expected)
     assert await _probe(database, lock_path) == 'acquired'
     async with factory.accounting_sessions() as db:
         runs = list((await db.scalars(select(WorkflowRunState))).all())
@@ -384,7 +400,7 @@ async def test_real_admission_integrity_rollback_releases_before_reselect(actual
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('phase', ['admit', 'queue', 'claim', 'terminal'])
-async def test_foreign_process_policy_busy_has_no_phase_adoption(actual_billing_journey, monkeypatch, phase):
+async def test_foreign_process_policy_busy_has_no_phase_adoption(actual_billing_journey, monkeypatch, scopes, phase):
     from src.workspace.production import ProductionWorkspaceReconciliationError
     client, factory, jobs, dispatcher, controls, engine = actual_billing_journey
     task_id, _ = await create_actual_near_task(client, factory)
@@ -392,6 +408,7 @@ async def test_foreign_process_policy_busy_has_no_phase_adoption(actual_billing_
     method = {'admit': 'admit_job', 'queue': 'queue_job', 'claim': 'claim_job', 'terminal': 'transition_job'}[phase]
     original = getattr(jobs, method)
     denied = []
+    bindings = []
 
     async def busy(*args, **kwargs):
         if not _selected(phase, args, kwargs):
@@ -404,12 +421,17 @@ async def test_foreign_process_policy_busy_has_no_phase_adoption(actual_billing_
             with pytest.raises(ProductionWorkspaceReconciliationError, match='accounting continuity busy'):
                 await original(*args, **kwargs)
             assert await jobs.get_job(job_id) == before
+            scope = scopes[-1]
+            assert scope.witness.job_id == job_id
+            bindings.append((scope.witness.task_id, scope.witness.attempt_id, scope.witness.job_id))
             denied.append(phase)
         raise BoardError('near_policy_changed', 'fixture confirmed foreign contention')
 
     monkeypatch.setattr(jobs, method, busy)
     await asyncio.wait_for(_drive_until_marker(dispatcher, denied), 35)
-    assert denied == [phase]
+    expected = 2 if phase == 'admit' else 1
+    assert denied == [phase] * expected
+    await _assert_original_binding(factory, task_id, bindings, expected)
     if phase != 'terminal':
         assert controls['calls'] == []
     assert await _probe(database, lock_path) == 'acquired'

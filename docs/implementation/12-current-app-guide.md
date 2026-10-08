@@ -1462,8 +1462,10 @@ lexical/degraded paths without making a provider call.
 
 The accepted memory-boundary decision requires goals, approved facts, jobs, artifacts, checkpoints,
 approvals, and audit records stay canonical in Seraph-owned storage. Graph or
-external memory systems may be benchmarked only as advisory providers with
-provenance, conflict, deletion, export, and failure handling.
+external memory integrations remain advisory providers with provenance,
+conflict, deletion, export, and failure handling. This boundary authorizes no
+benchmark or model call during implementation or acceptance; follow the
+Constitution's [standing no-evals direction](./00-project-constitution.md#no-evals-and-provider-free-implementation).
 
 ## Fixed reviewed local JSON formatter
 

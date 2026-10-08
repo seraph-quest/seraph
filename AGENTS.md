@@ -1,5 +1,35 @@
 # Agent Guidelines
 
+## Standing Operator Direction: No Evals
+
+Do not propose, plan, create, or run evals unless the operator explicitly asks
+for evals. This includes paid or unpaid campaigns, benchmarks, harness research,
+hidden quality corpora, model judges, synthetic substitutes, and canaries used
+to measure quality or improvement. Do not spend money on evals or make them a
+future feature, migration, activation, merge, or release gate. Available credits,
+credentials, a free tier, or a local model do not grant permission.
+Capability work comes first. Any later eval requires the implemented capability
+and a new explicit operator request; do not schedule a reminder or dependency.
+
+Implementation and acceptance must make no paid, live, free-tier, alternate-
+provider, or local-model inference calls and must not use ambient credentials.
+Keep external inference disabled or intercepted at the transport boundary.
+Ordinary isolated regression, integration, and security tests, actual local
+effects/readback, and independent code review remain required; no evals does
+not mean no tests. Tests establish the checked mechanics, not model quality or
+competitive superiority.
+
+Build capabilities, security, the accepted Cordis architecture, and reviewed
+self-improvement from ordinary task traces, explicit corrections, and skills.
+Do not revive cancelled [#771](https://github.com/seraph-quest/seraph/issues/771)
+as a learning or activation dependency; the completed
+[#736](https://github.com/seraph-quest/seraph/issues/736) already excludes it.
+This direction does not disable product inference for ordinary operator-
+approved tasks under existing consent, grants, routing, and budget contracts.
+Historical receipts and runtime proof interfaces do not authorize an eval or
+an inference call during implementation or acceptance. See the
+[canonical boundary](docs/implementation/00-project-constitution.md#no-evals-and-provider-free-implementation).
+
 ## Start Here
 
 Seraph is a local-first proactive guardian and operator cockpit. It owns goals,
@@ -285,7 +315,9 @@ with managed status and `/health`; use authenticated `/api/runtime/status` and
 `/api/settings/artifact-storage` for runtime/settings truth. An unauthenticated
 denial is not a broken service. If sandboxed localhost fails while the host app
 should be running, retry the same probe with proper approval before claiming it
-is down. Keep local, mocked, hosted and live-provider proof distinct.
+is down. Keep local, mocked, hosted and historical live-provider proof distinct.
+Apply the standing no-evals and provider-free implementation boundary above to
+every check; an effective-route receipt uses intercepted inference transport.
 
 | Change | Required proof |
 | --- | --- |
@@ -320,7 +352,7 @@ registry entry, settings surface, deterministic scenario or benchmark endpoint:
 
 Mark non-applicable elements explicitly. Proactive behavior must prove goal or
 standing intent → candidate → admission/priority → approval/reservation →
-execution → evidence/readback → evaluation → governed memory update. Periodic
+execution → evidence/readback → recorded outcome → governed memory update. Periodic
 model calls or delivered messages alone do not satisfy that contract.
 
 Keep feature batches focused on the actual capability with its necessary proof;

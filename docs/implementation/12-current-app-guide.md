@@ -738,6 +738,101 @@ are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
 missing route, authority, or budget is visible as a blocked recovery state.
 
+#### Typed general tasks (#997)
+
+Available on the installed `develop` revision containing
+the independently reviewed [#997](https://github.com/seraph-quest/seraph/issues/997)
+merge. This section describes the intended post-merge contract; it does not
+establish model quality or complete the later interpreter and specialist-child
+work in [#998](https://github.com/seraph-quest/seraph/issues/998) and
+[#999](https://github.com/seraph-quest/seraph/issues/999).
+
+The Work panel accepts ordinary intent, an owned Goal, requested output and
+explicit limits. The operator does not author tool-specific forms to request a
+task. Planning requires separate model-egress acknowledgment, a positive explicit
+cost ceiling and the existing current policy, consent, capability and inference
+admission checks. The canonical `general_task_planner` consumer uses the text
+purpose, interactive workload and priority, `OPERATOR_INPUT` provenance, and
+`text` plus `structured_output` capabilities. It uses the existing durable
+inference accounting owner. Evidence content, credential references and tool
+permission declarations are excluded from its model messages; unavailable secret
+redaction blocks planning.
+
+`POST /api/work-board/general-tasks` captures the server's current typed tool
+descriptor snapshot and creates one ordinary `WorkBoardTask`. Its bounded plan
+and input share an immutable private artifact. Repeating the same owner-scoped
+request returns the same card without contacting the planner again. A valid
+proposal remains in Triage for review. Invalid model output remains an editable
+Triage card with a visible proposal error and no task execution Root. Missing
+authority, route, consent or budget returns the current blocked reason rather
+than silently selecting a fallback.
+
+`GET /api/work-board/general-tasks/tools` reports descriptors, their digest and
+excluded tools with reasons. `GET /api/work-board/tasks/{id}/plan` reads the
+owner's plan and acceptance state. `POST /api/work-board/tasks/{id}/plan` edits
+the same unattempted Triage card using exact task and plan revisions; it stages
+a new immutable artifact and revokes the previous binding. The existing promote
+action accepts only the reviewed current revision. The inspector keeps
+acceptance unavailable while edits are unsaved. Plans contain at most sixteen
+closed typed steps, literal inputs and declared dependency pointers; they carry
+no executable expressions or permission grants.
+Admission also proves that each registered output satisfies its step contract
+and that the final step satisfies the requested output contract. Even equal
+schemas require an inhabited, known safe supported contract; unsupported unique
+array cardinalities block before effects. Regex matching permits only literal
+ASCII patterns with optional start/end anchors, the exact SHA-256 pattern and
+the native HTTP(S) URL prefix pattern. Other patterns and patternProperties
+are rejected before matching, including finite enum/const candidates and input
+validation. Incompatible contracts remain editable proposal errors.
+
+Accepted work uses the existing dispatcher, `WorkflowRunState`, leases, fences,
+effect journal and verified readback. Current owner, Goal, evidence, strategy
+binding and descriptor policy/revision are checked before admission and each
+step. Native tools retain current approval, audit and secret wrappers; MCP tools
+require a complete trusted typed contract and current connection revision.
+Task MCP output requires a finite schema and a bounded owned transport: raw
+response bytes are capped before SDK/result JSON parsing, with strict depth,
+node and serialized-output bounds. Oversized contacted output retains its
+unresolved effect and cannot be adopted as an artifact or automatically retried.
+The current task adapter requires a stateless inline identity-encoded MCP
+response; sessionful, compressed or deferred responses and GET resumption are
+blocked through the existing capability/recovery surface.
+While a task guard is active, an oversized outgoing POST on that same MCP
+connection is rejected before contact because its request binding cannot be
+decoded within the bound. This can also reject a concurrent oversized
+interactive POST; ordinary bounded interactive calls and other connections
+remain usable. Without an active task guard, this outgoing restriction is inactive.
+Unavailable or changed contracts block execution. An unknown contacted effect
+is retained for reconciliation instead of automatic replay. Successful output
+is a bounded private artifact with physical hash readback, and the card enters
+Review. Completion records an explicit no-learning result; task success alone
+does not update canonical memory.
+
+A mediated tool approval pauses the same durable Root only after the existing
+approval wrapper proves it has not contacted the tool. The card shows its exact
+pending approval and original deadline. The exact unconsumed pending or already
+approved request is bound without
+changing its arguments, scope, fingerprint or expiry. One existing SQLite
+writer commits that binding, the no-contact checkpoint/readback, paused Root
+and blocked open attempt together. An interruption rolls the whole wait back;
+an approved row without the wrapper proof is insufficient to recover a wait.
+Approval alone does not queue work. The owner explicitly continues the current
+task and plan revisions, original
+attempt, approval, workflow revision and fence. Generic paused-job resume cannot
+cross this wait. The canonical writer checks the current approval, policy,
+inputs, descriptor and already verified physical outputs, then reacquires the
+same attempt with a new lease fence. The tool wrapper consumes the approval
+once immediately before contact. Expired, denied, revoked, stale or uncertain
+bindings retain a visible recovery block.
+
+Isolated API-to-dispatcher receipts exercise genuine current native file reads,
+durable accounting, acceptance, physical artifact readback and restart replay.
+Actual local MCP fixtures also exercise the current approval wrapper and
+same-attempt continuation, including consecutive approvals and rejected stale,
+revoked, uncertain or physically changed output bindings.
+The planner HTTP response is intercepted inside the test: these receipts make no
+external provider call or spend and make no usefulness or quality claim.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for

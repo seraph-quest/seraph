@@ -478,11 +478,16 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     goal_response = await client.post("/api/goals", json={"title":"Preview the registered form during managed lifespan"}, headers={"origin":"http://localhost:3001"})
     assert goal_response.status_code == 200, goal_response.text
     goal = goal_response.json()
+    from src.work_board.dispatcher import _dispatcher
+    observed_stop_owners = []
     actual_host_stop = host.stop
     async def stop_with_late_failure(*args, **kwargs):
         from src.agent.session import session_manager
         assert session_manager._task_continuity is None
         assert client._transport.app.state.task_continuity._started
+        assert _dispatcher.general_tasks is not None
+        assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
+        observed_stop_owners.append(_dispatcher.general_tasks)
         assert browser_service.started
         assert bool(browser_service.active) is (host_failure != "cancel")
         await actual_host_stop(*args, **kwargs)
@@ -492,6 +497,8 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     actual_host_start = host.start
     startup_resources = []
     async def start_with_late_failure(*args, **kwargs):
+        assert _dispatcher.general_tasks is not None
+        assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
         started = await actual_host_start(*args, **kwargs)
         from src.agent.session import session_manager
         assert client._transport.app.state.task_continuity._started
@@ -515,10 +522,13 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     previous_boot = None
     receipts = []
     for _ in range(2):
+        assert _dispatcher.general_tasks is None
         import asyncio
         expected = pytest.raises(asyncio.CancelledError) if host_failure == "cancel" else pytest.raises(RuntimeError, match="late Cordis stop failure") if host_failure == "stop" else nullcontext()
         with expected:
             async with app_module.lifespan(client._transport.app):
+                assert _dispatcher.general_tasks is not None
+                assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
                 assert host.admitting
                 assert host.boot_nonce is not None and host.boot_nonce != previous_boot
                 previous_boot = host.boot_nonce
@@ -545,6 +555,12 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                 job_id = prepared.json()["job_id"]
                 page = browser_service.active[job_id]["page"]
                 assert page.latest is not None and not page.page.is_closed()
+        assert _dispatcher.general_tasks is None
+        assert not observed_stop_owners[-1].started
+        assert not observed_stop_owners[-1].registry.started
+        from src.guardian.goal_programmes import goal_programme_service
+        assert goal_programme_service.stop.await_count == len(observed_stop_owners)
+        assert app_module.shutdown_scheduler.call_count == len(observed_stop_owners)
         if host_failure == "cancel":
             process, boot_nonce = startup_resources[-1]
             try:
@@ -568,7 +584,8 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
             receipts.append({"host_failure":"cancel", "process_exit_code":process.returncode,
                 "process_reaped":True, "browser_started":False, "browser_contexts":0,
                 "browser_jobs":0, "shared_lane_available":True, "cancellation_propagated":True,
-                "continuity_unbound_and_stopped":True})
+                "continuity_unbound_and_stopped":True, "task_owner_released":True,
+                "task_service_and_registry_stopped":True, "goal_and_scheduler_stopped":True})
             continue
         assert not browser_service.started and browser_service.active == {}
         assert not client._transport.app.state.task_continuity._started
@@ -589,6 +606,8 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                          "fresh_boot":True, "process_exit_code":process.returncode,
                          "owned_pid_absent":True, "browser_positive_cleanup":True,
                          "browser_durable_status":cleanup_row["status"], "host_failure":host_failure,
-                         "continuity_unbound_and_stopped":True})
+                         "continuity_unbound_and_stopped":True,
+                         "task_owner_released":True, "task_service_and_registry_stopped":True,
+                         "goal_and_scheduler_stopped":True})
     assert contacts == ([] if host_failure == "cancel" else [("GET", "/forms/post"), ("GET", "/forms/post")]) and denied == []
     (tmp_path / "cordis-app-lifecycle-proof.json").write_text(json.dumps({"authenticated":True, "cycles":receipts}, indent=2))

@@ -3509,6 +3509,7 @@ class WorkBoardRepository:
         actor_principal_id: str,
         actor_session_id: str,
         capability_id: str = "guardian-routine.v1",
+        _writer_held: bool = False,
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Reacquire the same suspended routine attempt after approval."""
@@ -3516,7 +3517,11 @@ class WorkBoardRepository:
         observed_at = now or _now()
         if int(next_fence) != int(previous_fence) + 1:
             raise BoardError("stale_fence", "Routine recovery must advance exactly one fence")
-        await _begin_sqlite_immediate(db)
+        if _writer_held:
+            if capability_id != "agent.task.v1" or not db.in_transaction():
+                raise BoardError("routine_wait_not_supported", "Native recovery requires its canonical writer")
+        else:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)

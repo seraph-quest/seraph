@@ -472,38 +472,42 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    from src.work_board.general_task import current_task_service
     from src.guardian.goal_programmes import goal_programme_service
     await goal_programme_service.start()
-    init_scheduler()
-    await sync_scheduled_jobs()
     try:
-        from src.observer.manager import context_manager
-        await context_manager.refresh()
-    except Exception:
-        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    from src.browser.sessions import profiled_interaction_sessions
-    try:
-        await profiled_interaction_sessions.start()
-        # This optional host has no policy/agent ownership yet. Keep startup
-        # inside owned cleanup so cancellation still tears down both owners.
-        try:
-            await cordis_host.start()
-        except Exception:
-            logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
-        yield
+        with current_task_service():
+            init_scheduler()
+            await sync_scheduled_jobs()
+            try:
+                from src.observer.manager import context_manager
+                await context_manager.refresh()
+            except Exception:
+                logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
+            from src.browser.sessions import profiled_interaction_sessions
+            try:
+                await profiled_interaction_sessions.start()
+                # Optional native owners remain inside the current Python lifecycle.
+                try:
+                    await cordis_host.start()
+                except Exception:
+                    logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                yield
+            finally:
+                session_manager.bind_task_continuity(None)
+                try:
+                    await cordis_host.stop()
+                finally:
+                    await profiled_interaction_sessions.stop()
     finally:
         session_manager.bind_task_continuity(None)
         try:
-            await cordis_host.stop()
+            await app.state.task_continuity.stop()
         finally:
             try:
-                await app.state.task_continuity.stop()
+                await goal_programme_service.stop()
             finally:
-                try:
-                    await profiled_interaction_sessions.stop()
-                finally:
-                    await goal_programme_service.stop()
-    shutdown_scheduler()
+                shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:

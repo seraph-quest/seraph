@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from src.runtime_plugins.bridge import CordisHost, HostBlocked, Pending
 from src.runtime_plugins.composition import BUILD_FILES, CHILD_ENV, PACKAGE_FILES, PACKAGE_ROOT, CompositionBlocked, reviewed_composition, reviewed_node, validate_profile
 from src.runtime_plugins.protocol import ProtocolError, decode_json, encode_frame, read_frame, validate_frame
-from src.runtime_plugins.cli import reviewed_npm
+from src.runtime_plugins.cli import _npm_env, build, reviewed_npm
 
 
 def hello():
@@ -134,7 +134,7 @@ class ActualNpmCliTests(unittest.TestCase):
         calls = []
         def inspected_run(argv, **kwargs):
             self.assertEqual(argv[0], str(node))
-            self.assertEqual(argv[2:], ["--version"])
+            self.assertEqual(argv[2:], ["--prefix", str(PACKAGE_ROOT), "--version"])
             self.assertEqual(kwargs["env"], {**CHILD_ENV,
                 "PATH":str(node.parent)+os.pathsep+os.defpath,
                 "HOME":str(PACKAGE_ROOT/".build-home"),
@@ -152,6 +152,52 @@ class ActualNpmCliTests(unittest.TestCase):
             with patch.dict(os.environ, {"PATH":directory, "HOME":directory, "npm_config_userconfig":"/operator-config-forbidden", "NODE_OPTIONS":"--unreviewed-option", "OPENROUTER_API_KEY":"forbidden-fixture"}), patch("src.runtime_plugins.cli.subprocess.run", side_effect=inspected_run):
                 self.assertEqual(reviewed_npm(node), self.npm11.resolve())
         self.assertEqual(len(calls), 2)
+
+    def test_actual_project_config_is_detected_before_managed_npm_execution(self):
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-config-") as directory:
+            root = Path(directory)
+            (root / "package.json").write_text('{"name":"isolated-config","scripts":{"build":"node -e \\\"process.exit(0)\\\""}}')
+            config = root / ".npmrc"
+            config.write_text("script-shell=/bin/false\n")
+            with patch("src.runtime_plugins.cli.PACKAGE_ROOT", root):
+                actual = subprocess.run([str(self.node24), str(self.npm11), "--prefix", str(root), "config", "get", "script-shell"],
+                                        env=_npm_env(self.node24), cwd=root, close_fds=True,
+                                        capture_output=True, check=True, timeout=2)
+                self.assertEqual(actual.stdout.strip(), b"/bin/false")
+                with patch("src.runtime_plugins.cli.reviewed_node", return_value=(self.node24, "v24.13.1")), patch("src.runtime_plugins.cli.subprocess.run") as npm_run, patch("builtins.print") as output:
+                    self.assertEqual(build(self.node24), 1)
+                    npm_run.assert_not_called()
+                    self.assertEqual(json.loads(output.call_args.args[0]), {"state":"blocked", "reason":"npm_configuration_unreviewed"})
+                config.unlink()
+                for name in (".npmrc", ".absent-user-npmrc", ".absent-global-npmrc"):
+                    with self.subTest(name=name):
+                        path = root / name
+                        path.symlink_to(root / "missing-config")
+                        with patch("src.runtime_plugins.cli.subprocess.run") as npm_run:
+                            with self.assertRaisesRegex(CompositionBlocked, "npm_configuration_unreviewed"):
+                                reviewed_npm(self.node24)
+                            npm_run.assert_not_called()
+                        path.unlink()
+                with patch("pathlib.Path.lstat", side_effect=PermissionError("unreadable configuration")), patch("src.runtime_plugins.cli.subprocess.run") as npm_run:
+                    with self.assertRaisesRegex(CompositionBlocked, "npm_configuration_unreviewed"):
+                        reviewed_npm(self.node24)
+                    npm_run.assert_not_called()
+
+    def test_actual_fixed_prefix_excludes_parent_workspace_configuration(self):
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-parent-") as directory:
+            parent = Path(directory)
+            root = parent / "child"
+            root.mkdir()
+            (parent / "package.json").write_text('{"name":"parent","workspaces":["child"]}')
+            (parent / ".npmrc").write_text("script-shell=/bin/false\n")
+            (root / "package.json").write_text('{"name":"child"}')
+            with patch("src.runtime_plugins.cli.PACKAGE_ROOT", root):
+                for node in (self.node24, self.node22()):
+                    with self.subTest(node=node):
+                        result = subprocess.run([str(node), str(self.npm11), "--prefix", str(root), "config", "get", "script-shell"],
+                                                env=_npm_env(node), cwd=root, close_fds=True,
+                                                capture_output=True, check=True, timeout=2)
+                        self.assertEqual(result.stdout.strip(), b"null")
 
     def test_node22_missing_or_wrong_external_pin_fails_closed(self):
         node = self.node22()

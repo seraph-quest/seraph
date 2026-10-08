@@ -47,6 +47,13 @@ trusted JavaScript CLI on `PATH` only when it reports exactly 11.8.0. It execute
 that CLI through the reviewed Node binary, never through a shell wrapper.
 Missing or wrong npm stays a visible setup block; the managed build installs
 nothing. Node 24's matching bundled npm remains preferred.
+Managed version checks and builds pin npm's documented
+[`--prefix`](https://docs.npmjs.com/cli/v11/using-npm/config/#prefix) to this
+package, excluding parent workspace configuration. A package `.npmrc` or a file
+at either reserved `.absent-user-npmrc`/`.absent-global-npmrc` path (including a
+symlink) blocks the build with `npm_configuration_unreviewed`; remove that
+unreviewed configuration before retrying. Operator npm configuration is not
+loaded by these managed commands.
 
 ```bash
 ./manage.sh -e dev cordis status

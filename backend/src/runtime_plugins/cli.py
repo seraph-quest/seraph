@@ -23,8 +23,22 @@ def _npm_env(node: Path) -> dict[str, str]:
             "npm_config_update_notifier": "false", "npm_config_audit": "false"}
 
 
+def _check_npm_configuration() -> None:
+    # --prefix fixes project lookup here; none of these config files is reviewed.
+    # lstat also rejects broken symlinks; inspection errors must fail closed.
+    for name in (".npmrc", ".absent-user-npmrc", ".absent-global-npmrc"):
+        try:
+            (PACKAGE_ROOT / name).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise CompositionBlocked("npm_configuration_unreviewed") from exc
+        raise CompositionBlocked("npm_configuration_unreviewed")
+
+
 def reviewed_npm(node: Path) -> Path:
     """Prefer an exact bundled pin, then an independently installed trusted CLI."""
+    _check_npm_configuration()
     bundled = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
     found = shutil.which("npm")
     candidates = [bundled, *([Path(found)] if found else [])]
@@ -43,7 +57,7 @@ def reviewed_npm(node: Path) -> Path:
         if npm.suffix != ".js":
             raise CompositionBlocked("unreviewed_runtime_path")
         try:
-            result = subprocess.run([str(node), str(npm), "--version"], env=_npm_env(node), cwd=PACKAGE_ROOT,
+            result = subprocess.run([str(node), str(npm), "--prefix", str(PACKAGE_ROOT), "--version"], env=_npm_env(node), cwd=PACKAGE_ROOT,
                                     close_fds=True, capture_output=True, check=True, timeout=2)
             if result.stdout.decode("ascii").strip() == NPM_VERSION:
                 return npm
@@ -59,7 +73,8 @@ def build(node_path: Path | None) -> int:
         # Build never installs dependencies or reads operator npm configuration.
         if not (PACKAGE_ROOT / "node_modules/typescript/bin/tsc").is_file():
             raise CompositionBlocked("build_dependencies_missing")
-        result = subprocess.run([str(node), str(npm), "run", "build"], cwd=PACKAGE_ROOT,
+        _check_npm_configuration()
+        result = subprocess.run([str(node), str(npm), "--prefix", str(PACKAGE_ROOT), "run", "build"], cwd=PACKAGE_ROOT,
                                 env=_npm_env(node), close_fds=True, timeout=60)
         if result.returncode:
             return result.returncode

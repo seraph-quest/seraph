@@ -10,8 +10,11 @@ from uuid import UUID
 from dataclasses import dataclass
 import asyncio
 import os
+import sys
+import ctypes
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, TypeAdapter
 from sqlalchemy import select, exists
 from sqlalchemy.orm import aliased
 
@@ -29,23 +32,87 @@ _IO_STARTED = "task_lesson.automatic_io.started.v1"
 _IO_FINISHED = "task_lesson.automatic_io.finished.v1"
 _IO_CANCELLED = "task_lesson.automatic_io.cancelled.v1"
 _MAX_LESSON_BYTES = 64 * 1024
+_PROCESS_INSTANCE = str(uuid4())
 
 
-def _process_identity():
+def _host_platform():
+    return sys.platform
+
+
+class _DarwinBsdInfo(ctypes.Structure):
+    # Apple public proc_info.h, MAXCOMLEN=16; fixed supported ABI only.
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid", "rgid", "svuid", "svgid", "reserved")]
+    _fields_ += [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)]
+    _fields_ += [(name, ctypes.c_uint32) for name in ("nfiles", "pgid", "jobc", "tdev", "tpgid")]
+    _fields_ += [("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+
+
+def _darwin_boot_id():
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    query = library.sysctlbyname
+    query.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+    query.restype = ctypes.c_int
+    buffer, size = ctypes.create_string_buffer(37), ctypes.c_size_t(37)
+    if query(b"kern.bootsessionuuid", buffer, ctypes.byref(size), None, 0) != 0 or size.value != 37:
+        raise OSError("native boot-session witness unavailable")
+    return str(UUID(buffer.value.decode("ascii")))
+
+
+def _darwin_start(pid):
+    if (sys.byteorder != "little" or ctypes.sizeof(_DarwinBsdInfo) != 136
+            or _DarwinBsdInfo.pid.offset != 12 or _DarwinBsdInfo.start_sec.offset != 120
+            or _DarwinBsdInfo.start_usec.offset != 128 or not 0 < pid <= 2147483647):
+        raise OSError("native process witness ABI unsupported")
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    query = library.proc_pidinfo
+    query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    query.restype = ctypes.c_int
+    info = _DarwinBsdInfo()
+    if query(pid, 3, 0, ctypes.byref(info), 136) != 136 or info.pid != pid or not info.start_sec or info.start_usec >= 1000000:
+        raise OSError("native process lifetime witness unknown")
+    return info.start_sec, info.start_usec
+
+
+def _process_identity(pid=None):
     from pathlib import Path
-    return {"pid": os.getpid(), "start": Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19],
-        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+    pid = os.getpid() if pid is None else pid
+    try:
+        if _host_platform() == "linux":
+            return LinuxProcessWitness(pid=pid, start=Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19],
+                boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip()).model_dump(mode="json")
+        if _host_platform() == "darwin":
+            boot_id = _darwin_boot_id()
+            seconds, microseconds = _darwin_start(pid)
+            return DarwinProcessWitness(pid=pid, boot_id=boot_id,
+                start_sec=seconds, start_usec=microseconds).model_dump(mode="json")
+    except (OSError, ValueError, IndexError):
+        pass
+    return UnknownProcessWitness(pid=pid, platform=_host_platform(), instance_id=_PROCESS_INSTANCE).model_dump(mode="json")
 
 
 def _process_ended(identity):
     from pathlib import Path
-    if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != identity["boot_id"]:
-        return True
     try:
-        actual = Path(f"/proc/{identity['pid']}/stat").read_text().rsplit(")", 1)[1].split()[19]
-    except FileNotFoundError:
-        return True
-    return actual != identity["start"]
+        if set(identity) == {"pid", "start", "boot_id"}:
+            identity = LinuxProcessWitness(**identity).model_dump(mode="json")
+        witness = PROCESS_WITNESS.validate_python(identity)
+        if isinstance(witness, LinuxProcessWitness) and _host_platform() == "linux":
+            if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != witness.boot_id:
+                return True
+            try:
+                actual = Path(f"/proc/{witness.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            except FileNotFoundError:
+                return True
+            return actual != witness.start
+        if isinstance(witness, DarwinProcessWitness) and _host_platform() == "darwin":
+            if _darwin_boot_id() != witness.boot_id:
+                return True
+            # Lookup failure/PID absence is unknown, never termination proof.
+            return _darwin_start(witness.pid) != (witness.start_sec, witness.start_usec)
+        return False
+    except (OSError, ValueError, IndexError):
+        return False
 
 
 async def _io_event(db, start, kind):
@@ -184,6 +251,34 @@ class ClosedModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
+class LinuxProcessWitness(ClosedModel):
+    schema_version: Literal["lesson_process_witness.v1"] = "lesson_process_witness.v1"
+    kind: Literal["linux"] = "linux"
+    pid: int = Field(ge=1)
+    start: str = Field(pattern=r"^[0-9]+$", max_length=32)
+    boot_id: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+
+
+class DarwinProcessWitness(ClosedModel):
+    schema_version: Literal["lesson_process_witness.v1"] = "lesson_process_witness.v1"
+    kind: Literal["darwin"] = "darwin"
+    pid: int = Field(ge=1)
+    start_sec: int = Field(ge=1)
+    start_usec: int = Field(ge=0, lt=1000000)
+    boot_id: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+
+
+class UnknownProcessWitness(ClosedModel):
+    schema_version: Literal["lesson_process_witness.v1"] = "lesson_process_witness.v1"
+    kind: Literal["unknown"] = "unknown"
+    platform: str = Field(min_length=1, max_length=32)
+    pid: int = Field(ge=1)
+    instance_id: str = Field(pattern=r"^[a-f0-9-]{36}$")
+
+
+PROCESS_WITNESS = TypeAdapter(Annotated[LinuxProcessWitness | DarwinProcessWitness | UnknownProcessWitness, Field(discriminator="kind")])
+
+
 class ResearchStrategy(ClosedModel):
     schema_version: Literal["ResearchStrategy.v1"] = "ResearchStrategy.v1"
     query_templates: list[BoundedText] = Field(max_length=3)
@@ -283,6 +378,7 @@ class LessonRequest(ClosedModel):
 class LessonAutoPolicyRequest(ClosedModel):
     enabled: bool
     expected_revision: int = Field(ge=1)
+    expected_policy_revision: int | None = Field(..., ge=1)
     mutation_uuid: str
 
     @field_validator("mutation_uuid")
@@ -328,6 +424,9 @@ async def set_automatic_lesson_policy(operator, task_id, request: LessonAutoPoli
             if existing.kind != "task_lesson.automatic_policy.v1" or existing.mutation_request_digest != request_sha:
                 raise BoardError("lesson_policy_request_conflict", "This request key already binds another change")
             return await _automatic_policy(db, operator, task)
+        policy = await _automatic_policy(db, operator, task)
+        if request.expected_policy_revision != policy["policy_revision"]:
+            raise BoardError("lesson_policy_changed", "Refresh the authoritative automatic policy before changing consent")
         db.add(WorkBoardEvent(task_id=task_id, owner_principal_id=owner[0], owner_session_id=owner[1],
             actor_principal_id=owner[0], actor_session_id=owner[1], kind="task_lesson.automatic_policy.v1",
             mutation_idempotency_key=request.mutation_uuid, mutation_request_digest=request_sha,
@@ -497,9 +596,10 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             MemoryProposal.owner_session_id == task.owner_session_id,
             MemoryProposal.request_binding_digest == binding))).scalar_one_or_none()
         if previous:
+            mirror = {"status": "not_requested", "reason_code": "automatic_canonical_receipt"}
             if not _automatic:
-                await asyncio.to_thread(_reconcile_lesson_receipt, previous)
-            return {**proposal_projection(previous), "idempotent_replay": True}
+                mirror = await _repair_lesson_mirror(previous)
+            return {**proposal_projection(previous), "idempotent_replay": True, "mirror": mirror}
         candidate = _correct_method(old, correction)
         reason = ("observed_failure_candidate" if _automatic else "explicit_correction") if candidate else "insufficient_method_evidence" if old is None else "no_explicit_correction" if not correction else "unsupported_correction_no_change"
         envelope = {"schema_version": PROPOSAL_SCHEMA, "old_method": old.model_dump() if old else None,
@@ -580,9 +680,10 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         if previous:
             # Release the SQLite writer before touching the independent mirror.
             await db.commit()
+            mirror = {"status": "not_requested", "reason_code": "automatic_canonical_receipt"}
             if not _automatic:
-                await asyncio.to_thread(_reconcile_lesson_receipt, previous)
-            return {**proposal_projection(previous), "idempotent_replay": True}
+                mirror = await _repair_lesson_mirror(previous)
+            return {**proposal_projection(previous), "idempotent_replay": True, "mirror": mirror}
         if _automatic:
             current_policy = await _automatic_policy(db, operator, task)
             if current_policy != policy or not current_policy["enabled"]:
@@ -616,9 +717,21 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         await db.refresh(row)
         payload = proposal_projection(row)
     _AUTOMATIC_CALLBACKS.pop(binding, None)
+    mirror = {"status": "not_requested", "reason_code": "automatic_canonical_receipt"}
     if not _automatic:
+        mirror = await _repair_lesson_mirror(row)
+    return {**payload, "mirror": mirror}
+
+
+async def _repair_lesson_mirror(row):
+    """Advisory repair cannot hide the committed canonical private proposal."""
+    from src.evolution.runtime import EvolutionRuntimeError
+    try:
         await asyncio.to_thread(_reconcile_lesson_receipt, row)
-    return payload
+    except (EvolutionRuntimeError, OSError):
+        return {"status": "degraded", "reason_code": "lesson_mirror_repair_unavailable",
+            "recovery_action": "Inspect the canonical candidate; repair or archive the evolution state using its existing owner, then inspect again."}
+    return {"status": "reconciled", "reason_code": "lesson_mirror_current"}
 
 
 def _reconcile_lesson_receipt(row):
@@ -699,7 +812,7 @@ async def _record_automatic_outcome(operator, original_task, outcome, attempt_id
         if task is None or (task.owner_principal_id, task.owner_session_id) != (
             original_task.owner_principal_id, original_task.owner_session_id):
             raise BoardError("lesson_task_changed", "Automatic outcome belongs to an older task revision")
-        payload = {key: outcome[key] for key in ("status", "result", "reason_code", "proposal_id", "candidate_digest", "error_type") if key in outcome}
+        payload = {key: outcome[key] for key in ("status", "result", "reason_code", "proposal_id", "candidate_digest", "error_type", "restart_witness_unknown") if key in outcome}
         payload.update({"task_revision": original_task.task_revision, "behavior_changed": False, "provider_contacts": 0})
         attempt = await db.get(WorkBoardAttempt, attempt_id)
         if attempt is None or attempt.task_id != task.task_id:
@@ -738,7 +851,7 @@ async def inspect_task_lesson(operator, proposal_id):
         payload = proposal_projection(row)
         ref, sha = row.artifact_ref, row.artifact_digest
     raw = await asyncio.to_thread(read_private_proof, ref, sha)
-    await asyncio.to_thread(_reconcile_lesson_receipt, row)
+    mirror = await _repair_lesson_mirror(row)
     envelope = json.loads(raw)
     request = LessonRequest(task_id=payload["task_id"], attempt_id=payload["attempt_id"],
         correction=envelope["correction"], source_refs=envelope["source_refs"], scope=LessonScope.model_validate(envelope["scope"]),
@@ -751,7 +864,7 @@ async def inspect_task_lesson(operator, proposal_id):
             current = token == envelope["source_token"]
         except BoardError:
             current = False
-    return {**envelope, **payload, "source_current": current, "status": payload["status"] if current else "blocked",
+    return {**envelope, **payload, "mirror": mirror, "source_current": current, "status": payload["status"] if current else "blocked",
         "reason_code": payload["reason_code"] if current else "lesson_source_changed"}
 
 
@@ -786,6 +899,18 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
             WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1").order_by(WorkBoardEvent.event_id.desc()).limit(1))).scalar_one_or_none()
         outcome = json.loads(latest_outcome.metadata_json) if latest_outcome else None
         payload["automatic_outcome"] = outcome if outcome and outcome.get("task_revision") == task.task_revision else None
+        finished = aliased(WorkBoardEvent)
+        pending = (await db.execute(select(WorkBoardEvent).where(
+            WorkBoardEvent.kind == _IO_STARTED,
+            WorkBoardEvent.task_id == task_id,
+            WorkBoardEvent.owner_principal_id == task.owner_principal_id,
+            WorkBoardEvent.owner_session_id == task.owner_session_id,
+            ~exists(select(finished.event_id).where(finished.kind == _IO_FINISHED,
+                finished.mutation_request_digest == WorkBoardEvent.mutation_request_digest)))
+            .order_by(WorkBoardEvent.event_id.desc()).limit(1))).scalar_one_or_none()
+        payload["restart_witness_unknown"] = bool(pending
+            and pending.mutation_request_digest not in _AUTOMATIC_IO
+            and json.loads(pending.metadata_json)["process"].get("kind") == "unknown")
         if attempt is None:
             return payload
         run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))).scalar_one_or_none()

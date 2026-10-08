@@ -35,10 +35,15 @@ authoritative source discovery and separately opted-in automatic proposals
 limited to two durable starts per owner/UTC day. Unsupported corrections produce explicit
 no-change. Automatic outcomes have content-free task receipts; exact replay
 repairs a missing evolution receipt off-loop without duplicate proposals.
+Policy mutations require an exact revision. A degraded or oversized advisory
+evolution mirror preserves existing bytes and does not hide the canonical draft.
 Automatic completion avoids evolution-file writes, retains one off-loop private
 staging worker until positive completion, and exposes exact-attempt timeout and
 restart recovery outcomes without allowing a cancelled callback to progress
-into proposal commit. It makes no
+into proposal commit. Native process witnesses support Linux and the fixed
+macOS ABI; unknown restart proof visibly retains capacity while same-process
+workers and manual review remain usable. macOS native execution is unverified
+on the Linux validation host. It makes no
 inference call, grants no trace-egress permission and
 does not infer a positive preference from success. Strategy adoption and
 next-task reuse (#1001) remain **Planned**. The named proof is an actual

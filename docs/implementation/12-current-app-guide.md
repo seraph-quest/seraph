@@ -643,7 +643,9 @@ successful task nor a failure creates a positive preference vote. Changes to
 the task, Goal, run, receipts or method steps block the old preview.
 
 Automatic proposals require a separate per-task opt-in bound to the original
-current operator, task intent and Goal revision. The terminal dispatcher callback
+current operator, task intent and Goal revision. Enable and disable require the
+exact authoritative policy revision; a stale request cannot overwrite a later
+consent change. The terminal dispatcher callback
 reauthenticates that exact Root without renewing it. Automatic creation uses only
 the finite missing-source failure rule and is limited to two durable proposal starts per UTC
 day across the owner; consent renewal does not renew that cap. It performs no
@@ -657,13 +659,22 @@ After restart, recovery requires proof that the original process ended and
 checks the exact private artifact; it records no-change and releases the
 original slot without making a proposal. Replays and recovered starts still
 count toward the daily cap.
+Linux recovery uses the original kernel boot/process identity. macOS uses the
+fixed native boot-session UUID and exact PID start seconds/microseconds; a
+missing PID or failed native read remains unknown. A same-process retained
+worker can complete even when native witness acquisition is unavailable.
+Unknown restart witnesses retain capacity and expose `restart_witness_unknown`;
+manual lesson review remains available. Native macOS execution was not verified
+on the Linux validation host; finite ABI and recovery fixtures cover its contract.
 Automatic outcomes have content-free, original-owner task events; source
 discovery returns the latest matching outcome, including no-change, cap and
 failure states. Automatic completion uses the canonical proposal and task event
 receipt and performs no evolution-file work. Explicit inspection or manual
 request replay repairs a missing evolution receipt off-loop from the canonical
 proposal without another daily-cap charge; mirror work is capped at 1 MiB and
-4096 entries.
+4096 entries. The canonical proposal remains inspectable if this advisory mirror
+is oversized or unavailable; readback exposes a degraded mirror status and
+preserves its existing bytes for recovery through the evolution owner.
 Model reflection remains unavailable because no existing consent authorizes task-trace
 egress. No model call or spend is needed to draft a supported lesson.
 

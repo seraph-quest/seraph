@@ -10,7 +10,7 @@ interface AutomaticOutcome { status: string; result: "candidate_inert" | "no_cha
   source_digest?: string; candidate_digest?: string; error_type?: string }
 interface Source { task_id: string; expected_revision: number; attempt_id: string | null; source_refs: string[];
   scope: { goal_id: string; goal_revision: number; family: "general" | "research" | "software" | "knowledge" };
-  eligible: boolean; reason_code: string; automatic_policy?: Policy; automatic_outcome?: AutomaticOutcome | null }
+  eligible: boolean; reason_code: string; automatic_policy?: Policy; automatic_outcome?: AutomaticOutcome | null; restart_witness_unknown?: boolean }
 interface Method { schema_version: "TaskMethod.v1"; family: string;
   steps: ({ kind: "registered_tool"; tool_id: string } | { kind: "guard"; check: string } | {
     kind: "registered_capability"; capability_id: "work.json-format.v1"; capability_version: "1";
@@ -20,7 +20,8 @@ interface Method { schema_version: "TaskMethod.v1"; family: string;
 interface Lesson { schema_version: "task_method_proposal.v1"; proposal_id: string; task_id: string; attempt_id: string;
   revision: number; status: string; result: "candidate_inert" | "no_change"; reason_code: string;
   behavior_changed: false; source_current: boolean; correction: string; old_method: Method | null; new_method: Method | null;
-  source_refs: string[]; scope: Source["scope"] }
+  source_refs: string[]; scope: Source["scope"]; mirror?: Mirror }
+interface Mirror { status: "reconciled" | "degraded" | "not_requested"; reason_code: string; recovery_action?: string }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
 async function request(path: string, body?: unknown): Promise<unknown> {
   const response = await apiFetch(`${API_URL}/api/memory/task-lessons${path}`, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -32,6 +33,9 @@ function sourceRead(value: unknown, task: WorkBoardTask): Source {
     || !Array.isArray(value.source_refs) || !value.source_refs.every(v => typeof v === "string") || !record(value.scope)
     || value.scope.goal_id !== task.goal_id || value.scope.goal_revision !== task.goal_revision || typeof value.reason_code !== "string"
     || (value.eligible && (typeof value.attempt_id !== "string" || !value.source_refs.length))) throw Error("Source readback does not match this exact Work card. Refresh Work before learning.");
+  if (value.automatic_policy != null && (!record(value.automatic_policy)
+    || typeof value.automatic_policy.enabled !== "boolean"
+    || !(value.automatic_policy.policy_revision === null || (Number.isInteger(value.automatic_policy.policy_revision) && Number(value.automatic_policy.policy_revision) > 0)))) throw Error("Automatic policy revision is unconfirmed. Inspect the current policy again.");
   if (value.automatic_outcome != null) {
     const outcome = value.automatic_outcome;
     if (!record(outcome) || typeof outcome.status !== "string" || typeof outcome.reason_code !== "string"
@@ -90,8 +94,10 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
     if (!owned || busy || !source || (enabled && !autoAck)) return;
     const version = generation.current; setBusy(true); setError(null);
     try {
-      const result = await request(`/automatic-policy/${encodeURIComponent(task.task_id)}`, { enabled, expected_revision: source.expected_revision, mutation_uuid: crypto.randomUUID() });
-      if (!record(result) || result.enabled !== enabled || result.inference_egress !== "not_permitted" || result.adoption !== "requires_separate_review" || result.daily_cap !== 2) throw Error("Automatic lesson consent readback is unconfirmed. Inspect the current policy again.");
+      const result = await request(`/automatic-policy/${encodeURIComponent(task.task_id)}`, { enabled, expected_revision: source.expected_revision,
+        expected_policy_revision: source.automatic_policy?.policy_revision, mutation_uuid: crypto.randomUUID() });
+      if (!record(result) || result.enabled !== enabled || result.inference_egress !== "not_permitted" || result.adoption !== "requires_separate_review" || result.daily_cap !== 2
+        || !Number.isInteger(result.policy_revision) || Number(result.policy_revision) < 1) throw Error("Automatic lesson consent readback is unconfirmed. Inspect the current policy again.");
       if (version === generation.current) { setSource({ ...source, automatic_policy: result as unknown as Policy }); setAutoAck(false); }
     } catch (e) { if (version === generation.current) { setSource(null); setError((e as Error).message); } }
     finally { if (version === generation.current) setBusy(false); }
@@ -110,6 +116,7 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
         <p>Task revision {source.automatic_outcome.task_revision}{source.automatic_outcome.attempt_id ? ` · attempt ${source.automatic_outcome.attempt_id}` : ""}{source.automatic_outcome.proposal_id ? ` · proposal ${source.automatic_outcome.proposal_id} revision ${source.automatic_outcome.proposal_revision ?? "unavailable"}` : ""}</p>
         {source.automatic_outcome.error_type && <p>Proposal preparation error: {source.automatic_outcome.error_type}. Restore the learning service and inspect the task again; execution results and method adoption are separate.</p>}
       </div>}
+      {source.restart_witness_unknown === true && <p role="status">Automatic staging retains its original capacity: restart process termination is unverified. Manual lesson review remains available.</p>}
       {source.eligible && <><label>Private task correction<textarea aria-label="Private task correction" className="cockpit-input w-full" rows={3} maxLength={4000} disabled={busy} value={correction} onChange={e => { setCorrection(e.target.value); setLesson(null); }} /></label>
         <p>Supported corrections: check source existence; verify readback; preserve source attribution. Other corrections are retained privately with an explicit no-change result.</p>
         <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void propose()}>Prepare private lesson candidate</button></>}
@@ -122,6 +129,7 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
       <p role="status">{lesson.result === "no_change" ? "No change" : "Inert method candidate"} · {lesson.reason_code} · behavior unchanged · {lesson.source_current ? "source current" : "source changed; inspect again"}</p>
       <p>Proposal {lesson.proposal_id} · revision {lesson.revision} · Goal {lesson.scope.goal_id} revision {lesson.scope.goal_revision}</p>
       <p className="whitespace-pre-wrap">Correction: {lesson.correction}</p>
+      {lesson.mirror?.status === "degraded" && <p role="status">Evolution receipt mirror degraded. The canonical private candidate remains inspectable. {typeof lesson.mirror.recovery_action === "string" ? lesson.mirror.recovery_action : "Repair the evolution state using its existing owner, then inspect again."}</p>}
       <h4>Old method</h4><pre aria-label="Old task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.old_method, null, 2)}</pre>
       <h4>Proposed method</h4><pre aria-label="Proposed task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.new_method, null, 2)}</pre>
       <p>No method adoption or quality improvement is established by this candidate.</p>

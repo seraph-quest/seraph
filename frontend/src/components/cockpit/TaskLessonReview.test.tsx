@@ -42,15 +42,16 @@ it("fails closed on changed task revision and unverified sources", async () => {
   expect(await screen.findByText(/Blocked: lesson_run_unverified/)).toBeInTheDocument();
 });
 it("requires explicit scoped automatic consent and supports revocation", async () => {
-  vi.mocked(apiFetch).mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response({ ...source.automatic_policy, enabled: true })).mockResolvedValueOnce(response(source.automatic_policy));
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response({ ...source.automatic_policy, enabled: true, policy_revision: 1 })).mockResolvedValueOnce(response({ ...source.automatic_policy, policy_revision: 2 }));
   render(<TaskLessonReview {...owner} task={task} />); await inspect();
   expect(screen.getByRole("button", { name: "Enable automatic task lesson proposals" })).toBeDisabled();
   fireEvent.click(screen.getByText(/Allow bounded private lesson proposals/));
   fireEvent.click(screen.getByRole("button", { name: "Enable automatic task lesson proposals" }));
   await screen.findByText(/Automatic proposals: enabled/);
-  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ enabled: true, expected_revision: 3, mutation_uuid: expect.any(String) });
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ enabled: true, expected_revision: 3, expected_policy_revision: null, mutation_uuid: expect.any(String) });
   fireEvent.click(screen.getByRole("button", { name: "Disable automatic task lesson proposals" }));
   await screen.findByText(/Automatic proposals: disabled/);
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[2][1]?.body)).expected_policy_revision).toBe(1);
 });
 it("does not expose private correction or late lesson evidence after owner change", async () => {
   let resolve!: (v: Response) => void; vi.mocked(apiFetch).mockImplementation(() => new Promise(r => { resolve = r; }));
@@ -59,6 +60,25 @@ it("does not expose private correction or late lesson evidence after owner chang
   mounted.rerender(<TaskLessonReview {...owner} ownerSessionId="other" task={task} />);
   resolve(response(source)); await waitFor(() => expect(screen.getByRole("button", { name: "Inspect lesson sources" })).toBeDisabled());
   expect(screen.queryByText("artifact:verified")).toBeNull();
+});
+it("keeps the canonical candidate inspectable with explicit mirror degradation", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...source, restart_witness_unknown: true })).mockResolvedValueOnce(response({ proposal_id: "proposal", mirror: { status: "degraded" } })).mockResolvedValueOnce(response({ ...lesson,
+    mirror: { status: "degraded", reason_code: "lesson_mirror_repair_unavailable", recovery_action: "Repair the evolution state, then inspect again." } }));
+  render(<TaskLessonReview {...owner} task={task} />); await inspect();
+  expect(screen.getByText(/restart process termination is unverified/)).toHaveTextContent("Manual lesson review remains available");
+  fireEvent.click(screen.getByRole("button", { name: "Prepare private lesson candidate" }));
+  await screen.findByRole("region", { name: "Exact private lesson change" });
+  expect(screen.getByText(/Evolution receipt mirror degraded/)).toHaveTextContent("canonical private candidate remains inspectable");
+  expect(screen.getByLabelText("Proposed task method")).toHaveTextContent("source_exists");
+  expect(screen.queryByRole("button", { name: /adopt|accept/i })).toBeNull();
+});
+it("requires refreshing policy after a stale enable is rejected", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response({ detail: { code: "lesson_policy_changed" } }, 409));
+  render(<TaskLessonReview {...owner} task={task} />); await inspect();
+  fireEvent.click(screen.getByText(/Allow bounded private lesson proposals/));
+  fireEvent.click(screen.getByRole("button", { name: "Enable automatic task lesson proposals" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Refresh Work");
+  expect(screen.queryByRole("button", { name: "Enable automatic task lesson proposals" })).toBeNull();
 });
 it("shows the bound automatic no-change/error outcome without claiming adoption", async () => {
   vi.mocked(apiFetch).mockResolvedValue(response({ ...source, automatic_outcome: { status: "blocked", result: "no_change", reason_code: "automatic_lesson_unavailable", error_type: "OSError", task_revision: 3, attempt_id: "attempt", workflow_run_id: "run", behavior_changed: false, provider_contacts: 0, outcome_binding: "a".repeat(64) } }));

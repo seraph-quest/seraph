@@ -114,7 +114,7 @@ async def test_failed_task_correction_is_private_inspectable_idempotent_and_iner
 async def test_committed_proposal_receipt_is_repaired_once_by_exact_replay(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     from src.evolution.runtime import EvolutionRuntime
     actual = EvolutionRuntime.record_task_lesson
     def unavailable(*args, **kwargs):
@@ -123,8 +123,9 @@ async def test_committed_proposal_receipt_is_repaired_once_by_exact_replay(async
     automatic = await create_task_lesson(operator, request, _automatic=True)
     # Completion uses only canonical receipts. Explicit inspection owns mirror
     # repair, so its failure cannot hold the terminal dispatcher hot path.
-    with pytest.raises(OSError, match="postcommit"):
-        await inspect_task_lesson(operator, automatic["proposal_id"])
+    degraded = await inspect_task_lesson(operator, automatic["proposal_id"])
+    assert degraded["mirror"]["status"] == "degraded"
+    assert degraded["new_method"] and degraded["source_current"] is True
     async with async_db() as db:
         committed = (await db.execute(select(MemoryProposal))).scalar_one()
         identity = (committed.proposal_id, committed.revision, committed.source_context_digest, committed.artifact_digest)
@@ -144,20 +145,95 @@ async def test_committed_proposal_receipt_is_repaired_once_by_exact_replay(async
         assert len(list((await db.execute(select(MemoryProposal))).scalars())) == 1
         assert not list((await db.execute(select(Memory))).scalars())
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     second = await create_task_lesson(operator, request, _automatic=True)
     assert second["proposal_id"] != identity[0]
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     denied = await create_task_lesson(operator, request, _automatic=True)
     assert denied["reason_code"] == "automatic_lesson_daily_cap"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_state", ["bytes", "entries"])
+async def test_oversized_mirror_never_hides_canonical_api_candidate(async_db, monkeypatch, tmp_path, full_state):
+    tokens = []
+    actual_create = create_session
+    async def capture_login(*args, **kwargs):
+        issued = await actual_create(*args, **kwargs)
+        tokens.append(issued[0])
+        return issued
+    monkeypatch.setattr(sys.modules[__name__], "create_session", capture_login)
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    from src.evolution.runtime import EvolutionRuntime
+    state = EvolutionRuntime.default_path(settings.workspace_dir)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps({"schema_version": 1, "proposals": {}, "task_lesson_receipts":
+        {str(i): {} for i in range(4097)} if full_state == "entries" else {},
+        "retained_history": "x" * (1024 * 1024) if full_state == "bytes" else ""}).encode()
+    state.write_bytes(raw)
+    from fastapi import FastAPI
+    import httpx
+    from src.api import memory
+    from src.auth.middleware import OperatorAuthMiddleware
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+    app = FastAPI()
+    app.add_middleware(OperatorAuthMiddleware)
+    app.include_router(memory.router, prefix="/api")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+        cookies={settings.operator_auth_cookie_name: tokens[0]}, headers={"Origin": "http://localhost:3001"}) as client:
+        proposed = await client.post("/api/memory/task-lessons", json=request.model_dump())
+        assert proposed.status_code == 201, proposed.text
+        candidate = proposed.json()
+        assert candidate["result"] == "candidate_inert" and candidate["mirror"]["status"] == "degraded"
+        inspected = await client.get("/api/memory/task-lessons/" + candidate["proposal_id"])
+        assert inspected.status_code == 200, inspected.text
+        detail = inspected.json()
+        assert detail["source_current"] and detail["new_method"] and detail["old_method"]
+        assert detail["mirror"]["status"] == "degraded" and detail["mirror"]["recovery_action"]
+        replay = await client.post("/api/memory/task-lessons", json=request.model_dump())
+        assert replay.status_code == 201 and replay.json()["proposal_id"] == candidate["proposal_id"]
+        assert replay.json()["idempotent_replay"] is True and replay.json()["mirror"]["status"] == "degraded"
+    assert state.read_bytes() == raw
+    async with async_db() as db:
+        assert len(list((await db.execute(select(MemoryProposal))).scalars())) == 1
+        assert not list((await db.execute(select(Memory))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_policy_revision_cas_rejects_delayed_enable_after_confirmed_disable(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    stale_enable = LessonAutoPolicyRequest(enabled=True, expected_revision=1,
+        expected_policy_revision=None, mutation_uuid=str(uuid4()))
+    disabled = await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=False,
+        expected_revision=1, expected_policy_revision=None, mutation_uuid=str(uuid4())))
+    with pytest.raises(BoardError) as rejected:
+        await set_automatic_lesson_policy(operator, "task", stale_enable)
+    assert rejected.value.code == "lesson_policy_changed"
+    assert (await eligible_lesson_source(operator, "task"))["automatic_policy"] == disabled
+    fresh_enable = stale_enable.model_copy(update={"mutation_uuid": str(uuid4()),
+        "expected_policy_revision": disabled["policy_revision"]})
+    enabled = await set_automatic_lesson_policy(operator, "task", fresh_enable)
+    confirmed_disable = await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=False,
+        expected_revision=1, expected_policy_revision=enabled["policy_revision"], mutation_uuid=str(uuid4())))
+    assert await set_automatic_lesson_policy(operator, "task", fresh_enable) == confirmed_disable
+    with pytest.raises(ValidationError):
+        LessonAutoPolicyRequest(enabled=True, expected_revision=1, mutation_uuid=str(uuid4()))
+    # Two concurrent changes observed at one revision cannot both mutate it.
+    outcomes = await asyncio.gather(*(set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
+        enabled=enabled_value, expected_revision=1, expected_policy_revision=confirmed_disable["policy_revision"],
+        mutation_uuid=str(uuid4()))) for enabled_value in (False, True)), return_exceptions=True)
+    assert sum(isinstance(item, BoardError) and item.code == "lesson_policy_changed" for item in outcomes) == 1
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
 
 
 @pytest.mark.asyncio
 async def test_terminal_automatic_failure_and_replay_are_visible_without_private_content(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     async with async_db() as db:
         task = await _task(db, "task")
     from src.memory import task_lessons
@@ -207,7 +283,7 @@ async def test_unresolved_effect_sibling_states_deny_failed_task_learning(async_
 async def test_exact_timeout_retains_single_io_until_positive_finish_and_never_late_commits(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     async with async_db() as db:
         task = await _task(db, "task")
     from src.memory import task_lessons
@@ -282,24 +358,148 @@ async def test_timeout_status_survives_revocation_and_binds_original_attempt(asy
 
 
 @pytest.mark.asyncio
+async def test_macos_profile_without_proc_supports_actual_same_process_proposal(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    from src.memory import task_lessons
+    from pathlib import Path
+    actual_read = Path.read_text
+    def no_proc(path, *args, **kwargs):
+        if str(path).startswith("/proc/"):
+            raise AssertionError("macOS lesson profile must not read Linux procfs")
+        return actual_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", no_proc)
+    monkeypatch.setattr(task_lessons, "_host_platform", lambda: "darwin")
+    monkeypatch.setattr(task_lessons, "_darwin_boot_id", lambda: (_ for _ in ()).throw(OSError("native witness unavailable")))
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, expected_policy_revision=None, mutation_uuid=str(uuid4())))
+    async with async_db() as db:
+        task = await _task(db, "task")
+    result = await maybe_propose_automatic_lesson(task, "attempt")
+    assert result["result"] == "candidate_inert"
+    detail = await inspect_task_lesson(operator, result["proposal_id"])
+    assert detail["source_current"] and detail["new_method"] and not detail["positive_preference_vote"]
+    from src.db.models import WorkBoardEvent
+    async with async_db() as db:
+        start = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == task_lessons._IO_STARTED))).scalar_one()
+        witness = json.loads(start.metadata_json)["process"]
+        assert witness["kind"] == "unknown" and witness["platform"] == "darwin"
+        assert task_lessons._process_ended(witness) is False
+    assert not task_lessons._AUTOMATIC_IO
+
+
+def test_darwin_native_witness_driver_fixture_has_exact_finite_public_abi(async_db, monkeypatch):
+    """Driver contract fixture on Linux; no native macOS execution claimed."""
+    import ctypes
+    from types import SimpleNamespace
+    from src.memory import task_lessons
+    assert ctypes.sizeof(task_lessons._DarwinBsdInfo) == 136
+    assert task_lessons._DarwinBsdInfo.pid.offset == 12
+    assert task_lessons._DarwinBsdInfo.start_sec.offset == 120
+    assert task_lessons._DarwinBsdInfo.start_usec.offset == 128
+    calls = []
+    def boot(name, buffer, size, new, new_size):
+        assert name == b"kern.bootsessionuuid" and new is None and new_size == 0
+        buffer.value = b"12345678-1234-1234-1234-123456789abc"
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t)).contents.value = 37
+        return 0
+    def process(pid, flavor, argument, buffer, size):
+        assert (pid, flavor, argument, size) == (42, 3, 0, 136)
+        info = ctypes.cast(buffer, ctypes.POINTER(task_lessons._DarwinBsdInfo)).contents
+        info.pid, info.start_sec, info.start_usec = pid, 100, 999999
+        return 136
+    def library(path, **kwargs):
+        calls.append(path)
+        assert kwargs == {"use_errno": True}
+        if path == "/usr/lib/libSystem.B.dylib":
+            return SimpleNamespace(sysctlbyname=boot)
+        assert path == "/usr/lib/libproc.dylib"
+        return SimpleNamespace(proc_pidinfo=process)
+    monkeypatch.setattr(ctypes, "CDLL", library)
+    assert task_lessons._darwin_boot_id() == "12345678-1234-1234-1234-123456789abc"
+    assert task_lessons._darwin_start(42) == (100, 999999)
+    assert calls == ["/usr/lib/libSystem.B.dylib", "/usr/lib/libproc.dylib"]
+    for returned, reported_pid, seconds, microseconds in [(135, 42, 100, 1), (136, 43, 100, 1), (136, 42, 0, 1), (136, 42, 100, 1000000)]:
+        def invalid(pid, flavor, argument, buffer, size):
+            info = ctypes.cast(buffer, ctypes.POINTER(task_lessons._DarwinBsdInfo)).contents
+            info.pid, info.start_sec, info.start_usec = reported_pid, seconds, microseconds
+            return returned
+        monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(proc_pidinfo=invalid))
+        with pytest.raises(OSError, match="unknown"):
+            task_lessons._darwin_start(42)
+    def missing(*args):
+        return 0
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(proc_pidinfo=missing))
+    with pytest.raises(OSError, match="unknown"):
+        task_lessons._darwin_start(42)
+
+
+def test_darwin_restart_requires_positive_boot_or_exact_pid_replacement(async_db, monkeypatch):
+    from src.memory import task_lessons
+    boot = "12345678-1234-1234-1234-123456789abc"
+    monkeypatch.setattr(task_lessons, "_host_platform", lambda: "darwin")
+    monkeypatch.setattr(task_lessons, "_darwin_boot_id", lambda: boot)
+    monkeypatch.setattr(task_lessons, "_darwin_start", lambda pid: (100, 1))
+    witness = task_lessons._process_identity(42)
+    assert witness["kind"] == "darwin" and witness["pid"] == 42
+    assert task_lessons._process_ended(witness) is False
+    monkeypatch.setattr(task_lessons, "_darwin_start", lambda pid: (101, 1))
+    assert task_lessons._process_ended(witness) is True
+    monkeypatch.setattr(task_lessons, "_darwin_start", lambda pid: (_ for _ in ()).throw(ProcessLookupError("missing PID")))
+    assert task_lessons._process_ended(witness) is False
+    assert task_lessons._process_identity(42)["kind"] == "unknown"
+    monkeypatch.setattr(task_lessons, "_darwin_boot_id", lambda: "87654321-1234-1234-1234-123456789abc")
+    assert task_lessons._process_ended(witness) is True
+    monkeypatch.setattr(task_lessons, "_host_platform", lambda: "linux")
+    assert task_lessons._process_ended(witness) is False
+    assert task_lessons._process_ended({**witness, "start_usec": 1000000}) is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_restart_witness_retains_capacity_and_projects_recovery(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    from src.memory import task_lessons
+    monkeypatch.setattr(task_lessons, "_host_platform", lambda: "darwin")
+    monkeypatch.setattr(task_lessons, "_darwin_boot_id", lambda: (_ for _ in ()).throw(OSError("unavailable")))
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, expected_policy_revision=None, mutation_uuid=str(uuid4())))
+    async with async_db() as db:
+        task = await _task(db, "task")
+    async def interrupted_completion(*args):
+        raise OSError("completion event interrupted")
+    monkeypatch.setattr(task_lessons, "_finish_io", interrupted_completion)
+    with pytest.raises(OSError, match="completion event"):
+        await maybe_propose_automatic_lesson(task, "attempt")
+    assert all(future.done() for future in task_lessons._AUTOMATIC_IO.values())
+    task_lessons._AUTOMATIC_IO.clear()  # Declared restart: no retained future proof.
+    await task_lessons._recover_ended_io()
+    source = await eligible_lesson_source(operator, "task")
+    assert source["restart_witness_unknown"] is True and source["eligible"]
+    blocked = await maybe_propose_automatic_lesson(task, "attempt")
+    assert blocked["reason_code"] == "automatic_lesson_io_pending"
+    manual = await create_task_lesson(operator, request)
+    assert manual["result"] == "candidate_inert"
+    assert (await inspect_task_lesson(operator, manual["proposal_id"]))["source_current"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Actual Linux kernel/process-exit proof; Mac profile and driver fixture are separately covered")
 async def test_restart_recovery_uses_positive_process_exit_and_exact_private_stage(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     async with async_db() as db:
         task = await _task(db, "task")
     from src.memory import task_lessons
-    from pathlib import Path
     # Actual local process identity/exit witness for the declared restart seam.
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
-    identity = {"pid": child.pid, "start": Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[19],
-        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
     original_identity, original_finish = task_lessons._process_identity, task_lessons._finish_io
-    monkeypatch.setattr(task_lessons, "_process_identity", lambda: identity)
     async def crash_before_completion_event(*args):
         raise OSError("declared private-stage-complete before durable completion crash")
     monkeypatch.setattr(task_lessons, "_finish_io", crash_before_completion_event)
     try:
+        identity = original_identity(child.pid)
+        assert identity["kind"] == "linux"
+        monkeypatch.setattr(task_lessons, "_process_identity", lambda: identity)
         with pytest.raises(OSError, match="durable completion"):
             await maybe_propose_automatic_lesson(task, "attempt")
         assert len(task_lessons._AUTOMATIC_IO) == 1
@@ -321,10 +521,10 @@ async def test_restart_recovery_uses_positive_process_exit_and_exact_private_sta
     # The recovered start still consumes its daily slot; only one fresh opt-in
     # start remains, and a third cannot bypass the cap via recovery/replay.
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert (await maybe_propose_automatic_lesson(task, "attempt"))["result"] == "candidate_inert"
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
-        expected_revision=1, mutation_uuid=str(uuid4())))
+        expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lesson_daily_cap"
 
 
@@ -407,7 +607,7 @@ async def test_automatic_requires_explicit_policy_and_is_idempotent_without_posi
     denied = await propose_automatic_task_lesson(operator, "task")
     assert denied["reason_code"] == "automatic_lessons_not_opted_in"
     enabled = await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
-        enabled=True, expected_revision=1, mutation_uuid=str(uuid4())))
+        enabled=True, expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert enabled["enabled"] is True
     assert enabled["daily_cap"] == 2
     source = await eligible_lesson_source(operator, "task")
@@ -423,16 +623,16 @@ async def test_automatic_requires_explicit_policy_and_is_idempotent_without_posi
     assert replay["idempotent_replay"] is True
     # Renewing proposal consent never renews the owner-wide daily cap.
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
-        enabled=True, expected_revision=1, mutation_uuid=str(uuid4())))
+        enabled=True, expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert (await maybe_propose_automatic_lesson(task, "attempt"))["result"] == "candidate_inert"
     await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
-        enabled=True, expected_revision=1, mutation_uuid=str(uuid4())))
+        enabled=True, expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lesson_daily_cap"
     async with async_db() as db:
         rows = list((await db.execute(select(MemoryProposal))).scalars())
         assert sum(json.loads(row.provenance_json).get("automatic") is True for row in rows) == 2
     disabled = await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(
-        enabled=False, expected_revision=1, mutation_uuid=str(uuid4())))
+        enabled=False, expected_revision=1, expected_policy_revision=(await eligible_lesson_source(operator, "task"))["automatic_policy"]["policy_revision"], mutation_uuid=str(uuid4())))
     assert disabled["enabled"] is False
     assert (await maybe_propose_automatic_lesson(task, "attempt"))["reason_code"] == "automatic_lessons_not_opted_in"
 

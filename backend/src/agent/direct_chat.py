@@ -231,17 +231,19 @@ async def stream_direct_local_chat(
     )
     parts: list[str] = []
     from src.agent.native_turn_family import original_direct_stream
+    from src.model_fabric.execution import _closing_original_stream
     with original_direct_stream(stream_completion_with_fallback):
-        async for delta in stream_completion_with_fallback(
+        async with _closing_original_stream(stream_completion_with_fallback(
             messages=messages,
             temperature=settings.model_temperature,
             max_tokens=min(settings.model_max_tokens, 512),
             runtime_path=runtime_path,
             request_context=context,
             request_id=context.request_id,
-        ):
-            parts.append(delta)
-            yield delta
+        )) as inner:
+            async for delta in inner:
+                parts.append(delta)
+                yield delta
 
     if not parts:
         fallback = "I am here. What should we focus on first?"

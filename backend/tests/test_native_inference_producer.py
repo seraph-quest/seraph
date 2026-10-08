@@ -16,13 +16,17 @@ from tests.test_native_turn_cleanup import original_app
 from src.agent.direct_chat import _uses_openrouter_profile as original_openrouter_profile
 
 
-async def original_websocket_turn(app, token):
+async def original_websocket_turn(app, token, *, early_close=False, consumer_errors=None):
     incoming, frames = asyncio.Queue(), []
     final = asyncio.get_running_loop().create_future()
     async def send(message):
         if message["type"] == "websocket.send":
             value = json.loads(message["text"])
             frames.append(value)
+            if early_close and value["type"] == "delta" and not consumer_errors:
+                error = RuntimeError("Original WS consumer closed after its first delta")
+                consumer_errors.append(error)
+                raise error
             if value["type"] in ("final", "error") and not final.done():
                 final.set_result(value)
     scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
@@ -35,8 +39,12 @@ async def original_websocket_turn(app, token):
     task = asyncio.create_task(app(scope, incoming.get, send))
     try:
         value = await asyncio.wait_for(asyncio.shield(final), 30)
-        assert value["type"] == "final", frames
-        assert "".join(item["content"] for item in frames if item["type"] == "delta") == value["content"]
+        assert value["type"] == ("error" if early_close else "final"), frames
+        if early_close:
+            value = dict(value)
+            value["session_id"] = next(item["session_id"] for item in frames if item["type"] == "delta")
+        else:
+            assert "".join(item["content"] for item in frames if item["type"] == "delta") == value["content"]
         return value
     finally:
         await incoming.put({"type": "websocket.disconnect", "code": 1000})
@@ -46,6 +54,7 @@ async def original_websocket_turn(app, token):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route,outcome", [("direct", "success"), ("generic", "success"), ("stream", "success"),
     ("direct", "nonzero_cost"),
+    ("stream", "early_close"),
     ("direct", "unknown_cost"), ("direct", "transport_failed"),
     ("direct", "foreign_conversation"), ("direct", "foreign_root"), ("direct", "copied_result")])
 async def test_actual_original_direct_route_seals_same_owner_before_ack(native_transport, monkeypatch, route, outcome):
@@ -80,6 +89,8 @@ async def test_actual_original_direct_route_seals_same_owner_before_ack(native_t
         monkeypatch.setattr("src.api.chat.create_onboarding_agent", create_onboarding_agent)
     provider_calls = []
     original_candidates = []
+    original_stream_closed = []
+    consumer_errors = []
     if outcome in ("foreign_conversation", "foreign_root"):
         from src.model_fabric.native_inference import NativeInferenceContinuation
         from src.agent.session import session_manager
@@ -153,7 +164,11 @@ async def test_actual_original_direct_route_seals_same_owner_before_ack(native_t
         events = [{"id": "actual-owned-stream", "choices": [{"delta": {"content": text}}]},
             {"id": "actual-owned-stream", "choices": [{"delta": {}}], "usage": {"cost": "0", "prompt_tokens": 1, "completion_tokens": 1}}]
         data = "".join("data: " + json.dumps(item) + "\n\n" for item in events) + "data: [DONE]\n\n"
-        yield httpx.Response(200, request=httpx.Request(method, url), content=data.encode())
+        try:
+            yield httpx.Response(200, request=httpx.Request(method, url), content=data.encode())
+        finally:
+            if not canary:
+                original_stream_closed.append(True)
     monkeypatch.setattr(httpx.AsyncClient, "stream", scripted_stream)
     app = original_app()
     try:
@@ -174,12 +189,13 @@ async def test_actual_original_direct_route_seals_same_owner_before_ack(native_t
             async with get_session() as db:
                 baseline_owners = set((await db.execute(select(WorkflowRunState.run_identity))).scalars())
             if route == "stream":
-                result = await original_websocket_turn(app, native_transport[1])
+                result = await original_websocket_turn(app, native_transport[1], early_close=outcome == "early_close", consumer_errors=consumer_errors)
             else:
                 response = await client.post("/api/chat", json={"message": "Hello" if route == "direct" else "Inspect this short answer",
                     "message_id": "owned-original-inference-direct"})
             if outcome not in ("success", "nonzero_cost"):
-                assert response.status_code in (409, 500, 503), (response.text, route_decisions)
+                if route != "stream":
+                    assert response.status_code in (409, 500, 503), (response.text, route_decisions)
                 originals = [kind for kind, _ in provider_calls].count("original")
                 assert originals == (0 if outcome.startswith("foreign_") else 1)
                 assert len(original_candidates) == 1
@@ -191,6 +207,14 @@ async def test_actual_original_direct_route_seals_same_owner_before_ack(native_t
                     assert candidate._rpc.result()["status"] == "blocked"
                     if outcome != "copied_result":
                         assert candidate.result_witness is None and candidate.route_witness is None
+                    if outcome == "early_close":
+                        assert original_stream_closed == [True]
+                        actual_broker_receipt = original_broker.receipt_for(candidate.handle.request.operation_id)
+                        assert actual_broker_receipt.callback_completed is True
+                        assert actual_broker_receipt.reconciliation_required is True
+                        assert actual_broker_receipt.status == "blocked"
+                        assert candidate.execution.worker.done() and not candidate.execution.worker.cancelled()
+                        assert candidate.execution.worker.exception() is consumer_errors[0]
                 async with get_session() as db:
                     owners = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == "model_inference_ephemeral_v1", WorkflowRunState.run_identity.not_in(baseline_owners)))).scalars())
                     assert len(owners) == 1
@@ -205,6 +229,10 @@ async def test_actual_original_direct_route_seals_same_owner_before_ack(native_t
                     else:
                         assert reservation.contact_started_at is not None and reservation.state == "unknown"
                         assert owners[0].status == "cost_liability"
+                    if outcome == "early_close":
+                        turn = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == candidate.execution.admission.job_id))
+                        assert turn.status == "cost_liability"
+                        assert not any(item["checkpoint_id"] == "conversation:assistant-message" for item in json.loads(turn.checkpoint_receipts_json))
                 return
             if route != "stream":
                 assert response.status_code == 200, (response.text, route_decisions)

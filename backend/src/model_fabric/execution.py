@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
+from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator, Awaitable, Callable
 from threading import Thread
 from typing import Any, Protocol, TypeVar
+
 
 from .contracts import (
     InferenceRequestContext,
@@ -31,6 +34,22 @@ from .gpu_admission import GpuPriority
 
 
 _SyncResult = TypeVar("_SyncResult")
+
+
+@asynccontextmanager
+async def _closing_original_stream(iterator):
+    """Close this captured iterator without replacing an unwinding exception."""
+    try:
+        yield iterator
+    finally:
+        primary_error = sys.exception()
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except BaseException:
+                if primary_error is None:
+                    raise
 
 
 class SyncAdapterReceiptError(RuntimeError):
@@ -207,9 +226,10 @@ async def execute_streaming(
             else:
                 await hooks.attempt_started(context=attempt_context, decision=decision)
             try:
-                async for delta in transport(decision.selected, transport_body, False):
-                    emitted = True
-                    yield delta
+                async with _closing_original_stream(transport(decision.selected, transport_body, False)) as inner:
+                    async for delta in inner:
+                        emitted = True
+                        yield delta
             except BaseException:
                 if aggregate is not None:
                     aggregate.attempt_finished(
@@ -263,12 +283,13 @@ async def execute_streaming(
         try:
             from .native_inference import original_route_scope
             with original_route_scope(attempt_context, decision, aggregate, "stream"):
-                async for delta in gpu_admission_broker.stream(
+                async with _closing_original_stream(gpu_admission_broker.stream(
                     admission_request,
                     admitted_transport,
                     now=now,
-                ):
-                    yield delta
+                )) as inner:
+                    async for delta in inner:
+                        yield delta
         except Exception as error:
             admission_error_receipt = getattr(error, "receipt", None)
             if isinstance(error, GpuAdmissionError) and not admission_callback_started:

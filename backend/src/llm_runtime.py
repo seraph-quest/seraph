@@ -4799,7 +4799,8 @@ async def stream_completion_with_fallback(
 
     transport = _model_fabric_streaming_transport or default_transport
     hooks = _model_fabric_receipt_hooks or RouteReceiptSession(context=request_context)
-    async for delta in execute_streaming(
+    from src.model_fabric.execution import _closing_original_stream
+    async with _closing_original_stream(execute_streaming(
         context=request_context,
         candidates=tuple(candidates),
         proofs=tuple(proofs),
@@ -4808,5 +4809,6 @@ async def stream_completion_with_fallback(
         max_tokens=max_tokens,
         transport=transport,
         hooks=hooks,
-    ):
-        yield delta
+    )) as inner:
+        async for delta in inner:
+            yield delta

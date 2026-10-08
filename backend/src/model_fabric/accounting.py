@@ -676,12 +676,14 @@ class DurableInferenceBrokerMixin:
         async def callback():
             await self._contact_accounting(handle)
             try:
-                async for item in operation():
-                    capture_inference_usage(item)
-                    assert_current_inference_policy()
-                    if continuation is not None:
-                        continuation.stage_delta(item)
-                    yield item
+                from .execution import _closing_original_stream
+                async with _closing_original_stream(operation()) as inner:
+                    async for item in inner:
+                        capture_inference_usage(item)
+                        assert_current_inference_policy()
+                        if continuation is not None:
+                            continuation.stage_delta(item)
+                        yield item
             except BaseException as error:
                 if continuation is not None:
                     continuation.failure = error
@@ -691,8 +693,10 @@ class DurableInferenceBrokerMixin:
             if continuation is not None:
                 await continuation.permit()
             self._restore_order(handle)
-            async for item in super().stream(handle.request, callback, **kwargs):
-                yield item
+            from .execution import _closing_original_stream
+            async with _closing_original_stream(super().stream(handle.request, callback, **kwargs)) as inner:
+                async for item in inner:
+                    yield item
             settlement = await self._settlement_after_release(settlement_context)
             completed = True
             if not settlement["result_adoption_allowed"]:

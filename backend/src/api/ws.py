@@ -954,29 +954,31 @@ async def websocket_chat(websocket: WebSocket):
 
                     async def _stream_direct_reply() -> str:
                         nonlocal emitted_safe_chars
-                        async for delta in stream_direct_local_chat(
+                        from src.model_fabric.execution import _closing_original_stream
+                        async with _closing_original_stream(stream_direct_local_chat(
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
                             is_onboarding=direct_is_onboarding,
                             session_id=session.id,
-                        ):
-                            if native_turn is not None:
-                                native_turn.remaining()
-                            streamed_parts.append(delta)
-                            safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
-                                "".join(streamed_parts),
-                                emitted_safe_chars,
-                            )
-                            if safe_delta:
-                                await websocket.send_text(
-                                    WSResponse(
-                                        type="delta",
-                                        content=safe_delta,
-                                        session_id=session.id,
-                                        **_ws_lineage_kwargs(session.id, operator, ingress),
-                                        seq=_next_seq(),
-                                    ).model_dump_json()
+                        )) as inner:
+                            async for delta in inner:
+                                if native_turn is not None:
+                                    native_turn.remaining()
+                                streamed_parts.append(delta)
+                                safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
+                                    "".join(streamed_parts),
+                                    emitted_safe_chars,
                                 )
+                                if safe_delta:
+                                    await websocket.send_text(
+                                        WSResponse(
+                                            type="delta",
+                                            content=safe_delta,
+                                            session_id=session.id,
+                                            **_ws_lineage_kwargs(session.id, operator, ingress),
+                                            seq=_next_seq(),
+                                        ).model_dump_json()
+                                    )
                         return "".join(streamed_parts).strip()
 
                     try:
@@ -1061,6 +1063,19 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 except _DirectStreamOutcomeUncertain as exc:
+                    if native_turn is not None:
+                        from src.workflows.job_runtime import DurableJobError, durable_job_repository
+                        original_lease = native_turn.claim.job["lease"]
+                        try:
+                            await durable_job_repository.transition_job(
+                                native_turn.claim.job["job_id"], "failed",
+                                owner=original_lease["owner"],
+                                fencing_token=original_lease["fencing_token"],
+                                expected_status="running",
+                                reason="native_turn_stream_outcome_uncertain",
+                            )
+                        except DurableJobError:
+                            logger.warning("Original native stream failure recovery lost its claim; obligation retained", exc_info=True)
                     logger.warning(
                         "Direct OpenRouter websocket stream ended with an uncertain outcome; automatic retry suppressed",
                         exc_info=True,

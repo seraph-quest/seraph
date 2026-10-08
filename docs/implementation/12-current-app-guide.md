@@ -31,6 +31,10 @@ dependencies explicitly with that npm version (`npm ci --ignore-scripts
 the managed command. Missing dependencies are a setup condition, never a reason
 to install packages during app startup. The installed toolchain and package are
 reviewed trusted application code, not a sandbox for arbitrary same-user code.
+The lockfile SRI verifies stock package bytes during `npm ci`; the reported
+`package_digest` binds host files/build and lock metadata, not unpacked
+`node_modules`. Runtime trust includes that reviewed installation and excludes
+malicious code changes by the same user.
 
 ```bash
 ./manage.sh -e dev cordis status

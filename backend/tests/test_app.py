@@ -414,3 +414,82 @@ async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_run
     assert host.state == "stopped"
     assert host.process is None
     assert host.snapshot()["cleanup"]["resources_remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_cleanup(client, monkeypatch, tmp_path):
+    """One real stock host crosses actual app startup, authenticated RPC and reap."""
+    import os
+    import json
+    import time
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import src.app as app_module
+
+    selected = os.environ.get("SERAPH_CORDIS_TEST_NODE")
+    if not selected:
+        pytest.skip("explicit reviewed Node required for native app-lifespan proof")
+    host = CordisHost(node_path=Path(selected).resolve())
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "isolated-cordis-auth-fixture")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    # Isolate unrelated startup owners; Cordis start/status/stop remain actual.
+    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+        monkeypatch.setattr(app_module, name, AsyncMock())
+    for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
+        monkeypatch.setattr(app_module, name, Mock())
+    for manager, methods in [(app_module.mcp_manager, ("load_config", "disconnect_all")),
+                             (app_module.skill_manager, ("init",)), (app_module.runbook_manager, ("init",)),
+                             (app_module.workflow_manager, ("init",)), (app_module.starter_pack_manager, ("init",))]:
+        for method in methods:
+            monkeypatch.setattr(manager, method, Mock())
+    for target in ("src.model_fabric.configuration.hydrate_openrouter_credential",
+                   "src.observer.manager.context_manager.refresh",
+                   "src.guardian.goal_programmes.goal_programme_service.start",
+                   "src.guardian.goal_programmes.goal_programme_service.stop"):
+        monkeypatch.setattr(target, AsyncMock())
+    for target in ("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs",
+                   "src.workflows.routines.routine_service.recover_pending_installs",
+                   "src.guardian.audio_worker.cleanup_audio_ingress_jobs"):
+        monkeypatch.setattr(target, AsyncMock(return_value=[]))
+    profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
+    monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
+    assert (await client.get("/api/runtime/status")).status_code == 401
+    login = await client.post("/api/auth/login", json={"password":"isolated-cordis-auth-fixture"},
+                              headers={"origin":"http://localhost:3001"})
+    assert login.status_code == 200
+    previous_boot = None
+    receipts = []
+    for _ in range(2):
+        async with app_module.lifespan(client._transport.app):
+            assert host.admitting
+            assert host.boot_nonce is not None and host.boot_nonce != previous_boot
+            previous_boot = host.boot_nonce
+            process = host.process
+            pid = process.pid
+            assert host.snapshot()["readiness"]["state"] == "unknown"
+            started = int(time.time()*1000)
+            response = await client.get("/api/runtime/status")
+            assert response.status_code == 200
+            actual = response.json()["cordis_runtime"]
+            assert actual["state"] == "ready" and actual["reason"] is None
+            assert actual["runtime_role"] == "lifecycle_host"
+            assert actual["readiness"]["state"] == "verified"
+            assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
+            assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
+            assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
+            assert host.boot_nonce not in response.text
+            assert (await client.get("/health")).json() == {"status":"ok"}
+        cleanup = host.snapshot()["cleanup"]
+        assert cleanup == {"state":"clean", "process_reaped":True,
+                           "resources_remaining":0, "cordis_disposal":"confirmed"}
+        assert process.returncode == 0 and not host.admitting
+        with pytest.raises(ProcessLookupError): os.kill(pid, 0)
+        receipts.append({"runtime_status":actual, "cleanup":cleanup,
+                         "fresh_boot":True, "process_exit_code":process.returncode,
+                         "owned_pid_absent":True})
+    (tmp_path / "cordis-app-lifecycle-proof.json").write_text(json.dumps({"authenticated":True, "cycles":receipts}, indent=2))

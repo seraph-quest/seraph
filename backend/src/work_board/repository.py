@@ -1427,6 +1427,19 @@ class WorkBoardRepository:
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
         return await self._owned_task(db, owner, task_id)
 
+    async def read_context_task(self, db, owner: WorkBoardOwner, task_id: str, operator=None):
+        """Resolve exact current or selected historical read scope; never execution."""
+        task = await self._find_task(db, task_id)
+        if operator is not None and task is not None and task.owner_session_id != owner.session_id:
+            from src.auth.ownership import selected_read_scopes
+            tasks = await selected_read_scopes(operator, "task", db=db)
+            goals = await selected_read_scopes(operator, "goal", db=db)
+            if tasks.get(task_id) == task.owner_session_id and goals.get(task.goal_id) == task.owner_session_id:
+                return task, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        task = await self.get_task(db, owner, task_id)
+        await self._validate_goal(db, owner, goal_id=task.goal_id, goal_revision=task.goal_revision)
+        return task, owner
+
     async def list_tasks(
         self,
         db: AsyncSession,

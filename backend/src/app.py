@@ -349,6 +349,12 @@ async def lifespan(app: FastAPI):
         workspace_owner = runtime_workspace_owner(settings.workspace_dir)
         workspace_owner.__enter__()
     await init_db()
+    from src.conversation.task_context import TaskContinuityService
+    from src.work_board.repository import WorkBoardRepository
+    app.state.task_continuity = TaskContinuityService(WorkBoardRepository())
+    await app.state.task_continuity.start()
+    from src.agent.session import session_manager
+    session_manager.bind_task_continuity(app.state.task_continuity)
     # Hydrate the trusted OpenRouter vault credential before any scheduler or
     # canonical inference path resolves a provider profile.  Failure remains
     # visible as configuration_required through the normal status surfaces;
@@ -473,6 +479,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
+    session_manager.bind_task_continuity(None)
+    await app.state.task_continuity.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

@@ -1,5 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { useChatStore } from "../../stores/chatStore";
+import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
+import { continueTask, readTaskContext, type TaskContextPacket } from "../../lib/taskContinuity";
 
 export function SessionList() {
   const sessions = useChatStore((s) => s.sessions);
@@ -15,6 +18,64 @@ export function SessionList() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const [tasks, setTasks] = useState<{ task_id: string; title: string }[]>([]);
+  const [taskId, setTaskId] = useState("");
+  const [packet, setPacket] = useState<TaskContextPacket | null>(null);
+  const [contextError, setContextError] = useState("");
+  const [continuing, setContinuing] = useState(false);
+  const [reload, setReload] = useState(0);
+  const continuationRef = useRef<{ taskId: string; conversationId: string } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    apiFetch(`${API_URL}/api/work-board/tasks?limit=100`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("task_list_unavailable");
+        const result = await response.json();
+        if (!controller.signal.aborted) setTasks(result.tasks);
+      }).catch((error) => {
+        if (!controller.signal.aborted) setContextError(error instanceof Error ? error.message : "task_list_unavailable");
+      });
+    return () => controller.abort();
+  }, [reload]);
+
+  useEffect(() => {
+    const linked = sessions.find((session) => session.id === sessionId)?.continuity_task_id;
+    if (linked) setTaskId(linked);
+  }, [sessions, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPacket(null);
+    if (!taskId) return;
+    setContextError("");
+    readTaskContext(taskId).then((value) => {
+      if (!cancelled) setPacket(value);
+    }).catch((error) => {
+      if (!cancelled) setContextError(error instanceof Error ? error.message : "task_context_unavailable");
+    });
+    return () => { cancelled = true; };
+  }, [taskId, reload]);
+
+  const resumeTask = async () => {
+    if (!packet || continuing) return;
+    if (continuationRef.current?.taskId !== packet.task_id) {
+      continuationRef.current = { taskId: packet.task_id, conversationId: crypto.randomUUID() };
+    }
+    setContinuing(true);
+    setContextError("");
+    try {
+      const id = await continueTask(packet, continuationRef.current.conversationId);
+      await loadSessions();
+      await switchSession(id, "restored");
+      setPacket(await readTaskContext(packet.task_id));
+      continuationRef.current = null;
+    } catch (error) {
+      setContextError(error instanceof Error ? error.message : "task_context_unavailable");
+    } finally {
+      setContinuing(false);
+    }
+  };
 
   useEffect(() => {
     loadSessions();
@@ -36,6 +97,34 @@ export function SessionList() {
 
   return (
     <div className="flex flex-col gap-1 py-1">
+      <label className="text-[9px] px-2">
+        Continue a task
+        <select aria-label="Task to continue" value={taskId} disabled={continuing}
+          onChange={(event) => setTaskId(event.target.value)} className="w-full bg-retro-panel text-retro-text">
+          <option value="">Choose task</option>
+          {tasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title}</option>)}
+        </select>
+      </label>
+      {packet && <div className="text-[9px] px-2" aria-label="Task continuity context">
+        <p>{packet.summary}</p>
+        {packet.ownership_access === "recovered_read_only" && <p>Recovered history is read-only. Current scope review is required for execution.</p>}
+        <p>Verified outputs: {packet.verified_artifact_refs.length}</p>
+        <p>Selected private references: {packet.private_source_refs.length}</p>
+        <p>Evidence: {packet.evidence_state.replace(/_/g, " ")}</p>
+        <p>Assistant context: {packet.assistant_context_state.replace(/_/g, " ")}</p>
+        <p>Source egress: {packet.source_egress.filter((source) => source.model_context_allowed).length} allowed / {packet.source_egress.filter((source) => !source.model_context_allowed).length} blocked</p>
+        <p>Unanswered questions: {packet.open_questions.length ? packet.open_questions.join(" ") : "None recorded"}</p>
+        <p>Next permitted action: {packet.next_actions.join(" ")}</p>
+        <p>Unresolved effect: {packet.unresolved_effect ? `Unknown — ${packet.unresolved_effect.replace(/_/g, " ")}` : "None recorded"}</p>
+        {packet.truncated && <p>Context is bounded. Open Work for the full task history.</p>}
+        <button disabled={continuing} onClick={resumeTask} className="text-retro-highlight">
+          {continuing ? "Continuing…" : "Continue in new chat"}
+        </button>
+      </div>}
+      {contextError && <div role="alert" className="text-[9px] px-2 text-retro-error">
+        Task context unavailable: {contextError.replace(/_/g, " ")}. No previous action was replayed.
+        <button disabled={continuing} onClick={() => setReload((value) => value + 1)}>Reload task context</button>
+      </div>}
       <button
         onClick={() => {
           newSession();

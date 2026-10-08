@@ -14,6 +14,45 @@ are **Planned**. Continue using the current managed commands, workspace and
 operator controls. The architecture documentation does not install Cordis,
 replace the runtime or migrate stored data.
 
+## Task conversation continuity
+
+The [#1021](https://github.com/seraph-quest/seraph/issues/1021) continuation
+journey is **Planned** until its reviewed feature branch merges. That branch
+adds a task picker to the chat list. Local context shows canonical status,
+verified output references, selected private reference counts, unanswered input,
+the next permitted local review action and unresolved effects separately.
+Missing narrative summaries use a bounded factual canonical timeline; no model
+summary or provider call is needed. Open Work for full history and output controls.
+
+**Continue in new chat** creates an owned conversation referencing the same
+task ID. It does not create another task or change its revision. Selecting
+historical Task and Goal records through ownership recovery permits read-only
+context in a new login; historical transcripts and unselected artifacts remain
+private. Continuing a recovered task renews no grant, approval, budget, effect or
+model-egress permission. Current scope review remains required in Work.
+The assistant context status reports that boundary separately. Existing direct
+and agent chat compilers share one current-authority helper: only the current
+Root's owned task facts and permitted opaque references enter the next prompt.
+Selecting history grants no assistant access to its facts or sources. A selected
+source reference requires current packet adoption and current per-source model
+permission; private-source classification is independent from model permission.
+No source body or historical transcript is copied into the task handoff.
+Deleted or changed output bytes invalidate the displayed reference. A stale
+revision prompts context reload without replaying the previous chat action.
+Recovery rollback removes access on the next context read.
+
+Focused proof: `test_task_conversation_continuity.py` covers authenticated
+SQLite links, replay, stale revisions, owner conflicts, selected recovery and
+rollback, local artifact readback/deletion, bounded metadata and additive
+migration. Literal intercepted async and streaming transports confirm the same
+factual handoff and request digest as the agent context compiler; missing grants,
+revoked Roots and recovered history block assistant context. Canonical evidence
+adoption/revocation controls which source refs are included without copying text.
+`SessionList.test.tsx` covers mocked continuation and visible recovery.
+These provider-free mechanical checks establish no model-quality or live-provider
+claim. The Python lifespan owns service activation and shutdown; this journey
+does not introduce a Cordis bridge.
+
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional

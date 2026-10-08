@@ -5,6 +5,10 @@ import re
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.conversation.task_context import TaskContinuityService
 
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -124,6 +128,26 @@ def _coerce_datetime(value: object) -> datetime | None:
 
 class SessionManager:
     """DB-backed session manager replacing the old in-memory dict."""
+
+    def __init__(self):
+        self._task_continuity: "TaskContinuityService | None" = None
+
+    def bind_task_continuity(self, service: "TaskContinuityService | None") -> None:
+        """The application lifecycle is the only activation owner."""
+        self._task_continuity = service
+
+    async def get_task_continuity_context(self, session_id: str, *, trust_principal=None) -> str:
+        if not session_id or self._task_continuity is None:
+            return ""
+        async with get_session() as db:
+            session = await db.get(Session, session_id)
+            if session is None or session.continuity_task_id is None:
+                return ""
+            try:
+                principal = trust_principal if trust_principal is not None else get_current_trust_principal()
+                return await self._task_continuity.for_chat(db, session_id, principal)
+            except (SQLAlchemyError, ValueError):
+                return "Task continuity is unavailable; reload current task context in Work."
 
     @staticmethod
     async def _claim_session_owner(db, session: Session, owner_principal_id: str | None) -> None:
@@ -435,7 +459,7 @@ class SessionManager:
                 rows = (await db.execute(text(
                     """
                     SELECT
-                        s.id, s.title, s.created_at, s.updated_at,
+                        s.id, s.title, s.created_at, s.updated_at, s.continuity_task_id,
                         lm.content AS last_content, lm.role AS last_role
                     FROM sessions s
                     LEFT JOIN (
@@ -452,6 +476,7 @@ class SessionManager:
                     {
                         "id": r.id,
                         "title": r.title,
+                        "continuity_task_id": r.continuity_task_id,
                         "created_at": r.created_at if isinstance(r.created_at, str) else r.created_at.isoformat(),
                         "updated_at": r.updated_at if isinstance(r.updated_at, str) else r.updated_at.isoformat(),
                         "last_message": r.last_content[:100] if r.last_content else None,

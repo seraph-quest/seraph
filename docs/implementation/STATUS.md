@@ -26,6 +26,18 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+## Task conversation continuity
+
+**Planned** until the independently reviewed
+[#1021](https://github.com/seraph-quest/seraph/issues/1021) feature branch merges:
+same-task continuation into a new owned chat, bounded reference-only factual
+context, selected read-only historical recovery, separate next actions/questions
+and Unknown state. Existing chat paths consume the same bounded current-owner
+factual/reference handoff; selected recovered history stays blocked for assistant
+egress. No task ownership, execution authority or model egress is renewed.
+The [operator contract](./12-current-app-guide.md#task-conversation-continuity)
+names the isolated authenticated SQLite/local artifact and mocked UI checks.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

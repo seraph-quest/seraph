@@ -176,6 +176,8 @@ class Session(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
+    # Read continuity only: a new chat never renews the task's authority.
+    continuity_task_id: Optional[str] = Field(default=None, foreign_key="work_board_tasks.task_id", index=True)
     title: str = Field(default="New Conversation")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

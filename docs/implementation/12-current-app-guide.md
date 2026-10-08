@@ -14,6 +14,34 @@ are **Planned**. Continue using the current managed commands, workspace and
 operator controls. The architecture documentation does not install Cordis,
 replace the runtime or migrate stored data.
 
+## Finite public goal programmes
+
+The finite authority controls under [#1003](https://github.com/seraph-quest/seraph/issues/1003)
+and [ADR-027](./decisions/027-standing-public-goal-programmes.md) are available
+on `develop` revisions containing the independently reviewed implementation
+merge. This section describes that post-merge control scope, which does not
+include discovery or digest execution. Supply a separate public
+brief locally, preview the exact public-web/local-artifact/inference ceiling,
+and explicitly accept a daily programme lasting at most seven days. Private goal
+text is never copied into this brief automatically. No query, URL or output path
+is required. Zero budget or missing provider policy shows a blocked programme.
+
+The original finite grant may outlive browser logout/expiry. Pause/revoke or
+stable identity revocation stops new contacts and adoption; Goal/route correction
+requires renewed review. Expiry produces a passive review state.
+Saving a preview with a changed public brief immediately pauses the old
+programme; abandoning that review does not restart it. An unchanged-brief
+renewal pauses its predecessor on acceptance. A new login
+cannot renew old authority; exact pause/revoke needs separately acknowledged
+stable-owner recovery. This authority milestone alone does not run discovery or
+produce a digest; later discovery retains native job/artifact/accounting owners.
+
+Isolated Linux SQLite/ASGI checks verify the finite configuration/control path,
+logout/restart clocks, owner recovery and fail-closed correction boundaries.
+They make no provider calls and establish neither macOS execution nor model
+quality. The native contact/adoption executor still requires its separately
+implemented and reviewed integration before activation.
+
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional

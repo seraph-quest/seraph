@@ -5725,12 +5725,14 @@ class WorkBoardDispatcher:
         # The immutable original Board attempt bounds first admission and
         # recovery. A later pass cannot grant another execution window.
         deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
-        spec = spec_for(task, attempt, inputs, deadline=deadline)
+        spec = spec_for(task, attempt, inputs, deadline=deadline, strategy=strategy)
         # The resolver is an optional current-owner dependency. Its absence
         # records baseline behavior and creates no task-method import or grant.
-        spec = replace(spec, declared_authority={**spec.declared_authority,
-            "task_strategy_binding": strategy.model_dump(mode="json")})
-        projection = await self.jobs.admit_job(spec)
+        from src.work_board.research_parent import stage_native_projection
+        async with self.session_provider() as strategy_db:
+            original_projection = await stage_native_projection(strategy_db, spec,
+                task=task, attempt=attempt, inputs=inputs)
+        projection = await self.jobs.admit_job(spec, native_research_projection=original_projection)
         expected = expected_identity(task, attempt, spec)
         async with self.session_provider() as db:
             linked = await self.repository.link_attempt_workflow_run(db, task.task_id, attempt.attempt_id,
@@ -5779,9 +5781,15 @@ class WorkBoardDispatcher:
                 task.goal_id, "work.research-dossier.v1")
             if inspect.isawaitable(binding):
                 binding = await binding
+            original_binding = binding
             binding = TaskStrategyBinding.model_validate(binding)
+        else:
+            original_binding = binding
         if binding.status == "blocked":
             raise BoardError("task_strategy_blocked", binding.reason, status_code=409)
+        from src.work_board.research_parent import secret_safe_strategy_projection
+        async with self.session_provider() as db:
+            await secret_safe_strategy_projection(db, original_binding)
         return binding
 
     async def _admit_execute_direct(

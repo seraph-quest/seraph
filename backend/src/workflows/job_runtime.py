@@ -913,10 +913,18 @@ def _safe_routine_publication_binding(value: Any) -> dict[str, Any] | None:
 
 def _safe_durable_authority(
     value: Any, *, repo_node_posture_expectation: Mapping[str, Any] | None = None,
+    native_research_projection=None, native_job_kind=None,
 ) -> dict[str, Any]:
     safe = _safe_structure(value)
     if not isinstance(safe, dict) or not isinstance(value, Mapping):
         return safe if isinstance(safe, dict) else {}
+    if native_research_projection is not None:
+        from src.work_board.research_parent import NativeResearchProjection, strategy_projection
+        if (type(native_research_projection) is not NativeResearchProjection
+            or native_job_kind not in {"research_dossier", "readonly_research_child"}
+            or not native_research_projection.matches(value, native_job_kind)):
+            raise ValueError("native research projection mismatch")
+        safe["task_strategy_binding"] = strategy_projection(value["task_strategy_binding"])
     binding = _safe_routine_publication_binding(value.get("routine_binding"))
     if binding is not None:
         safe["routine_binding"] = binding
@@ -2586,6 +2594,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         admission_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         opportunity_preference_witness=None,
         near_text_policy_scope=None,
+        native_research_projection=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
@@ -2648,8 +2657,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dedupe_key=identity.idempotency_key,
         )
         authority_digest = _digest(spec.declared_authority)
+        from src.work_board.research_contracts import PARENT_KIND as research_parent_kind
+        if identity.job_kind == research_parent_kind:
+            if native_research_projection is None:
+                raise DurableJobAdmissionDenied("research_original_projection_required")
+        elif native_research_projection is not None:
+            raise DurableJobAdmissionDenied("research_original_projection_unexpected")
         safe_authority = _safe_durable_authority(
             spec.declared_authority,
+            native_research_projection=native_research_projection, native_job_kind=identity.job_kind,
             repo_node_posture_expectation=repo_node_posture_expectation,
         )
         root_run_identity = identity.job_id

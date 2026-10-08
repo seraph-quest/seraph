@@ -65,7 +65,10 @@ async def create_kernel(accounting_db):
                 grant_id="kernel-review",max_outstanding_jobs=1,max_attempts=1,max_runtime_seconds=300))))
         db.add(task);db.add(attempt)
     spec=spec_for(task,attempt,inputs(),deadline=now+timedelta(seconds=300))
-    await jobs.admit_job(spec)
+    from src.work_board.research_parent import stage_native_projection
+    async with factory.accounting_sessions() as db:
+        original_projection = await stage_native_projection(db, spec, task=task, attempt=attempt, inputs=inputs())
+    await jobs.admit_job(spec, native_research_projection=original_projection)
     await jobs.queue_job(spec.identity.job_id)
     parent=await jobs.claim_job(spec.identity.job_id,owner="research-kernel",lease_seconds=120)
     async with factory.accounting_sessions() as db:

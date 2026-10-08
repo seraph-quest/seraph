@@ -56,11 +56,16 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
             "input": model.model_dump(mode="json", exclude_none=True)}
         if hashlib.sha256(_canonical_json(envelope)).hexdigest() != task.typed_input_digest:
             raise DurableJobLeaseError("research child group must use the exact admitted source input")
-        creation = {"schema_version": 1, "board_task_id": task_id, "board_attempt_id": attempt_id,
+        from src.work_board.research_readback import binds
+        if not binds(task, attempt, parent, typed_inputs=model):
+            raise DurableJobLeaseError("research original parent identity changed")
+        creation = {"schema_version": 2, "board_task_id": task_id, "board_attempt_id": attempt_id,
             "creation_board_fence": board_fence, "creation_job_fence": runtime_fence,
             "parent_input_digest": parent.input_digest, "live_root_digest": authority["live_root_digest"],
             "child_ids": [f"{parent_id}:child:{slot}" for slot in range(len(model.perspectives))],
             "model_policy_digest": authority["model_policy_digest"], "no_learning": True}
+        creation.update(parent_authority_digest=parent.authority_digest,
+            parent_run_fingerprint=parent.run_fingerprint, research_authority_schema_version=2)
         creation["creation_digest"] = _digest(creation)
         history = json.loads(parent.checkpoint_receipts_json)
         existing = [item for item in history if item.get("checkpoint_id") == "research:creation"]
@@ -106,7 +111,9 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
                 run_fingerprint=_digest({"input": child_inputs, "authority": child_authority}))
             _validate_admission_authority(spec)
             input_digest, safe_inputs = _safe_durable_inputs(child_inputs)
-            safe_authority = _safe_durable_authority(child_authority)
+            from src.work_board.research_parent import fixed_child_projection
+            safe_authority = _safe_durable_authority(child_authority, native_job_kind=CHILD_KIND,
+                native_research_projection=fixed_child_projection(parent, child_authority))
             # Use the canonical admission encodings, identity and digests. The
             # fixed group bypasses no root limit: its already-admitted parent
             # owns the sole Goal outstanding slot, as native routine leaves do.

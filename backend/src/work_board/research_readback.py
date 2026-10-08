@@ -15,12 +15,12 @@ from src.work_board.research_contracts import PARENT_CAPABILITY, PARENT_KIND, Re
 from src.work_board.research_parent import job_id
 
 
-def binds(task, attempt, run):
+def binds(task, attempt, run, *, typed_inputs=None):
     """Recompute fixed input, authority and fingerprint from admitted input."""
     from src.work_board.dispatcher import _parse_typed_input
     from src.workflows.job_runtime import _digest
     try:
-        inputs = ResearchDossierInput.model_validate(_parse_typed_input(task))
+        inputs = ResearchDossierInput.model_validate(typed_inputs if typed_inputs is not None else _parse_typed_input(task))
         authority = json.loads(run.declared_authority_json)
         bound = authority["research_slot_allowance_microusd"]
         ceiling = authority["research_owner_ceiling_microusd"]
@@ -30,37 +30,159 @@ def binds(task, attempt, run):
             or run.session_id != task.owner_session_id or run.operator_session_id != task.owner_session_id
             or run.goal_id != task.goal_id or run.goal_revision != task.goal_revision
             or run.parent_job_id or run.parent_run_identity or run.branch_depth != 0
+            or run.max_attempts != 1 or run.budget_digest != _digest({"budget_microusd": 0})
+            or json.loads(run.resource_claims_json) != []
             or run.idempotency_scope != "work-board-attempt" or run.idempotency_key != f"{task.task_id}:{attempt.attempt_id}"
             or type(bound) is not int or bound <= 0 or type(ceiling) is not int or ceiling < bound*len(inputs.perspectives)
             or type(authority["model_policy_revision"]) is not int or authority["model_policy_revision"] <= 0
             or not re.fullmatch(r"[0-9a-f]{64}", authority["model_policy_digest"])):
             return False
-        expected_authority = {"principal": task.owner_principal_id, "owner_kind": "user",
-            "session_id": task.owner_session_id, "goal_id": task.goal_id, "goal_revision": task.goal_revision,
-            "capability_id": PARENT_CAPABILITY, "capability_version": "1", "typed_input_digest": task.typed_input_digest,
-            "input_artifact_id": task.input_artifact_id, "live_root_digest": digest(root_binding()),
-            "model_policy_digest": authority["model_policy_digest"], "model_policy_revision": authority["model_policy_revision"],
-            "source_egress_acknowledged": True, "research_allowance_microusd": bound*len(inputs.perspectives),
-            "research_slot_allowance_microusd": bound, "research_owner_ceiling_microusd": ceiling,
-            "permissions": ["workspace_read", "workspace_write", "model_inference", "public_https_text_read"],
-            "limits": {"max_seconds": 300, "max_children": 2, "max_depth": 1, "max_sources": 4,
-                "max_output_bytes": 65536, "max_attempts": 1}, "no_learning": True}
-        expected_inputs = {"typed_input_digest": task.typed_input_digest, "input_artifact_id": task.input_artifact_id,
-            "child_count": len(inputs.perspectives), "source_count": len(inputs.sources), "no_learning": True}
-        return (authority == expected_authority and run.input_digest == _digest(expected_inputs)
-            and run.authority_digest == _digest(expected_authority)
-            and run.run_fingerprint == digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
-                "inputs": expected_inputs, "authority": expected_authority}))
+        from src.work_board.research_parent import authority_projection, input_projection, fingerprint, strategy_projection
+        base = authority_projection(task, inputs, policy_digest=authority["model_policy_digest"],
+            policy_revision=authority["model_policy_revision"], bound=bound, ceiling=ceiling)
+        expected_inputs = input_projection(task, inputs)
+        marker = authority.get("research_authority_schema_version")
+        if "research_authority_schema_version" in authority:
+            if type(marker) is not int or marker != 2:
+                return False
+            expected_authority = authority_projection(task, inputs,
+                policy_digest=authority["model_policy_digest"], policy_revision=authority["model_policy_revision"],
+                bound=bound, ceiling=ceiling, strategy=strategy_projection(authority["task_strategy_binding"]))
+            expected_fingerprint = fingerprint(task, attempt, expected_inputs, expected_authority)
+        else:
+            expected_authority = dict(base)
+            if "task_strategy_binding" in authority:
+                expected_authority["task_strategy_binding"] = strategy_projection(authority["task_strategy_binding"])
+            expected_fingerprint = fingerprint(task, attempt, expected_inputs, base)
+        if (authority != expected_authority or run.input_digest != _digest(expected_inputs)
+            or run.authority_digest != _digest(expected_authority) or run.run_fingerprint != expected_fingerprint):
+            return False
+        history = json.loads(run.checkpoint_receipts_json)
+        if type(history) is not list or any(type(item) is not dict for item in history):
+            return False
+        records = [item for item in history if item.get("checkpoint_id") == "research:creation"]
+        if records:
+            creation = _checkpoint(run, "research:creation")
+            if not creation_binds(run, creation, marker):
+                return False
+        elif marker is None:
+            # Legacy recovery requires immutable original group evidence.
+            return False
+        return True
     except (ValueError, TypeError, KeyError, OSError):
         return False
 
 
 def _checkpoint(run, identifier):
-    records = [item.get("payload") for item in json.loads(run.checkpoint_receipts_json)
+    from src.workflows.job_runtime import _digest
+    history = json.loads(run.checkpoint_receipts_json)
+    if type(history) is not list or any(type(item) is not dict for item in history):
+        raise ValueError("research canonical checkpoint history is unavailable")
+    records = [item for item in history
         if item.get("checkpoint_id") == identifier]
-    if len(records) != 1 or not isinstance(records[0], dict):
+    if (len(records) != 1 or type(records[0].get("payload")) is not dict
+        or records[0].get("safe") is not True
+        or records[0].get("state_digest") != _digest(records[0]["payload"])):
         raise ValueError("research canonical checkpoint is unavailable")
-    return records[0]
+    return records[0]["payload"]
+
+
+def creation_binds(run, creation, marker):
+    from src.workflows.job_runtime import _digest
+    authority = json.loads(run.declared_authority_json)
+    fields = {"schema_version", "board_task_id", "board_attempt_id", "creation_board_fence",
+        "creation_job_fence", "parent_input_digest", "live_root_digest", "child_ids",
+        "model_policy_digest", "no_learning", "creation_digest"}
+    if marker == 2:
+        fields |= {"parent_authority_digest", "parent_run_fingerprint", "research_authority_schema_version"}
+        if (type(creation.get("research_authority_schema_version")) is not int
+            or creation["research_authority_schema_version"] != 2
+            or creation.get("parent_authority_digest") != run.authority_digest
+            or creation.get("parent_run_fingerprint") != run.run_fingerprint):
+            return False
+    return (set(creation) == fields and type(creation.get("schema_version")) is int
+        and creation["schema_version"] == (2 if marker == 2 else 1)
+        and type(creation.get("board_task_id")) is str
+        and type(creation.get("board_attempt_id")) is str
+        and run.idempotency_key == f'{creation["board_task_id"]}:{creation["board_attempt_id"]}'
+        and type(creation.get("creation_board_fence")) is int and creation["creation_board_fence"] > 0
+        and type(creation.get("creation_job_fence")) is int and creation["creation_job_fence"] > 0
+        and type(creation.get("child_ids")) is list and 1 <= len(creation["child_ids"]) <= 2
+        and creation["child_ids"] == [f"{run.run_identity}:child:{slot}" for slot in range(len(creation["child_ids"]))]
+        and creation.get("live_root_digest") == authority["live_root_digest"]
+        and creation.get("model_policy_digest") == authority["model_policy_digest"]
+        and creation.get("no_learning") is True
+        and creation.get("parent_input_digest") == run.input_digest
+        and creation.get("creation_digest") == _digest({k: v for k, v in creation.items() if k != "creation_digest"}))
+
+
+async def original_group_binds(db, run, *, typed_inputs):
+    """Read exact original child/accounting group without renewing any authority."""
+    from datetime import timezone
+    from src.workflows.job_runtime import DurableJobRepository, _digest
+    from src.workflows.inference_accounting import _continuity_lock, InferenceAccountingError
+    model = ResearchDossierInput.model_validate(typed_inputs)
+    authority = json.loads(run.declared_authority_json)
+    creation = _checkpoint(run, "research:creation")
+    if (not creation_binds(run, creation, authority.get("research_authority_schema_version"))
+        or len(creation["child_ids"]) != len(model.perspectives)):
+        raise ValueError("research creation binding unavailable")
+    rows = list((await db.execute(select(WorkflowRunState).where(
+        WorkflowRunState.parent_job_id == run.run_identity))).scalars())
+    if sorted(row.run_identity for row in rows) != sorted(creation["child_ids"]):
+        raise ValueError("research original child group unavailable")
+    for slot, child_id in enumerate(creation["child_ids"]):
+        row = next(row for row in rows if row.run_identity == child_id)
+        expected = {**authority, "capability_id": "work.readonly-research-child.v1",
+            "parent_creation_digest": creation["creation_digest"], "research_slot": slot,
+            "parent_board_task_id": creation["board_task_id"], "parent_board_attempt_id": creation["board_attempt_id"],
+            "creation_board_fence": creation["creation_board_fence"], "creation_job_fence": creation["creation_job_fence"]}
+        child_inputs = {"parent_input_digest": run.input_digest, "research_slot": slot,
+            "parent_creation_digest": creation["creation_digest"], "source_slots": model.perspectives[slot].source_slots,
+            "source_manifest_digest": _digest([model.sources[index].model_dump(mode="json")
+                for index in model.perspectives[slot].source_slots]),
+            "source_permission_revision": authority["model_policy_revision"],
+            "model_policy_revision": authority["model_policy_revision"],
+            "slot_allowance_microusd": authority["research_slot_allowance_microusd"], "no_learning": True}
+        if (json.loads(row.declared_authority_json) != expected or row.authority_digest != _digest(expected)
+            or row.input_digest != _digest(child_inputs)
+            or row.run_fingerprint != _digest({"input": child_inputs, "authority": expected})
+            or row.job_kind != "readonly_research_child" or row.capability_version != "1"
+            or row.parent_fencing_token != creation["creation_job_fence"] or row.branch_depth != 1
+            or row.owner_principal_id != run.owner_principal_id or row.session_id != run.session_id
+            or row.operator_session_id != run.operator_session_id or row.goal_id != run.goal_id
+            or row.goal_revision != run.goal_revision or row.max_attempts != 1
+            or row.deadline_at is None or row.deadline_at.replace(tzinfo=timezone.utc) > run.deadline_at.replace(tzinfo=timezone.utc)):
+            raise ValueError("research original child identity changed")
+    jobs = DurableJobRepository()
+    account, costs = await jobs._accounting_rows(db)
+    try:
+        with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+            jobs._assert_accounting_continuity(workspace, account, costs)
+    except InferenceAccountingError as exc:
+        raise ValueError("research original accounting proof unavailable") from exc
+    group = [cost for cost in costs if cost.job_id in creation["child_ids"]]
+    if group:
+        call_ids = ["remote:"+child for child in creation["child_ids"]]
+        if len(group) != len(call_ids):
+            raise ValueError("research original accounting group incomplete")
+        for slot, child in enumerate(creation["child_ids"]):
+            cost = next((cost for cost in group if cost.job_id == child), None)
+            evidence = json.loads(cost.evidence_json) if cost is not None else []
+            if type(evidence) is not list or any(type(item) is not dict for item in evidence):
+                raise ValueError("research original accounting evidence unavailable")
+            if (cost is None or cost.operation_id != call_ids[slot] or cost.owner_id != run.owner_principal_id
+                or cost.policy_digest != creation["model_policy_digest"]
+                or cost.goal_id != run.goal_id or cost.goal_revision != run.goal_revision
+                or cost.runtime_path != "readonly_research_child"
+                or cost.bound_microusd != authority["research_slot_allowance_microusd"]
+                or cost.owner_ceiling_microusd != authority["research_owner_ceiling_microusd"]
+                or not any(item.get("kind") == "research_group_reservation"
+                    and item.get("creation_digest") == creation["creation_digest"]
+                    and item.get("slot") == slot and item.get("group_call_ids") == call_ids
+                    for item in evidence)):
+                raise ValueError("research original accounting provenance changed")
+    return True
 
 
 async def verified_dossier(db, task, attempt, run):
@@ -77,12 +199,16 @@ async def _materialized_dossier(db, task, attempt, run):
     from src.workflows.job_runtime import DurableJobRepository, _digest
     from src.workflows.inference_accounting import _continuity_lock
     inputs = ResearchDossierInput.model_validate(_parse_typed_input(task))
+    await original_group_binds(db, run, typed_inputs=inputs)
     creation = _checkpoint(run, "research:creation")
     if (creation["board_task_id"] != task.task_id or creation["board_attempt_id"] != attempt.attempt_id
         or creation["parent_input_digest"] != run.input_digest
         or creation["creation_digest"] != _digest({key: value for key, value in creation.items() if key != "creation_digest"})
         or creation["child_ids"] != [f"{run.run_identity}:child:{slot}" for slot in range(len(inputs.perspectives))]):
         raise ValueError("research immutable creation proof changed")
+    authority = json.loads(run.declared_authority_json)
+    if not creation_binds(run, creation, authority.get("research_authority_schema_version")):
+        raise ValueError("research original creation identity changed")
     jobs = DurableJobRepository()
     account, costs = await jobs._accounting_rows(db)
     with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
@@ -98,6 +224,13 @@ async def _materialized_dossier(db, task, attempt, run):
             or child.operator_session_id != run.operator_session_id or child.goal_id != run.goal_id
             or child.goal_revision != run.goal_revision):
             raise ValueError("research completed child lineage changed")
+        child_authority = json.loads(child.declared_authority_json)
+        expected_child_authority = {**authority, "capability_id": "work.readonly-research-child.v1",
+            "parent_creation_digest": creation["creation_digest"], "research_slot": slot,
+            "parent_board_task_id": task.task_id, "parent_board_attempt_id": attempt.attempt_id,
+            "creation_board_fence": creation["creation_board_fence"], "creation_job_fence": creation["creation_job_fence"]}
+        if child_authority != expected_child_authority or child.authority_digest != _digest(expected_child_authority):
+            raise ValueError("research original child authority changed")
         ready = _checkpoint(child, "research:prompt-ready")
         output = _checkpoint(child, f"research:artifact:child:{slot}")
         from src.workflows.research_sources import canonical_sources_in_db

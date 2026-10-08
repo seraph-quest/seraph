@@ -19,7 +19,10 @@ MAX_OUTPUT = 512 * 1024
 
 
 def main():
-    if len(sys.argv) != 4: return 2
+    if len(sys.argv) not in (4, 5): return 2
+    general = len(sys.argv) == 5 and sys.argv[4] == "general-read"
+    if len(sys.argv) == 5 and not general: return 2
+    maximum_output = 1024*1024+4096 if general else MAX_OUTPUT
     directory = int(sys.argv[1]); binding = json.loads(sys.argv[2])
     absolute_deadline=float(sys.argv[3])
     allowance=absolute_deadline-time.time()
@@ -37,21 +40,22 @@ def main():
     def expire(_signal,_frame):raise TimeoutError("document_supervisor_deadline")
     signal.signal(signal.SIGALRM,expire)
     signal.setitimer(signal.ITIMER_REAL,max(.001,wait_deadline-time.monotonic()-5))
-    parser = subprocess.Popen([sys.executable, "-I", str(Path(__file__).with_name("document_compare_child.py")), binding["nonce"]],
+    parser = subprocess.Popen([sys.executable, "-I", str(Path(__file__).with_name("document_read_child.py" if general else "document_compare_child.py")), binding["nonce"]],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)
     result=b""; reason=None
     try:
         ready=parser.stdout.readline(4097)
         packet=json.loads(ready)
         if len(ready)>4096 or packet.get("state")!="ready" or packet.get("nonce")!=binding["nonce"]:
-            reason="document_resource_self_check_failed"
+            reason=(packet.get("reason") if general and packet.get("reason") == "document_confinement_unavailable"
+                else "document_resource_self_check_failed")
         else:
             packet.update({"supervisor_pid":os.getpid(),"parser_pid":parser.pid,"binding":binding})
             print(json.dumps(packet),flush=True)
             header=sys.stdin.buffer.read(8)
             if len(header)!=8: raise ValueError("document_parent_source_incomplete")
             a,b=struct.unpack("!II",header)
-            if not 1<=a<=2*1024*1024 or not 1<=b<=1024*1024: raise ValueError("document_parent_source_bound")
+            if not 1<=a<=(8192 if general else 2*1024*1024) or not 1<=b<=(16*1024*1024 if general else 1024*1024): raise ValueError("document_parent_source_bound")
             parser.stdin.write(header)
             remaining=a+b
             while remaining:
@@ -60,8 +64,8 @@ def main():
                 parser.stdin.write(chunk); remaining-=len(chunk)
             if sys.stdin.buffer.read(1): raise ValueError("document_parent_source_extra")
             parser.stdin.close()
-            result=parser.stdout.read(MAX_OUTPUT+1)
-            if len(result)>MAX_OUTPUT: raise ValueError("document_output_pipe_bound")
+            result=parser.stdout.read(maximum_output+1)
+            if len(result)>maximum_output: raise ValueError("document_output_pipe_bound")
     except TimeoutError:
         reason="document_supervisor_deadline"
     except (ValueError, OSError, json.JSONDecodeError):

@@ -85,6 +85,11 @@ def canonical_tool_name(tool_name: str) -> str:
 
 
 TOOL_METADATA: dict[str, dict] = {
+    "document_prepare": {
+        "description": "Prepare exact owner-selected document citations locally",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["owner_private_read", "local_compute"],
+    },
     # Phase 1 tools
     "web_search": {
         "description": "Search the web for information",
@@ -348,3 +353,11 @@ def get_tool_metadata(tool_name: str) -> dict | None:
 def get_all_metadata() -> dict[str, dict]:
     """Return a copy of all bundled native tool metadata."""
     return TOOL_METADATA.copy()
+
+
+def __getattr__(name: str):
+    # Keep metadata imports free of runtime construction and circular imports.
+    if name == "ToolRegistry":
+        from src.native_tools.task_adapters import ToolRegistry
+        return ToolRegistry
+    raise AttributeError(name)

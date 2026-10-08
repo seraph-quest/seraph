@@ -42,10 +42,16 @@ test('positive native projections preserve artifact readback and honest memory m
   assert.equal(validateResult('artifacts.read',{status:'succeeded',memory_status:'no_learning',value:{artifact_ref:'native-1',digest:sha,size_bytes:2,content:'ok'}}).status,'succeeded');
   assert.equal(validateResult('tasks.admit',{status:'succeeded',memory_status:'no_learning',value:{job_ref:'native-1',revision:1,state:'accepted',replayed:true}}).status,'succeeded');
   for (const [method, status] of [['memory.propose','proposal_only'],['memory.applyReviewed','reviewed_update'],['memory.forget','forgotten']] as const) {
-    const value = method === 'memory.propose' ? {proposal_ref:'proposal-1',revision:1,state:'proposed'} : {record_ref:'memory-1',revision:2};
+    const value = method === 'memory.propose' ? {proposal_ref:'proposal-1',revision:1,state:'proposed'} : {record_ref:'memory-1',receipt_ref:'memory-receipt-1'};
     assert.equal(validateResult(method,{status:'succeeded',memory_status:status,value}).memory_status,status);
     assert.throws(() => validateResult(method,{status:'succeeded',memory_status:'no_learning',value}));
   }
+});
+test('memory evidence results use exact text digests and real receipt references', () => {
+  const value = {records:[{record_ref:'memory-1',text:'',text_digest:'a'.repeat(64)}]};
+  assert.equal(validateResult('memory.retrieve',{status:'succeeded',memory_status:'no_learning',value}).status,'succeeded');
+  assert.throws(() => validateResult('memory.retrieve',{status:'succeeded',memory_status:'no_learning',value:{records:[{record_ref:'memory-1',text:'',revision:1}]}}));
+  assert.throws(() => validateResult('memory.forget',{status:'succeeded',memory_status:'forgotten',value:{record_ref:'memory-1',revision:1}}));
 });
 test('closed requests deny client authority, URL/path/bytes, unsafe limits and asserted extraction provenance before native contact', () => {
   for (const method of SERVICE_METHODS) for (const field of ['root_id','goal_id','route','budget','deadline_at','composition_epoch','owner_kind','authority_mode']) assert.throws(() => validateInput(method,{...input[method] as object,[field]:'injected'}));

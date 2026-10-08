@@ -293,8 +293,8 @@ def _reply_body(key: str) -> dict[str, object]:
     }
 
 
-async def _create_claim(async_db, monkeypatch, key: str):
-    created = await mail_api.create_reply_task(_request(_reply_body(key)))
+async def _create_claim(async_db, monkeypatch, key: str, related_input=None):
+    created = await mail_api.create_reply_task(_request({**_reply_body(key), **(related_input or {})}))
     assert created.status_code == 201
     created_body = json.loads(created.body)
     repository = WorkBoardRepository()
@@ -349,12 +349,18 @@ def _body(read_index: int, *, changed: bool = False) -> GmailMessageBody:
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accounting_db, monkeypatch):
+@pytest.mark.parametrize("related", [False, True])
+async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accounting_db, monkeypatch, related):
     tmp_path, _engine, factory = accounting_db
     async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
-    repository, owner, claim, inputs, created = await _create_claim(async_db, monkeypatch, "reply-vertical-key")
+    related_runtime = None
+    if related:
+        from tests.connected_source_native_fixture import synchronized_related_source
+        related_runtime, related_provider, selections = await synchronized_related_source(async_db, monkeypatch, WorkBoardOwner(principal_id=OWNER, session_id=SESSION), _operator(), GOAL, 1)
+        contacts = len(related_provider.calls)
+    repository, owner, claim, inputs, created = await _create_claim(async_db, monkeypatch, "reply-vertical-key", {"connected_sources": selections, "acknowledge_connected_sources": True} if related else None)
 
     class FakeAdapter:
         reads = 0
@@ -384,6 +390,7 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accoun
     monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", FakeAdapter)
     monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
     dispatcher = WorkBoardDispatcher(repository=repository, jobs=DurableJobRepository(), session_provider=async_db)
+    dispatcher.connection_sync_runtime = related_runtime
     result = await dispatcher._admit_execute_direct(claim, inputs, runtime_seconds=120)
     assert result["completed"] is True, result
     assert FakeAdapter.reads == 2
@@ -422,6 +429,15 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accoun
     assert private["sent"] is False
     assert private["saved_to_provider"] is False
     assert private["memory_status"] == "no_learning"
+    if related:
+        assert private["related_sources"]["sources"][0]["item_refs"] == selections[0]["item_refs"]
+        assert len(related_provider.calls) == contacts
+        assert "private-subject" not in json.dumps(model_calls)
+        assert "private-preview" not in json.dumps(model_calls)
+        assert "private-body" not in json.dumps(model_calls)
+        assert all(b"private-body" not in path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
+        assert selections[0]["item_refs"][0]["opaque_id"] not in json.dumps(model_calls)
+        await related_runtime.stop()
     recovered = await mail_api.recover_reply_task(_request({}), "reply-vertical-key")
     assert recovered["status"] == "verified"
     assert recovered["task_id"] == created["task_id"]
@@ -499,14 +515,22 @@ async def test_mail_reply_oversized_source_blocks_before_model_contact(accountin
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_dispatches_through_normal_work_board_pass(accounting_db, monkeypatch):
+@pytest.mark.parametrize("related", [False, True])
+async def test_mail_reply_dispatches_through_normal_work_board_pass(accounting_db, monkeypatch, related):
     tmp_path, _engine, factory = accounting_db
     async_db = factory.accounting_sessions
     """The managed dispatcher must execute the canonical Mail task path."""
 
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
-    created_response = await mail_api.create_reply_task(_request(_reply_body("reply-dispatch-pass-key")))
+    runtime = None
+    related_input = {}
+    if related:
+        from tests.connected_source_native_fixture import synchronized_related_source
+        runtime, provider, selections = await synchronized_related_source(async_db, monkeypatch, WorkBoardOwner(principal_id=OWNER, session_id=SESSION), _operator(), GOAL, 1)
+        contacts = len(provider.calls)
+        related_input = {"connected_sources": selections, "acknowledge_connected_sources": True}
+    created_response = await mail_api.create_reply_task(_request({**_reply_body("reply-dispatch-pass-key"), **related_input}))
     assert created_response.status_code == 201
     created = json.loads(created_response.body)
 
@@ -542,7 +566,11 @@ async def test_mail_reply_dispatches_through_normal_work_board_pass(accounting_d
         runner_id="service:work-board",
     )
 
+    dispatcher.connection_sync_runtime = runtime
     receipt = await dispatcher.run_pass()
+    if related:
+        assert len(provider.calls) == contacts
+        await runtime.stop()
     assert receipt["claimed"] == 1, receipt
     assert receipt["admitted"] == 1, receipt
     assert receipt["completed"] == 1, receipt

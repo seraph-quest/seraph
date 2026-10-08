@@ -4953,6 +4953,26 @@ class MemoryRepository:
         status: MemoryStatus | str = MemoryStatus.active,
         recovered_read_scopes: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        """Return the existing authenticated owner list-safe projection."""
+        async with get_session() as db:
+            return await self._list_memory_records_in_session(
+                db, owner_session_id=owner_session_id, limit=limit, cursor=cursor,
+                query=query, kind=kind, status=status,
+                recovered_read_scopes=recovered_read_scopes,
+            )
+
+    async def _list_memory_records_in_session(
+        self,
+        db,
+        *,
+        owner_session_id: str,
+        limit: int = _MEMORY_RECORD_PAGE_DEFAULT,
+        cursor: str | None = None,
+        query: str | None = None,
+        kind: MemoryKind | str | None = None,
+        status: MemoryStatus | str = MemoryStatus.active,
+        recovered_read_scopes: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return an authenticated owner's metadata-first memory page.
 
         This read path is intentionally separate from ``list_memories``.  It
@@ -4976,124 +4996,123 @@ class MemoryRepository:
             recovered_read_scopes=recovered_read_scopes,
         )
 
-        async with get_session() as db:
-            count_scope = scope_statement.with_only_columns(
-                Memory.id,
-                maintain_column_froms=True,
-            )
-            count_statement = select(func.count()).select_from(
-                count_scope.order_by(None).subquery()
-            )
-            total_count = int((await db.execute(count_statement)).scalar_one() or 0)
+        count_scope = scope_statement.with_only_columns(
+            Memory.id,
+            maintain_column_froms=True,
+        )
+        count_statement = select(func.count()).select_from(
+            count_scope.order_by(None).subquery()
+        )
+        total_count = int((await db.execute(count_statement)).scalar_one() or 0)
 
-            visible_rows: list[Memory] = []
-            scan_cursor = decoded_cursor
-            last_scanned_cursor = decoded_cursor
-            scan_batches = 0
-            batch_was_full = False
-            while (
-                len(visible_rows) <= normalized_limit
-                and scan_batches < _MEMORY_RECORD_SCAN_MAX_BATCHES
-            ):
-                scan_batches += 1
-                page_statement = _memory_record_scope_statement(
-                    owner_session_id=owner_session_id,
-                    query=normalized_query,
-                    kind=kind,
-                    status=status,
-                    cursor=scan_cursor,
-                    recovered_read_scopes=recovered_read_scopes,
-                ).options(
-                    defer(Memory.content),
-                    defer(Memory.summary),
-                ).order_by(Memory.updated_at.desc(), Memory.id.desc()).limit(
-                    normalized_limit + 1
+        visible_rows: list[Memory] = []
+        scan_cursor = decoded_cursor
+        last_scanned_cursor = decoded_cursor
+        scan_batches = 0
+        batch_was_full = False
+        while (
+            len(visible_rows) <= normalized_limit
+            and scan_batches < _MEMORY_RECORD_SCAN_MAX_BATCHES
+        ):
+            scan_batches += 1
+            page_statement = _memory_record_scope_statement(
+                owner_session_id=owner_session_id,
+                query=normalized_query,
+                kind=kind,
+                status=status,
+                cursor=scan_cursor,
+                recovered_read_scopes=recovered_read_scopes,
+            ).options(
+                defer(Memory.content),
+                defer(Memory.summary),
+            ).order_by(Memory.updated_at.desc(), Memory.id.desc()).limit(
+                normalized_limit + 1
+            )
+            rows = (await db.execute(page_statement)).scalars().all()
+            if not rows:
+                batch_was_full = False
+                break
+            last_scanned: tuple[datetime, str] | None = None
+            for memory in rows:
+                last_scanned = (
+                    _normalize_utc_timestamp(memory.updated_at) or datetime.min.replace(tzinfo=timezone.utc),
+                    memory.id,
                 )
-                rows = (await db.execute(page_statement)).scalars().all()
-                if not rows:
-                    batch_was_full = False
+                last_scanned_cursor = last_scanned
+                if _canonical_memory_deletion_marker(memory, check_text=False) is not None:
+                    continue
+                visible_rows.append(memory)
+                if len(visible_rows) > normalized_limit:
                     break
-                last_scanned: tuple[datetime, str] | None = None
-                for memory in rows:
-                    last_scanned = (
-                        _normalize_utc_timestamp(memory.updated_at) or datetime.min.replace(tzinfo=timezone.utc),
-                        memory.id,
-                    )
-                    last_scanned_cursor = last_scanned
-                    if _canonical_memory_deletion_marker(memory, check_text=False) is not None:
-                        continue
-                    visible_rows.append(memory)
-                    if len(visible_rows) > normalized_limit:
-                        break
-                batch_was_full = len(rows) >= normalized_limit + 1
-                if len(visible_rows) > normalized_limit or len(rows) < normalized_limit + 1:
-                    break
-                if last_scanned is None or last_scanned == scan_cursor:
-                    break
-                scan_cursor = last_scanned
+            batch_was_full = len(rows) >= normalized_limit + 1
+            if len(visible_rows) > normalized_limit or len(rows) < normalized_limit + 1:
+                break
+            if last_scanned is None or last_scanned == scan_cursor:
+                break
+            scan_cursor = last_scanned
 
-            scan_truncated = bool(
-                scan_batches >= _MEMORY_RECORD_SCAN_MAX_BATCHES
-                and len(visible_rows) <= normalized_limit
-                and batch_was_full
-            )
-            has_next = len(visible_rows) > normalized_limit or scan_truncated
-            page_rows = visible_rows[:normalized_limit]
-            source_by_memory: dict[str, list[MemorySource]] = {}
-            truncated_memory_ids = set()
-            if page_rows:
-                for source_owner in {str(memory.source_session_id) for memory in page_rows}:
-                    sources, truncated = await _load_memory_record_sources(
-                        db, memory_ids=[memory.id for memory in page_rows if memory.source_session_id == source_owner],
-                        owner_session_id=source_owner,
-                    )
-                    source_by_memory.update(sources)
-                    truncated_memory_ids.update(truncated)
-            summary_previews = await _load_memory_record_previews(
+        scan_truncated = bool(
+            scan_batches >= _MEMORY_RECORD_SCAN_MAX_BATCHES
+            and len(visible_rows) <= normalized_limit
+            and batch_was_full
+        )
+        has_next = len(visible_rows) > normalized_limit or scan_truncated
+        page_rows = visible_rows[:normalized_limit]
+        source_by_memory: dict[str, list[MemorySource]] = {}
+        truncated_memory_ids = set()
+        if page_rows:
+            for source_owner in {str(memory.source_session_id) for memory in page_rows}:
+                sources, truncated = await _load_memory_record_sources(
+                    db, memory_ids=[memory.id for memory in page_rows if memory.source_session_id == source_owner],
+                    owner_session_id=source_owner,
+                )
+                source_by_memory.update(sources)
+                truncated_memory_ids.update(truncated)
+        summary_previews = await _load_memory_record_previews(
+            db,
+            memory_ids=[memory.id for memory in page_rows],
+            field="summary",
+            max_length=_MEMORY_RECORD_SUMMARY_MAX,
+        )
+        records = [
+            await _memory_record_projection(
                 db,
-                memory_ids=[memory.id for memory in page_rows],
-                field="summary",
-                max_length=_MEMORY_RECORD_SUMMARY_MAX,
+                memory,
+                owner_session_id=str(memory.source_session_id).strip(),
+                sources=source_by_memory.get(memory.id, []),
+                sources_truncated=memory.id in truncated_memory_ids,
+                summary_preview=summary_previews.get(memory.id, (None, False)),
+                detail=False,
             )
-            records = [
-                await _memory_record_projection(
-                    db,
-                    memory,
-                    owner_session_id=str(memory.source_session_id).strip(),
-                    sources=source_by_memory.get(memory.id, []),
-                    sources_truncated=memory.id in truncated_memory_ids,
-                    summary_preview=summary_previews.get(memory.id, (None, False)),
-                    detail=False,
-                )
-                for memory in page_rows
-            ]
-            if recovered_read_scopes:
-                from src.auth.ownership import RECOVERED_FIELDS
-                for record in records:
-                    if record["id"] in recovered_read_scopes:
-                        record.update(RECOVERED_FIELDS)
-            next_cursor = None
-            if has_next and page_rows:
-                if scan_truncated and last_scanned_cursor is not None:
-                    next_cursor = _encode_memory_record_cursor(*last_scanned_cursor)
-                else:
-                    last = page_rows[-1]
-                    next_cursor = _encode_memory_record_cursor(last.updated_at, last.id)
-            confirmation_times = [
-                _normalize_utc_timestamp(memory.last_confirmed_at)
-                for memory in page_rows
-                if _normalize_utc_timestamp(memory.last_confirmed_at) is not None
-            ]
-            last_confirmed_at = max(confirmation_times) if confirmation_times else None
-            return {
-                "records": records,
-                "next_cursor": next_cursor,
-                "total_count": total_count,
-                "scan_truncated": scan_truncated,
-                # This is the latest confirmation timestamp represented by the
-                # returned page, never the wall-clock time of the read.
-                "last_confirmed_at": _recovery_timestamp(last_confirmed_at),
-            }
+            for memory in page_rows
+        ]
+        if recovered_read_scopes:
+            from src.auth.ownership import RECOVERED_FIELDS
+            for record in records:
+                if record["id"] in recovered_read_scopes:
+                    record.update(RECOVERED_FIELDS)
+        next_cursor = None
+        if has_next and page_rows:
+            if scan_truncated and last_scanned_cursor is not None:
+                next_cursor = _encode_memory_record_cursor(*last_scanned_cursor)
+            else:
+                last = page_rows[-1]
+                next_cursor = _encode_memory_record_cursor(last.updated_at, last.id)
+        confirmation_times = [
+            _normalize_utc_timestamp(memory.last_confirmed_at)
+            for memory in page_rows
+            if _normalize_utc_timestamp(memory.last_confirmed_at) is not None
+        ]
+        last_confirmed_at = max(confirmation_times) if confirmation_times else None
+        return {
+            "records": records,
+            "next_cursor": next_cursor,
+            "total_count": total_count,
+            "scan_truncated": scan_truncated,
+            # This is the latest confirmation timestamp represented by the
+            # returned page, never the wall-clock time of the read.
+            "last_confirmed_at": _recovery_timestamp(last_confirmed_at),
+        }
 
     async def get_memory_record(
         self,

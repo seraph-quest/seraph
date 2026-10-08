@@ -68,6 +68,54 @@ def _sql(connection, query, parameters=()):
     return connection.execute(query, parameters)
 
 
+NULL_SESSION_DDL_VERSION = "native-composition-null-session-ddl.v1"
+NULL_SESSION_DDL_DESCRIPTOR = {
+    "version": NULL_SESSION_DDL_VERSION,
+    "column": ["continuity_task_id", "VARCHAR", 0, None, 0],
+    "foreign_key": ["work_board_tasks", "continuity_task_id", "task_id", "NO ACTION", "NO ACTION", "NONE"],
+    "index": ["ix_sessions_continuity_task_id", "continuity_task_id", 0, "c", 0, 0, "BINARY"],
+}
+NULL_SESSION_DDL_DIGEST = hashlib.sha256(json.dumps(
+    NULL_SESSION_DDL_DESCRIPTOR, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_retained_table_schema(connection, table, *, error="composition_projection_schema_changed"):
+    """Only the reviewed NULL-only Session addition is DDL-compatible with v3."""
+    columns = list(_sql(connection, f'PRAGMA table_info("{table}")'))
+    actual = {row[1] for row in columns}
+    expected = set(RETAINED_FIELDS[table])
+    if table != "sessions":
+        if actual != expected:
+            raise ProductionWorkspaceReconciliationError(error)
+        return
+    index_name = "ix_sessions_continuity_task_id"
+    named = list(_sql(connection, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", (index_name,)))
+    if actual == expected:
+        if named:
+            raise ProductionWorkspaceReconciliationError(error)
+        return
+    if actual != expected | {"continuity_task_id"}:
+        raise ProductionWorkspaceReconciliationError(error)
+    column = next(row for row in columns if row[1] == "continuity_task_id")
+    if tuple(column[1:]) != tuple(NULL_SESSION_DDL_DESCRIPTOR["column"]):
+        raise ProductionWorkspaceReconciliationError(error)
+    all_foreign = [tuple(row) for row in _sql(connection, 'PRAGMA foreign_key_list("sessions")')]
+    foreign = [row for row in all_foreign if row[3] == "continuity_task_id"]
+    if (len(foreign) != 1 or foreign[0][1] != 0
+        or foreign[0][2:] != tuple(NULL_SESSION_DDL_DESCRIPTOR["foreign_key"])
+        or sum(row[0] == foreign[0][0] for row in all_foreign) != 1):
+        raise ProductionWorkspaceReconciliationError(error)
+    if len(named) != 1 or named[0][0] != "sessions":
+        raise ProductionWorkspaceReconciliationError(error)
+    indexes = [row for row in _sql(connection, 'PRAGMA index_list("sessions")') if row[1] == index_name]
+    if len(indexes) != 1 or tuple(indexes[0][2:]) != (0, "c", 0):
+        raise ProductionWorkspaceReconciliationError(error)
+    info = [tuple(row) for row in _sql(connection, f'PRAGMA index_info("{index_name}")')]
+    keys = [tuple(row) for row in _sql(connection, f'PRAGMA index_xinfo("{index_name}")') if row[5] == 1]
+    if info != [(0, column[0], "continuity_task_id")] or keys != [(0, column[0], "continuity_task_id", 0, "BINARY", 1)]:
+        raise ProductionWorkspaceReconciliationError(error)
+
+
 def _composition_row(connection, table, key):
     if table not in RETAINED_FIELDS or type(key) is not str or len(key.encode()) > 512:
         raise ProductionWorkspaceReconciliationError("composition_reference_invalid")
@@ -76,6 +124,14 @@ def _composition_row(connection, table, key):
     result = _sql(connection, f'SELECT {names} FROM "{table}" WHERE "{COMPOSITION_KEYS[table]}"=?', (key,)).fetchall()
     if len(result) != 1:
         raise ProductionWorkspaceReconciliationError("composition_canonical_row_missing")
+    if table == "sessions":
+        # The merged continuity FK is outside the reviewed v3 native closure.
+        # Preserve the frozen tuple; never drop a live task link on restoration.
+        actual_fields = {row[1] for row in _sql(connection, 'PRAGMA table_info("sessions")')}
+        if "continuity_task_id" in actual_fields:
+            linked = _sql(connection, 'SELECT "continuity_task_id" FROM "sessions" WHERE "id"=?', (key,)).fetchone()
+            if linked is None or linked[0] is not None:
+                raise ProductionWorkspaceReconciliationError("composition_session_continuity_unsupported")
     return dict(zip(columns, result[0]))
 
 
@@ -141,8 +197,9 @@ def composition_closure(connection, *, verify_files=None):
         if row[4] not in {"ready", "draining", "blocked"}:
             raise ProductionWorkspaceReconciliationError("composition_inventory_invalid")
     for table, fields in RETAINED_FIELDS.items():
-        if table not in tables or {row[1] for row in _sql(connection, f'PRAGMA table_info("{table}")')} != set(fields):
+        if table not in tables:
             raise ProductionWorkspaceReconciliationError("composition_projection_schema_changed")
+        validate_retained_table_schema(connection, table)
     pending = [("runtime_composition_states", row[0]) for row in inventory]
     pending.extend(("workflow_run_states", row[0]) for row in _sql(connection,
         "SELECT run_identity FROM workflow_run_states WHERE composition_binding_json IS NOT NULL"))
@@ -523,6 +580,41 @@ class CompositionSessionGuard:
         self.listeners = []
         self.connection_listeners = []
         self.prepared_commit = False
+        self._legacy_continuity_metadata = {}
+
+    def _enroll_legacy_continuity_metadata(self, connection, key):
+        """Private canonical legacy transcript caller; no native authorization."""
+        row = _sql(connection, 'SELECT id,owner_principal_id,created_at,continuity_task_id FROM sessions WHERE id=?', (key,)).fetchone()
+        if row is None or row[3] is None:
+            return
+        if (self.db.info.get("composition_writer_owner") != "native_ingress"
+            or ("sessions", key) in self.members
+            or self._native_session_provenance(connection, key)):
+            raise ProductionWorkspaceReconciliationError("composition_session_continuity_unsupported")
+        self._legacy_continuity_metadata[key] = tuple(row)
+
+    def _native_session_provenance(self, connection, key):
+        if _sql(connection, "SELECT 1 FROM workflow_run_states WHERE composition_binding_json IS NOT NULL AND (session_id=? OR conversation_id=?) LIMIT 1", (key, key)).fetchone():
+            return True
+        return any(getattr(value, "__tablename__", None) == "workflow_run_states"
+            and getattr(value, "composition_binding_json", None) is not None
+            and key in (getattr(value, "session_id", None), getattr(value, "conversation_id", None))
+            for value in (*self.db.sync_session.new, *self.db.sync_session.dirty))
+
+    def _legacy_continuity_metadata_allowed(self, session, connection, value):
+        from sqlalchemy import inspect
+        key = value.id
+        original = self._legacy_continuity_metadata.get(key)
+        if original is None:
+            return False
+        row = _sql(connection, 'SELECT id,owner_principal_id,created_at,continuity_task_id FROM sessions WHERE id=?', (key,)).fetchone()
+        if (value in session.new or value in session.deleted or ("sessions", key) in self.members
+            or self.db.info.get("composition_writer_owner") != "native_ingress"
+            or row is None or tuple(row) != original or self._native_session_provenance(connection, key)
+            or any(inspect(value).attrs[field].history.has_changes()
+                for field in ("id", "owner_principal_id", "created_at", "continuity_task_id"))):
+            raise ProductionWorkspaceReconciliationError("composition_session_continuity_unsupported")
+        return True
 
     def _touch(self, connection, table, key, *, creating=False):
         if (table, key) in self.touched:
@@ -593,6 +685,8 @@ class CompositionSessionGuard:
             records = state.session.execute(lookup).scalars()
             connection = state.session.connection()
             for identity in records:
+                if name == "sessions" and identity in self._legacy_continuity_metadata:
+                    raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
                 if name == "workflow_run_states":
                     for column, value in values.items():
                         if getattr(column, "name", column) == "checkpoint_receipts_json":
@@ -648,6 +742,8 @@ class CompositionSessionGuard:
                     related = related or ("messages", getattr(value, "source_message_id", None)) in self.members
                 if table == "sessions":
                     related = related or self.db.info.get("composition_writer_owner") in {"native_ingress", "durable_jobs"}
+                    if self._legacy_continuity_metadata_allowed(session, connection, value):
+                        related = False
                 if table == "audit_events":
                     related = related or getattr(value, "event_type", None) == "runtime_composition_recovery"
                 if related:

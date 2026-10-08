@@ -754,22 +754,23 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
 
 
 @pytest.mark.asyncio
-async def test_large_complete_historical_restore_blocks_without_trimming_or_partial_sql(composition_db, tmp_path):
+@pytest.mark.parametrize("history_size", [102, 129])
+async def test_large_complete_historical_restore_blocks_without_trimming_or_partial_sql(composition_db, tmp_path, history_size):
     from src.workspace.accounting_continuity import retain_inference_accounting
     root, _, _, workspace = composition_db
     repo = DurableJobRepository()
     original = await bound_spec(job_id="historical-template")
-    for start in (0, 64, 128):
+    for start in range(0, history_size, 64):
         async with canonical_session() as db:
             await begin_native_writer(db, owner="durable_jobs")
-            for index in range(start, min(start + 64, 129)):
+            for index in range(start, min(start + 64, history_size)):
                 identity = f"history-{index:03d}"
                 spec = replace(original, identity=replace(original.identity, job_id=identity,
                     idempotency_key=identity))
                 await repo._admit_in_session(db, spec)
     before_receipt = read_lifecycle_receipt(workspace)
     before_checkpoint = read_accounting_checkpoint(workspace)
-    assert before_receipt["runtime_composition"]["table_counts"]["workflow_run_states"] == 129
+    assert before_receipt["runtime_composition"]["table_counts"]["workflow_run_states"] == history_size
     target = tmp_path / "large-retained"
     target.mkdir()
     with sqlite3.connect(root / "seraph.db") as source, sqlite3.connect(target / "seraph.db") as destination:
@@ -780,8 +781,9 @@ async def test_large_complete_historical_restore_blocks_without_trimming_or_part
         retain_inference_accounting(active=root, target=target, database_path="seraph.db")
     with sqlite3.connect(target / "seraph.db") as db:
         assert db.execute("SELECT run_identity,status,revision,fencing_token,checkpoint_receipts_json FROM workflow_run_states ORDER BY run_identity").fetchall() == before_rows
-        assert db.execute("SELECT COUNT(*) FROM workflow_run_states").fetchone()[0] == 129
+        assert db.execute("SELECT COUNT(*) FROM workflow_run_states").fetchone()[0] == history_size
         assert db.execute("SELECT COUNT(*) FROM runtime_composition_states WHERE state='ready'").fetchone()[0] == 14
+        assert db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
     assert read_lifecycle_receipt(workspace) == before_receipt
     assert read_accounting_checkpoint(workspace) == before_checkpoint
 
@@ -854,8 +856,14 @@ async def test_stopped_restore_keeps_exact_native_audit_chain_and_fk_or_blocks(c
         assert retain_inference_accounting(active=root, target=target, database_path="seraph.db") == result
     with sqlite3.connect(target / "seraph.db") as db:
         marker = db.execute("SELECT recovery_receipt_ref FROM runtime_composition_states WHERE runtime_domain=?", (after.runtime_domain,)).fetchone()[0]
-        assert len(marker) == 105 and restore_audit_reference(marker) == second_id
-        assert restore_audit_reference(restored_recovery_reference("c" * 64, marker)) == second_id
+        recovery_id = restore_audit_reference(marker)
+        assert len(marker) == 105 and recovery_id != second_id
+        assert restore_audit_reference(restored_recovery_reference("c" * 64, marker)) == recovery_id
+        recovery = json.loads(db.execute("SELECT details_json FROM audit_events WHERE id=?", (recovery_id,)).fetchone()[0])
+        assert recovery["prior_recovery_receipt_ref"] == second_id
+        assert recovery["prior"] == after.payload()
+        assert recovery["target"] == {**after.payload(), "epoch": after.epoch + 1}
+        assert recovery["state"] == "blocked" and recovery["phase"] == "awaiting_boot"
         assert db.execute("SELECT COUNT(*) FROM audit_events WHERE id IN (?,?)", (first_id, second_id)).fetchone()[0] == 2
         assert db.execute("SELECT session_id FROM audit_events WHERE id=?", (first_id,)).fetchone()[0] == spec.session_id
         assert db.execute("SELECT id FROM sessions WHERE id=?", (spec.session_id,)).fetchone()[0] == spec.session_id

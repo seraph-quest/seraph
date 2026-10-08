@@ -74,7 +74,7 @@ def test_source_extraction_result_has_bounded_evidence_and_no_implicit_learning(
 
 def test_reviewed_memory_result_cannot_claim_no_learning_or_invent_output():
     result = {"status": "succeeded", "memory_status": "reviewed_update",
-        "value": {"record_ref": "memory:123", "revision": 1}}
+        "value": {"record_ref": "memory:123", "receipt_ref": "memory:receipt:123"}}
     validate_result("memory.applyReviewed", result)
     for changes in ({"memory_status": "no_learning"}, {"secret": "private"},
                     {"value": {"record_ref": "memory:123", "revision": 1, "text": "private"}}):

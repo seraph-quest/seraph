@@ -560,6 +560,87 @@ class ApprovalRepository:
             db.expunge(request)
             return request
 
+    async def attach_general_task_wait_binding_in_session(
+        self, db, approval_id: str, *, owner_principal_id: str,
+        operator_session_id: str, runtime_owner: str, binding: Mapping[str, Any],
+        tool_name: str, approval_context: Mapping[str, Any],
+        original_input_digest: str, verify_current,
+    ) -> ApprovalRequest | None:
+        """Attach display/recovery metadata without changing approved scope.
+
+        A fast operator decision may precede the task's no-contact checkpoint.
+        The exact unconsumed row may already be approved; its fingerprint,
+        arguments and approval context remain immutable. This transaction
+        neither consumes approval nor claims that a durable wait exists.
+        """
+        from src.db.models import WorkflowRunState
+        from src.workflows.job_runtime import _assert_canonical_goal_fence
+        from src.auth.service import authenticate_principal
+        exact = dict(binding)
+        now = datetime.now(timezone.utc)
+        request = await db.get(ApprovalRequest, approval_id)
+        run = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == exact.get("job_id")))
+        if request is None or run is None:
+            return None
+        try:
+            details = json.loads(request.details_json or "{}")
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(details, dict) or request.status not in {"pending", "approved"}
+            or _pending_is_expired(request.expires_at, now=now)
+            or request.owner_principal_id != owner_principal_id
+            or request.operator_session_id != operator_session_id
+            or request.session_id != operator_session_id
+            or request.tool_name != tool_name or request.fingerprint != exact.get("fingerprint")
+            or details.get("approval_context") != dict(approval_context)
+            or approval_context.get("workflow_run_identity") != run.run_identity
+            or run.job_kind != "agent.task.v1" or run.status != "running"
+            or run.parent_job_id is not None or run.root_run_identity != run.run_identity
+            or run.owner_kind != "user" or run.owner_principal_id != owner_principal_id
+            or run.operator_session_id != operator_session_id or run.session_id != operator_session_id
+            or run.lease_owner != runtime_owner or run.fencing_token != exact.get("fence")
+            or _pending_is_expired(run.lease_expires_at, now=now)
+            or _pending_is_expired(run.deadline_at, now=now)
+            or run.input_digest != original_input_digest
+            or run.authority_digest != exact.get("authority_digest")
+            or _approval_expiry(run.deadline_at) != _approval_expiry(exact.get("deadline_at"))):
+            return None
+        operator = await authenticate_principal(owner_principal_id, db=db)
+        from src.security.trust_contract import AuthorityGrant
+        if (operator.session_id != operator_session_id
+            or AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants):
+            return None
+        await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+            goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+            owner_principal_id=owner_principal_id, session_id=operator_session_id,
+            authority=run.declared_authority_json)
+        await verify_current(db, run)
+        scope = {"workflow_run_identity": run.run_identity,
+            "goal_id": run.goal_id, "goal_revision": run.goal_revision}
+        updates = {"scope": scope, "general_task_step_id": exact["step_id"],
+            "general_task_wait_binding": exact}
+        # Repeated attachment is exact-only; approved data cannot be
+        # rebound to a different input, deadline, root or descriptor.
+        if any(key in details and details[key] != value for key, value in updates.items()):
+            return None
+        prior_details = request.details_json
+        details.update(updates)
+        mutation = await db.execute(update(ApprovalRequest).where(
+            ApprovalRequest.id == approval_id,
+            ApprovalRequest.status == request.status,
+            ApprovalRequest.fingerprint == request.fingerprint,
+            ApprovalRequest.resolved_at == request.resolved_at,
+            ApprovalRequest.details_json == prior_details if prior_details is not None
+            else ApprovalRequest.details_json.is_(None),
+        ).values(details_json=json.dumps(details, sort_keys=True))
+            .execution_options(synchronize_session=False))
+        if mutation.rowcount != 1:
+            return None
+        await db.refresh(request)
+        db.expunge(request)
+        return request
+
     async def get_or_create_pending(
         self,
         *,

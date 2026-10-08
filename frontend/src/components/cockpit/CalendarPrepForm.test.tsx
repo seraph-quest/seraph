@@ -48,6 +48,22 @@ describe("CalendarPrepForm", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+  it("extends the calendar window only with separate finite metadata sync acknowledgement", async () => {
+    fetchMock.mockResolvedValueOnce(response({ connections: [connection] }))
+      .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 10080, max_events: 20, sync_metadata_limit: 50, allow_remote_model: false, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: new Date().toISOString(), updated_at: new Date().toISOString() } }))
+      .mockResolvedValueOnce(response({ events: [], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: new Date().toISOString(), pages_read: 1, truncated: false }));
+    render(<CalendarPrepForm goals={[goal]} onCreated={vi.fn()} onClose={vi.fn()} />);
+    await screen.findByText("Work calendar · active · revision 2");
+    fireEvent.click(screen.getByRole("button", { name: "Verify calendars" })); await screen.findByRole("option", { name: "Work" });
+    const ack = screen.getByRole("checkbox", { name: /Also grant bounded metadata sync/ }); expect(ack).not.toBeChecked();
+    fireEvent.click(ack); fireEvent.change(screen.getByLabelText("Window minutes"), { target: { value: "10080" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create finite consent and read events" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    const body = JSON.parse(String(fetchMock.mock.calls[2][1].body));
+    expect(body.acknowledge_sync_metadata).toBe(true); expect(body.window_minutes).toBe(10080); expect(body.allow_remote_model).toBe(false);
+    expect(screen.getByRole("region", { name: "Calendar connected context sync" })).toBeInTheDocument();
+  });
 
   it("allows readonly event selection without model consent while meeting preparation stays blocked", async () => {
     fetchMock
@@ -71,27 +87,34 @@ describe("CalendarPrepForm", () => {
   it("walks the explicit verify, finite consent, event, and prep sequence", async () => {
     const onCreated = vi.fn();
     const selectedEventListRevision = "b".repeat(64);
+    const ref = { provider: "calendar", opaque_id: "a".repeat(64), revision: "b".repeat(64), content_digest: "c".repeat(64), privacy: "owner_private", expires_at: futureConsentExpiry() };
     fetchMock
       .mockResolvedValueOnce(response({ connections: [connection] }))
       .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
-      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, sync_metadata_limit: 50, allow_remote_model: true, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
       .mockResolvedValueOnce(response({ events: [{ event_binding_id: "binding-1", event_binding_revision: 3, event_key: digest, event_revision: digest, calendar_list_revision: selectedEventListRevision, summary: "Planning", start: "2026-09-30T12:00:00Z", end: "2026-09-30T13:00:00Z", location: "Room 1", description: null, attendees: null }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }))
+      .mockResolvedValueOnce(response({ connection_id: "connection-1", state: "ready", active_job_id: null, cursor_revision: 1, reservation_state: "available", external_effect_state: "none", unresolved_jobs: [], items: [ref], coverage: { partial: true, pages_read: 1 }, freshness: { expires_at: ref.expires_at }, selection: { goal_ref: { id: "goal-1", revision: 4 }, connection_ref: { id: "connection-1", revision: 2 }, source_scope: { provider: "calendar", consents: [{ id: "consent-1", revision: 1 }], label_ids: [], thread_keys: [] }, window: { start: new Date().toISOString(), end: ref.expires_at }, max_items: 50 } }))
       .mockResolvedValueOnce(response({ input_artifact: { artifact_id: "artifact-1", typed_input_ref: "workspace-json:artifacts/work-board/inputs/artifact-1.json", typed_input_digest: digest, capability_id: "calendar.meeting-prep.v1", goal_id: "goal-1", goal_revision: 4, expires_at: "2026-10-01T09:00:00Z" }, task: { task_id: "task-1", title: "Prepare meeting", goal_id: "goal-1", goal_revision: 4, input_artifact_id: "artifact-1", capability_id: "calendar.meeting-prep.v1" }, idempotent_replay: false }));
-    render(<CalendarPrepForm goals={[goal]} onCreated={onCreated} onClose={vi.fn()} />);
+    render(<CalendarPrepForm ownerPrincipalId="owner" ownerSessionId="session" goals={[goal]} onCreated={onCreated} onClose={vi.fn()} />);
     await screen.findByText("Work calendar · active · revision 2");
     fireEvent.click(screen.getByRole("button", { name: "Verify calendars" }));
     await screen.findByRole("option", { name: "Work" });
     fireEvent.click(screen.getByRole("checkbox", { name: /Allow the governed OpenRouter model/i }));
+    fireEvent.click(screen.getByLabelText(/Also grant bounded metadata sync/));
     fireEvent.click(screen.getByRole("button", { name: "Create finite consent and read events" }));
     await screen.findByText(/Consent consent-1/);
     await screen.findByRole("option", { name: /Planning/ });
     expect(String(fetchMock.mock.calls[3]?.[0])).toContain("/api/calendar/connections/connection-1/events?consent_id=consent-1");
     fireEvent.change(screen.getByLabelText("Event binding"), { target: { value: "binding-1" } });
+    fireEvent.click(await screen.findByLabelText(/Use local reference/));
+    fireEvent.click(screen.getByLabelText(/I acknowledge these exact references/));
     fireEvent.click(screen.getByRole("button", { name: "Prepare meeting" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
-    const prepCall = fetchMock.mock.calls[4];
+    const prepCall = fetchMock.mock.calls[5];
     const prepBody = JSON.parse(String((prepCall?.[1] as RequestInit).body));
     expect(prepBody).toMatchObject({ title: "Prepare for meeting", input: { consent_id: "consent-1", event_binding_id: "binding-1", goal_id: "goal-1", goal_revision: 4, calendar_list_revision: selectedEventListRevision, purpose: "bounded preparation request" } });
+    expect(prepBody.input.connected_sources).toEqual([{ connection_ref: { id: "connection-1", revision: 2 }, item_refs: [ref] }]);
+    expect(prepBody.input.acknowledge_connected_sources).toBe(true);
     expect(prepBody.input.calendar_id).toBeUndefined();
     expect(prepBody.input.event_key).toBeUndefined();
     expect(prepBody.input.idempotency_key).toBeUndefined();

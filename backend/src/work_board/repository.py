@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Literal
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -1427,6 +1427,19 @@ class WorkBoardRepository:
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
         return await self._owned_task(db, owner, task_id)
 
+    async def read_context_task(self, db, owner: WorkBoardOwner, task_id: str, operator=None):
+        """Resolve exact current or selected historical read scope; never execution."""
+        task = await self._find_task(db, task_id)
+        if operator is not None and task is not None and task.owner_session_id != owner.session_id:
+            from src.auth.ownership import selected_read_scopes
+            tasks = await selected_read_scopes(operator, "task", db=db)
+            goals = await selected_read_scopes(operator, "goal", db=db)
+            if tasks.get(task_id) == task.owner_session_id and goals.get(task.goal_id) == task.owner_session_id:
+                return task, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        task = await self.get_task(db, owner, task_id)
+        await self._validate_goal(db, owner, goal_id=task.goal_id, goal_revision=task.goal_revision)
+        return task, owner
+
     async def list_tasks(
         self,
         db: AsyncSession,
@@ -2298,7 +2311,12 @@ class WorkBoardRepository:
         owner: WorkBoardOwner,
         task_id: str,
         request: WorkBoardCommentCreate,
+        *,
+        provenance: Literal["operator", "worker", "system"] | None = None,
     ) -> tuple[WorkBoardComment, WorkBoardEvent]:
+        # Server-owned provenance; never accepted from a comment request body.
+        if provenance not in {None, "operator", "worker", "system"}:
+            raise ValueError("invalid comment provenance")
         task = await self._owned_task(db, owner, task_id)
         expected = request.expected_revision
         if task.task_revision != expected:
@@ -2326,7 +2344,8 @@ class WorkBoardRepository:
             task,
             owner,
             kind="comment.created",
-            metadata={"comment_id": comment.comment_id, "body_digest": _text_digest(safe_body)},
+            metadata={"comment_id": comment.comment_id, "body_digest": _text_digest(safe_body),
+                "provenance": provenance or "unknown"},
         )
         return comment, event
 
@@ -3490,6 +3509,7 @@ class WorkBoardRepository:
         actor_principal_id: str,
         actor_session_id: str,
         capability_id: str = "guardian-routine.v1",
+        _writer_held: bool = False,
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Reacquire the same suspended routine attempt after approval."""
@@ -3497,7 +3517,11 @@ class WorkBoardRepository:
         observed_at = now or _now()
         if int(next_fence) != int(previous_fence) + 1:
             raise BoardError("stale_fence", "Routine recovery must advance exactly one fence")
-        await _begin_sqlite_immediate(db)
+        if _writer_held:
+            if capability_id != "agent.task.v1" or not db.in_transaction():
+                raise BoardError("routine_wait_not_supported", "Native recovery requires its canonical writer")
+        else:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)

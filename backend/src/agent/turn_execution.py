@@ -126,6 +126,8 @@ async def validate_native_turn_owner(db, admission: NativeTurnAdmission) -> None
     if (conversation is None or conversation.owner_principal_id != ingress.principal_id
         or ingress.conversation_id != conversation.id or ingress.thread_id != conversation.id):
         raise NativeTurnBlocked("native_turn_conversation_owner_changed")
+    if conversation.continuity_task_id is not None:
+        raise NativeTurnBlocked("native_turn_continuity_context_unsupported")
     if admission.deadline_at <= now:
         raise NativeTurnBlocked("native_turn_original_deadline_expired")
     if _policy_digest() != admission.policy_config_digest:
@@ -177,6 +179,12 @@ async def native_turn_binding_available(admission):
             status = await inspect_invocation_availability(db, method="conversation.accept",
                 native_branch=admission.native_route,
                 reviewed_composition=admission.reviewed_composition)
+            from src.db.models import Session
+            conversation = await db.get(Session, admission.ingress.session_id)
+            # Existing Task-linked context is not part of the reviewed native closure.
+            # Inspect inventory first so damaged retained state never becomes fallback.
+            if conversation is not None and conversation.continuity_task_id is not None:
+                return False
     except CompositionBindingError as exc:
         raise NativeTurnBlocked(exc.reason_code) from exc
     if not status.available and status.reason_code != "composition_inventory_absent":

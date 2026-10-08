@@ -348,7 +348,10 @@ class _RoutineV2Input(BaseModel):
     invocation_uuid: str = Field(min_length=1, max_length=256)
 
 
-class CalendarMeetingPrepInput(BaseModel):
+from src.integrations.connected_source_contracts import ConnectedSourceTaskInput
+
+
+class CalendarMeetingPrepInput(ConnectedSourceTaskInput):
     """Strict, provider-identity-free input for one bounded prep task."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -420,7 +423,7 @@ class MailWatchInput(BaseModel):
     max_messages: int = Field(..., ge=1, le=10)
 
 
-class MailReplyDraftInput(BaseModel):
+class MailReplyDraftInput(ConnectedSourceTaskInput):
     """Server-produced, body-free input for one reviewed Mail reply draft."""
 
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
@@ -486,24 +489,28 @@ _AUTHORITY_INPUT_KEYS = frozenset(
 )
 
 
-def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
+def _reject_authority_input_keys(value: Any, *, path: str = "input", allow_connected_citations: bool = False) -> None:
     """Reject server-owned authority fields at every input nesting level."""
 
     if isinstance(value, Mapping):
         for key, child in value.items():
             normalized = str(key).strip().casefold().replace("-", "_")
-            if normalized in _AUTHORITY_INPUT_KEYS:
+            citation_expiry = allow_connected_citations and normalized == "expires_at" and re.fullmatch(r"input\.connected_sources\[[0-2]\]\.item_refs\[[0-9]\]", path) is not None
+            if normalized in _AUTHORITY_INPUT_KEYS and not citation_expiry:
                 raise TypedInputError(
                     "typed_input_authority_field",
                     f"{path} contains a server-owned authority field",
                 )
-            _reject_authority_input_keys(child, path=f"{path}.{normalized[:64]}")
+            _reject_authority_input_keys(child, path=f"{path}.{normalized[:64]}", allow_connected_citations=allow_connected_citations)
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value[:64]):
-            _reject_authority_input_keys(child, path=f"{path}[{index}]")
+            _reject_authority_input_keys(child, path=f"{path}[{index}]", allow_connected_citations=allow_connected_citations)
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "agent.task.v1":
+        from src.work_board.contracts import GeneralTaskEnvelope
+        return GeneralTaskEnvelope
     if capability_id == "inference.near-text.v1":
         from src.model_fabric.near_text_contracts import NearTextInput
         return NearTextInput
@@ -553,6 +560,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "agent.task.v1": CapabilitySpec("agent.task.v1", "1", secret_like=False),
     "inference.near-text.v1": CapabilitySpec("inference.near-text.v1", "1", secret_like=False),
     "memory.opportunity-preference.v1": CapabilitySpec("memory.opportunity-preference.v1", "1", secret_like=False),
     "work.context.selected_text.v1": CapabilitySpec(
@@ -662,7 +670,7 @@ def validate_capability_input(
         raise TypedInputError("typed_input_category_invalid", "the capability is not executable as a task")
     if not isinstance(raw, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must be an object")
-    _reject_authority_input_keys(raw)
+    _reject_authority_input_keys(raw, allow_connected_citations=normalized_capability in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     model_type = _typed_input_model(normalized_capability)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the capability input model is unavailable")
@@ -1476,7 +1484,7 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
     try:
-        _reject_authority_input_keys(raw_input)
+        _reject_authority_input_keys(raw_input, allow_connected_citations=capability_id in {"work.mail-reply-draft.v1", "calendar.meeting-prep.v1"})
     except TypedInputError as exc:
         # Preserve the legacy workspace-envelope contract.  Older callers and
         # their operator receipts intentionally expose one generic invalid
@@ -1542,6 +1550,8 @@ class WorkBoardDispatcher:
         session_provider: Any | None = None,
         now: Any = _now,
         runner_id: str = DISPATCHER_PRINCIPAL,
+        general_tasks: Any | None = None,
+        strategy_resolver: Any | None = None,
     ) -> None:
         self.repository = repository or WorkBoardRepository()
         self.jobs = jobs or durable_job_repository
@@ -1552,12 +1562,22 @@ class WorkBoardDispatcher:
         self.session_provider = session_provider or (lambda: get_session())
         self.now = now
         self.runner_id = runner_id
+        self.general_tasks = general_tasks
+        self.strategy_resolver = strategy_resolver
         self.runner_session = f"{runner_id}:session"
         # GoalSnapshot executes inline in the dispatcher.  Keep a server-side
         # handle so cancellation can stop that worker before the durable root
         # is reconciled; no client supplied identifier can reach this map.
         self._active_worker_tasks = _ACTIVE_WORKER_TASKS
         self._pipeline_recovery_after = None
+        self.connection_sync_runtime = None
+
+    async def _related_source_references(self, task, inputs, before_boundary, bindings):
+        from src.extensions.source_operations import collect_connected_task_references
+        return await collect_connected_task_references(self.connection_sync_runtime,
+            WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+            goal_id=task.goal_id, goal_revision=int(task.goal_revision),
+            selections=inputs.get("connected_sources"), before_boundary=before_boundary, bindings=bindings)
 
     async def _advance_linked_pipeline(self, task):
         from src.work_board import pipelines
@@ -4217,9 +4237,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
+        if (capability_id in {"agent.task.v1", "browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
+        if capability_id in {"agent.task.v1", "browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4310,6 +4330,17 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability == "agent.task.v1":
+                from src.work_board.contracts import GeneralTaskEnvelope
+                if self.general_tasks is None:
+                    return "general_task_inactive", "Restore the registered task service"
+                envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
+                if envelope.task_input.goal_ref != task.goal_id:
+                    return "general_task_goal_binding_changed", "Task intent belongs to a different goal"
+                async with self.session_provider() as db:
+                    await self.general_tasks.recheck_authority(db,
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), envelope)
+                return None, None
             if capability == "work.document-compare.v1":
                 from src.work_board.document_pairs import source_pair
                 async with self.session_provider() as db:
@@ -4322,6 +4353,7 @@ class WorkBoardDispatcher:
                 inspect_runtime(runtime_root())
                 return None, None
             if capability == "work.research-dossier.v1":
+                await self._research_strategy(task)
                 from src.workflows.research_provider import _target
                 from src.model_fabric.caller_context import build_canonical_inference_context
                 from src.llm_runtime import _governed_preflight_target_async
@@ -4700,7 +4732,7 @@ class WorkBoardDispatcher:
         *,
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
     ) -> tuple[DurableJobSpec, dict[str, Any], str, str, int]:
-        if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) not in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
             raise TypedInputError(
                 "adapter_root_owned_by_capability",
                 "Only GoalSnapshot uses the work-board wrapper root",
@@ -4716,12 +4748,16 @@ class WorkBoardDispatcher:
             )
         inputs = _parse_typed_input(task)
         runtime_seconds = max(1, min(runtime_seconds, MAX_RUNTIME_SECONDS))
+        if task.capability_id == "agent.task.v1":
+            runtime_seconds = min(runtime_seconds, inputs["task_input"]["limits"]["wall_seconds"])
         job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
-        owner_principal = DISPATCHER_PRINCIPAL
-        service_id = DISPATCHER_SERVICE
+        general = task.capability_id == "agent.task.v1"
+        owner_principal = task.owner_principal_id if general else DISPATCHER_PRINCIPAL
+        owner_kind = "user" if general else "service"
+        service_id = None if general else DISPATCHER_SERVICE
         declared_authority = {
             "principal": owner_principal,
-            "owner_kind": "service",
+            "owner_kind": owner_kind,
             "service_id": service_id,
             "session_id": task.owner_session_id,
             "goal_owner_principal_id": task.owner_principal_id,
@@ -4732,7 +4768,7 @@ class WorkBoardDispatcher:
             "budget_microusd": 0,
             "limits": {
                 "runtime_seconds": runtime_seconds,
-                "max_attempts": MAX_ATTEMPTS_PER_TASK,
+                "max_attempts": 1 if general else MAX_ATTEMPTS_PER_TASK,
             },
         }
         safe_inputs = {
@@ -4748,10 +4784,12 @@ class WorkBoardDispatcher:
             safe_inputs["parent_handoff_context"] = parent_handoffs
             safe_inputs["parent_handoff_digest"] = _text(attempt.parent_handoff_digest)
         deadline = self.now() + timedelta(seconds=runtime_seconds)
+        if general:
+            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
                 job_id=job_id,
-                owner_kind="service",
+                owner_kind=owner_kind,
                 owner_principal_id=owner_principal,
                 job_kind=_text(task.capability_id),
                 capability_version=REGISTERED_CAPABILITIES[_text(task.capability_id)].version,
@@ -4795,7 +4833,7 @@ class WorkBoardDispatcher:
                 max_outstanding_jobs=max_outstanding_jobs,
                 browser_lane=browser_lane,
             )
-        if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) not in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
             try:
                 inputs = _parse_typed_input(task)
                 return await self._admit_execute_direct(claim, inputs, runtime_seconds=runtime_seconds)
@@ -4913,6 +4951,11 @@ class WorkBoardDispatcher:
                 parent_fence=parent_fence,
                 runtime_seconds=runtime_seconds,
             )
+            if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
+                projection = await self.jobs.get_job(job_id)
+                await self._pause_general_task(task, attempt, projection)
+                result["blocked"] = True
+                return result
             await self._settle_parent(
                 job_id,
                 parent_runtime_owner,
@@ -5677,11 +5720,16 @@ class WorkBoardDispatcher:
         from src.workflows.research_native import checkpoint
         from src.work_board.research_artifacts import read
         task, attempt = claim.task, claim.attempt
+        strategy = await self._research_strategy(task)
         inputs = _parse_typed_input(task)
         # The immutable original Board attempt bounds first admission and
         # recovery. A later pass cannot grant another execution window.
         deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
         spec = spec_for(task, attempt, inputs, deadline=deadline)
+        # The resolver is an optional current-owner dependency. Its absence
+        # records baseline behavior and creates no task-method import or grant.
+        spec = replace(spec, declared_authority={**spec.declared_authority,
+            "task_strategy_binding": strategy.model_dump(mode="json")})
         projection = await self.jobs.admit_job(spec)
         expected = expected_identity(task, attempt, spec)
         async with self.session_provider() as db:
@@ -5720,6 +5768,21 @@ class WorkBoardDispatcher:
             return {"admitted": True, "completed": False, "blocked": True}
         finally:
             self._active_worker_tasks.pop(key, None)
+
+    async def _research_strategy(self, task):
+        from src.work_board.contracts import TaskStrategyBinding
+        import inspect
+        binding = TaskStrategyBinding(status="none", reason="baseline")
+        if self.strategy_resolver is not None:
+            binding = self.strategy_resolver.resolve(WorkBoardOwner(
+                principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+                task.goal_id, "work.research-dossier.v1")
+            if inspect.isawaitable(binding):
+                binding = await binding
+            binding = TaskStrategyBinding.model_validate(binding)
+        if binding.status == "blocked":
+            raise BoardError("task_strategy_blocked", binding.reason, status_code=409)
+        return binding
 
     async def _admit_execute_direct(
         self,
@@ -7481,6 +7544,15 @@ class WorkBoardDispatcher:
                         raise GmailReadError("mail_message_not_found", "The selected Mail message is unavailable", status_code=409, recovery_action="rescan_messages") from exc
                 return connection, consent, binding, provider_message_id, lease
 
+            original_current_context = current_context
+            related_sources = None
+            related_bindings = []
+            async def current_context():
+                nonlocal related_sources
+                value = await original_current_context()
+                related_sources = await self._related_source_references(task, inputs, original_current_context, related_bindings)
+                return value
+
             connection, consent, binding, provider_message_id, _lease = await current_context()
             adapter = GoogleGmailReadonlyAdapter(
                 connection,
@@ -7504,6 +7576,7 @@ class WorkBoardDispatcher:
 
             async def model_call() -> Any:
                 nonlocal effective_route
+                await current_context()
                 from src.approval.runtime import reset_runtime_context, set_runtime_context
                 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
                 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -7634,6 +7707,7 @@ class WorkBoardDispatcher:
                 "caveats": list(draft.caveats),
                 "memory_status": "no_learning",
                 "source_body_digest": second_body_digest,
+                **({"related_sources": related_sources} if related_sources else {}),
                 "effective_route": effective_route or {},
             }
             artifact_relative, artifact_sha256, encrypted = prepare_private_draft(job_id, private_payload)
@@ -7668,6 +7742,7 @@ class WorkBoardDispatcher:
             # publication look like a stale worker and leave the private file
             # unreconciled.
             expected_revision = int(latest.get("revision") or 0)
+            await current_context()
             publish_private_draft(artifact_relative, encrypted)
             artifact_receipt = await self.jobs.record_artifact(job_id, file_path=artifact_relative, artifact_type="mail_reply_draft", owner=lease_owner, fencing_token=fence, expected_revision=expected_revision)
             latest = artifact_receipt
@@ -7675,7 +7750,11 @@ class WorkBoardDispatcher:
             readback_id = f"mail-reply-readback:{uuid.uuid4().hex}"
             readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="mail_reply_draft", target_digest=artifact_sha256, content_sha256=artifact_sha256, readback_id=readback_id, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
             latest = readback
-            await self.jobs.transition_job(job_id, "succeeded", owner=lease_owner, fencing_token=fence, expected_state="running", expected_revision=int(latest.get("revision") or 0), result={"artifact_type": "mail_reply_draft", "artifact_sha256": artifact_sha256, "message_revision": second.metadata.message_revision, "memory_status": "no_learning"}, result_summary="Private Mail reply draft verified", reason=None)
+            await current_context()
+            async def assert_related_terminal(db, run):
+                if related_bindings:
+                    await self.connection_sync_runtime.assert_task_bindings(db, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), related_bindings)
+            await self.jobs.transition_job(job_id, "succeeded", terminal_authority_check=assert_related_terminal, owner=lease_owner, fencing_token=fence, expected_state="running", expected_revision=int(latest.get("revision") or 0), result={"artifact_type": "mail_reply_draft", "artifact_sha256": artifact_sha256, "message_revision": second.metadata.message_revision, "memory_status": "no_learning"}, result_summary="Private Mail reply draft verified", reason=None)
             finished = await self.jobs.get_job(job_id) or latest
             return {"job_id": job_id, "status": "succeeded", "artifact_refs": finished.get("artifacts", []), "readback": readback, "effective_route": effective_route or {}, "memory_status": "no_learning", "admission_only": False}
         if capability_id == "calendar.meeting-prep.v1":
@@ -7684,6 +7763,7 @@ class WorkBoardDispatcher:
                 GoogleCalendarReadonlyAdapter,
                 MeetingPrepService,
                 calendar_authority,
+                digest as calendar_digest,
                 calendar_artifact_path_for_job,
                 calendar_input_digest,
                 calendar_input_payload,
@@ -7729,6 +7809,8 @@ class WorkBoardDispatcher:
                     recovery_action="reconcile_admission_binding",
                 )
             authority = calendar_authority(task=task, attempt=attempt)
+            if inputs.get("connected_sources"):
+                authority["connected_sources_digest"] = calendar_digest(inputs["connected_sources"])
             if procedure_binding is not None:
                 authority.update(
                     {
@@ -7750,6 +7832,8 @@ class WorkBoardDispatcher:
                 )
             def expected_calendar_authority() -> dict[str, Any]:
                 expected = calendar_authority(task=task, attempt=attempt)
+                if inputs.get("connected_sources"):
+                    expected["connected_sources_digest"] = calendar_digest(inputs["connected_sources"])
                 if procedure_binding is not None:
                     expected.update(
                         {
@@ -8173,6 +8257,15 @@ class WorkBoardDispatcher:
                         ):
                         raise_calendar_guard_error("Calendar authorization or event binding changed")
 
+            original_assert_calendar_current = assert_calendar_current
+            related_sources = None
+            related_bindings = []
+            async def assert_calendar_current():
+                nonlocal related_sources
+                await original_assert_calendar_current()
+                related_sources = await self._related_source_references(task, inputs, original_assert_calendar_current, related_bindings)
+            await assert_calendar_current()
+
             adapter = GoogleCalendarReadonlyAdapter(
                 connection,
                 owner_principal_id=task.owner_principal_id,
@@ -8184,6 +8277,7 @@ class WorkBoardDispatcher:
 
             async def model_call(event_payload: dict[str, Any]) -> Any:
                 nonlocal effective_route
+                await assert_calendar_current()
                 from src.approval.runtime import reset_runtime_context, set_runtime_context
                 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
                 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -8374,7 +8468,8 @@ class WorkBoardDispatcher:
                 model_call=model_call,
             )
             await assert_calendar_current()
-            output = json.dumps(result["output"], ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            local_output = {**result["output"], **({"related_sources": related_sources} if related_sources else {})}
+            output = json.dumps(local_output, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
             artifact_relative = calendar_artifact_path_for_job(job_id)
             write_calendar_result_bytes(artifact_relative, output.encode("utf-8"), workspace_root=settings.workspace_dir)
             verified_bytes = read_calendar_result_bytes(artifact_relative, workspace_root=settings.workspace_dir)
@@ -8679,6 +8774,8 @@ class WorkBoardDispatcher:
                 ):
                     reject()
 
+                if related_bindings:
+                    await self.connection_sync_runtime.assert_task_bindings(terminal_db, WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), related_bindings)
                 persisted_receipt = await terminal_db.get(CalendarPrepReceipt, receipt_id)
                 if (
                     persisted_receipt is None
@@ -9276,9 +9373,12 @@ class WorkBoardDispatcher:
             from src.work_board.pipeline_cpu import spec_for
             return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
         if _text(task.capability_id) == "calendar.meeting-prep.v1":
-            from src.integrations.google_calendar import calendar_authority_digest
+            from src.integrations.google_calendar import calendar_authority, digest
 
-            return calendar_authority_digest(task=task, attempt=attempt)
+            authority = calendar_authority(task=task, attempt=attempt)
+            if inputs.get("connected_sources"):
+                authority["connected_sources_digest"] = digest(inputs["connected_sources"])
+            return digest(authority)
         if _text(task.capability_id) == "engineering.repo-repair.v1":
             return _safe_digest(
                 WorkBoardDispatcher._repo_repair_authority_payload(
@@ -9908,6 +10008,17 @@ class WorkBoardDispatcher:
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
     ) -> dict[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "agent.task.v1":
+            from src.work_board.contracts import GeneralTaskEnvelope
+            if self.general_tasks is None:
+                return {"verified": False, "reason": "general_task_inactive"}
+            operator = await authenticate_session(task.owner_session_id, touch=False)
+            if operator.principal.principal_id != task.owner_principal_id:
+                raise DurableJobError("general_task_owner_changed")
+            envelope = GeneralTaskEnvelope.model_validate(dict(inputs))
+            return await self.general_tasks.execute(self.jobs, job_id=job_id,
+                owner=parent_runtime_owner, fence=parent_fence, envelope=envelope,
+                principal=operator.principal)
         if capability_id != GOAL_SNAPSHOT_CAPABILITY:
             return {
                 "verified": False,
@@ -10198,6 +10309,83 @@ class WorkBoardDispatcher:
         except Exception as exc:
             logger.info("automatic task lesson unavailable for %s: %s", projected.task.task_id, type(exc).__name__)
         return projected
+
+    async def _pause_general_task(self, task, attempt, projection):
+        if projection.get("status") != "paused" or projection.get("failure_reason") != "general_task_approval_required":
+            raise BoardError("general_task_resume_binding_changed", "Exact native approval pause is required", status_code=409)
+        async with self.session_provider() as db:
+            # Native approval publication already committed the joint wait.
+            # Read it back without applying the stale pre-publication revision.
+            from src.work_board.repository import BoardAttemptProjection
+            current_task = await db.scalar(select(WorkBoardTask).where(
+                WorkBoardTask.task_id == task.task_id))
+            current_attempt = await db.get(WorkBoardAttempt, attempt.attempt_id)
+            if (current_task is not None and current_attempt is not None
+                and current_task.status is WorkBoardStatus.blocked
+                and current_task.block_reason == "awaiting_approval"
+                and current_task.task_revision == task.task_revision + 1
+                and current_task.owner_principal_id == task.owner_principal_id
+                and current_task.owner_session_id == task.owner_session_id
+                and current_task.typed_input_digest == task.typed_input_digest
+                and current_task.goal_id == task.goal_id and current_task.goal_revision == task.goal_revision
+                and current_attempt.task_id == task.task_id
+                and current_attempt.workflow_run_id == projection.get("job_id") == attempt.workflow_run_id
+                and current_attempt.fencing_token == attempt.fencing_token == (projection.get("lease") or {}).get("fencing_token")
+                and current_attempt.ended_at is None and current_attempt.cancel_requested_at is None
+                and current_attempt.lease_owner is None and current_attempt.lease_expires_at is None):
+                return BoardAttemptProjection(current_task, current_attempt, None)
+            return await self.repository.pause_routine_attempt_for_operator(db,
+                task.task_id, attempt.attempt_id, expected_revision=task.task_revision,
+                board_fence=attempt.fencing_token, lease_owner=attempt.lease_owner,
+                workflow_run_id=attempt.workflow_run_id,
+                durable_fence=int((projection.get("lease") or {}).get("fencing_token") or 0),
+                reason="awaiting_approval", actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session, capability_id="agent.task.v1")
+
+    async def resume_general_task(self, owner, task_id, request):
+        from src.work_board.general_task_approval import prepare_resume_witness
+        if self.general_tasks is None:
+            raise BoardError("general_task_inactive", "Restore the task service", status_code=503)
+        projection = await self.jobs.get_job(request.workflow_run_id)
+        async with self.session_provider() as db:
+            witness = await prepare_resume_witness(self.general_tasks, db, owner, task_id,
+                request, projection, runner_id=self.runner_id)
+        # This owner CAS also reacquires the same board attempt inside one
+        # serialized transaction, without consuming the tool's approval row.
+        queued = await self.jobs.transition_job(request.workflow_run_id, "queued",
+            expected_state="paused", expected_revision=request.workflow_revision,
+            expected_fencing_token=request.fencing_token,
+            reason="general_task_operator_resumed", _general_task_resume_witness=witness)
+        async with self.session_provider() as db:
+            task = await self.repository.get_task(db, owner, task_id)
+            attempt = await db.get(WorkBoardAttempt, request.attempt_id)
+        claimed = await self.jobs.claim_job(request.workflow_run_id,
+            owner=f"{self.runner_id}:{attempt.attempt_id}",
+            lease_seconds=await self._effective_runtime(task), expected_state="queued",
+            expected_revision=queued["revision"], expected_fencing_token=request.fencing_token,
+            continue_existing_attempt=True)
+        parent_owner, parent_fence = _lease(claimed)
+        if parent_fence != attempt.fencing_token:
+            raise BoardError("stale_fence", "Original native attempt fence changed", status_code=409)
+        claim = BoardDispatchClaim(task, attempt, None)
+        try:
+            outcome = await self._execute_registered(task, attempt, _parse_typed_input(task),
+                job_id=request.workflow_run_id, parent_runtime_owner=parent_owner,
+                parent_fence=parent_fence, runtime_seconds=await self._effective_runtime(task))
+            projection = await self.jobs.get_job(request.workflow_run_id)
+            if outcome.get("awaiting_approval"):
+                return (await self._pause_general_task(task, attempt, projection)).task
+            await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
+            projection = await self.jobs.get_job(request.workflow_run_id)
+            proof = self._workflow_readback(projection, request.workflow_run_id)
+            if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:
+                raise DurableJobError("general_task_readback_missing")
+            return (await self._project(task, attempt, board_revision=task.task_revision,
+                status=WorkBoardStatus.review, outcome="verified", proof=proof,
+                result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))).task
+        except Exception:
+            await self._reconcile_linked_failure(claim, request.workflow_run_id)
+            raise BoardError("general_task_continuation_blocked", "Read the exact original task recovery state", status_code=409)
 
     async def _pause_routine_for_operator(
         self,
@@ -10779,6 +10967,12 @@ class WorkBoardDispatcher:
                 status = _status(projection)
                 effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
                 accounting_resume = False
+                if (task.capability_id == "agent.task.v1" and status == "paused"
+                    and projection.get("failure_reason") == "general_task_approval_required"):
+                    if task.status is WorkBoardStatus.running:
+                        await self._pause_general_task(task, attempt, projection)
+                    recovered.append(job_id)
+                    continue
                 if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
                     resume_check = getattr(self.jobs, "inference_precontact_resume_allowed", None)
                     accounting_resume = bool(resume_check is not None and await resume_check(job_id))
@@ -10874,13 +11068,15 @@ class WorkBoardDispatcher:
                     and status == "queued"
                     and _repair_approval_resume_recovery_ready(projection)
                 )
-                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume):
+                native_continuation = (task.capability_id == "agent.task.v1" and status == "queued"
+                    and attempt.outcome == "operator_recovery_running")
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume or native_continuation):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
                     # other services own their existing approval/recovery
                     # routes and are invoked only through the exact binding.
-                    if _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
+                    if _text(task.capability_id) in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
                         if status == "accepted":
                             projection = await self.jobs.queue_job(
                                 job_id,
@@ -10894,9 +11090,12 @@ class WorkBoardDispatcher:
                                 expected_state="queued",
                                 expected_revision=projection.get("revision"),
                                 expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"),
+                                continue_existing_attempt=native_continuation,
                             )
                         parent_owner, parent_fence = _lease(projection)
                         if parent_owner is None or parent_fence is None:
+                            raise DurableJobError("stale_workflow_fence")
+                        if task.capability_id == "agent.task.v1" and parent_fence != attempt.fencing_token:
                             raise DurableJobError("stale_workflow_fence")
                         outcome = await self._execute_registered(
                             task,
@@ -10907,6 +11106,10 @@ class WorkBoardDispatcher:
                             parent_fence=parent_fence,
                             runtime_seconds=await self._effective_runtime(task),
                         )
+                        if task.capability_id == "agent.task.v1" and outcome.get("awaiting_approval"):
+                            await self._pause_general_task(task, attempt, await self.jobs.get_job(job_id))
+                            recovered.append(job_id)
+                            continue
                         await self._settle_parent(job_id, parent_owner, parent_fence, outcome)
                         projection = await self.jobs.get_job(job_id) or projection
                     elif _text(task.capability_id) == "engineering.repo-repair.v1":
@@ -11323,6 +11526,10 @@ class WorkBoardDispatcher:
             if _text(effect.get("effect_type")) == "workflow_output":
                 continue
             details = effect.get("details") if isinstance(effect.get("details"), Mapping) else {}
+            if details.get("never_contacted") is True:
+                # Positive absence closes its call intent; it cannot prove
+                # the task's intended output or authorize Review/Done.
+                continue
             # Fixed GitHub recovery also appends observation-only receipts.
             # Their private artifact digest is not the canonical semantic
             # effect proof used by the protected adoption receipt. Select the

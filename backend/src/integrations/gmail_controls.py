@@ -237,10 +237,12 @@ def _open_parent(relative_path: str, *, create: bool) -> int | None:
 
 def _prepare_artifact(job_id: str, payload: Mapping[str, Any]) -> tuple[str, bytes, str]:
     plain = json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if not 0 < len(plain) <= 16 * 1024:
+    is_sync_page = payload.get("schema") == "connection-sync-page-v1"
+    maximum = 256 * 1024 if is_sync_page else 16 * 1024
+    if not 0 < len(plain) <= maximum:
         raise OSError("mail source result exceeds the bounded artifact limit")
     encrypted = encrypt(plain.decode("utf-8")).encode("utf-8")
-    if len(encrypted) > 96 * 1024:
+    if len(encrypted) > (384 * 1024 if is_sync_page else 96 * 1024):
         raise OSError("mail source result exceeds the bounded encrypted artifact limit")
     path = _artifact_path(job_id)
     return path, encrypted, hashlib.sha256(encrypted).hexdigest()
@@ -291,7 +293,7 @@ def _write_artifact(job_id: str, payload: Mapping[str, Any]) -> tuple[str, bytes
     return path, encrypted, encrypted_sha
 
 
-def _read_artifact(job_id: str, expected_sha256: str | None = None) -> dict[str, Any] | None:
+def _read_artifact(job_id: str, expected_sha256: str | None = None, *, max_encrypted_bytes: int = 96 * 1024) -> dict[str, Any] | None:
     path = _artifact_path(job_id)
     parent = _open_parent(path, create=False)
     if parent is None:
@@ -300,11 +302,11 @@ def _read_artifact(job_id: str, expected_sha256: str | None = None) -> dict[str,
     try:
         descriptor = os.open(PurePosixPath(path).name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 96 * 1024:
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > max_encrypted_bytes:
             return None
-        encrypted = os.read(descriptor, 96 * 1024 + 1)
+        encrypted = os.read(descriptor, max_encrypted_bytes + 1)
         after = os.fstat(descriptor)
-        if len(encrypted) > 96 * 1024 or before.st_size != after.st_size or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        if len(encrypted) > max_encrypted_bytes or before.st_size != after.st_size or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             return None
         if expected_sha256 and hashlib.sha256(encrypted).hexdigest() != expected_sha256:
             return None

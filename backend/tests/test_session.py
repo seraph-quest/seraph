@@ -509,18 +509,26 @@ class TestSearchSessions:
 
 
 class TestRecentSessionSummary:
-    async def test_orders_by_conversation_recency_not_todo_mutation(self, async_db, sm):
-        await sm.get_or_create("stale")
+    async def test_orders_by_conversation_recency_not_todo_mutation(self, async_db, sm, monkeypatch):
+        from config.settings import settings
+        monkeypatch.setattr(settings, "operator_auth_secret", "disposable-owned-chat-test-secret")
+        from src.auth.service import bind_operator_principal, create_session
+        _, operator = await create_session()
+        principal = bind_operator_principal(operator, "current")
+        metadata = json.dumps({"lineage": {"owner_principal_id": principal.principal_id,
+            "operator_session_id": operator.session_id}})
+        await sm.get_or_create("current", owner_principal_id=principal.principal_id)
+        await sm.get_or_create("stale", owner_principal_id=principal.principal_id)
         await sm.update_title("stale", "Older thread")
-        await sm.add_message("stale", "assistant", "Older conversation")
+        await sm.add_message("stale", "assistant", "Older conversation", metadata_json=metadata)
 
-        await sm.get_or_create("fresh")
+        await sm.get_or_create("fresh", owner_principal_id=principal.principal_id)
         await sm.update_title("fresh", "Newer thread")
-        await sm.add_message("fresh", "assistant", "Newer conversation")
+        await sm.add_message("fresh", "assistant", "Newer conversation", metadata_json=metadata)
 
         await sm.replace_todos("stale", [{"content": "Unrelated checklist", "completed": False}])
 
-        summary = await sm.get_recent_sessions_summary(limit_sessions=2)
+        summary = await sm.get_recent_sessions_summary(limit_sessions=2, exclude_session_id="current", trust_principal=principal)
 
         assert summary.splitlines()[0].startswith("- Newer thread:")
         assert summary.splitlines()[1].startswith("- Older thread:")

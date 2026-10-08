@@ -176,6 +176,8 @@ class Session(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     owner_principal_id: Optional[str] = Field(default=None, index=True)
+    # Read continuity only: a new chat never renews the task's authority.
+    continuity_task_id: Optional[str] = Field(default=None, foreign_key="work_board_tasks.task_id", index=True)
     title: str = Field(default="New Conversation")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -396,6 +398,12 @@ class GoogleServiceConnection(SQLModel, table=True):
     # connection keeps only its opaque root identity for owner-bound lookup;
     # no idempotency key or response payload is cached on this row.
     verified_setup_job_id: Optional[str] = Field(default=None, index=True)
+    # Mirror of the canonical durable sync root, never a lease or credential.
+    sync_active_job_id: Optional[str] = Field(default=None)
+    sync_scope_digest: str = Field(default="")
+    sync_cursor_job_id: Optional[str] = Field(default=None)
+    sync_cursor_page: int = Field(default=0)
+    sync_cursor_revision: int = Field(default=0)
     revoke_idempotency_key: Optional[str] = Field(default=None, index=True, max_length=256)
     revoke_request_digest: Optional[str] = Field(default=None, index=True, max_length=128)
     created_at: datetime = Field(default_factory=_now, index=True)
@@ -438,6 +446,7 @@ class CalendarReadConsent(SQLModel, table=True):
     allowed_fields_json: str = Field(default="[]")
     window_minutes: int = Field(default=60)
     max_events: int = Field(default=10)
+    sync_metadata_limit: int = Field(default=0)
     allow_remote_model: bool = Field(default=False)
     expires_at: datetime = Field(index=True)
     state: str = Field(default="active", index=True)
@@ -572,6 +581,7 @@ class MailReadConsent(SQLModel, table=True):
     label_ids_json: str = Field(default="[]")
     window_days: int = Field(default=7, index=True)
     max_messages: int = Field(default=10, index=True)
+    sync_metadata_limit: int = Field(default=0)
     source_read_allowed: bool = Field(default=True, index=True)
     source_revision: int = Field(default=1, index=True)
     source_digest: str = Field(default="", index=True, max_length=128)

@@ -340,7 +340,8 @@ def _retain_composition_in_transaction(source, destination, *, workspace, source
     writer. Missing native extensions/private bytes remain a hard block.
     """
     from src.workspace.accounting_witness import (composition_closure, native_composition_files,
-        RETAINED_FIELDS, COMPOSITION_KEYS, composition_row_digest, _composition_row)
+        RETAINED_FIELDS, COMPOSITION_KEYS, composition_row_digest, _composition_row,
+        validate_retained_table_schema)
     from src.workspace.production import (read_lifecycle_receipt, read_accounting_checkpoint,
         write_accounting_checkpoint, write_lifecycle_receipt, ProductionWorkspaceReconciliationError)
     source_witness, members = composition_closure(source,
@@ -372,9 +373,16 @@ def _retain_composition_in_transaction(source, destination, *, workspace, source
         if table not in target_tables:
             ddl = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
             destination.execute(ddl)
-        columns = {row[1] for row in destination.execute(f'PRAGMA table_info("{table}")')}
-        if columns != set(fields):
-            raise ProductionWorkspaceReconciliationError("composition_restore_schema_unavailable")
+            if table == "sessions":
+                index = source.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='ix_sessions_continuity_task_id'").fetchone()
+                if index is not None:
+                    destination.execute(index[0])
+        validate_retained_table_schema(destination, table, error="composition_restore_schema_unavailable")
+    # Check selected destination Sessions even when no destination inventory yet
+    # exists; otherwise their unretained task link could survive a row update.
+    for table, key in members:
+        if table == "sessions" and destination.execute('SELECT 1 FROM sessions WHERE id=?', (key,)).fetchone():
+            _composition_row(destination, table, key)
     destination_witness, destination_members = composition_closure(destination,
         verify_files=lambda table, row: native_composition_files(table, row, root=target_root))
     if destination_members - members:
@@ -388,17 +396,45 @@ def _retain_composition_in_transaction(source, destination, *, workspace, source
                 raise ProductionWorkspaceReconciliationError("composition_restore_high_water_conflict")
     neutral = account or {"deployment_id": source_witness["inventory_digest"], "revision": 0}
     retained = []
+    planned = []
+    recovery_rows = []
+    from src.runtime_plugins.ownership import checked_recovery_proof, restored_recovery_reference
+    from uuid import uuid5, NAMESPACE_URL
+    restored_at = datetime.now(timezone.utc).isoformat(sep=" ").replace("+00:00", "")
     for table, key in sorted(members):
         values = _composition_row(source, table, key)
         key_field = COMPOSITION_KEYS[table]
         existing = destination.execute(f'SELECT * FROM "{table}" WHERE "{key_field}"=?', (key,)).fetchone()
-        prior = dict(existing) if existing is not None else None
+        prior = {field: existing[field] for field in RETAINED_FIELDS[table]} if existing is not None else None
         if table == "workflow_run_states":
             values = _retained_job_values(values, prior, neutral)
         elif table == "runtime_composition_states":
-            from src.runtime_plugins.ownership import restored_recovery_reference
-            values = {**values, "state": "blocked", "recovery_receipt_ref": restored_recovery_reference(
-                source_witness["closure_digest"], values["recovery_receipt_ref"])}
+            if values["epoch"] >= 2**63 - 1:
+                raise ProductionWorkspaceReconciliationError("composition_restore_epoch_exhausted")
+            old_owner = {field: values[field] for field in RETAINED_FIELDS[table][:4]}
+            new_owner = {**old_owner, "epoch": values["epoch"] + 1}
+            proof = {"schema_version": 1, "runtime_domain": key, "prior": old_owner,
+                "target": new_owner, "state": "blocked", "phase": "awaiting_boot",
+                "prior_recovery_receipt_ref": values["recovery_receipt_ref"]}
+            details = json.dumps(proof, sort_keys=True, separators=(",", ":"))
+            checked_recovery_proof("runtime_composition_recovery", details)
+            recovery_id = uuid5(NAMESPACE_URL, "seraph-stopped-composition-restore-v1:" +
+                source_witness["closure_digest"] + ":" + json.dumps(new_owner, sort_keys=True, separators=(",", ":"))).hex
+            recovery = {"id": recovery_id, "session_id": None, "actor": "managed_maintenance",
+                "event_type": "runtime_composition_recovery", "tool_name": None,
+                "risk_level": "low", "policy_mode": "full",
+                "summary": "Stopped restoration invalidated prior owner authority.",
+                "details_json": details, "created_at": restored_at}
+            if source.execute('SELECT 1 FROM audit_events WHERE id=?', (recovery_id,)).fetchone() is not None:
+                raise ProductionWorkspaceReconciliationError("composition_restore_recovery_collision")
+            collision = destination.execute('SELECT * FROM audit_events WHERE id=?', (recovery_id,)).fetchone()
+            if collision is not None:
+                if {field: collision[field] for field in RETAINED_FIELDS["audit_events"]} != recovery:
+                    raise ProductionWorkspaceReconciliationError("composition_restore_recovery_collision")
+            else:
+                recovery_rows.append(("audit_events", recovery_id, None, recovery))
+            values = {**values, **new_owner, "state": "blocked",
+                "recovery_receipt_ref": restored_recovery_reference(source_witness["closure_digest"], recovery_id)}
         elif table == "work_board_attempts":
             source_fence = values["fencing_token"]
             values = {**values, "lease_owner": None, "lease_expires_at": None,
@@ -411,26 +447,30 @@ def _retain_composition_in_transaction(source, destination, *, workspace, source
             values.update(workflow_phase="blocked", safe_replay_decision="unsafe",
                           blocked_replay_reason="workspace_restore_requires_reconciliation")
         if prior != values:
-            if len(retained) >= 128:
-                raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
-            retained.append({"table_id": table, "key": key,
-                "before_digest": composition_row_digest(table, key, prior) if prior is not None else None,
-                "after_digest": composition_row_digest(table, key, values)})
-            if prior is None:
-                names = ",".join('"' + field + '"' for field in values)
-                destination.execute(f'INSERT INTO "{table}" ({names}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
-            else:
-                names = ",".join('"' + field + '"=?' for field in values if field != key_field)
-                destination.execute(f'UPDATE "{table}" SET {names} WHERE "{key_field}"=?',
-                    (*[value for field, value in values.items() if field != key_field], key))
+            planned.append((table, key, prior, values))
+    operations = checkpoint.get("operations", []) if checkpoint and checkpoint.get("schema_version") == 2 else []
+    planned = recovery_rows + planned
+    if len(operations) + len(planned) > 128:
+        raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+    # Validate the complete actual delta before the first retained row changes.
+    for table, key, prior, values in planned:
+        retained.append({"table_id": table, "key": key,
+            "before_digest": composition_row_digest(table, key, prior) if prior is not None else None,
+            "after_digest": composition_row_digest(table, key, values)})
+    for table, key, prior, values in planned:
+        key_field = COMPOSITION_KEYS[table]
+        if prior is None:
+            names = ",".join('"' + field + '"' for field in values)
+            destination.execute(f'INSERT INTO "{table}" ({names}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
+        else:
+            names = ",".join('"' + field + '"=?' for field in values if field != key_field)
+            destination.execute(f'UPDATE "{table}" SET {names} WHERE "{key_field}"=?',
+                (*[value for field, value in values.items() if field != key_field], key))
     target_witness, _ = composition_closure(destination,
         verify_files=lambda table, row: native_composition_files(table, row, root=target_root))
     # Source deployment receipt stays its latest stopped generation. The
     # target witness travels in the already-existing shared checkpoint and
     # only becomes the promoted receipt during native root reconciliation.
-    operations = checkpoint.get("operations", []) if checkpoint and checkpoint.get("schema_version") == 2 else []
-    if len(operations) + len(retained) > 128:
-        raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
     write_accounting_checkpoint(workspace, {**(checkpoint or {}), "schema_version": 2,
         "composition_base": source_witness, "composition_target": target_witness,
         "composition_delta": retained, "secret_values_included": False})

@@ -85,7 +85,8 @@ class ConsentCreate(_Strict):
     goal_id: str = Field(min_length=1, max_length=256)
     goal_revision: int = Field(ge=1)
     allowed_fields: list[str] = Field(default_factory=lambda: list(_DEFAULT_FIELDS), max_length=6)
-    window_minutes: int = Field(ge=5, le=1440)
+    window_minutes: int = Field(ge=5, le=10080)
+    acknowledge_sync_metadata: bool = False
     max_events: int = Field(ge=1, le=50)
     allow_remote_model: bool
     expires_at: datetime
@@ -510,6 +511,7 @@ def _consent_metadata(consent: CalendarReadConsent) -> dict[str, Any]:
         "allowed_fields": json.loads(consent.allowed_fields_json or "[]"),
         "window_minutes": consent.window_minutes,
         "max_events": consent.max_events,
+        "sync_metadata_limit": consent.sync_metadata_limit,
         "allow_remote_model": consent.allow_remote_model,
         "expires_at": _aware(consent.expires_at).isoformat().replace("+00:00", "Z"),
         "state": consent.state,
@@ -535,6 +537,26 @@ async def _connection_for(db, owner: WorkBoardOwner, connection_id: str) -> Goog
     if connection is None:
         raise CalendarIntegrationError("calendar_connection_not_found", "The Calendar connection is unavailable", status_code=404)
     return connection
+
+
+async def _native_read_connection_metadata(db, owner: WorkBoardOwner, *, connection_id: str, expected_revision: int):
+    """Metadata-only original Calendar read; never load credential references."""
+    from src.runtime_plugins.dispatch import NativeServiceBlocked
+    await _assert_live_operator_session(db, owner)
+    row = (await db.execute(select(
+        GoogleServiceConnection.connection_id, GoogleServiceConnection.revision,
+        GoogleServiceConnection.state,
+    ).where(
+        GoogleServiceConnection.connection_id == connection_id,
+        GoogleServiceConnection.owner_principal_id == owner.principal_id,
+        GoogleServiceConnection.owner_session_id == owner.session_id,
+        GoogleServiceConnection.service == "calendar_readonly",
+    ))).one_or_none()
+    if row is None or row.revision != expected_revision:
+        raise NativeServiceBlocked("native_connection_candidate_changed")
+    state = row.state if row.state in {"ready", "revoked"} else "blocked"
+    return {"connection_ref": row.connection_id, "revision": row.revision, "state": state,
+        "reason_code": None if state in {"ready", "revoked"} else "native_connection_unavailable"}
 
 
 async def _assert_live_operator_session(db, owner: WorkBoardOwner) -> None:
@@ -1426,6 +1448,8 @@ async def _create_consent_locked(request: Request):
     owner = _owner(operator)
     expires_at = _aware(body.expires_at)
     now = _now()
+    if body.window_minutes > 1440 and not body.acknowledge_sync_metadata:
+        raise HTTPException(status_code=422, detail={"code": "calendar_sync_acknowledgement_required", "message": "A seven-day sync window requires explicit metadata consent", "recovery_action": "acknowledge_bounded_sync"})
     if expires_at <= now or expires_at > now + timedelta(days=7):
         raise HTTPException(status_code=422, detail={"code": "calendar_consent_expiry_invalid", "message": "Calendar consent expiry is outside the bounded window", "recovery_action": "choose_bounded_expiry"})
     async with get_session() as db:
@@ -1444,7 +1468,7 @@ async def _create_consent_locked(request: Request):
             raise HTTPException(status_code=409, detail={"code": "calendar_connection_unavailable", "message": "The Calendar connection is not active", "recovery_action": "restore_prerequisite"})
         await repository._validate_goal(db, owner, goal_id=body.goal_id, goal_revision=body.goal_revision)
         allowed = list(dict.fromkeys(body.allowed_fields))
-        request_digest = "sha256:" + digest({"schema_version": 1, "connection_id": connection.connection_id, "connection_revision": connection.revision, "calendar_id": body.calendar_id, "goal_id": body.goal_id, "goal_revision": body.goal_revision, "allowed_fields": allowed, "window_minutes": body.window_minutes, "max_events": body.max_events, "allow_remote_model": body.allow_remote_model, "expires_at": expires_at.isoformat(), "idempotency_key": body.idempotency_key})
+        request_digest = "sha256:" + digest({"schema_version": 1, "connection_id": connection.connection_id, "connection_revision": connection.revision, "calendar_id": body.calendar_id, "goal_id": body.goal_id, "goal_revision": body.goal_revision, "allowed_fields": allowed, "window_minutes": body.window_minutes, "max_events": body.max_events, "allow_remote_model": body.allow_remote_model, **({"sync_metadata_limit": 50} if body.acknowledge_sync_metadata else {}), "expires_at": expires_at.isoformat(), "idempotency_key": body.idempotency_key})
         existing = (await db.execute(select(CalendarReadConsent).where(CalendarReadConsent.owner_principal_id == owner.principal_id, CalendarReadConsent.owner_session_id == owner.session_id, CalendarReadConsent.creation_idempotency_key == body.idempotency_key))).scalar_one_or_none()
         if existing is not None:
             if existing.creation_request_digest != request_digest:
@@ -1472,8 +1496,8 @@ async def _create_consent_locked(request: Request):
         except CalendarControlError as exc:
             raise _control_http_error(exc) from exc
         consent_id = secrets.token_urlsafe(18)
-        consent_digest = "sha256:" + digest({"owner": owner.principal_id, "session": owner.session_id, "connection_id": connection.connection_id, "connection_revision": connection.revision, "calendar_id": body.calendar_id, "goal_id": body.goal_id, "goal_revision": body.goal_revision, "allowed_fields": allowed, "window_minutes": body.window_minutes, "max_events": body.max_events, "allow_remote_model": body.allow_remote_model, "expires_at": expires_at.isoformat()})
-        row = CalendarReadConsent(consent_id=consent_id, owner_principal_id=owner.principal_id, owner_session_id=owner.session_id, connection_id=connection.connection_id, connection_revision=connection.revision, creation_idempotency_key=body.idempotency_key, creation_request_digest=request_digest, calendar_id=encrypt(body.calendar_id), goal_id=body.goal_id, goal_revision=body.goal_revision, allowed_fields_json=json.dumps(allowed, separators=(",", ":")), window_minutes=body.window_minutes, max_events=body.max_events, allow_remote_model=body.allow_remote_model, expires_at=expires_at, state="active", revision=1, consent_digest=consent_digest)
+        consent_digest = "sha256:" + digest({"owner": owner.principal_id, "session": owner.session_id, "connection_id": connection.connection_id, "connection_revision": connection.revision, "calendar_id": body.calendar_id, "goal_id": body.goal_id, "goal_revision": body.goal_revision, "allowed_fields": allowed, "window_minutes": body.window_minutes, "max_events": body.max_events, "allow_remote_model": body.allow_remote_model, **({"sync_metadata_limit": 50} if body.acknowledge_sync_metadata else {}), "expires_at": expires_at.isoformat()})
+        row = CalendarReadConsent(consent_id=consent_id, owner_principal_id=owner.principal_id, owner_session_id=owner.session_id, connection_id=connection.connection_id, connection_revision=connection.revision, creation_idempotency_key=body.idempotency_key, creation_request_digest=request_digest, calendar_id=encrypt(body.calendar_id), goal_id=body.goal_id, goal_revision=body.goal_revision, allowed_fields_json=json.dumps(allowed, separators=(",", ":")), window_minutes=body.window_minutes, max_events=body.max_events, sync_metadata_limit=50 if body.acknowledge_sync_metadata else 0, allow_remote_model=body.allow_remote_model, expires_at=expires_at, state="active", revision=1, consent_digest=consent_digest)
         db.add(row)
         await db.flush()
         return JSONResponse(content={"consent": _consent_metadata(row)}, status_code=201)
@@ -2209,3 +2233,26 @@ async def revoke_schedule(request: Request, binding_id: str):
 
 
 __all__ = ["router"]
+
+
+# Connected context uses the existing authenticated source surface.
+
+@router.post("/calendar/connections/{connection_id}/sync")
+async def connection_sync_sync(request: Request, connection_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "calendar", "sync")
+
+@router.get("/calendar/connections/{connection_id}/sync")
+async def connection_sync_status(request: Request, connection_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "calendar", "status")
+
+@router.post("/calendar/connections/{connection_id}/sync/items/{opaque_id}")
+async def connection_sync_read(request: Request, connection_id: str, opaque_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "calendar", "read", opaque_id=opaque_id)
+
+@router.post("/calendar/connections/{connection_id}/sync/{job_id}/reconcile")
+async def connection_sync_reconcile(request: Request, connection_id: str, job_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "calendar", "reconcile", job_id=job_id)

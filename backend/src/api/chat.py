@@ -882,6 +882,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     user_message=request.message,
                     owner_principal_id=operator.principal.principal_id,
                     owner_session_id=operator.session_id,
+                    trust_principal=chat_principal,
                 ),
                 timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
             )

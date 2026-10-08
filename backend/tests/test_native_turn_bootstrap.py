@@ -12,7 +12,7 @@ from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked
 from src.api.chat import _bind_chat_principal, build_chat_ingress_envelope, chat_ingress_metadata
 from src.auth.service import create_session
 from src.db.engine import get_session
-from src.db.models import Message, OperatorSession, WorkflowRunState
+from src.db.models import Message, OperatorSession, Session, WorkBoardTask, WorkflowRunState
 from src.runtime_plugins.composition import ReviewedComposition
 from tests.test_runtime_composition_ownership import composition_db
 
@@ -170,6 +170,41 @@ async def test_revoked_original_root_denies_both_rows(composition_db, monkeypatc
     async with get_session() as db:
         assert await db.scalar(select(func.count()).select_from(Message)) == 0
         assert await db.scalar(select(func.count()).select_from(WorkflowRunState)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing", ["before_writer", "same_writer_after_message"])
+async def test_task_continuity_native_admission_denies_and_rolls_back(composition_db, monkeypatch, timing):
+    manager, ingress, admission, content = await prepare_turn(monkeypatch)
+    task_id = "owned-continuity-admission-task"
+    # Fixture preparation uses the real FK-on factory before the guarded ingress.
+    async with composition_db[2]() as db:
+        db.add(WorkBoardTask(task_id=task_id, owner_principal_id=ingress.principal_id,
+            owner_session_id=ingress.operator_session_id, goal_id="owned-no-execution-goal",
+            title="Existing task context", idempotency_key=task_id))
+        await db.flush()
+        if timing == "before_writer":
+            conversation = await db.get(Session, ingress.session_id)
+            conversation.continuity_task_id = task_id
+        await db.commit()
+    if timing == "same_writer_after_message":
+        from src.workflows.job_runtime import durable_job_repository
+        actual = durable_job_repository._admit_in_session
+        async def link_before_original_admission(db, *args, **kwargs):
+            assert await db.get(Message, ingress.message_id) is not None
+            conversation = await db.get(Session, ingress.session_id)
+            conversation.continuity_task_id = task_id
+            await db.flush()
+            return await actual(db, *args, **kwargs)
+        monkeypatch.setattr(durable_job_repository, "_admit_in_session", link_before_original_admission)
+    with pytest.raises(NativeTurnBlocked, match="native_turn_continuity_context_unsupported"):
+        await reserve(manager, ingress, admission, content)
+    async with get_session() as db:
+        assert await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)) is not None
+        assert await db.scalar(select(func.count()).select_from(Message)) == 0
+        assert await db.scalar(select(func.count()).select_from(WorkflowRunState)) == 0
+        conversation = await db.get(Session, ingress.session_id)
+        assert conversation.continuity_task_id == (task_id if timing == "before_writer" else None)
 
 
 @pytest.mark.asyncio

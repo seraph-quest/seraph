@@ -2306,6 +2306,80 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
         ) from exc
 
 
+from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
+
+
+@router.get("/general-tasks/tools")
+async def general_task_tools(request: Request):
+    _operator(request)
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        descriptors, tool_set_digest = dispatcher.general_tasks.snapshot()
+        return {"tool_set_digest": tool_set_digest,
+                "tools": [item.model_dump(mode="json") for item in descriptors],
+                "blocked_tools": dispatcher.general_tasks.registry.blocked_tools()}
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/general-tasks")
+async def create_general_task(request: Request, body: GeneralTaskCreate):
+    operator = _operator(request)
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        async with get_session() as db:
+            mutation = await dispatcher.general_tasks.create(db, _owner(operator), body)
+            return {"task": await _safe_task_payload(mutation.task, db=db),
+                    "idempotent_replay": mutation.idempotent_replay}
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/tasks/{task_id}/plan")
+async def get_general_task_plan(request: Request, task_id: str):
+    owner = _owner(_operator(request))
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        async with get_session() as db:
+            payload = await dispatcher.general_tasks.plan(db, owner, task_id)
+            # Plans are data, but can still contain operator-supplied secrets.
+            safe = await vault_redaction.redact_secrets_in_text_readonly(db,
+                json.dumps(payload), fail_closed=True)
+            return json.loads(safe)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/plan")
+async def update_general_task_plan(request: Request, task_id: str, body: GeneralTaskPlanUpdate):
+    owner = _owner(_operator(request))
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        async with get_session() as db:
+            task = await dispatcher.general_tasks.update_plan(db, owner, task_id, body)
+            return {"task": await _safe_task_payload(task, db=db)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/plan/resume")
+async def resume_general_task_plan(request: Request, task_id: str, body: GeneralTaskResume):
+    owner = _owner(_operator(request))
+    try:
+        task = await dispatcher.resume_general_task(owner, task_id, body)
+        async with get_session() as db:
+            return {"task": await _safe_task_payload(task, db=db)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail={"code": "general_task_resume_binding_changed",
+            "message": "Refresh the exact original task and approval state"}) from exc
+
+
 @router.get("/tasks/{task_id}")
 async def get_work_board_task(request: Request, task_id: str):
     operator = _operator(request)
@@ -2701,6 +2775,13 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                     expected_revision=body.expected_revision,
                 )
             else:
+                if body.action.value == "promote":
+                    promoted = await repository.get_task(db, owner, task_id)
+                    if promoted.capability_id == "agent.task.v1":
+                        if dispatcher.general_tasks is None:
+                            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+                        await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
+                            body.expected_revision)
                 mutation = await repository.action_task(db, owner, task_id, body)
             latest_attempt = (
                 await db.execute(
@@ -2870,7 +2951,7 @@ async def add_work_board_comment(request: Request, task_id: str, body: WorkBoard
     operator = _operator(request)
     try:
         async with get_session() as db:
-            comment, event = await repository.add_comment(db, _owner(operator), task_id, body)
+            comment, event = await repository.add_comment(db, _owner(operator), task_id, body, provenance="operator")
             payload = {"comment": await _safe_comment_payload(comment, db=db)}
         return payload
     except BoardError as exc:

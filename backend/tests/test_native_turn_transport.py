@@ -17,7 +17,7 @@ from sqlmodel import SQLModel
 from config.settings import settings
 from src.auth.service import create_session
 from src.db.engine import get_session, override_session_factory
-from src.db.models import Message, RuntimeCompositionState, WorkflowRunState
+from src.db.models import Message, RuntimeCompositionState, Session, WorkBoardTask, WorkflowRunState
 from src.runtime_plugins.bridge import CordisHost
 from src.runtime_plugins.dispatch import NativeServiceDispatcher
 from tests.test_runtime_composition_ownership import composition_db
@@ -411,12 +411,15 @@ async def test_actual_stock_fresh_cpu_absent_inventory_uses_unbound_legacy(fresh
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["partial", "stale", "empty_retained"])
-async def test_actual_stock_damaged_inventory_denies_before_message_or_contact(native_transport, composition_db, damage):
+@pytest.mark.parametrize("task_linked", [False, True])
+async def test_actual_stock_damaged_inventory_denies_before_message_or_contact(native_transport, composition_db, damage, task_linked):
     from src.app import create_app
     from src.agent.session import session_manager
     from src.workspace.production import read_lifecycle_receipt, read_accounting_checkpoint
     host, token, operator, model, direct_calls = native_transport
     conversation = await session_manager.get_or_create(owner_principal_id=operator.principal.principal_id)
+    if task_linked:
+        await _link_existing_task(conversation.id, operator, factory=composition_db[2])
     _, engine, _, workspace = composition_db
     receipt, checkpoint = read_lifecycle_receipt(workspace), read_accounting_checkpoint(workspace)
     async with engine.begin() as connection:
@@ -438,6 +441,94 @@ async def test_actual_stock_damaged_inventory_denies_before_message_or_contact(n
         assert await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind == "conversation_turn_v1")) is None
     assert read_lifecycle_receipt(workspace) == receipt and read_accounting_checkpoint(workspace) == checkpoint
     assert host.admitting and direct_calls == [] and model.calls == 0
+
+
+async def _link_existing_task(conversation_id, operator, *, factory=None):
+    task_id = "owned-task-context-" + conversation_id
+    # Seed actual FK-on rows before ingress; this is fixture setup, not a writer grant.
+    async with (factory() if factory is not None else get_session()) as db:
+        db.add(WorkBoardTask(task_id=task_id, owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id, goal_id="owned-no-execution-goal",
+            title="Existing task context", idempotency_key=task_id))
+        await db.flush()
+        conversation = await db.get(Session, conversation_id)
+        conversation.continuity_task_id = task_id
+        if factory is not None:
+            await db.commit()
+    return task_id
+
+
+async def _assert_task_linked_legacy(transport, monkeypatch, channel, *, factory=None):
+    from unittest.mock import AsyncMock
+    from src.app import create_app
+    from src.agent.session import session_manager
+    host, token, operator, model, direct_calls = transport
+    monkeypatch.setattr("src.memory.flush.flush_session_memory", AsyncMock())
+    conversation = await session_manager.get_or_create(owner_principal_id=operator.principal.principal_id)
+    task_id = await _link_existing_task(conversation.id, operator, factory=factory)
+    if factory is not None:
+        from src.workspace.accounting_witness import composition_closure, native_composition_files
+        async with factory() as db:
+            connection = await db.connection()
+            projection, members = await connection.run_sync(
+                lambda conn: composition_closure(conn, verify_files=native_composition_files))
+            assert projection is not None
+            assert ("sessions", conversation.id) not in members
+            assert ("work_board_tasks", task_id) not in members
+            assert await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.composition_binding_json.is_not(None))) is None
+            print("Task-linked legacy fixture before ingress: selected Session=False, selected Task=False, bound jobs=0")
+    payload = {"message": "Hello", "session_id": conversation.id,
+        "message_id": "owned-task-linked-unbound"}
+    if channel == "rest":
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://127.0.0.1:8004",
+            cookies={settings.operator_auth_cookie_name: token}, headers={"origin": "http://127.0.0.1:3001"}) as client:
+            response = await client.post("/api/chat", json=payload)
+            assert response.status_code == 200, response.text
+    else:
+        incoming, frames = asyncio.Queue(), []
+        final = asyncio.get_running_loop().create_future()
+        async def send(message):
+            if message["type"] == "websocket.send":
+                value = json.loads(message["text"])
+                frames.append(value)
+                if value["type"] in {"final", "error"} and not final.done():
+                    final.set_result(value)
+        scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
+            "path": "/ws/chat", "raw_path": b"/ws/chat", "query_string": b"",
+            "root_path": "", "server": ("127.0.0.1", 8004), "client": ("127.0.0.1", 12345),
+            "headers": [(b"host", b"127.0.0.1:8004"), (b"origin", b"http://127.0.0.1:3001"),
+                (b"cookie", (settings.operator_auth_cookie_name + "=" + token).encode())], "subprotocols": []}
+        await incoming.put({"type": "websocket.connect"})
+        await incoming.put({"type": "websocket.receive", "text": json.dumps({"type": "message", **payload})})
+        worker = asyncio.create_task(create_app()(scope, incoming.get, send))
+        try:
+            result = await asyncio.wait_for(asyncio.shield(final), timeout=30)
+            assert result["type"] == "final", frames
+            assert result["content"] == "Scripted native reply"
+            assert "".join(frame["content"] for frame in frames if frame["type"] == "delta") == result["content"]
+            assert [frame["seq"] for frame in frames] == sorted({frame["seq"] for frame in frames})
+        finally:
+            await incoming.put({"type": "websocket.disconnect", "code": 1000})
+            await asyncio.wait_for(worker, timeout=5)
+    async with get_session() as db:
+        messages = list((await db.execute(select(Message).where(Message.session_id == conversation.id))).scalars())
+        assert sorted(message.role for message in messages) == ["assistant", "user"]
+        assert (await db.get(Session, conversation.id)).continuity_task_id == task_id
+        assert await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind == "conversation_turn_v1")) is None
+    assert host.admitting and len(direct_calls) == (1 if channel == "rest" else 0) and model.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["rest", "ws"])
+async def test_actual_stock_task_linked_healthy_inventory_keeps_unbound_legacy(native_transport, composition_db, monkeypatch, channel):
+    await _assert_task_linked_legacy(native_transport, monkeypatch, channel, factory=composition_db[2])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["rest", "ws"])
+async def test_actual_stock_task_linked_absent_inventory_keeps_unbound_legacy(fresh_native_transport, monkeypatch, channel):
+    await _assert_task_linked_legacy(fresh_native_transport, monkeypatch, channel)
 
 
 class ControlledScriptedModel(Model):

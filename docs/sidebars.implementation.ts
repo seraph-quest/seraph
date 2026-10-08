@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
             'decisions/epic-integration-branch-workflow',
             'decisions/evidence-bound-guardian-opportunities',
             'decisions/purpose-specific-openrouter-routes',
+            'decisions/all-plugin-cordis-architecture',
           ],
         },
         'docs-contract',

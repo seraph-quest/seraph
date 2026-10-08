@@ -5,6 +5,15 @@ title: Current App Guide
 
 # Current App Guide
 
+## Current Implementation And Cordis Target
+
+The application described here runs the existing Python/FastAPI backend and
+React cockpit. [ADR-026](./decisions/026-all-plugin-cordis-architecture.md) accepts
+an all-plugin Cordis agent-runtime composition target; its migration capabilities
+are **Planned**. Continue using the current managed commands, workspace and
+operator controls. The architecture documentation does not install Cordis,
+replace the runtime or migrate stored data.
+
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional
@@ -134,16 +143,15 @@ retry/unblock and workflow pause/resume/revoke/retry cannot replace a linked
 document attempt or bypass its retry and positive cleanup requirements.
 
 **Status:** Partial
-**Scope:** current `develop` baseline plus the accepted Epic #736/#775 target;
-open integration branches describe intended post-merge truth and label any
-remaining partial boundaries inline
+**Scope:** current `develop` baseline and its named partial proof boundaries;
+new target architecture is owned by the Constitution and ADRs
 
-> **Epic #736/#775 OpenRouter phase:** the accepted active inference contract
+> **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU
 > topology below remains documented as pre-#775 `develop` evidence and rollback
-> diagnostics. On an open integration branch, the final reviewed Epic PR is the
-> merge gate; after it lands, the active sections are shipped `develop` truth.
+> diagnostics, not a startup dependency. Named missing platform/provider receipts
+> remain unverified; integration does not establish them.
 > The target contract is defined by [ADR-006](./decisions/006-openrouter-only-inference-phase.md).
 > [ADR-025](./decisions/025-near-https-text-inference.md) permits only the separate
 > optional NEAR HTTPS text capability described above.
@@ -153,7 +161,7 @@ the target product and locked decisions, read the
 [Project Constitution](./00-project-constitution.md). For exhaustive shipped
 detail, read [Development Status](./STATUS.md).
 
-## OpenRouter topology (Epic #736/#775)
+## Governed OpenRouter topology
 
 ```text
 Seraph frontend       http://127.0.0.1:3001
@@ -165,8 +173,8 @@ The backend and canonical workspace remain local on a CPU-capable host.
 [ADR-008](./decisions/008-portable-core-and-consented-context.md) defines macOS
 and Linux as peer core-host targets. This accepted target does not establish
 new platform-specific capture or execution readiness; each selected optional
-adapter/profile must report its actual proof and availability. All
-active text, vision, and embedding inference is admitted through the governed
+adapter/profile must report its actual proof and availability. Ordinary
+text, vision, and embedding inference is admitted through the governed
 OpenRouter profile. A missing key, empty upstream allow-list, missing cloud
 consent, absent budget, or unverified capability blocks the request and is
 reported as configuration-required or degraded. Local model servers and the

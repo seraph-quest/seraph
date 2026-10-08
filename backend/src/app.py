@@ -354,9 +354,16 @@ async def lifespan(app: FastAPI):
     from src.work_board.repository import WorkBoardRepository
     from src.agent.session import session_manager
     from src.work_board.general_task import current_task_service
+    from src.integrations.connection_sync import ConnectionSyncService
+    from src.work_board.dispatcher import _dispatcher
     from src.guardian.goal_programmes import goal_programme_service
     continuity = None
+    connection_sync_runtime = None
     try:
+        connection_sync_runtime = ConnectionSyncService()
+        await connection_sync_runtime.start()
+        app.state.connection_sync_runtime = connection_sync_runtime
+        _dispatcher.connection_sync_runtime = connection_sync_runtime
         continuity = TaskContinuityService(WorkBoardRepository())
         app.state.task_continuity = continuity
         await continuity.start()
@@ -510,7 +517,15 @@ async def lifespan(app: FastAPI):
             try:
                 await goal_programme_service.stop()
             finally:
-                shutdown_scheduler()
+                try:
+                    if connection_sync_runtime is not None:
+                        await connection_sync_runtime.stop()
+                finally:
+                    try:
+                        if connection_sync_runtime is not None and _dispatcher.connection_sync_runtime is connection_sync_runtime:
+                            _dispatcher.connection_sync_runtime = None
+                    finally:
+                        shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:

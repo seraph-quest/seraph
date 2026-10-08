@@ -1,3 +1,4 @@
+import type { ConnectedSource, RelatedSources } from "../lib/connectionSync";
 export type MessageRole = "user" | "agent" | "step" | "status" | "error" | "proactive" | "approval" | "clarification";
 
 export interface ChatMessage {
@@ -1503,6 +1504,7 @@ export type CalendarAllowedField =
 export type CalendarConsentState = "active" | "revoked" | "expired" | "consumed";
 
 export interface CalendarConsentMetadata {
+  sync_metadata_limit?: number;
   consent_id: string;
   connection_id: string;
   connection_revision: number;
@@ -1521,6 +1523,7 @@ export interface CalendarConsentMetadata {
 }
 
 export interface CreateCalendarReadConsentRequest {
+  acknowledge_sync_metadata?: boolean;
   schema_version: 1;
   connection_id: string;
   calendar_id: string;
@@ -1560,6 +1563,8 @@ export interface CalendarEventListResponse {
 }
 
 export interface CalendarMeetingPrepInput {
+  connected_sources?: ConnectedSource[];
+  acknowledge_connected_sources?: true;
   schema_version: 1;
   consent_id: string;
   event_binding_id: string;
@@ -1705,6 +1710,7 @@ export interface CalendarExecutionProjection {
 }
 
 export interface CalendarResultPreview {
+  related_sources?: RelatedSources;
   schema_version: 1;
   capability_id: "calendar.meeting-prep.v1";
   artifact_id: string;

@@ -50,6 +50,7 @@ EXPECTED_CANONICAL_ROUTES = {
     "memory_keeper",
     "vault_keeper",
     "goal_planner",
+    "general_task_planner",
     "web_researcher",
     "file_worker",
     "workflow_runner",

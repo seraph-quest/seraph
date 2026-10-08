@@ -96,6 +96,26 @@ def _registered_path(tool):
 
 
 def validate_controlled_origin(exception, *, native_execution):
+    from src.agent.turn_execution import NativeTurnExecution
+    if type(native_execution) is not NativeTurnExecution:
+        raise ValueError("controlled_origin_execution_invalid")
+    native_execution.remaining()
+    return _validate_controlled_origin_identity(exception, native_execution=native_execution)
+
+
+def validate_controlled_cleanup_origin(exception, *, cleanup_witness):
+    """Only the exact original finished source may attest a stopped origin."""
+    from src.agent.native_turn_family import validate_original_cleanup
+    execution = getattr(cleanup_witness, "execution", None)
+    worker = getattr(cleanup_witness, "worker", None)
+    if validate_original_cleanup(execution, worker) is not cleanup_witness:
+        raise ValueError("controlled_origin_cleanup_unproven")
+    if cleanup_witness.exception is not exception:
+        raise ValueError("controlled_origin_cleanup_exception_changed")
+    return _validate_controlled_origin_identity(exception, native_execution=execution)
+
+
+def _validate_controlled_origin_identity(exception, *, native_execution):
     from smolagents import ToolCallingAgent
     from smolagents.utils import AgentToolExecutionError
     from src.agent.turn_execution import NativeTurnExecution
@@ -105,7 +125,6 @@ def validate_controlled_origin(exception, *, native_execution):
     from src.tools.clarify_tool import clarify
     if type(native_execution) is not NativeTurnExecution:
         raise ValueError("controlled_origin_execution_invalid")
-    native_execution.remaining()
     origin = getattr(exception, "_canonical_controlled_origin", None)
     if (type(origin) is not CanonicalControlledOrigin or origin.execution is not native_execution
         or origin.issued_exception is not exception):

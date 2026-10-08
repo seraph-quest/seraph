@@ -11,7 +11,7 @@ from time import perf_counter
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import APIRouter, HTTPException, Request as HttpRequest
+from fastapi import APIRouter, Body, HTTPException, Request as HttpRequest
 
 from src.approval.exceptions import ApprovalRequired
 from src.approval.metadata import approval_wire_metadata
@@ -532,8 +532,11 @@ async def persist_turn_output(native_turn, session_id, role, content, *, metadat
         raise NativeTurnBlocked("native_turn_output_authority_changed") from exc
     except asyncio.TimeoutError as exc:
         raise NativeTurnBlocked("native_turn_original_deadline_expired") from exc
-    await native_turn.forward("conversation.append", {"message_ref": message.id})
-    return message
+    try:
+        await native_turn.forward("conversation.append", {"message_ref": message.id})
+        return message
+    finally:
+        await native_turn.observe_resource()
 
 
 async def persist_rest_turn_output(*args, **kwargs):
@@ -550,9 +553,39 @@ async def persist_controlled_turn(native_turn, exception, session_id, *, content
             return await session_manager.add_message(session_id, "assistant", content,
                 metadata_json=metadata_json, message_id=message_id)
         return None
-    return await session_manager.record_native_turn_controlled(session_id, exception,
-        execution=native_turn, content=content, metadata_json=metadata_json,
-        message_id=message_id)
+    try:
+        return await session_manager.record_native_turn_controlled(session_id, exception,
+            execution=native_turn, content=content, metadata_json=metadata_json, message_id=message_id)
+    finally:
+        await native_turn.observe_resource()
+
+
+async def _native_control(http_request, turn_ref, method, payload):
+    from src.runtime_plugins.protocol import ProtocolError
+    from src.runtime_plugins.bridge import HostBlocked
+    operator = getattr(http_request.state, "operator", None)
+    resources = getattr(http_request.app.state, "native_turn_resources", None)
+    if operator is None or resources is None:
+        raise HTTPException(status_code=503, detail={"code": "native_turn_resource_owner_unavailable"})
+    try:
+        return await resources.control(turn_ref, operator, method, payload)
+    except (NativeTurnBlocked, HostBlocked, ProtocolError) as exc:
+        raise HTTPException(status_code=409, detail={"code": getattr(exc, "reason_code", "native_turn_control_invalid")}) from exc
+
+
+@router.post("/chat/native-turns/{turn_ref}/conversation/read")
+async def native_conversation_read(turn_ref: str, http_request: HttpRequest, payload: dict = Body(...)):
+    return await _native_control(http_request, turn_ref, "conversation.read", payload)
+
+
+@router.post("/chat/native-turns/{turn_ref}/conversation/cancel")
+async def native_conversation_cancel(turn_ref: str, http_request: HttpRequest, payload: dict = Body(...)):
+    return await _native_control(http_request, turn_ref, "conversation.cancel", payload)
+
+
+@router.post("/chat/native-turns/{turn_ref}/agent-loop/cancel-turn")
+async def native_agent_loop_cancel(turn_ref: str, http_request: HttpRequest, payload: dict = Body(...)):
+    return await _native_control(http_request, turn_ref, "agent-loop.cancelTurn", payload)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -635,6 +668,8 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             detail={"code": exc.code, "message": exc.message},
         ) from exc
     native_turn = None
+    resource = None
+    native_job = None
     profile = None
     host = available_turn_host(ingress, request.message)
     try:
@@ -649,18 +684,28 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             if not await native_turn_binding_available(admission):
                 host = None
         if host is not None:
+            resources = getattr(http_request.app.state, "native_turn_resources", None)
+            if resources is None:
+                raise NativeTurnBlocked("native_turn_resource_owner_unavailable")
+            resource = resources.reserve(admission)
             _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
                 session.id, request.message, message_id=ingress.message_id,
                 metadata_json=chat_ingress_metadata(ingress), admission=admission)
             if not duplicate:
-                native_turn = await claim_native_turn(admission, host, native_job)
+                native_turn = await claim_native_turn(admission, host, native_job, resource=resource)
+            elif resource.execution is None:
+                resources.release_unclaimed(resource)
         else:
             _ingress_message, duplicate = await session_manager.reserve_ingress_message(
                 session.id, request.message, message_id=ingress.message_id,
                 metadata_json=chat_ingress_metadata(ingress), attachment_refs=request.attachments)
     except NativeTurnBlocked as exc:
+        if resource is not None and native_job is None:
+            resource.owner.release_unclaimed(resource)
         raise HTTPException(status_code=503, detail={"code": exc.reason_code}) from exc
     except MessageIngressConflictError as exc:
+        if resource is not None and native_job is None:
+            resource.owner.release_unclaimed(resource)
         await log_chat_ingress_event(
             session_id=session.id,
             envelope=ingress,

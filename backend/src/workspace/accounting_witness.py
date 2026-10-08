@@ -317,8 +317,19 @@ def composition_closure(connection, *, verify_files=None):
             session_role("legacy_job_session_fk", table, key, row["session_id"])
             binding = row["composition_binding_json"]
             if binding is not None:
-                RuntimeCompositionBinding.from_json(binding)
-                if row["job_kind"] not in {"workflow", "conversation_turn_v1", "research_dossier", "readonly_research_child", "runtime_service_read_v1"}:
+                native_binding = RuntimeCompositionBinding.from_json(binding)
+                if row["job_kind"] == "work.local-evidence-report.v1":
+                    from src.runtime_plugins.task_capability import checked_report_records
+                    report = checked_report_records(SimpleNamespace(**row))
+                    if (report is None or native_binding.origin_method != "tasks.admit"
+                        or native_binding.native_branch != "artifact"):
+                        raise ProductionWorkspaceReconciliationError("composition_report_original_profile_changed")
+                    for target_table, field in (("work_board_tasks", "task_id"),
+                        ("work_board_attempts", "attempt_id"), ("work_board_input_artifacts", "input_id"),
+                        ("work_board_links", "link_id"), ("work_board_handoffs", "handoff_id"),
+                        ("work_board_tasks", "producer_task_id"), ("work_board_attempts", "producer_attempt_id")):
+                        required(target_table, report[field])
+                elif row["job_kind"] not in {"workflow", "conversation_turn_v1", "research_dossier", "readonly_research_child", "runtime_service_read_v1"}:
                     raise ProductionWorkspaceReconciliationError("composition_extension_unsupported")
             for field in ("root_run_identity", "parent_run_identity", "parent_job_id"):
                 required(table, row[field])
@@ -415,7 +426,43 @@ def composition_closure(connection, *, verify_files=None):
                         output = _composition_row(connection, "messages", payload["message_ref"])
                         validate_message(output, "assistant")
                         required("messages", output["id"])
-            if binding is not None and (json.loads(row["artifact_receipts_json"]) or json.loads(row["checkpoint_receipts_json"])):
+            from src.runtime_plugins.inference_output import checked_output_records, checked_candidate_record
+            marker = checked_candidate_record(row)
+            if marker is not None:
+                from src.model_fabric.native_inference import validate_candidate_binding
+                marker_payload = marker["payload"]
+                required("workflow_run_states", marker_payload["turn_job_id"])
+                marker_turn = _composition_row(connection, "workflow_run_states", marker_payload["turn_job_id"])
+                marker_family = checked_turn_family(marker_turn)
+                if marker_family is None or marker_family["original_claim_digest"] != marker_payload["turn_claim_digest"]:
+                    raise ProductionWorkspaceReconciliationError("composition_inference_candidate_claim_changed")
+                result = _sql(connection, 'SELECT * FROM inference_cost_reservations WHERE operation_id=?', (marker_payload["operation_id"],))
+                columns = list(result.keys()) if hasattr(result, "keys") else [item[0] for item in result.description]
+                matches = result.fetchall()
+                if len(matches) != 1:
+                    raise ProductionWorkspaceReconciliationError("composition_inference_candidate_owner_missing")
+                validate_candidate_binding(marker_payload, SimpleNamespace(**row), SimpleNamespace(**dict(zip(columns, matches[0]))))
+            outputs = checked_output_records(row)
+            if outputs is not None:
+                if marker is None:
+                    raise ProductionWorkspaceReconciliationError("composition_inference_output_candidate_missing")
+                payload = outputs[0]["payload"]
+                required("workflow_run_states", payload["turn_job_id"])
+                turn_row = _composition_row(connection, "workflow_run_states", payload["turn_job_id"])
+                family = checked_turn_family(turn_row)
+                if (family is None or payload["family_call_index"] >= len(family["operations"])
+                    or payload["turn_claim_digest"] != family["original_claim_digest"]
+                    or turn_row["owner_principal_id"] != payload["owner_id"]):
+                    raise ProductionWorkspaceReconciliationError("composition_inference_output_family_changed")
+                operation = family["operations"][payload["family_call_index"]]
+                for field, other in (("operation_id", "operation_id"), ("accounting_job_id", "job_id"),
+                        ("reservation_binding_digest", "reservation_binding_digest"), ("fencing_token", "fencing_token"),
+                        ("attempt_count", "attempt_count"), ("reservation_sequence", "reservation_sequence"),
+                        ("payload_digest", "payload_digest"), ("policy_digest", "policy_digest"),
+                        ("profile_id", "profile_id"), ("runtime_path", "runtime_path")):
+                    if payload[field] != operation[other]:
+                        raise ProductionWorkspaceReconciliationError("composition_inference_output_operation_changed")
+            if (binding is not None or outputs is not None) and (json.loads(row["artifact_receipts_json"]) or json.loads(row["checkpoint_receipts_json"])):
                 if verify_files is None:
                     raise ProductionWorkspaceReconciliationError("composition_private_reader_unavailable")
                 for ref, digest, size, classification in verify_files(table, row):
@@ -534,6 +581,13 @@ def native_composition_files(table, row, *, root=None):
         return
     if table != "workflow_run_states":
         raise ProductionWorkspaceReconciliationError("composition_private_reader_unsupported")
+    from src.runtime_plugins.inference_output import checked_output_records, OUTPUT_ID, read_output_bytes, verify_output_envelope
+    outputs = checked_output_records(row)
+    if outputs is not None and outputs[-1]["checkpoint_id"] == OUTPUT_ID:
+        payload = outputs[-1]["payload"]
+        workspace = Path(root) if root is not None else canonical_workspace_root(settings.workspace_dir)
+        verify_output_envelope(read_output_bytes(workspace, payload), payload)
+        yield payload["file_ref"], payload["content_sha256"], payload["size_bytes"], "private_inference_output"
     refs = json.loads(row["artifact_receipts_json"])
     for checkpoint in json.loads(row["checkpoint_receipts_json"]):
         if type(checkpoint) is not dict:
@@ -694,7 +748,7 @@ class CompositionSessionGuard:
         before = None if creating else composition_row_digest(table, key, _composition_row(connection, table, key))
         self.touched[(table, key)] = before
 
-    def _check_private_journal(self, before, after):
+    def _check_private_journal(self, before, after, *, run_id):
         from src.workflows.job_runtime import _protected_composition_checkpoint
         def protected(raw):
             records = json.loads(raw or "[]")
@@ -709,8 +763,32 @@ class CompositionSessionGuard:
                     selected[identifier] = item
             return selected
         previous, current = protected(before), protected(after)
+        task_ids = {"runtime-service-invocation:task-capability:" + phase
+            for phase in ("admission", "source", "invoke", "outcome", "cleanup")}
+        if task_ids.intersection(current):
+            from src.runtime_plugins.task_capability import preflight_report_journal
+            preflight_report_journal(json.loads(after or "[]"))
         family_permission = self.db.info.get("composition_native_turn_family_receipt")
         permitted = (self.db.info.get("composition_native_claim_receipt"), self.db.info.get("composition_native_turn_receipt"), family_permission)
+        if any(previous.get(key) != current.get(key) for key in task_ids):
+            from src.runtime_plugins.task_capability import validate_task_publication
+            task_permission = validate_task_publication(self.db, previous, current, run_id=run_id,
+                previous_journal=json.loads(before or "[]"), current_journal=json.loads(after or "[]"))
+            permitted = (*permitted, *task_permission)
+        controls = {"conversation:cancel", "conversation:callback-closure"}
+        if controls.intersection(current):
+            from src.agent.native_turn_controls import preflight_control_journal
+            preflight_control_journal(json.loads(after or "[]"))
+        control_permission = ()
+        if any(previous.get(key) != current.get(key) for key in controls):
+            from src.agent.native_turn_controls import validate_control_publication
+            control_permission = validate_control_publication(self.db, previous, current, run_id=run_id)
+            permitted = (*permitted, *control_permission)
+        output_ids = {"inference:owned-output-intent.v1", "inference:owned-output.v1", "inference:original-candidate.v1"}
+        if any(previous.get(key) != current.get(key) for key in output_ids):
+            from src.runtime_plugins.inference_output import validate_output_publication
+            output_permission = validate_output_publication(self.db, previous, current, run_id=run_id)
+            permitted = (*permitted, *output_permission)
         from src.agent.native_turn_family import FAMILY_CHECKPOINT_ID, validate_family_transition
         from src.workflows.job_runtime import _digest
         for selected in (previous, current):
@@ -720,6 +798,8 @@ class CompositionSessionGuard:
                 raise ProductionWorkspaceReconciliationError("composition_turn_family_receipt_invalid")
         for identifier, receipt in previous.items():
             if current.get(identifier) != receipt:
+                if identifier in controls and current.get(identifier) in control_permission:
+                    continue
                 if identifier == FAMILY_CHECKPOINT_ID and current.get(identifier) == family_permission:
                     validate_family_transition(receipt["payload"], family_permission["payload"])
                     continue
@@ -797,7 +877,7 @@ class CompositionSessionGuard:
                             raw = getattr(value, "value", None)
                             if type(raw) is not str:
                                 raise ProductionWorkspaceReconciliationError("composition_private_journal_expression_denied")
-                            self._check_private_journal(_composition_row(connection, name, identity)["checkpoint_receipts_json"], raw)
+                            self._check_private_journal(_composition_row(connection, name, identity)["checkpoint_receipts_json"], raw, run_id=identity)
                 if (name, identity) in self.members:
                     self._touch(connection, name, identity)
             state.update_execution_options(_composition_tracked_writer=self)
@@ -830,12 +910,12 @@ class CompositionSessionGuard:
                     if value not in session.new:
                         original = _composition_row(connection, table, key)
                         self._check_read_context(original, value)
-                        self._check_private_journal(original["checkpoint_receipts_json"], value.checkpoint_receipts_json)
+                        self._check_private_journal(original["checkpoint_receipts_json"], value.checkpoint_receipts_json, run_id=key)
                         if any(getattr(value, field, None) != original[field] for field in ("composition_binding_json", "source_task_id")):
                             raise ProductionWorkspaceReconciliationError("composition_binding_retrofit_denied")
                     else:
                         self._check_read_context(None, value)
-                        self._check_private_journal("[]", value.checkpoint_receipts_json)
+                        self._check_private_journal("[]", value.checkpoint_receipts_json, run_id=key)
                     if value.job_kind == "conversation_turn_v1":
                         checked_turn_family({field: getattr(value, field) for field in RETAINED_FIELDS[table]})
                     related = related or getattr(value, "composition_binding_json", None) is not None

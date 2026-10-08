@@ -390,9 +390,22 @@ async def _stock_transport(monkeypatch):
     monkeypatch.setattr("src.agent.direct_chat.stream_completion_with_fallback", scripted_stream)
     await host.start()
     assert host.admitting and len((await host.refresh_status())["plugins"]) == 15
+    from src import app as app_module
+    from src.agent.native_turn_controls import NativeTurnResourceOwner
+    original_create_app = app_module.create_app
+    app_owners = []
+    def create_owned_app(*args, **kwargs):
+        app = original_create_app(*args, **kwargs)
+        owner = NativeTurnResourceOwner()
+        app.state.native_turn_resources = owner
+        app_owners.append(owner)
+        return app
+    monkeypatch.setattr(app_module, "create_app", create_owned_app)
     try:
         yield host, token, operator, model, direct_calls
     finally:
+        for owner in app_owners:
+            await owner.shutdown()
         await host.stop()
         cleanup = host.snapshot()["cleanup"]
         assert cleanup["state"] == "clean"

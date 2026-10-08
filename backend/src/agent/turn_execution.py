@@ -308,6 +308,17 @@ class NativeTurnExecution:
             raise NativeTurnBlocked(result.get("reason_code", "native_turn_forward_blocked"))
         return result
 
+    def register_worker(self, worker):
+        resource = getattr(self, "_native_resource", None)
+        if resource is not None:
+            resource.owner.attach_worker(self, worker)
+
+    async def observe_resource(self):
+        resource = getattr(self, "_native_resource", None)
+        if resource is not None:
+            resource.published = True
+            await resource.owner.observe(resource)
+
     async def execute(self, awaitable):
         # Shield the existing Python callback, not a second execution lane.
         # Timeout/cancel is not positive thread completion. No late output is
@@ -328,6 +339,7 @@ class NativeTurnExecution:
         with original_execution_context(self):
             task = asyncio.ensure_future(awaitable)
         self.worker = task
+        self.register_worker(task)
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
         except Exception as exc:
@@ -348,7 +360,7 @@ class NativeTurnExecution:
             raise
 
 
-async def claim_native_turn(admission, host, job):
+async def claim_native_turn(admission, host, job, *, resource=None):
     from src.workflows.job_runtime import durable_job_repository as jobs
     from src.runtime_plugins.dispatch import capture_original_scope
     async def authority_check(db, run):
@@ -363,6 +375,11 @@ async def claim_native_turn(admission, host, job):
         lease_seconds=max(1, math.ceil(remaining)), expected_revision=queued["revision"],
         claim_authority_check=authority_check)
     runtime = NativeTurnExecution(admission, host, claim, capture_original_scope(claim, host))
+    if resource is not None:
+        from dataclasses import replace
+        from src.agent.native_turn_controls import _FACTORY_SEAL
+        runtime.scope = replace(runtime.scope, native_turn_resource=resource)
+        resource.owner.register(resource, runtime, seal=_FACTORY_SEAL)
     await runtime.forward("conversation.accept", {"turn_ref": admission.job_id})
     await runtime.forward("agent-loop.startTurn", {"turn_ref": admission.job_id})
     return runtime

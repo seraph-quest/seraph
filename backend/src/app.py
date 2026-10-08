@@ -349,6 +349,8 @@ async def lifespan(app: FastAPI):
 
         workspace_owner = runtime_workspace_owner(settings.workspace_dir)
         workspace_owner.__enter__()
+    from src.agent.native_turn_controls import NativeTurnResourceOwner
+    app.state.native_turn_resources = NativeTurnResourceOwner()
     await init_db()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
@@ -505,6 +507,7 @@ async def lifespan(app: FastAPI):
             finally:
                 session_manager.bind_task_continuity(None)
                 try:
+                    await app.state.native_turn_resources.shutdown()
                     await cordis_host.stop()
                 finally:
                     await profiled_interaction_sessions.stop()

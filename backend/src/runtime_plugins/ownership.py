@@ -185,6 +185,9 @@ def method_closure(origin_method, native_branch):
         return (origin_method,)
     if native_branch == "artifact" and origin_method in {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}:
         return tuple(sorted({origin_method, "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}))
+    if native_branch == "artifact" and origin_method == "tasks.admit":
+        return tuple(sorted({origin_method, "tasks.inspect", "tasks.cancel", "tasks.checkpoint", "tasks.settle",
+                             "capabilities.invoke", "artifacts.read", "artifacts.stage", "artifacts.adopt"}))
     if native_branch in {"artifact", "workflow"} and origin_method in {"tasks.admit", "capabilities.invoke"}:
         return tuple(sorted({origin_method, "tasks.inspect", "tasks.cancel", "tasks.checkpoint", "tasks.settle",
                              "artifacts.read", "artifacts.stage", "artifacts.adopt"}))
@@ -220,7 +223,7 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
         names.add("goals")
     if programme_bound:
         names.add("inference")
-    fixed = {"memory.applyReviewed": {"audit"}, "memory.forget": {"audit"},
+    fixed = {"memory.propose": {"audit"}, "memory.applyReviewed": {"audit"}, "memory.forget": {"audit"},
              "research.buildPlan": {"artifacts", "inference"},
              "research.executeAccepted": {"capabilities", "inference", "artifacts", "source-extraction"},
              "source-extraction.extract": {"artifacts", "research"},

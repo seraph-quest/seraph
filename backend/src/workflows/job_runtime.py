@@ -94,10 +94,13 @@ async def _validate_native_service_claim(db, run, request):
         "readonly_research_child": {("research.executeAccepted", "public_research"),
                                     ("source-extraction.extract", "public_research")},
         "research_dossier": {("research.executeAccepted", "public_research")},
+        "work.local-evidence-report.v1": {("tasks.admit", "artifact")},
         "conversation_turn_v1": {("conversation.accept", "direct_turn"),
                                  ("conversation.accept", "generic_turn")},
         "runtime_service_read_v1": {(method, branch) for branch in {"base", "artifact"} for method in
             {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}},
+        "runtime_service_memory_v1": {(method, "base") for method in
+            {"memory.propose", "memory.applyReviewed", "memory.forget"}},
     }
     if (binding.origin_method, binding.native_branch) not in producers.get(run.job_kind, set()):
         raise DurableJobLeaseError("native service claim producer unsupported")
@@ -119,6 +122,9 @@ async def _validate_native_service_claim(db, run, request):
     if root is None:
         raise DurableJobLeaseError("native service original operator inactive")
     current_operator = await authenticate_principal(run.owner_principal_id, db=db)
+    if run.job_kind == "work.local-evidence-report.v1":
+        from src.runtime_plugins.task_capability import recheck_report_claim
+        await recheck_report_claim(db, run, host_boot_nonce=request.host_boot_nonce)
     if run.job_kind == "runtime_service_read_v1":
         from src.runtime_plugins.read_journal import read_context
         if read_context(run)["host_boot_nonce"] != request.host_boot_nonce:
@@ -126,6 +132,15 @@ async def _validate_native_service_claim(db, run, request):
         if json.loads(run.declared_authority_json).get("grants") != sorted(
             str(getattr(grant, "value", grant)) for grant in current_operator.principal.grants):
             raise DurableJobLeaseError("native_read_original_policy_changed")
+    if run.job_kind == "runtime_service_memory_v1":
+        from src.runtime_plugins.memory_producer import memory_context, NativeMemoryMutationAdmission, validate_original_memory_owner
+        context = memory_context(run)
+        if (context["candidate"]["host_boot_nonce"] != request.host_boot_nonce
+            or json.loads(run.declared_authority_json).get("grants") != sorted(
+                str(getattr(grant, "value", grant)) for grant in current_operator.principal.grants)):
+            raise DurableJobLeaseError("native_memory_original_policy_or_host_changed")
+        if context["result"] is None:
+            await validate_original_memory_owner(db, NativeMemoryMutationAdmission.from_candidate(context["candidate"]))
     if run.job_kind == "conversation_turn_v1":
         from src.db.models import Session
         conversation = await db.get(Session, run.conversation_id, populate_existing=True)
@@ -197,7 +212,9 @@ _RUNTIME_SERVICE_CLAIM_PREFIX = "runtime-service-invocation:"
 def _protected_composition_checkpoint(checkpoint_id):
     value = _text(checkpoint_id)
     return (value == "runtime-service-invocation" or value.startswith(_RUNTIME_SERVICE_CLAIM_PREFIX)
-            or value in {"conversation:assistant-message", "conversation:controlled-outcome", "conversation:operation-family"})
+            or value in {"conversation:assistant-message", "conversation:controlled-outcome", "conversation:operation-family",
+                "conversation:cancel", "conversation:callback-closure",
+                "inference:owned-output-intent.v1", "inference:owned-output.v1", "inference:original-candidate.v1"})
 
 
 @asynccontextmanager
@@ -834,6 +851,13 @@ def _native_turn_pending(run) -> bool:
         and _text(item.get("checkpoint_id")).startswith(_RUNTIME_SERVICE_CLAIM_PREFIX)]
     if run.attempt_count > 0 and len(claims) != 1:
         return True
+    cancellation = [item for item in history if isinstance(item, dict)
+        and item.get("checkpoint_id") == "conversation:cancel"
+        and (not isinstance(item.get("payload"), dict)
+            or item["payload"].get("producer") != "native-turn-control-reservation.v1")]
+    if cancellation or _text(run.failure_reason).startswith("native_turn_cancel"):
+        from src.agent.native_turn_controls import terminal_cancel_projection_valid
+        return not terminal_cancel_projection_valid(run, history)
     arguments = _json_load(run.arguments_json, {})
     outputs = []
     for item in history:
@@ -2831,12 +2855,51 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         native_read_admission=None,
         native_read_host=None,
         native_read_host_boot_nonce=None,
+        native_memory_admission=None,
+        native_memory_host=None,
+        native_memory_host_boot_nonce=None,
+        native_task_admission=None,
+        native_task_host=None,
+        native_task_host_boot_nonce=None,
         native_research_projection=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if identity.job_kind == "work.local-evidence-report.v1" and spec.composition_binding is not None:
+            from src.runtime_plugins.task_capability import ReportAdmissionCandidate
+            from src.runtime_plugins.bridge import CordisHost
+            if (type(native_task_admission) is not ReportAdmissionCandidate
+                or native_task_admission.original_spec is not spec
+                or spec.composition_binding.origin_method != "tasks.admit"
+                or spec.composition_binding.native_branch != "artifact"
+                or not spec.composition_binding.allows("capabilities.invoke")):
+                raise DurableJobAdmissionDenied("native_report_original_admission_required")
+            if (type(native_task_host) is not CordisHost or not native_task_host.admitting
+                or native_task_host.reviewed is None or native_task_host.boot_nonce != native_task_host_boot_nonce
+                or type(native_task_host_boot_nonce) is not str or not re.fullmatch(r"[0-9a-f]{64}", native_task_host_boot_nonce)
+                or spec.composition_binding.host_package_digest != native_task_host.reviewed.package_digest
+                or spec.composition_binding.host_composition_digest != native_task_host.reviewed.composition_digest):
+                raise DurableJobAdmissionDenied("native_report_original_host_changed")
+        elif any(value is not None for value in (native_task_admission, native_task_host, native_task_host_boot_nonce)):
+            raise DurableJobAdmissionDenied("native_report_admission_unexpected")
+        if identity.job_kind == "runtime_service_memory_v1":
+            from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission
+            from src.runtime_plugins.bridge import CordisHost
+            if (type(native_memory_admission) is not NativeMemoryMutationAdmission
+                or spec.inputs != native_memory_admission.candidate()
+                or admission_authority_check is None or admission_db is None):
+                raise DurableJobAdmissionDenied("native_memory_original_admission_required")
+            if (type(native_memory_host) is not CordisHost or not native_memory_host.admitting
+                or native_memory_host.reviewed is None or spec.composition_binding is None
+                or native_memory_host.boot_nonce != native_memory_host_boot_nonce
+                or native_memory_host_boot_nonce != native_memory_admission.candidate()["host_boot_nonce"]
+                or spec.composition_binding.host_package_digest != native_memory_host.reviewed.package_digest
+                or spec.composition_binding.host_composition_digest != native_memory_host.reviewed.composition_digest):
+                raise DurableJobAdmissionDenied("native_memory_original_host_changed")
+        elif any(value is not None for value in (native_memory_admission, native_memory_host, native_memory_host_boot_nonce)):
+            raise DurableJobAdmissionDenied("native_memory_admission_unexpected")
         if identity.job_kind == "runtime_service_read_v1":
             from src.runtime_plugins.read_admission import NativeServiceReadAdmission
             from src.runtime_plugins.bridge import CordisHost
@@ -2894,6 +2957,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         input_digest, safe_inputs = _safe_durable_inputs(spec.inputs)
         if native_read_admission is not None:
             input_digest = native_read_admission.candidate_digest
+        if native_memory_admission is not None:
+            input_digest = native_memory_admission.candidate_digest
         if native_turn_admission is not None:
             safe_inputs = dict(spec.inputs)
         run_fingerprint = _bounded_identifier(
@@ -3017,6 +3082,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if native_read_admission is not None:
                 from src.runtime_plugins.read_journal import validate_read_spec
                 await validate_read_spec(db, spec, native_read_admission)
+            if native_task_admission is not None:
+                from src.runtime_plugins.task_capability import validate_report_spec
+                await validate_report_spec(db, spec, native_task_admission, host_boot_nonce=native_task_host_boot_nonce)
+            if native_memory_admission is not None:
+                from src.runtime_plugins.memory_producer import validate_memory_spec
+                await validate_memory_spec(db, spec, native_memory_admission)
             if native_turn_admission is not None:
                 from src.agent.turn_execution import native_turn_spec, validate_native_turn_owner
                 await validate_native_turn_owner(db, native_turn_admission)
@@ -3276,6 +3347,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 private_read_context = candidate_context(native_read_admission, host_boot_nonce=native_read_host_boot_nonce,
                     native_branch=spec.composition_binding.native_branch)
                 db.info["composition_native_read_context"] = (identity.job_id, private_read_context)
+            if native_memory_admission is not None:
+                from src.runtime_plugins.memory_producer import candidate_context
+                if not native_memory_host.admitting or native_memory_host.boot_nonce != native_memory_host_boot_nonce:
+                    raise DurableJobAdmissionDenied("native_memory_original_host_changed")
+                private_read_context = candidate_context(native_memory_admission)
+                db.info["composition_native_memory_admission"] = native_memory_admission
             run = WorkflowRunState(
                 run_identity=identity.job_id,
                 root_run_identity=root_run_identity,
@@ -3356,6 +3433,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if native_read_admission is not None and (
                 not native_read_host.admitting or native_read_host.boot_nonce != native_read_host_boot_nonce):
                 raise DurableJobAdmissionDenied("native_read_original_host_changed")
+            if native_memory_admission is not None and (
+                not native_memory_host.admitting or native_memory_host.boot_nonce != native_memory_host_boot_nonce):
+                raise DurableJobAdmissionDenied("native_memory_original_host_changed")
+            if native_task_admission is not None:
+                if not native_task_host.admitting or native_task_host.boot_nonce != native_task_host_boot_nonce:
+                    raise DurableJobAdmissionDenied("native_report_original_host_changed")
+                from src.runtime_plugins.task_capability import seal_report_admission
+                await seal_report_admission(db, run, native_task_admission, host_boot_nonce=native_task_host_boot_nonce)
             db.add(run)
             try:
                 await db.flush()
@@ -3421,6 +3506,74 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def create_job(self, spec: DurableJobSpec) -> dict[str, Any]:
         """Compatibility alias emphasizing that ScheduledJob is only a trigger."""
         return await self.admit_job(spec)
+
+    async def admit_task_capability_job(self, spec, *, candidate, host,
+                                        admission_db=None, admission_authority_check=None):
+        """Admit only the source-staged original report specification."""
+        return await self._admit_in_session(admission_db, spec,
+            native_task_admission=candidate, native_task_host=host,
+            native_task_host_boot_nonce=host.boot_nonce,
+            admission_authority_check=admission_authority_check)
+
+    async def record_task_capability_checkpoint(self, job_id, *, original_scope, checkpoint_candidate):
+        return await self._record_task_capability_phase(job_id, original_scope=original_scope,
+            method="tasks.checkpoint", phase="source", candidate=checkpoint_candidate)
+
+    async def record_task_capability_invocation(self, job_id, *, original_scope, invocation_witness):
+        return await self._record_task_capability_phase(job_id, original_scope=original_scope,
+            method="capabilities.invoke", phase="invoke", candidate=invocation_witness)
+
+    async def _record_task_capability_phase(self, job_id, *, original_scope, method, phase, candidate):
+        from src.runtime_plugins.dispatch import NativeServiceDispatcher
+        from src.runtime_plugins.task_capability import prepare_report_publication, preflight_report_journal
+        if (method, phase) not in {("tasks.checkpoint", "source"), ("capabilities.invoke", "invoke")}:
+            raise DurableJobTransitionError("fixed original report phase required")
+        async with self._writer_session() as db:
+            run, witness, _ = await NativeServiceDispatcher(jobs=self)._current_in_db(
+                db, job_id, method, original_scope)
+            if run.job_kind != "work.local-evidence-report.v1":
+                raise DurableJobTransitionError("fixed original report required")
+            previous = run.checkpoint_receipts_json
+            receipt = await prepare_report_publication(db, run, phase=phase,
+                candidate=candidate, original_scope=original_scope)
+            history = json.loads(previous)
+            if any(item.get("checkpoint_id") == receipt["checkpoint_id"] for item in history):
+                raise DurableJobTransitionError("original report phase cannot be republished")
+            history.append(receipt)
+            preflight_report_journal(history)
+            now = _utc_now()
+            changed = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.status == "running",
+                WorkflowRunState.revision == run.revision,
+                WorkflowRunState.fencing_token == witness["fencing_token"],
+                WorkflowRunState.lease_owner == witness["lease_owner"], WorkflowRunState.lease_expires_at > now,
+                WorkflowRunState.deadline_at == run.deadline_at, WorkflowRunState.deadline_at > now,
+                WorkflowRunState.attempt_count == 1, WorkflowRunState.input_digest == run.input_digest,
+                WorkflowRunState.authority_digest == run.authority_digest,
+                WorkflowRunState.run_fingerprint == run.run_fingerprint,
+                WorkflowRunState.composition_binding_json == run.composition_binding_json,
+                WorkflowRunState.checkpoint_receipts_json == previous,
+                WorkflowRunState.artifact_receipts_json == run.artifact_receipts_json,
+                WorkflowRunState.effect_receipts_json == run.effect_receipts_json,
+            ).values(checkpoint_receipts_json=_canonical(history), updated_at=now,
+                heartbeat_at=now, revision=WorkflowRunState.revision + 1))
+            if not _rowcount_is_one(changed):
+                raise DurableJobLeaseError("original report phase changed before publication")
+            current = await self._fetch(db, job_id)
+            return _serialize(current, receipt={"kind": "native_report_phase", "phase": phase,
+                "receipt_ref": receipt["checkpoint_id"], "no_learning": True})
+
+    async def settle_task_capability(self, job_id, *, original_scope, outcome_candidate, terminal_witness):
+        from src.runtime_plugins.task_capability import settle_report_job
+        return await settle_report_job(self, job_id, original_scope=original_scope,
+            outcome_candidate=outcome_candidate, terminal_witness=terminal_witness)
+
+    async def cancel_task_capability(self, job_id, *, original_scope, cancel_candidate,
+                                     cleanup_witness, expected_revision):
+        from src.runtime_plugins.task_capability import cancel_report_job
+        return await cancel_report_job(self, job_id, original_scope=original_scope,
+            cancel_candidate=cancel_candidate, cleanup_witness=cleanup_witness,
+            expected_revision=expected_revision)
 
     async def replace_general_task_manifest(self, job_id, **bindings):
         from src.workflows.general_task_guard import replace_manifest
@@ -4027,8 +4180,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
                 )
+            if run.job_kind == "model_inference_ephemeral_v1" and to_status in {"succeeded", "degraded"}:
+                from src.runtime_plugins.inference_output import CANDIDATE_ID, OUTPUT_IDS
+                if any(item.get("checkpoint_id") in OUTPUT_IDS | {CANDIDATE_ID}
+                       for item in _json_load(run.checkpoint_receipts_json, [])):
+                    raise DurableJobTransitionError("original inference output requires its private sealing writer")
             if run.job_kind == "runtime_service_read_v1" and to_status == "succeeded":
                 raise DurableJobTransitionError("original native read sealed completion required")
+            if run.job_kind == "runtime_service_memory_v1" and to_status in {"succeeded", "degraded"}:
+                raise DurableJobTransitionError("original native Memory sealed completion required")
             if run.job_kind == "conversation_turn_v1" and run.composition_binding_json and to_status == "succeeded":
                 raise DurableJobTransitionError("original native turn publication required")
             if (run.job_kind == "conversation_turn_v1" and run.composition_binding_json
@@ -4707,12 +4867,23 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             validate_family_transition(None, payload)
             receipt = {"checkpoint_id": FAMILY_CHECKPOINT_ID, "state_digest": _digest(payload), "safe": True, "payload": payload}
             db.info["composition_native_turn_family_receipt"] = receipt
-            run.checkpoint_receipts_json = _canonical([*history, receipt])
+            from src.agent.native_turn_controls import reserve_control_capacity
+            reserved = reserve_control_capacity(db, native_execution, [*history, receipt])
+            run.checkpoint_receipts_json = _canonical(reserved)
             run.revision += 1
             run.updated_at = now
         await db.flush()
         if not native_execution.host.admitting or native_execution.host.boot_nonce != native_execution.claim.host_boot_nonce:
             raise DurableJobLeaseError("original native turn family host changed")
+
+    async def seal_native_inference_output(self, *, result_witness, route_witness):
+        """Only exact original inference/route witnesses can publish output."""
+        from src.runtime_plugins.inference_output import seal_output
+        return await seal_output(self, result_witness=result_witness, route_witness=route_witness)
+
+    async def consume_native_inference_candidate_in_session(self, db, *, candidate):
+        from src.runtime_plugins.inference_output import consume_candidate
+        return await consume_candidate(self, db, candidate=candidate)
 
     async def append_native_turn_family_in_session(self, db, *, native_execution,
                                                   operation_witness, operation_run, reservation):
@@ -4959,6 +5130,46 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobLeaseError("original native read host changed before settlement")
             return _serialize(run, receipt={"kind": "native_read_completed", "no_learning": True})
 
+    async def complete_native_memory(self, original_claim: NativeServiceClaim, *, result) -> dict[str, Any]:
+        """Complete only the same-writer actual Memory result and retained owners."""
+        from src.runtime_plugins.memory_producer import memory_context
+        from src.runtime_plugins.ownership import begin_native_writer
+        from src.workspace.accounting_witness import validate_native_memory_retention
+        if type(original_claim) is not NativeServiceClaim or original_claim._host is None:
+            raise DurableJobLeaseError("original native Memory claim required")
+        host = original_claim._host
+        async with self._writer_session() as db:
+            await begin_native_writer(db, owner="durable_jobs")
+            run = await self._fetch(db, original_claim.job["job_id"])
+            context = memory_context(run)
+            sealed = context["result"]
+            receipt = _native_plain(original_claim.checkpoint)
+            payload = receipt["payload"]
+            if (run.status != "running" or sealed is None or sealed["payload"] != result
+                or sealed["claim_ref"] != payload["claim_ref"]
+                or run.composition_binding_json != original_claim.binding.to_json()
+                or receipt not in _json_load(run.checkpoint_receipts_json, [])
+                or run.input_digest != payload["input_digest"] or run.authority_digest != payload["authority_digest"]
+                or run.run_fingerprint != payload["run_fingerprint"] or run.attempt_count != payload["attempt_count"]
+                or _deadline_expired(run, now=_utc_now())):
+                raise DurableJobLeaseError("original native Memory completion changed")
+            self._assert_lease(run, owner=payload["lease_owner"], fencing_token=payload["fencing_token"])
+            await _validate_native_service_claim(db, run,
+                _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce))
+            await validate_native_memory_retention(db, run, sealed)
+            now = _utc_now()
+            run.status = "succeeded" if result["status"] == "succeeded" else "blocked"
+            run.result_digest = sealed["result_digest"]
+            run.result_summary = "Native Memory owner result committed"
+            run.failure_reason = result.get("reason_code")
+            run.finished_at, run.updated_at = now, now
+            run.lease_owner, run.lease_expires_at = None, None
+            run.revision += 1
+            if not host.admitting or host.boot_nonce != original_claim.host_boot_nonce:
+                raise DurableJobLeaseError("original native Memory host changed before settlement")
+            await db.flush()
+            return _serialize(run, receipt={"kind": "native_memory_completed", "memory_status": result["memory_status"]})
+
     async def claim_service_job(self, job_id: str, *, host, owner: str,
                                 lease_seconds: int = 300, expected_revision: int | None = None,
                                 expected_fencing_token: int | None = None, claim_authority_check=None) -> NativeServiceClaim:
@@ -5023,6 +5234,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             elif claim_authority_check is not None or dependency_guard or preference_guard:
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
+                if (_runtime_service_claim is None or continue_existing_attempt or run.attempt_count != 0):
+                    raise DurableJobLeaseError("the original native report claim is exhausted or unavailable")
             service_binding = await _validate_native_service_claim(db, run, _runtime_service_claim) if _runtime_service_claim is not None else None
             if _native_turn_pending(run):
                 raise DurableJobLeaseError("original native turn physical completion is unproven; replay denied")
@@ -5042,7 +5256,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
-                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"} and not (_runtime_service_claim is not None and run.job_kind in {"workflow", "conversation_turn_v1", "research_dossier", "runtime_service_read_v1"}):
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"} and not (_runtime_service_claim is not None and run.job_kind in {"workflow", "conversation_turn_v1", "research_dossier", "runtime_service_read_v1", "runtime_service_memory_v1", "work.local-evidence-report.v1"}):
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(
@@ -6974,6 +7188,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        native_report_witness=None,
     ) -> dict[str, Any]:
         """Persist an operator-safe artifact receipt.
 
@@ -6984,6 +7199,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """
         async with self._writer_session() as db:
             run = await self._fetch(db, job_id)
+            if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
+                if native_report_witness is None:
+                    raise DurableJobLeaseError("original report artifact source witness required")
+                if artifact_type != "evidence_local_report" or not isinstance(content, bytes):
+                    raise DurableJobLeaseError("fixed original report artifact required")
+                await db.rollback()
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="durable_jobs")
+                run = await self._fetch(db, job_id)
+                from src.runtime_plugins.task_capability import recheck_report_current
+                await recheck_report_current(db, run, phase="artifact", witness=native_report_witness,
+                    file_path=file_path, content_digest=hashlib.sha256(content.encode() if isinstance(content, str) else content or b"").hexdigest())
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
                 await db.rollback()
@@ -7541,6 +7768,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int | None = None,
         expected_revision: int | None = None,
         readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        native_report_witness=None,
     ) -> dict[str, Any]:
         """Persist a bounded effect or readback receipt on the job record.
 
@@ -7588,6 +7816,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
+            if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
+                if native_report_witness is None or effect_type != "evidence_cpu_output":
+                    raise DurableJobLeaseError("fixed original report effect source witness required")
+                await db.rollback()
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="durable_jobs")
+                run = await self._fetch(db, job_id)
+                from src.runtime_plugins.task_capability import recheck_report_current
+                await recheck_report_current(db, run, phase="readback" if receipt_kind == "readback" else "effect",
+                    witness=native_report_witness, file_path=target_path, content_digest=content_sha256 or target_digest)
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
                 if readback_authority_check is None:
@@ -7910,6 +8148,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int | None = None,
         expected_revision: int | None = None,
         readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        native_report_witness=None,
     ) -> dict[str, Any]:
         """Record an explicit readback receipt in the canonical effect ledger."""
         if effect_id and effect_type is None:
@@ -7941,6 +8180,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             fencing_token=fencing_token,
             expected_revision=expected_revision,
             readback_authority_check=readback_authority_check,
+            native_report_witness=native_report_witness,
         )
 
     async def record_remote_inference_receipt(

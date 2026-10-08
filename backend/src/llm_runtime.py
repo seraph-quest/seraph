@@ -1533,6 +1533,10 @@ def _transport_json_value(value: Any) -> Any:
         return {str(key): _transport_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_transport_json_value(item) for item in value]
+    from smolagents.tools import Tool
+    if isinstance(value, Tool):
+        from smolagents.models import get_tool_json_schema
+        return _transport_json_value(get_tool_json_schema(value))
     for method_name in ("model_dump", "to_dict", "dict"):
         method = getattr(value, method_name, None)
         if callable(method):
@@ -3304,6 +3308,7 @@ def _execute_sync_with_gpu_admission(
     decision: Any,
     operation_id: str,
     operation: Callable[[], Any],
+    native_route_session: Any | None = None,
 ) -> Any:
     """Run one blocking route callback under the shared one-GPU broker."""
     if not _requires_sync_gpu_admission(context):
@@ -3347,7 +3352,9 @@ def _execute_sync_with_gpu_admission(
             "canonical synchronous inference requires a valid GPU admission owner context"
         ) from error
     try:
-        result = gpu_admission_broker.execute_sync(request, operation)
+        from src.model_fabric.native_inference import original_route_scope
+        with original_route_scope(context, decision, native_route_session, "completion"):
+            result = gpu_admission_broker.execute_sync(request, operation)
     except GpuAdmissionError as error:
         _persist_bound_sync_admission_receipt(
             effective_operation_id,
@@ -3861,6 +3868,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         decision=route_decision,
                         operation_id=str(admission_operation_id),
                         operation=invoke_primary_transport,
+                        native_route_session=receipt_session,
                     )
                     _mark_target_succeeded(
                         model_id=primary_model,
@@ -3939,6 +3947,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     decision=route_decision,
                     operation_id=str(admission_operation_id),
                     operation=invoke_fallback_transport,
+                    native_route_session=receipt_session,
                 )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
@@ -4020,6 +4029,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 # receipt, and no fallback candidate may run.
                 raise
             except Exception as error:
+                from src.model_fabric.native_inference import NativeInferenceContinuation
+                if (receipt_session is not None and receipt_session._finalized
+                    and type(getattr(receipt_session, "_native_continuation", None)) is NativeInferenceContinuation):
+                    raise
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(
                         outcome="failed",
@@ -4027,6 +4040,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         decision=route_decision,
                         degradation_code="transport_failed",
                     )
+                if receipt_session is not None:
+                    from src.model_fabric.native_inference import complete_original_failed_attempt
+                    _run_receipt_hook_sync(complete_original_failed_attempt(receipt_session))
                 last_error = error
                 if is_primary:
                     primary_error = error
@@ -4381,6 +4397,7 @@ def completion_with_fallback_sync(
                         decision=route_decision,
                         operation_id=str(admission_operation_id),
                         operation=invoke_primary_transport,
+                        native_route_session=receipt_session,
                     )
                     _mark_target_succeeded(
                         model_id=primary_model,
@@ -4455,6 +4472,7 @@ def completion_with_fallback_sync(
                     decision=route_decision,
                     operation_id=str(admission_operation_id),
                     operation=invoke_fallback_transport,
+                    native_route_session=receipt_session,
                 )
                 _mark_target_succeeded(
                     model_id=fallback_model,
@@ -4534,6 +4552,10 @@ def completion_with_fallback_sync(
                 # this request; a fallback candidate must not run.
                 raise
             except Exception as error:
+                from src.model_fabric.native_inference import NativeInferenceContinuation
+                if (receipt_session is not None and receipt_session._finalized
+                    and type(getattr(receipt_session, "_native_continuation", None)) is NativeInferenceContinuation):
+                    raise
                 if receipt_session is not None and route_attempt_started:
                     receipt_session.attempt_finished(
                         outcome="failed",
@@ -4541,6 +4563,9 @@ def completion_with_fallback_sync(
                         decision=route_decision,
                         degradation_code="transport_failed",
                     )
+                if receipt_session is not None:
+                    from src.model_fabric.native_inference import complete_original_failed_attempt
+                    _run_receipt_hook_sync(complete_original_failed_attempt(receipt_session))
                 last_error = error
                 if is_primary:
                     primary_error = error

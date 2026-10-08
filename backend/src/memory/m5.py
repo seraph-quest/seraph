@@ -197,6 +197,54 @@ async def sanitize_m5_memory_text_async(value: str) -> str:
     return sanitize_m5_memory_text(redacted)
 
 
+@dataclass(frozen=True)
+class PreparedM5Text:
+    """Private original text staged through the actual readonly Vault owner."""
+    original_digest: str
+    sanitized_text: str
+    vault_rows_digest: str
+
+
+async def _vault_rows_digest(db) -> str:
+    from src.db.models import Secret
+    rows = list((await db.execute(select(Secret).order_by(Secret.id))).scalars())
+    # Secret has no revision. Bind its exact existing fields, including the
+    # encrypted value, so inserts, replacements and deletions all fence staging.
+    return m5_digest([row.model_dump(mode="json") for row in rows])
+
+
+async def prepare_m5_text(db, value: str) -> PreparedM5Text:
+    """Read/decrypt before the native writer; retain no decrypted secret set."""
+    if db.info.get("native_writer_started"):
+        raise RuntimeError("Vault staging must precede the native writer")
+    if not isinstance(value, str):
+        raise ValueError("M5 memory text must be a string")
+    original_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    before = await _vault_rows_digest(db)
+    redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True)
+    if redacted == "[redaction unavailable]":
+        raise ValueError("memory proposal redaction is unavailable")
+    text = sanitize_m5_memory_text(redacted)
+    if await _vault_rows_digest(db) != before:
+        raise ValueError("memory proposal Vault changed during staging")
+    return PreparedM5Text(original_digest, text, before)
+
+
+async def _consume_prepared_m5_text(db, original: str, prepared: PreparedM5Text) -> str:
+    if (type(prepared) is not PreparedM5Text or not isinstance(original, str)
+        or hashlib.sha256(original.encode("utf-8")).hexdigest() != prepared.original_digest
+        or await _vault_rows_digest(db) != prepared.vault_rows_digest):
+        raise ValueError("memory proposal staged Vault binding changed")
+    # This is structural checking only: no file open, key lookup or decrypt.
+    return sanitize_m5_memory_text(prepared.sanitized_text)
+
+
+async def _require_original_m5_session(db, principal_id: str, session_id: str) -> None:
+    session = await db.get(Session, session_id)
+    if session is None or session.owner_principal_id != principal_id:
+        raise PermissionError("original memory Session owner is required")
+
+
 def _safe_identifier(value: Any, *, field: str) -> str:
     candidate = str(value or "").strip()
     if not candidate or not _SAFE_ID.fullmatch(candidate):
@@ -2089,281 +2137,307 @@ async def create_memory_proposal(
     decision_effect: MemoryProposalDecisionEffect | str = MemoryProposalDecisionEffect.none,
     composition_authority_check=None,
 ) -> dict[str, Any]:
-    """Create or replay one source verified proposal.
+    """Create or replay one provider-free source-verified proposal."""
+    async with get_session() as db:
+        from src.work_board.repository import _begin_sqlite_immediate
+        await _begin_sqlite_immediate(db)
+        return await _create_memory_proposal_in_session(db,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            task_id=task_id,
+            expected_task_revision=expected_task_revision,
+            attempt_id=attempt_id,
+            candidate_text=candidate_text,
+            candidate_kind=candidate_kind,
+            preferred_capability_id=preferred_capability_id,
+            decision_effect=decision_effect,
+            composition_authority_check=composition_authority_check,
+        )
 
-    The public route creates a deterministic, provider-free candidate from
-    safe structured proof identifiers.  No model route is contacted.  The
-    optional candidate argument is reserved for a governed test adapter and
-    is sanitized by the same canonical path.
-    """
 
+async def _create_memory_proposal_in_session(
+    db, *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    task_id: str,
+    expected_task_revision: int,
+    attempt_id: str,
+    candidate_text: str | None = None,
+    candidate_kind: MemoryKind | str | None = None,
+    preferred_capability_id: str | None = None,
+    decision_effect: MemoryProposalDecisionEffect | str = MemoryProposalDecisionEffect.none,
+    composition_authority_check=None,
+    prepared_text=None,
+    require_original_session: bool = False,
+) -> dict[str, Any]:
+    """Existing M5 owner; caller retains the complete mutation/result writer."""
+    if not db.in_transaction():
+        raise RuntimeError("M5 proposal requires a caller-owned writer")
     owner_principal_id = _safe_identifier(owner_principal_id, field="owner_principal_id")
     owner_session_id = _safe_identifier(owner_session_id, field="owner_session_id")
     task_id = _safe_identifier(task_id, field="task_id")
     attempt_id = _safe_identifier(attempt_id, field="attempt_id")
-    async with get_session() as db:
-        from src.work_board.repository import _begin_sqlite_immediate
-
-        await _begin_sqlite_immediate(db)
-        if composition_authority_check is not None:
-            await composition_authority_check(db)
-        task = (
-            await db.execute(
-                select(WorkBoardTask).where(
-                    WorkBoardTask.task_id == task_id,
-                    WorkBoardTask.owner_principal_id == owner_principal_id,
-                    WorkBoardTask.owner_session_id == owner_session_id,
-                )
+    if require_original_session:
+        await _require_original_m5_session(db, owner_principal_id, owner_session_id)
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
+    task = (
+        await db.execute(
+            select(WorkBoardTask).where(
+                WorkBoardTask.task_id == task_id,
+                WorkBoardTask.owner_principal_id == owner_principal_id,
+                WorkBoardTask.owner_session_id == owner_session_id,
             )
-        ).scalar_one_or_none()
-        if task is None:
-            raise PermissionError("task owner/session binding is invalid")
-        if task.capability_id == "memory.opportunity-preference.v1":
-            raise ValueError("opportunity_preference_requires_specialized_review")
-        if int(task.task_revision or 0) != int(expected_task_revision):
-            raise ValueError("stale_task_revision")
-        goal = (
-            await db.execute(select(Goal).where(Goal.id == task.goal_id))
-        ).scalar_one_or_none()
-        if goal is None or int(goal.revision or 0) != int(task.goal_revision or 0):
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise PermissionError("task owner/session binding is invalid")
+    if task.capability_id == "memory.opportunity-preference.v1":
+        raise ValueError("opportunity_preference_requires_specialized_review")
+    if int(task.task_revision or 0) != int(expected_task_revision):
+        raise ValueError("stale_task_revision")
+    goal = (
+        await db.execute(select(Goal).where(Goal.id == task.goal_id))
+    ).scalar_one_or_none()
+    if goal is None or int(goal.revision or 0) != int(task.goal_revision or 0):
+        return await _write_source_failure_proposal(
+            db,
+            task=task,
+            attempt_id=attempt_id,
+            status=MemoryProposalStatus.blocked,
+            reason="stale_goal_revision",
+            recovery_action="refresh_goal_and_request_new_verified_source",
+        )
+    try:
+        proof = await _verified_source(db, task, requested_attempt_id=attempt_id)
+    except ValueError as exc:
+        if str(exc) == "source_not_verified":
             return await _write_source_failure_proposal(
                 db,
                 task=task,
                 attempt_id=attempt_id,
-                status=MemoryProposalStatus.blocked,
-                reason="stale_goal_revision",
-                recovery_action="refresh_goal_and_request_new_verified_source",
+                status=MemoryProposalStatus.no_learning,
+                reason="source_not_verified",
+                recovery_action="complete_verified_readback_then_request_again",
             )
-        try:
-            proof = await _verified_source(db, task, requested_attempt_id=attempt_id)
-        except ValueError as exc:
-            if str(exc) == "source_not_verified":
-                return await _write_source_failure_proposal(
-                    db,
-                    task=task,
-                    attempt_id=attempt_id,
-                    status=MemoryProposalStatus.no_learning,
-                    reason="source_not_verified",
-                    recovery_action="complete_verified_readback_then_request_again",
-                )
-            raise
-        candidate_text = candidate_text if candidate_text is not None else _structured_source_candidate(proof)
-        redaction_unavailable = False
-        try:
-            candidate_text = await sanitize_m5_memory_text_async(candidate_text)
-            memory_kind = MemoryKind(candidate_kind or MemoryKind.fact)
-            if memory_kind not in {MemoryKind.fact, MemoryKind.pattern}:
-                raise ValueError("memory_kind must be fact or pattern")
-            preview_digest = m5_text_digest(candidate_text)
-        except (TypeError, ValueError) as exc:
-            redaction_unavailable = "redaction is unavailable" in str(exc).lower()
-            candidate_text = None
-            memory_kind = None
-            preview_digest = None
-        try:
-            requested_effect = MemoryProposalDecisionEffect(decision_effect)
-            invalid_effect = False
-        except (TypeError, ValueError):
-            requested_effect = MemoryProposalDecisionEffect.none
-            invalid_effect = True
-            candidate_text = None
-            memory_kind = None
-            preview_digest = None
-        derived_idempotency = m5_digest(
-            {
-                "version": M5_SCHEMA_VERSION,
-                "owner_principal_id": owner_principal_id,
-                "owner_session_id": owner_session_id,
-                "source_task_id": task.task_id,
-                "source_attempt_id": proof.attempt.attempt_id,
-                "evidence_digest": proof.evidence_digest,
-            }
+        raise
+    candidate_text = candidate_text if candidate_text is not None else _structured_source_candidate(proof)
+    redaction_unavailable = False
+    try:
+        candidate_text = (await _consume_prepared_m5_text(db, candidate_text, prepared_text)
+                if prepared_text is not None else await sanitize_m5_memory_text_async(candidate_text))
+        memory_kind = MemoryKind(candidate_kind or MemoryKind.fact)
+        if memory_kind not in {MemoryKind.fact, MemoryKind.pattern}:
+            raise ValueError("memory_kind must be fact or pattern")
+        preview_digest = m5_text_digest(candidate_text)
+    except (TypeError, ValueError) as exc:
+        redaction_unavailable = "redaction is unavailable" in str(exc).lower()
+        candidate_text = None
+        memory_kind = None
+        preview_digest = None
+    try:
+        requested_effect = MemoryProposalDecisionEffect(decision_effect)
+        invalid_effect = False
+    except (TypeError, ValueError):
+        requested_effect = MemoryProposalDecisionEffect.none
+        invalid_effect = True
+        candidate_text = None
+        memory_kind = None
+        preview_digest = None
+    derived_idempotency = m5_digest(
+        {
+            "version": M5_SCHEMA_VERSION,
+            "owner_principal_id": owner_principal_id,
+            "owner_session_id": owner_session_id,
+            "source_task_id": task.task_id,
+            "source_attempt_id": proof.attempt.attempt_id,
+            "evidence_digest": proof.evidence_digest,
+        }
+    )
+    existing_statement = select(MemoryProposal).where(
+        MemoryProposal.owner_principal_id == owner_principal_id,
+        MemoryProposal.owner_session_id == owner_session_id,
+        MemoryProposal.source_task_id == task.task_id,
+        MemoryProposal.source_attempt_id == proof.attempt.attempt_id,
+    ).order_by(MemoryProposal.created_at.desc(), MemoryProposal.proposal_id.desc()).limit(10)
+    existing_rows = list((await db.execute(existing_statement)).scalars().all())
+    request_binding = m5_digest(
+        {
+            "version": M5_SCHEMA_VERSION,
+            "owner_principal_id": owner_principal_id,
+            "owner_session_id": owner_session_id,
+            "source_task_id": task.task_id,
+            "source_task_revision": task.task_revision,
+            "source_attempt_id": proof.attempt.attempt_id,
+            "source_attempt_fence": int(proof.attempt.fencing_token or 0),
+            "workflow_run_id": proof.attempt.workflow_run_id,
+            "goal_id": task.goal_id,
+            "goal_revision": task.goal_revision,
+            "capability_id": task.capability_id,
+            "capability_version": proof.capability_version,
+            "typed_input_digest": task.typed_input_digest or "",
+            "source_context_digest": proof.source_context_digest,
+            "readback_digest": _proof_digest(proof.readback),
+            "idempotency_key": derived_idempotency,
+        }
+    )
+    if existing_rows:
+        existing = next(
+            (item for item in existing_rows if item.request_binding_digest == request_binding),
+            None,
         )
-        existing_statement = select(MemoryProposal).where(
-            MemoryProposal.owner_principal_id == owner_principal_id,
-            MemoryProposal.owner_session_id == owner_session_id,
-            MemoryProposal.source_task_id == task.task_id,
-            MemoryProposal.source_attempt_id == proof.attempt.attempt_id,
-        ).order_by(MemoryProposal.created_at.desc(), MemoryProposal.proposal_id.desc()).limit(10)
-        existing_rows = list((await db.execute(existing_statement)).scalars().all())
-        request_binding = m5_digest(
-            {
-                "version": M5_SCHEMA_VERSION,
-                "owner_principal_id": owner_principal_id,
-                "owner_session_id": owner_session_id,
-                "source_task_id": task.task_id,
-                "source_task_revision": task.task_revision,
-                "source_attempt_id": proof.attempt.attempt_id,
-                "source_attempt_fence": int(proof.attempt.fencing_token or 0),
-                "workflow_run_id": proof.attempt.workflow_run_id,
-                "goal_id": task.goal_id,
-                "goal_revision": task.goal_revision,
-                "capability_id": task.capability_id,
-                "capability_version": proof.capability_version,
-                "typed_input_digest": task.typed_input_digest or "",
-                "source_context_digest": proof.source_context_digest,
-                "readback_digest": _proof_digest(proof.readback),
-                "idempotency_key": derived_idempotency,
-            }
+        if existing is None:
+            raise ValueError("proposal_source_binding_conflict")
+        return _proposal_payload(existing)
+    if candidate_text is None or preview_digest is None:
+        status = (
+            MemoryProposalStatus.blocked
+            if redaction_unavailable
+            else MemoryProposalStatus.no_learning
         )
-        if existing_rows:
-            existing = next(
-                (item for item in existing_rows if item.request_binding_digest == request_binding),
-                None,
-            )
-            if existing is None:
-                raise ValueError("proposal_source_binding_conflict")
-            return _proposal_payload(existing)
-        if candidate_text is None or preview_digest is None:
-            status = (
-                MemoryProposalStatus.blocked
-                if redaction_unavailable
-                else MemoryProposalStatus.no_learning
-            )
-            memory_kind = None
-            scope_json = None
-            preview = None
-            preview_digest = None
-            confidence = None
-            effect = MemoryProposalDecisionEffect.none
-            reason = (
-                "memory_redaction_unavailable"
-                if redaction_unavailable
-                else ("decision_effect_invalid" if invalid_effect else "memory_candidate_rejected")
-            )
-            recovery_action = "restore_redaction_service_then_request_again" if redaction_unavailable else "none"
-            job_id = None
-        else:
-            preview = candidate_text
-            effect = requested_effect
-            scope = m5_memory_scope(
-                task,
-                source_context_digest=proof.source_context_digest,
-                preferred_capability_id=preferred_capability_id,
-            )
-            scope_json = m5_canonical_json(scope)
-            confidence = 0.5
-            status = MemoryProposalStatus.proposed
-            reason = "verified_source"
-            recovery_action = "none"
-            job_id = f"work-board-proposal:{derived_idempotency}"
-        proposal = MemoryProposal(
-            schema_version=M5_SCHEMA_VERSION,
-            owner_principal_id=owner_principal_id,
-            owner_session_id=owner_session_id,
-            source_task_id=task.task_id,
-            source_task_revision=task.task_revision,
-            source_attempt_id=proof.attempt.attempt_id,
-            source_attempt_fence=int(proof.attempt.fencing_token or 0),
-            workflow_run_id=proof.attempt.workflow_run_id or "",
-            workflow_run_revision=int(getattr(proof.run, "revision", 0) or 0),
-            goal_id=task.goal_id,
-            goal_revision=task.goal_revision,
-            capability_id=str(task.capability_id or ""),
-            capability_version=proof.capability_version,
-            typed_input_digest=str(task.typed_input_digest or ""),
+        memory_kind = None
+        scope_json = None
+        preview = None
+        preview_digest = None
+        confidence = None
+        effect = MemoryProposalDecisionEffect.none
+        reason = (
+            "memory_redaction_unavailable"
+            if redaction_unavailable
+            else ("decision_effect_invalid" if invalid_effect else "memory_candidate_rejected")
+        )
+        recovery_action = "restore_redaction_service_then_request_again" if redaction_unavailable else "none"
+        job_id = None
+    else:
+        preview = candidate_text
+        effect = requested_effect
+        scope = m5_memory_scope(
+            task,
             source_context_digest=proof.source_context_digest,
-            evidence_digest=proof.evidence_digest,
-            readback_kind=str(proof.readback.get("kind") or "verified_workflow_readback"),
-            readback_ref=next(iter(_source_refs(proof.readback)), None),
-            readback_digest=_proof_digest(proof.readback),
-            artifact_ref=(
-                str(proof.readback.get("artifact_id") or proof.readback.get("readback_id") or "") or None
-            ),
-            artifact_digest=(str(proof.readback.get("content_sha256") or "") or None),
-            proposal_job_id=job_id,
-            request_idempotency_key=derived_idempotency,
-            request_binding_digest=request_binding,
-            memory_kind=memory_kind,
-            memory_scope_json=scope_json,
-            preview_text=preview,
-            preview_text_digest=preview_digest,
-            decision_effect=effect,
-            confidence=confidence,
-            provenance_json=m5_canonical_json(
-                {
-                    "schema_version": M5_PROVENANCE_SCHEMA_VERSION,
-                    "owner_principal_id": owner_principal_id,
-                    "owner_session_id": owner_session_id,
-                    "source_task_id": task.task_id,
-                    "source_attempt_id": proof.attempt.attempt_id,
-                    "workflow_run_id": proof.attempt.workflow_run_id,
-                    "source_context_digest": proof.source_context_digest,
-                    "evidence_digest": proof.evidence_digest,
-                    "readback_digest": _proof_digest(proof.readback),
-                    "artifact_ref": (
-                        str(proof.readback.get("artifact_id") or proof.readback.get("readback_id") or "") or None
-                    ),
-                    "artifact_digest": str(proof.readback.get("content_sha256") or "") or None,
-                }
-            ),
-            source_refs_json=json.dumps(_source_refs(proof.readback), separators=(",", ":")),
-            reason_code=reason,
-            recovery_action=recovery_action if candidate_text is None else "none",
-            provider_contact_started=False,
-            provider_contact_state=MemoryProposalProviderContactState.not_started,
-            provider_contact_count=0,
-            privacy_state=MemoryProposalPrivacyState.visible,
-            status=status,
-            expires_at=_now() + timedelta(minutes=15) if status is MemoryProposalStatus.proposed else None,
+            preferred_capability_id=preferred_capability_id,
         )
-        if status is MemoryProposalStatus.proposed:
-            proposal_job = (
-                await db.execute(
-                    select(WorkBoardProposal).where(
-                        WorkBoardProposal.admission_job_id == job_id,
-                    )
+        scope_json = m5_canonical_json(scope)
+        confidence = 0.5
+        status = MemoryProposalStatus.proposed
+        reason = "verified_source"
+        recovery_action = "none"
+        job_id = f"work-board-proposal:{derived_idempotency}"
+    proposal = MemoryProposal(
+        schema_version=M5_SCHEMA_VERSION,
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+        source_task_id=task.task_id,
+        source_task_revision=task.task_revision,
+        source_attempt_id=proof.attempt.attempt_id,
+        source_attempt_fence=int(proof.attempt.fencing_token or 0),
+        workflow_run_id=proof.attempt.workflow_run_id or "",
+        workflow_run_revision=int(getattr(proof.run, "revision", 0) or 0),
+        goal_id=task.goal_id,
+        goal_revision=task.goal_revision,
+        capability_id=str(task.capability_id or ""),
+        capability_version=proof.capability_version,
+        typed_input_digest=str(task.typed_input_digest or ""),
+        source_context_digest=proof.source_context_digest,
+        evidence_digest=proof.evidence_digest,
+        readback_kind=str(proof.readback.get("kind") or "verified_workflow_readback"),
+        readback_ref=next(iter(_source_refs(proof.readback)), None),
+        readback_digest=_proof_digest(proof.readback),
+        artifact_ref=(
+            str(proof.readback.get("artifact_id") or proof.readback.get("readback_id") or "") or None
+        ),
+        artifact_digest=(str(proof.readback.get("content_sha256") or "") or None),
+        proposal_job_id=job_id,
+        request_idempotency_key=derived_idempotency,
+        request_binding_digest=request_binding,
+        memory_kind=memory_kind,
+        memory_scope_json=scope_json,
+        preview_text=preview,
+        preview_text_digest=preview_digest,
+        decision_effect=effect,
+        confidence=confidence,
+        provenance_json=m5_canonical_json(
+            {
+                "schema_version": M5_PROVENANCE_SCHEMA_VERSION,
+                "owner_principal_id": owner_principal_id,
+                "owner_session_id": owner_session_id,
+                "source_task_id": task.task_id,
+                "source_attempt_id": proof.attempt.attempt_id,
+                "workflow_run_id": proof.attempt.workflow_run_id,
+                "source_context_digest": proof.source_context_digest,
+                "evidence_digest": proof.evidence_digest,
+                "readback_digest": _proof_digest(proof.readback),
+                "artifact_ref": (
+                    str(proof.readback.get("artifact_id") or proof.readback.get("readback_id") or "") or None
+                ),
+                "artifact_digest": str(proof.readback.get("content_sha256") or "") or None,
+            }
+        ),
+        source_refs_json=json.dumps(_source_refs(proof.readback), separators=(",", ":")),
+        reason_code=reason,
+        recovery_action=recovery_action if candidate_text is None else "none",
+        provider_contact_started=False,
+        provider_contact_state=MemoryProposalProviderContactState.not_started,
+        provider_contact_count=0,
+        privacy_state=MemoryProposalPrivacyState.visible,
+        status=status,
+        expires_at=_now() + timedelta(minutes=15) if status is MemoryProposalStatus.proposed else None,
+    )
+    if status is MemoryProposalStatus.proposed:
+        proposal_job = (
+            await db.execute(
+                select(WorkBoardProposal).where(
+                    WorkBoardProposal.admission_job_id == job_id,
                 )
-            ).scalar_one_or_none()
-            if proposal_job is None:
-                proposal_job = WorkBoardProposal(
-                    owner_principal_id=owner_principal_id,
-                    owner_session_id=owner_session_id,
-                    parent_task_id=task.task_id,
-                    parent_revision=task.task_revision,
-                    goal_revision=task.goal_revision,
-                    kind="memory",
-                    idempotency_key=derived_idempotency,
-                    request_digest=request_binding,
-                    capability_id="memory_proposal",
-                    capability_version=M5_SCHEMA_VERSION,
-                    authority_digest=m5_digest({"owner": owner_principal_id, "session": owner_session_id}),
-                    grant_revision=task.goal_revision,
-                    input_digest=str(task.typed_input_digest or ""),
-                    route_id="provider-free-verified-readback",
-                    admission_job_id=job_id,
-                    effect_id_digest=m5_digest({"job_id": job_id})[:16],
-                    provider_contact_started=False,
-                    provider_contact_state="not_started",
-                    status="succeeded",
-                    proposal_json=m5_canonical_json(
-                        {
-                            "schema_version": "memory_proposal_result.v1",
-                            "proposed_text_digest": preview_digest,
-                            "evidence_refs": _source_refs(proof.readback),
-                        }
-                    ),
-                    proposal_digest=m5_digest({"text_digest": preview_digest, "evidence": _source_refs(proof.readback)}),
-                    expires_at=_now() + timedelta(minutes=15),
-                )
-                db.add(proposal_job)
-        db.add(proposal)
-        await db.flush()
-        if status is MemoryProposalStatus.proposed:
-            baseline = await _write_source_baseline(db, proof, proposal)
-            if baseline.receipt_integrity_mac is None:
-                proposal.status = MemoryProposalStatus.blocked
-                proposal.reason_code = "accepted_binding_unavailable"
-                proposal.recovery_action = "verify_source_and_reaccept"
-                proposal.revision += 1
-                proposal.updated_at = _now()
-                db.add(proposal)
-                await db.flush()
-                payload = _proposal_payload(proposal)
-                payload["error_code"] = "accepted_binding_unavailable"
-                return payload
-        return _proposal_payload(proposal)
-
+            )
+        ).scalar_one_or_none()
+        if proposal_job is None:
+            proposal_job = WorkBoardProposal(
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                parent_task_id=task.task_id,
+                parent_revision=task.task_revision,
+                goal_revision=task.goal_revision,
+                kind="memory",
+                idempotency_key=derived_idempotency,
+                request_digest=request_binding,
+                capability_id="memory_proposal",
+                capability_version=M5_SCHEMA_VERSION,
+                authority_digest=m5_digest({"owner": owner_principal_id, "session": owner_session_id}),
+                grant_revision=task.goal_revision,
+                input_digest=str(task.typed_input_digest or ""),
+                route_id="provider-free-verified-readback",
+                admission_job_id=job_id,
+                effect_id_digest=m5_digest({"job_id": job_id})[:16],
+                provider_contact_started=False,
+                provider_contact_state="not_started",
+                status="succeeded",
+                proposal_json=m5_canonical_json(
+                    {
+                        "schema_version": "memory_proposal_result.v1",
+                        "proposed_text_digest": preview_digest,
+                        "evidence_refs": _source_refs(proof.readback),
+                    }
+                ),
+                proposal_digest=m5_digest({"text_digest": preview_digest, "evidence": _source_refs(proof.readback)}),
+                expires_at=_now() + timedelta(minutes=15),
+            )
+            db.add(proposal_job)
+    db.add(proposal)
+    await db.flush()
+    if status is MemoryProposalStatus.proposed:
+        baseline = await _write_source_baseline(db, proof, proposal)
+        if baseline.receipt_integrity_mac is None:
+            proposal.status = MemoryProposalStatus.blocked
+            proposal.reason_code = "accepted_binding_unavailable"
+            proposal.recovery_action = "verify_source_and_reaccept"
+            proposal.revision += 1
+            proposal.updated_at = _now()
+            db.add(proposal)
+            await db.flush()
+            payload = _proposal_payload(proposal)
+            payload["error_code"] = "accepted_binding_unavailable"
+            return payload
+    return _proposal_payload(proposal)
 
 async def list_memory_proposals(*, owner_principal_id: str, owner_session_id: str, task_id: str | None = None) -> list[dict[str, Any]]:
     async with get_session() as db:
@@ -2433,10 +2507,13 @@ async def _canonical_accept(
     decision_effect: MemoryProposalDecisionEffect,
     corrects_memory_id: str | None,
     preferred_capability_id: str | None,
+    prepared_text=None,
 ) -> None:
     if proposal.status is not MemoryProposalStatus.proposed:
         raise ValueError("proposal_not_accepting")
-    text = await sanitize_m5_memory_text_async(edited_text if edited_text is not None else proposal.preview_text or "")
+    original_text = edited_text if edited_text is not None else proposal.preview_text or ""
+    text = (await _consume_prepared_m5_text(db, original_text, prepared_text)
+        if prepared_text is not None else await sanitize_m5_memory_text_async(original_text))
     kind = proposal.memory_kind
     if kind not in {MemoryKind.fact, MemoryKind.pattern}:
         raise ValueError("memory_kind_invalid")
@@ -2593,256 +2670,306 @@ async def apply_memory_proposal_action(
         normalized_rollback_reason = reason.strip()
     async with get_session() as db:
         from src.work_board.repository import _begin_sqlite_immediate
-
         await _begin_sqlite_immediate(db)
-        if composition_authority_check is not None:
-            await composition_authority_check(db)
-        proposal = (
-            await db.execute(
-                select(MemoryProposal).where(
-                    MemoryProposal.proposal_id == proposal_id,
-                    MemoryProposal.owner_principal_id == owner_principal_id,
-                    MemoryProposal.owner_session_id == owner_session_id,
-                )
+        return await _apply_memory_proposal_action_in_session(db,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            proposal_id=proposal_id,
+            action=action,
+            expected_revision=expected_revision,
+            expected_preview_text_digest=expected_preview_text_digest,
+            expected_task_revision=expected_task_revision,
+            expected_goal_revision=expected_goal_revision,
+            edited_text=edited_text,
+            decision_effect=decision_effect,
+            reason=reason,
+            corrects_memory_id=corrects_memory_id,
+            preferred_capability_id=preferred_capability_id,
+            composition_authority_check=composition_authority_check,
+        )
+
+
+async def _apply_memory_proposal_action_in_session(
+    db, *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    proposal_id: str,
+    action: str,
+    expected_revision: int,
+    expected_preview_text_digest: str | None = None,
+    expected_task_revision: int | None = None,
+    expected_goal_revision: int | None = None,
+    edited_text: str | None = None,
+    decision_effect: MemoryProposalDecisionEffect | str | None = None,
+    reason: str | None = None,
+    corrects_memory_id: str | None = None,
+    preferred_capability_id: str | None = None,
+    composition_authority_check=None,
+    prepared_text=None,
+    require_original_session: bool = False,
+) -> dict[str, Any]:
+    """Same existing M5 review checks in the caller-owned result writer."""
+    if not db.in_transaction():
+        raise RuntimeError("M5 review requires a caller-owned writer")
+    if require_original_session:
+        await _require_original_m5_session(db, owner_principal_id, owner_session_id)
+    action = str(action or "").strip().lower()
+    if action not in {"accept", "edit_accept", "reject", "rollback", "recover"}:
+        raise ValueError("unknown_proposal_action")
+    normalized_rollback_reason = None
+    if action == "rollback":
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 500:
+            raise ValueError("rollback_reason_invalid")
+        normalized_rollback_reason = reason.strip()
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
+    proposal = (
+        await db.execute(
+            select(MemoryProposal).where(
+                MemoryProposal.proposal_id == proposal_id,
+                MemoryProposal.owner_principal_id == owner_principal_id,
+                MemoryProposal.owner_session_id == owner_session_id,
             )
-        ).scalar_one_or_none()
-        if proposal is None:
-            raise PermissionError("proposal_owner_mismatch")
-        if proposal.schema_version == "task_method_proposal.v1":
-            raise ValueError("task_method_requires_specialized_review")
-        if (proposal.schema_version == "opportunity_recommendation.v1"
-            or proposal.capability_id == "memory.opportunity-preference.v1"
-            or _decode_object(proposal.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):
+        )
+    ).scalar_one_or_none()
+    if proposal is None:
+        raise PermissionError("proposal_owner_mismatch")
+    if proposal.schema_version == "task_method_proposal.v1":
+        raise ValueError("task_method_requires_specialized_review")
+    if (proposal.schema_version == "opportunity_recommendation.v1"
+        or proposal.capability_id == "memory.opportunity-preference.v1"
+        or _decode_object(proposal.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):
+        raise ValueError("opportunity_preference_requires_specialized_review")
+    if proposal.schema_version == "procedure_recommendation.v1":
+        raise ValueError("procedure_preference_requires_specialized_review")
+    if action == "rollback" and proposal.status is MemoryProposalStatus.rolled_back:
+        payload = _proposal_payload(proposal)
+        payload["idempotent_replay"] = True
+        return payload
+    effect: MemoryProposalDecisionEffect | None = None
+    acceptance_binding: str | None = None
+    if action in {"accept", "edit_accept"}:
+        try:
+            effect = MemoryProposalDecisionEffect(decision_effect or MemoryProposalDecisionEffect.none)
+        except ValueError as exc:
+            raise ValueError("decision_effect_invalid") from exc
+        if action == "accept" and edited_text is not None:
+            raise ValueError("edited_text_requires_edit_accept")
+        original_text = edited_text if edited_text is not None else proposal.preview_text or ""
+        normalized_text = (await _consume_prepared_m5_text(db, original_text, prepared_text)
+            if prepared_text is not None else await sanitize_m5_memory_text_async(original_text))
+        target_id = (
+            _safe_identifier(corrects_memory_id, field="corrects_memory_id")
+            if corrects_memory_id
+            else proposal.corrects_memory_id
+        )
+        selected_capability = (
+            _safe_identifier(preferred_capability_id, field="preferred_capability_id")
+            if preferred_capability_id
+            else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
+        )
+        if selected_capability and not _capability_version(selected_capability):
+            raise ValueError("preferred_capability_unregistered")
+        if selected_capability == "memory.opportunity-preference.v1":
             raise ValueError("opportunity_preference_requires_specialized_review")
-        if proposal.schema_version == "procedure_recommendation.v1":
-            raise ValueError("procedure_preference_requires_specialized_review")
-        if action == "rollback" and proposal.status is MemoryProposalStatus.rolled_back:
-            payload = _proposal_payload(proposal)
-            payload["idempotent_replay"] = True
-            return payload
-        effect: MemoryProposalDecisionEffect | None = None
-        acceptance_binding: str | None = None
-        if action in {"accept", "edit_accept"}:
-            try:
-                effect = MemoryProposalDecisionEffect(decision_effect or MemoryProposalDecisionEffect.none)
-            except ValueError as exc:
-                raise ValueError("decision_effect_invalid") from exc
-            if action == "accept" and edited_text is not None:
-                raise ValueError("edited_text_requires_edit_accept")
-            normalized_text = await sanitize_m5_memory_text_async(
-                edited_text if edited_text is not None else proposal.preview_text or ""
-            )
-            target_id = (
-                _safe_identifier(corrects_memory_id, field="corrects_memory_id")
-                if corrects_memory_id
-                else proposal.corrects_memory_id
-            )
-            selected_capability = (
-                _safe_identifier(preferred_capability_id, field="preferred_capability_id")
-                if preferred_capability_id
-                else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
-            )
-            if selected_capability and not _capability_version(selected_capability):
-                raise ValueError("preferred_capability_unregistered")
-            if selected_capability == "memory.opportunity-preference.v1":
-                raise ValueError("opportunity_preference_requires_specialized_review")
-            acceptance_binding = m5_digest(
-                {
-                    "version": M5_SCHEMA_VERSION,
-                    "proposal_id": proposal.proposal_id,
-                    "expected_revision": int(expected_revision),
-                    "expected_preview_text_digest": str(expected_preview_text_digest or ""),
-                    "action": action,
-                    "accepted_text_digest": m5_text_digest(normalized_text),
-                    "decision_effect": effect.value,
-                    "corrects_memory_id": target_id or "",
-                    "preferred_capability_id": selected_capability,
-                }
-            )
-            if proposal.status is MemoryProposalStatus.accepted:
-                if proposal.acceptance_binding_digest == acceptance_binding:
-                    payload = _proposal_payload(proposal)
-                    payload["idempotent_replay"] = True
-                    return payload
-                raise ValueError("proposal_already_accepted")
-        if action == "reject" and proposal.status is MemoryProposalStatus.rejected:
-            if (
-                proposal.rejected_by_principal_id == owner_principal_id
-                and int(proposal.revision or 0) == int(expected_revision) + 1
-                and proposal.preview_text_digest == expected_preview_text_digest
-                and proposal.reason_code == str(reason or "operator_rejected")[:200]
-            ):
+        acceptance_binding = m5_digest(
+            {
+                "version": M5_SCHEMA_VERSION,
+                "proposal_id": proposal.proposal_id,
+                "expected_revision": int(expected_revision),
+                "expected_preview_text_digest": str(expected_preview_text_digest or ""),
+                "action": action,
+                "accepted_text_digest": m5_text_digest(normalized_text),
+                "decision_effect": effect.value,
+                "corrects_memory_id": target_id or "",
+                "preferred_capability_id": selected_capability,
+            }
+        )
+        if proposal.status is MemoryProposalStatus.accepted:
+            if proposal.acceptance_binding_digest == acceptance_binding:
                 payload = _proposal_payload(proposal)
                 payload["idempotent_replay"] = True
                 return payload
-        if int(proposal.revision or 0) != int(expected_revision):
-            raise ValueError("stale_proposal_revision")
-        if action in {"accept", "edit_accept", "reject", "recover"}:
-            if expected_task_revision is None or int(proposal.source_task_revision or 0) != int(expected_task_revision):
-                raise ValueError("stale_task_revision")
-            if expected_goal_revision is None or int(proposal.goal_revision or 0) != int(expected_goal_revision):
-                raise ValueError("stale_goal_revision")
-        if action in {"accept", "edit_accept", "reject"} and not expected_preview_text_digest:
-            raise ValueError("preview_digest_required")
+            raise ValueError("proposal_already_accepted")
+    if action == "reject" and proposal.status is MemoryProposalStatus.rejected:
         if (
-            action != "rollback"
-            and expected_preview_text_digest is not None
-            and proposal.preview_text_digest != expected_preview_text_digest
+            proposal.rejected_by_principal_id == owner_principal_id
+            and int(proposal.revision or 0) == int(expected_revision) + 1
+            and proposal.preview_text_digest == expected_preview_text_digest
+            and proposal.reason_code == str(reason or "operator_rejected")[:200]
         ):
-            raise ValueError("stale_preview_digest")
-        if corrects_memory_id and action not in {"accept", "edit_accept"}:
-            raise ValueError("correction_target_requires_accept")
-        if action in {"accept", "edit_accept"}:
-            if proposal.expires_at is not None and _utc(proposal.expires_at) <= _now():
-                proposal.status = MemoryProposalStatus.expired
-                proposal.reason_code = "proposal_expired"
-                proposal.recovery_action = "request_verified_proposal_again"
-                proposal.revision += 1
-                proposal.updated_at = _now()
-                db.add(proposal)
-                await db.flush()
-                audit_event = await _write_memory_action_audit(
-                    db,
-                    owner_principal_id=owner_principal_id,
-                    owner_session_id=owner_session_id,
-                    proposal=proposal,
-                    action="expire",
+            payload = _proposal_payload(proposal)
+            payload["idempotent_replay"] = True
+            return payload
+    if int(proposal.revision or 0) != int(expected_revision):
+        raise ValueError("stale_proposal_revision")
+    if action in {"accept", "edit_accept", "reject", "recover"}:
+        if expected_task_revision is None or int(proposal.source_task_revision or 0) != int(expected_task_revision):
+            raise ValueError("stale_task_revision")
+        if expected_goal_revision is None or int(proposal.goal_revision or 0) != int(expected_goal_revision):
+            raise ValueError("stale_goal_revision")
+    if action in {"accept", "edit_accept", "reject"} and not expected_preview_text_digest:
+        raise ValueError("preview_digest_required")
+    if (
+        action != "rollback"
+        and expected_preview_text_digest is not None
+        and proposal.preview_text_digest != expected_preview_text_digest
+    ):
+        raise ValueError("stale_preview_digest")
+    if corrects_memory_id and action not in {"accept", "edit_accept"}:
+        raise ValueError("correction_target_requires_accept")
+    if action in {"accept", "edit_accept"}:
+        if proposal.expires_at is not None and _utc(proposal.expires_at) <= _now():
+            proposal.status = MemoryProposalStatus.expired
+            proposal.reason_code = "proposal_expired"
+            proposal.recovery_action = "request_verified_proposal_again"
+            proposal.revision += 1
+            proposal.updated_at = _now()
+            db.add(proposal)
+            await db.flush()
+            audit_event = await _write_memory_action_audit(
+                db,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                proposal=proposal,
+                action="expire",
+            )
+            payload = _proposal_payload(proposal)
+            payload["audit_event_id"] = audit_event.id
+            return payload
+        await _validate_current_proposal_source(
+            db,
+            proposal,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            expected_task_revision=int(expected_task_revision),
+            expected_goal_revision=int(expected_goal_revision),
+        )
+        if corrects_memory_id is not None:
+            proposal.corrects_memory_id = _safe_identifier(corrects_memory_id, field="corrects_memory_id")
+        selected_capability = (
+            _safe_identifier(preferred_capability_id, field="preferred_capability_id")
+            if preferred_capability_id
+            else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
+        ) or None
+        try:
+            await _canonical_accept(
+                db,
+                proposal,
+                actor_principal_id=owner_principal_id,
+                actor_session_id=owner_session_id,
+                edited_text=edited_text,
+                decision_effect=effect or MemoryProposalDecisionEffect.none,
+                corrects_memory_id=proposal.corrects_memory_id,
+                preferred_capability_id=selected_capability,
+                prepared_text=prepared_text,
+            )
+        except CapabilityJournalError:
+            # A server-key outage must never turn operator acceptance into
+            # an HTTP 500 or an unsigned canonical memory.  Persist a
+            # visible recovery state and return the normal typed proposal
+            # payload so the API can surface re-review/re-accept guidance.
+            proposal.status = MemoryProposalStatus.blocked
+            proposal.reason_code = "accepted_binding_unavailable"
+            proposal.recovery_action = "verify_source_and_reaccept"
+            proposal.revision += 1
+            proposal.updated_at = _now()
+            db.add(proposal)
+            await db.flush()
+            payload = _proposal_payload(proposal)
+            payload["error_code"] = "accepted_binding_unavailable"
+            return payload
+        proposal.acceptance_binding_digest = acceptance_binding
+    elif action == "reject":
+        if proposal.status is not MemoryProposalStatus.proposed:
+            return _proposal_payload(proposal)
+        proposal.status = MemoryProposalStatus.rejected
+        proposal.reason_code = str(reason or "operator_rejected")[:200]
+        proposal.rejected_by_principal_id = owner_principal_id
+        proposal.rejected_by_session_id = owner_session_id
+        proposal.rejected_at = _now()
+        proposal.revision += 1
+        proposal.updated_at = _now()
+    elif action == "rollback":
+        if proposal.status is not MemoryProposalStatus.accepted or not proposal.accepted_memory_id:
+            raise ValueError("proposal_not_accepted")
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == proposal.accepted_memory_id))
+        ).scalar_one_or_none()
+        if memory is None or memory.source_session_id != owner_session_id:
+            raise PermissionError("accepted_memory_owner_mismatch")
+        tombstone = (
+            await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory.id))
+        ).scalar_one_or_none()
+        if tombstone is not None:
+            raise ValueError("memory_tombstoned")
+        if proposal.accepted_memory_content_digest != m5_text_digest(memory.content):
+            raise ValueError("memory_changed_before_rollback")
+        await memory_repository.rollback_m5_memory_in_session(
+            db,
+            memory_id=memory.id,
+            expected_content_digest=proposal.accepted_memory_content_digest,
+            expected_proposal_id=proposal.proposal_id,
+            rollback_reason=normalized_rollback_reason or "",
+        )
+        proposal.status = MemoryProposalStatus.rolled_back
+        proposal.reason_code = "rolled_back"
+        proposal.rollback_by_principal_id = owner_principal_id
+        proposal.rollback_by_session_id = owner_session_id
+        proposal.rollback_at = _now()
+        proposal.rollback_reason = normalized_rollback_reason or ""
+        proposal.revision += 1
+        proposal.updated_at = _now()
+        affected_receipts = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.accepted_memory_id == memory.id
                 )
-                payload = _proposal_payload(proposal)
-                payload["audit_event_id"] = audit_event.id
-                return payload
-            await _validate_current_proposal_source(
+            )
+        ).scalars().all()
+        receipt_updated_at = _now()
+        for receipt in affected_receipts:
+            receipt.decision_status = WorkBoardDecisionStatus.blocked
+            receipt.admission_status = WorkBoardDecisionAdmissionStatus.superseded
+            receipt.reason = "memory_rolled_back"
+            receipt.revision += 1
+            receipt.updated_at = receipt_updated_at
+            receipt.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(receipt)
+            db.add(receipt)
+    elif action == "recover":
+        try:
+            recovered_proposal = await _reverify_blocked_proposal(
                 db,
                 proposal,
                 owner_principal_id=owner_principal_id,
                 owner_session_id=owner_session_id,
-                expected_task_revision=int(expected_task_revision),
-                expected_goal_revision=int(expected_goal_revision),
+                expected_task_revision=int(expected_task_revision or 0),
+                expected_goal_revision=int(expected_goal_revision or 0),
             )
-            if corrects_memory_id is not None:
-                proposal.corrects_memory_id = _safe_identifier(corrects_memory_id, field="corrects_memory_id")
-            selected_capability = (
-                _safe_identifier(preferred_capability_id, field="preferred_capability_id")
-                if preferred_capability_id
-                else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
-            ) or None
-            try:
-                await _canonical_accept(
-                    db,
-                    proposal,
-                    actor_principal_id=owner_principal_id,
-                    actor_session_id=owner_session_id,
-                    edited_text=edited_text,
-                    decision_effect=effect or MemoryProposalDecisionEffect.none,
-                    corrects_memory_id=proposal.corrects_memory_id,
-                    preferred_capability_id=selected_capability,
-                )
-            except CapabilityJournalError:
-                # A server-key outage must never turn operator acceptance into
-                # an HTTP 500 or an unsigned canonical memory.  Persist a
-                # visible recovery state and return the normal typed proposal
-                # payload so the API can surface re-review/re-accept guidance.
-                proposal.status = MemoryProposalStatus.blocked
-                proposal.reason_code = "accepted_binding_unavailable"
-                proposal.recovery_action = "verify_source_and_reaccept"
-                proposal.revision += 1
-                proposal.updated_at = _now()
-                db.add(proposal)
-                await db.flush()
-                payload = _proposal_payload(proposal)
-                payload["error_code"] = "accepted_binding_unavailable"
-                return payload
-            proposal.acceptance_binding_digest = acceptance_binding
-        elif action == "reject":
-            if proposal.status is not MemoryProposalStatus.proposed:
-                return _proposal_payload(proposal)
-            proposal.status = MemoryProposalStatus.rejected
-            proposal.reason_code = str(reason or "operator_rejected")[:200]
-            proposal.rejected_by_principal_id = owner_principal_id
-            proposal.rejected_by_session_id = owner_session_id
-            proposal.rejected_at = _now()
-            proposal.revision += 1
-            proposal.updated_at = _now()
-        elif action == "rollback":
-            if proposal.status is not MemoryProposalStatus.accepted or not proposal.accepted_memory_id:
-                raise ValueError("proposal_not_accepted")
-            memory = (
-                await db.execute(select(Memory).where(Memory.id == proposal.accepted_memory_id))
-            ).scalar_one_or_none()
-            if memory is None or memory.source_session_id != owner_session_id:
-                raise PermissionError("accepted_memory_owner_mismatch")
-            tombstone = (
-                await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory.id))
-            ).scalar_one_or_none()
-            if tombstone is not None:
-                raise ValueError("memory_tombstoned")
-            if proposal.accepted_memory_content_digest != m5_text_digest(memory.content):
-                raise ValueError("memory_changed_before_rollback")
-            await memory_repository.rollback_m5_memory_in_session(
-                db,
-                memory_id=memory.id,
-                expected_content_digest=proposal.accepted_memory_content_digest,
-                expected_proposal_id=proposal.proposal_id,
-                rollback_reason=normalized_rollback_reason or "",
-            )
-            proposal.status = MemoryProposalStatus.rolled_back
-            proposal.reason_code = "rolled_back"
-            proposal.rollback_by_principal_id = owner_principal_id
-            proposal.rollback_by_session_id = owner_session_id
-            proposal.rollback_at = _now()
-            proposal.rollback_reason = normalized_rollback_reason or ""
-            proposal.revision += 1
-            proposal.updated_at = _now()
-            affected_receipts = (
-                await db.execute(
-                    select(WorkBoardDecisionReceipt).where(
-                        WorkBoardDecisionReceipt.accepted_memory_id == memory.id
-                    )
-                )
-            ).scalars().all()
-            receipt_updated_at = _now()
-            for receipt in affected_receipts:
-                receipt.decision_status = WorkBoardDecisionStatus.blocked
-                receipt.admission_status = WorkBoardDecisionAdmissionStatus.superseded
-                receipt.reason = "memory_rolled_back"
-                receipt.revision += 1
-                receipt.updated_at = receipt_updated_at
-                receipt.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(receipt)
-                db.add(receipt)
-        elif action == "recover":
-            try:
-                recovered_proposal = await _reverify_blocked_proposal(
-                    db,
-                    proposal,
-                    owner_principal_id=owner_principal_id,
-                    owner_session_id=owner_session_id,
-                    expected_task_revision=int(expected_task_revision or 0),
-                    expected_goal_revision=int(expected_goal_revision or 0),
-                )
-            except CapabilityJournalError:
-                payload = _proposal_payload(proposal)
-                payload["error_code"] = "accepted_binding_unavailable"
-                return payload
-            # Keep the blocked/expired source row immutable and return the
-            # child generation so authenticated callers can replace the
-            # actionable card while retaining the historical projection.
-            proposal_for_audit = recovered_proposal
-        else:
-            raise ValueError("proposal_recovery_not_supported")
-        if action != "recover":
-            proposal_for_audit = proposal
-        audit_action = action
-        audit_event = await _write_memory_action_audit(
-            db,
-            owner_principal_id=owner_principal_id,
-            owner_session_id=owner_session_id,
-            proposal=proposal_for_audit,
-            action=audit_action,
-        )
-        await db.flush()
-        payload = _proposal_payload(proposal_for_audit)
-        payload["audit_event_id"] = audit_event.id
-        return payload
+        except CapabilityJournalError:
+            payload = _proposal_payload(proposal)
+            payload["error_code"] = "accepted_binding_unavailable"
+            return payload
+        # Keep the blocked/expired source row immutable and return the
+        # child generation so authenticated callers can replace the
+        # actionable card while retaining the historical projection.
+        proposal_for_audit = recovered_proposal
+    else:
+        raise ValueError("proposal_recovery_not_supported")
+    if action != "recover":
+        proposal_for_audit = proposal
+    audit_action = action
+    audit_event = await _write_memory_action_audit(
+        db,
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+        proposal=proposal_for_audit,
+        action=audit_action,
+    )
+    await db.flush()
+    payload = _proposal_payload(proposal_for_audit)
+    payload["audit_event_id"] = audit_event.id
+    return payload
 
 
 async def redact_m5_memory_references(db: AsyncSession, memory_id: str) -> None:

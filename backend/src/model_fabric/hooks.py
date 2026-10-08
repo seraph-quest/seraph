@@ -210,6 +210,8 @@ class RouteReceiptSession:
             receipt_id=result.receipt_id,
         )
         self._finalized = True
+        from .native_inference import finalize_original_route
+        await finalize_original_route(self, receipt, result)
         return result
 
     async def finalize_denied(

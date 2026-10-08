@@ -134,6 +134,7 @@ class _AccountingHandle:
     contacted: bool = False
     committed_denial: object | None = None
     native_turn_operation_witness: object | None = None
+    native_inference_continuation: object | None = None
 
 
 @dataclass
@@ -473,11 +474,16 @@ class DurableInferenceBrokerMixin:
             payload=None if near else payload, **billing_kwargs,
             reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True
+        continuation = handle.native_inference_continuation
+        if continuation is not None:
+            continuation.validate_host_scope(continuation.host, continuation.original_scope)
         try:
             adoption_allowed = _policy_for_runtime(handle.request.runtime_path)[1] == handle.policy_digest
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
-                operator = await authenticate_session(handle.request.session_id, touch=False)
+                owner_session_id = (continuation.execution.admission.principal.operator_session_id
+                    if continuation is not None else handle.request.session_id)
+                operator = await authenticate_session(owner_session_id, touch=False)
                 adoption_allowed = adoption_allowed and operator.principal.principal_id == handle.request.owner_id
         except Exception:
             adoption_allowed = False
@@ -491,7 +497,10 @@ class DurableInferenceBrokerMixin:
                 and snapshot.get("overrun_max_cost_microusd", 0) == 0)
         if handle.ephemeral:
             state = ("succeeded" if adoption_allowed else "blocked") if row["state"] == "settled" else "cost_liability" if handle.contacted else "blocked"
-            if state == "succeeded":
+            if continuation is not None:
+                if continuation.failure is not None and state == "succeeded":
+                    state = "blocked"
+            if state == "succeeded" or (continuation is not None and row["state"] == "settled" and adoption_allowed):
                 # Actual persisted ledger readback, not a seeded receipt.
                 snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
                 persisted = next((item for item in snapshot.get("operations", []) if item["operation_id"] == handle.request.operation_id), None)
@@ -504,6 +513,8 @@ class DurableInferenceBrokerMixin:
                     verified_at=datetime.now(timezone.utc).isoformat(),
                     details={"verified": True, "operation_id": handle.request.operation_id, "actual_cost_microusd": persisted["actual_cost_microusd"], "memory_status": "no_learning"},
                     owner=handle.owner, fencing_token=handle.fence)
+            if continuation is not None and state == "succeeded":
+                return {**row, "result_adoption_allowed": adoption_allowed}
             await handle.repository.transition_job(handle.job_id, state,
                 owner=handle.owner, fencing_token=handle.fence,
                 reason=row.get("recovery_reason") or (None if adoption_allowed else "inference_result_authority_changed"),
@@ -533,17 +544,28 @@ class DurableInferenceBrokerMixin:
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
+        from .native_inference import prepare_original_continuation
+        continuation = prepare_original_continuation(self, operation, handle, settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
-            result = await operation()
-            capture_inference_usage(result)
-            if isinstance(result, tuple):
-                for item in result:
-                    capture_inference_usage(item)
-            return result
+            try:
+                result = await operation()
+                capture_inference_usage(result)
+                if isinstance(result, tuple):
+                    for item in result:
+                        capture_inference_usage(item)
+                if continuation is not None:
+                    continuation.stage_result(result)
+                return result
+            except BaseException as error:
+                if continuation is not None:
+                    continuation.failure = error
+                raise
 
         try:
+            if continuation is not None:
+                await continuation.permit()
             self._restore_order(handle)
             result = await super().execute(handle.request, callback, **kwargs)
             settlement = await self._settlement_after_release(settlement_context)
@@ -552,6 +574,11 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("inference_result_authority_changed")
             assert_current_inference_policy()
             return result
+        except BaseException as error:
+            if continuation is not None:
+                await asyncio.shield(self._settlement_after_release(settlement_context))
+                await continuation.finish_failure(error)
+            raise
         finally:
             try:
                 if not completed:
@@ -581,17 +608,28 @@ class DurableInferenceBrokerMixin:
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
+        from .native_inference import prepare_original_continuation
+        continuation = prepare_original_continuation(self, operation, handle, settlement_context)
 
         def callback():
             _run_awaitable_sync(self._contact_accounting(handle))
-            result = operation()
-            capture_inference_usage(result)
-            if isinstance(result, tuple):
-                for item in result:
-                    capture_inference_usage(item)
-            return result
+            try:
+                result = operation()
+                capture_inference_usage(result)
+                if isinstance(result, tuple):
+                    for item in result:
+                        capture_inference_usage(item)
+                if continuation is not None:
+                    continuation.stage_result(result)
+                return result
+            except BaseException as error:
+                if continuation is not None:
+                    continuation.failure = error
+                raise
 
         try:
+            if continuation is not None:
+                continuation.permit_sync()
             self._restore_order(handle)
             result = super().execute_sync(handle.request, callback, **kwargs)
             settlement = _run_awaitable_sync(self._settlement_after_release(settlement_context))
@@ -600,6 +638,11 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("inference_result_authority_changed")
             assert_current_inference_policy()
             return result
+        except BaseException as error:
+            if continuation is not None:
+                _run_awaitable_sync(self._settlement_after_release(settlement_context))
+                _run_awaitable_sync(continuation.finish_failure(error))
+            raise
         finally:
             try:
                 if not completed:
@@ -627,15 +670,26 @@ class DurableInferenceBrokerMixin:
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
+        from .native_inference import prepare_original_continuation
+        continuation = prepare_original_continuation(self, operation, handle, settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
-            async for item in operation():
-                capture_inference_usage(item)
-                assert_current_inference_policy()
-                yield item
+            try:
+                async for item in operation():
+                    capture_inference_usage(item)
+                    assert_current_inference_policy()
+                    if continuation is not None:
+                        continuation.stage_delta(item)
+                    yield item
+            except BaseException as error:
+                if continuation is not None:
+                    continuation.failure = error
+                raise
 
         try:
+            if continuation is not None:
+                await continuation.permit()
             self._restore_order(handle)
             async for item in super().stream(handle.request, callback, **kwargs):
                 yield item
@@ -644,6 +698,13 @@ class DurableInferenceBrokerMixin:
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
             assert_current_inference_policy()
+            if continuation is not None:
+                continuation.stage_stream_close()
+        except BaseException as error:
+            if continuation is not None:
+                await asyncio.shield(self._settlement_after_release(settlement_context))
+                await continuation.finish_failure(error)
+            raise
         finally:
             try:
                 if not completed:

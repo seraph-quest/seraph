@@ -261,12 +261,14 @@ async def execute_streaming(
 
         admission_error_receipt = None
         try:
-            async for delta in gpu_admission_broker.stream(
-                admission_request,
-                admitted_transport,
-                now=now,
-            ):
-                yield delta
+            from .native_inference import original_route_scope
+            with original_route_scope(attempt_context, decision, aggregate, "stream"):
+                async for delta in gpu_admission_broker.stream(
+                    admission_request,
+                    admitted_transport,
+                    now=now,
+                ):
+                    yield delta
         except Exception as error:
             admission_error_receipt = getattr(error, "receipt", None)
             if isinstance(error, GpuAdmissionError) and not admission_callback_started:
@@ -400,7 +402,9 @@ async def run_preflighted_adapter(
 
     admission_error_receipt = None
     try:
-        result = await gpu_admission_broker.execute(admission_request, admitted_adapter)
+        from .native_inference import original_route_scope
+        with original_route_scope(context, decision, hooks, "completion"):
+            result = await gpu_admission_broker.execute(admission_request, admitted_adapter)
         return result
     except GpuAdmissionError as error:
         admission_error_receipt = getattr(error, "receipt", None)
@@ -534,7 +538,9 @@ def execute_sync_adapter(
         return result
 
     try:
-        result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
+        from .native_inference import original_route_scope
+        with original_route_scope(context, decision, session, "completion"):
+            result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
     except GpuAdmissionError as error:
         # Persist the broker's terminal/uncertain result while the durable
         # intent is still the authoritative operation record. Route-receipt

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
@@ -624,10 +625,57 @@ async def _finalize_pending(
     await db.flush()
 
 
-def _write_payload(path: Path, payload: bytes) -> None:
+@dataclass(frozen=True)
+class _PayloadClosureWitness:
+    payload_sha256: str
+    size_bytes: int
+    parent_identity: tuple[int, int]
+    file_identity: tuple[int, int, int, int, int]
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class _PayloadClosureSeal:
+    owner_identity: int
+    witness: _PayloadClosureWitness
+
+
+class _PayloadClosureOwner:
+    """One private writer's physical closure; conveys no execution authority."""
+
+    def __init__(self, path: Path, payload: bytes):
+        self._path = path
+        self._digest = hashlib.sha256(payload).hexdigest()
+        self._size = len(payload)
+        self._started = False
+        self._completion: _PayloadClosureSeal | None = None
+        self.witness: _PayloadClosureWitness | None = None
+
+    def _begin(self, path: Path, payload: bytes) -> None:
+        if (self._started or path != self._path or len(payload) != self._size
+            or hashlib.sha256(payload).hexdigest() != self._digest):
+            raise ValueError("private payload closure binding changed")
+        self._started = True
+
+
+def _verified_payload_closure(owner: _PayloadClosureOwner) -> _PayloadClosureWitness:
+    if (type(owner) is not _PayloadClosureOwner or type(owner._completion) is not _PayloadClosureSeal
+        or owner._completion.owner_identity != id(owner) or owner._completion.witness is not owner.witness
+        or owner.witness.payload_sha256 != owner._digest or owner.witness.size_bytes != owner._size):
+        raise OSError("original_private_payload_closure_required")
+    return owner.witness
+
+
+def _write_payload(path: Path, payload: bytes, *, _closure_owner: _PayloadClosureOwner | None = None) -> None:
+    if _closure_owner is not None:
+        if type(_closure_owner) is not _PayloadClosureOwner:
+            raise ValueError("fixed private payload closure owner required")
+        _closure_owner._begin(path, payload)
     parent_fd = -1
     descriptor = -1
     temporary_name = ""
+    closure_metadata = None
+    replayed = False
     try:
         parent_fd, filename = _open_input_artifact_parent(path, create=True)
         for _attempt in range(5):
@@ -650,7 +698,9 @@ def _write_payload(path: Path, payload: bytes) -> None:
             raise OSError("input artifact temporary file could not be reserved")
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             descriptor = -1
-            handle.write(payload)
+            written = handle.write(payload)
+            if _closure_owner is not None and written != len(payload):
+                raise OSError("private payload write incomplete")
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -666,6 +716,7 @@ def _write_payload(path: Path, payload: bytes) -> None:
                 follow_symlinks=False,
             )
         except FileExistsError:
+            replayed = True
             existing_fd = -1
             try:
                 existing_fd = os.open(
@@ -686,22 +737,46 @@ def _write_payload(path: Path, payload: bytes) -> None:
             os.unlink(temporary_name, dir_fd=parent_fd)
             temporary_name = ""
         os.fsync(parent_fd)
+        if _closure_owner is not None:
+            parent_metadata = os.fstat(parent_fd)
+            final_metadata = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+            if not _private_input_file_metadata(final_metadata) or final_metadata.st_size != len(payload):
+                raise OSError("private payload publication identity changed")
+            closure_metadata = (
+                (parent_metadata.st_dev, parent_metadata.st_ino),
+                (final_metadata.st_dev, final_metadata.st_ino, final_metadata.st_uid,
+                 stat.S_IMODE(final_metadata.st_mode), final_metadata.st_size),
+            )
     finally:
+        primary = sys.exception()
+        cleanup_failed = False
         if descriptor >= 0:
             try:
                 os.close(descriptor)
             except OSError:
-                pass
+                cleanup_failed = True
         if parent_fd >= 0 and temporary_name:
             try:
                 os.unlink(temporary_name, dir_fd=parent_fd)
             except OSError:
-                pass
+                cleanup_failed = True
         if parent_fd >= 0:
             try:
                 os.close(parent_fd)
             except OSError:
-                pass
+                cleanup_failed = True
+        if _closure_owner is not None:
+            if cleanup_failed:
+                if primary is not None:
+                    primary.add_note("private_payload_closure_unknown")
+                else:
+                    raise OSError("private_payload_closure_unknown")
+            elif primary is None and closure_metadata is not None:
+                _closure_owner.witness = _PayloadClosureWitness(
+                    _closure_owner._digest, _closure_owner._size,
+                    closure_metadata[0], closure_metadata[1], replayed,
+                )
+                _closure_owner._completion = _PayloadClosureSeal(id(_closure_owner), _closure_owner.witness)
 
 
 def _cleanup_private_input_file(

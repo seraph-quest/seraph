@@ -274,6 +274,7 @@ def prepare_generic_family(execution, agent):
     _validate_registry_paths(paths)
     _capture_original_step_callbacks(execution, agent)
     execution._family_seal, execution._family_steps = _SEAL, agent.max_steps
+    execution._family_original_execution = execution
     execution._family_agent, execution._family_model = agent, agent.model
     execution._family_agent_run = agent.run
     execution._family_registry, execution._family_registry_snapshot = agent.tools, tuple(agent.tools.items())
@@ -444,6 +445,7 @@ def _original_tool_method(tool, name):
 
 def prepare_direct_family(execution):
     execution._family_seal, execution._family_steps = _SEAL, 0
+    execution._family_original_execution = execution
     execution._family_witnesses, execution._family_calls = {}, []
 
 
@@ -654,6 +656,97 @@ async def assert_family_owner_readback(repository, db, run, payload, native_exec
             or not call.operation.consumed for call in calls)
             or [call.operation.operation_id for call in calls] != [item["operation_id"] for item in payload["operations"]]):
             _deny("native_turn_family_owner_reference_missing")
+    await _assert_recorded_owner_readback(repository, db, payload)
+
+
+class _OriginalCleanupWitness:
+    __slots__ = ("execution", "worker", "calls", "operations", "outcome", "exception", "_seal")
+
+    def __init__(self, execution, worker, calls, *, seal):
+        if seal is not _SEAL:
+            _deny("native_turn_family_callback_completion_unproven")
+        self.execution, self.worker, self.calls = execution, worker, calls
+        self.operations = tuple(call.operation for call in calls)
+        self.exception = worker.exception()
+        if self.exception is None and isinstance(worker.result(), BaseException):
+            self.exception = worker.result()
+        self.outcome = "raised" if self.exception is not None else "returned"
+        self._seal = seal
+
+
+def validate_original_cleanup(execution, worker):
+    """Observe the original finished callback; never renew stopped authority."""
+    import asyncio
+    from src.agent.turn_execution import NativeTurnExecution
+    from src.workflows.job_runtime import NativeServiceClaim
+    from src.runtime_plugins.dispatch import OriginalServiceInvocation
+    if (type(execution) is not NativeTurnExecution
+        or getattr(execution, "_family_seal", None) is not _SEAL
+        or getattr(execution, "_family_original_execution", None) is not execution
+        or type(execution.claim) is not NativeServiceClaim
+        or type(execution.scope) is not OriginalServiceInvocation
+        or execution.claim._host is not execution.host
+        or execution.claim.host_boot_nonce != execution.scope.host_boot_nonce
+        or not getattr(execution, "_family_initialized", False)
+        or not isinstance(worker, asyncio.Future) or execution.worker is not worker
+        or not worker.done() or worker.cancelled()):
+        _deny("native_turn_family_callback_completion_unproven")
+    calls = tuple(execution._family_calls)
+    if execution.admission.native_route == "generic_turn":
+        from smolagents.agents import MultiStepAgent
+        from src.api.ws import _run_agent_to_queue
+        original = getattr(execution, "_family_original_callback", None)
+        if (not getattr(execution, "_family_callback_started", False)
+            or getattr(execution, "_family_callback_active", False)
+            or not (original is _run_agent_to_queue
+                or (getattr(original, "__self__", None) is execution._family_agent
+                    and getattr(original, "__func__", None) is MultiStepAgent.run))):
+            _deny("native_turn_family_callback_completion_unproven")
+    elif (execution.admission.native_route != "direct_turn" or len(calls) != 1
+        or calls[0].producer is not getattr(execution, "_family_direct_callback", None)):
+        _deny("native_turn_family_callback_completion_unproven")
+    if any(type(call) is not _OriginalModelCall or call.seal is not _SEAL
+        or call.execution is not execution or not call.finished
+        or type(call.operation) is not NativeOperationWitness
+        or call.operation._seal is not _SEAL or call.operation.call is not call
+        or call.operation.execution is not execution or not call.operation.consumed
+        or execution._family_witnesses.get(call.operation.operation_id) is not call.operation
+        or call.operation._binding != _handle_binding(call.operation.handle) for call in calls):
+        _deny("native_turn_family_owner_reference_missing")
+    existing = getattr(execution, "_family_cleanup_witness", None)
+    if existing is not None:
+        if (type(existing) is not _OriginalCleanupWitness or existing._seal is not _SEAL
+            or existing.execution is not execution or existing.worker is not worker
+            or existing.calls != calls
+            or len(existing.operations) != len(calls)
+            or any(a is not b for a, b in zip(existing.operations, (call.operation for call in calls)))):
+            _deny("native_turn_family_callback_completion_unproven")
+        return existing
+    witness = _OriginalCleanupWitness(execution, worker, calls, seal=_SEAL)
+    execution._family_cleanup_witness = witness
+    return witness
+
+
+async def assert_cancelled_family_owner_readback(db, run, native_execution, worker):
+    """Cleanup evidence only; the control owner validates protected cancel/CAS."""
+    from src.workflows.job_runtime import durable_job_repository, _native_plain
+    witness = validate_original_cleanup(native_execution, worker)
+    entries = [entry for entry in json.loads(run.checkpoint_receipts_json or "[]")
+        if type(entry) is dict and entry.get("checkpoint_id") == FAMILY_CHECKPOINT_ID]
+    if len(entries) != 1 or entries[0].get("safe") is not True:
+        _deny("native_turn_family_initial_receipt_missing")
+    payload = entries[0].get("payload")
+    validate_family_binding(payload, run, _native_plain(native_execution.claim.checkpoint)["payload"])
+    if (entries[0].get("state_digest") != _digest(payload)
+        or [item.operation_id for item in witness.operations] != [item["operation_id"] for item in payload["operations"]]):
+        _deny("native_turn_family_owner_reference_missing")
+    await _assert_recorded_owner_readback(durable_job_repository, db, payload)
+    if validate_original_cleanup(native_execution, worker) is not witness:
+        _deny("native_turn_family_callback_completion_unproven")
+    return witness
+
+
+async def _assert_recorded_owner_readback(repository, db, payload):
     if not payload["operations"]:
         return
     from pathlib import Path

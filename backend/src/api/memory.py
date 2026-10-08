@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -196,6 +196,53 @@ class MemoryTaskProposalActionRequest(BaseModel):
     preferred_capability_id: str | None = Field(default=None, min_length=1, max_length=160)
     corrects_memory_id: str | None = Field(default=None, min_length=1, max_length=255)
     reason: str | None = Field(default=None, max_length=500)
+
+
+class NativeMemoryProposalRequest(MemoryTaskProposalRequest):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+class NativeMemoryReviewRequest(MemoryTaskProposalActionRequest):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["accept", "edit_accept"]
+    expected_preview_text_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision_effect: Literal["none", "require_operator_confirmation"] | None = None
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+class NativeMemoryForgetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["archive", "redact"] = "archive"
+    privacy_boundary: Literal["operator_visible", "private", "sensitive", "source_bound"] = "operator_visible"
+    reason: str | None = Field(default=None, max_length=500)
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+@router.post("/memory/task-proposals/native")
+async def native_memory_propose(http_request: Request, body: NativeMemoryProposalRequest):
+    authenticated_memory_context(http_request)
+    from src.runtime_plugins.memory_producer import native_memory_http
+    return await native_memory_http(operator=http_request.state.operator, method="memory.propose",
+        request=body.model_dump(exclude={"idempotency_key"}), idempotency_key=body.idempotency_key)
+
+
+@router.post("/memory/task-proposals/{proposal_id}/native-review")
+async def native_memory_review(http_request: Request, proposal_id: str, body: NativeMemoryReviewRequest):
+    authenticated_memory_context(http_request)
+    from src.runtime_plugins.memory_producer import native_memory_http
+    return await native_memory_http(operator=http_request.state.operator, method="memory.applyReviewed",
+        request={"proposal_id": proposal_id, **body.model_dump(exclude={"idempotency_key"})},
+        idempotency_key=body.idempotency_key)
+
+
+@router.post("/memory/records/{memory_id}/native-forget")
+async def native_memory_forget(http_request: Request, memory_id: str, body: NativeMemoryForgetRequest):
+    authenticated_memory_context(http_request)
+    from src.runtime_plugins.memory_producer import native_memory_http
+    return await native_memory_http(operator=http_request.state.operator, method="memory.forget",
+        request={"record_ref": memory_id, **body.model_dump(exclude={"idempotency_key"})},
+        idempotency_key=body.idempotency_key)
 
 
 @dataclass(frozen=True)

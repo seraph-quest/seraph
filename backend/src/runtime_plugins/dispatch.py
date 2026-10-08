@@ -33,6 +33,8 @@ class OriginalServiceInvocation:
     witness: object
     binding: object
     host_boot_nonce: str
+    native_turn_resource: object = None
+    native_report_resource: object = None
 
     @property
     def deadline_at(self):
@@ -125,10 +127,12 @@ def capture_original_scope(claim, host):
 class NativeServiceDispatcher:
     """Current owners remain the sole source of permission and effects."""
     supported_methods = frozenset({"authority.resolve", "goals.read", "tasks.inspect",
+        "conversation.read", "conversation.cancel", "agent-loop.cancelTurn",
         "agent-loop.inspectTurn", "conversation.accept", "agent-loop.startTurn",
         "conversation.append", "source-extraction.extract", "capabilities.list", "capabilities.describe",
         "connections.inspect", "memory.retrieve", "artifacts.stage", "artifacts.adopt",
-        "artifacts.read", "audit.append"})
+        "artifacts.read", "audit.append", "inference.request", "memory.propose", "memory.applyReviewed", "memory.forget",
+        "tasks.admit", "tasks.checkpoint", "capabilities.invoke", "tasks.settle", "tasks.cancel"})
     def __init__(self, *, jobs=None):
         from src.workflows.job_runtime import durable_job_repository
         self.jobs = jobs or durable_job_repository
@@ -214,11 +218,42 @@ class NativeServiceDispatcher:
                 or frame["deadline_at"] != call_scope.deadline_at
                 or frame["deadline_at"] > original_scope.deadline_at):
                 raise NativeServiceBlocked("native_original_frame_changed")
+            if method in {"tasks.admit", "tasks.checkpoint", "capabilities.invoke", "tasks.settle", "tasks.cancel"}:
+                from .task_capability import dispatch_report_service
+                return await dispatch_report_service(self, frame, call_scope)
             if method in {"artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}:
                 from .read_artifacts import dispatch_artifact_operation
                 return await dispatch_artifact_operation(self, frame, payload, original_scope)
+            if method == "inference.request":
+                from src.model_fabric.native_inference import dispatch_original_inference
+                return await dispatch_original_inference(self, frame, call_scope)
+            if method in {"conversation.cancel", "agent-loop.cancelTurn"}:
+                from src.agent.native_turn_controls import dispatch_native_turn_cancel
+                resource = original_scope.native_turn_resource
+                if resource is None:
+                    raise NativeServiceBlocked("native_turn_original_resource_missing")
+                resource.owner._check(resource)
+                purpose = resource.execution.host._native_cancel_purpose(call_scope, payload)
+                async with self.jobs._session() as db:
+                    return await dispatch_native_turn_cancel(self, db, frame, payload, call_scope, purpose)
             async with self.jobs._session() as db:
                 run, witness, binding = await self._current_in_db(db, frame["invocation_ref"], method, original_scope)
+                if method == "conversation.read":
+                    from src.agent.session import session_manager
+                    from src.agent.turn_execution import validate_native_turn_owner
+                    resource = original_scope.native_turn_resource
+                    if resource is None:
+                        raise NativeServiceBlocked("native_turn_original_resource_missing")
+                    resource.owner._check(resource)
+                    if resource.execution.scope is not original_scope or resource.execution.stop.is_set():
+                        raise NativeServiceBlocked("native_turn_original_resource_changed")
+                    await validate_native_turn_owner(db, resource.admission)
+                    value = await session_manager.native_turn_message_page(db,
+                        execution=resource.execution, **payload)
+                    return succeeded(method, value)
+                if method in {"memory.propose", "memory.applyReviewed", "memory.forget"}:
+                    from .memory_producer import dispatch_memory_mutation
+                    return await dispatch_memory_mutation(self, db, run, witness, method, payload, original_scope)
                 if method in {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}:
                     from .read_admission import NativeServiceReadAdmission, capability_read_projection, memory_read_projection
                     from .read_journal import read_candidate, validate_read_policy, seal_read_result

@@ -766,6 +766,8 @@ async def websocket_chat(websocket: WebSocket):
                         ).model_dump_json()
                     )
                     continue
+                resource = None
+                native_job = None
                 try:
                     host = available_turn_host(ingress, ws_msg.message)
                     if host is not None:
@@ -779,22 +781,32 @@ async def websocket_chat(websocket: WebSocket):
                         if not await native_turn_binding_available(admission):
                             host = None
                     if host is not None:
+                        resources = getattr(websocket.app.state, "native_turn_resources", None)
+                        if resources is None:
+                            raise NativeTurnBlocked("native_turn_resource_owner_unavailable")
+                        resource = resources.reserve(admission)
                         _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
                             session.id, ws_msg.message, message_id=ingress.message_id,
                             metadata_json=chat_ingress_metadata(ingress), admission=admission)
                         if not duplicate:
-                            native_turn = await claim_native_turn(admission, host, native_job)
+                            native_turn = await claim_native_turn(admission, host, native_job, resource=resource)
                             active_native_turn = native_turn
+                        elif resource.execution is None:
+                            resources.release_unclaimed(resource)
                     else:
                         _ingress_message, duplicate = await session_manager.reserve_ingress_message(
                             session.id, ws_msg.message, message_id=ingress.message_id,
                             metadata_json=chat_ingress_metadata(ingress), attachment_refs=ws_msg.attachments)
                 except NativeTurnBlocked as exc:
+                    if resource is not None and native_job is None:
+                        resource.owner.release_unclaimed(resource)
                     active_turn_completed = True
                     await websocket.send_text(WSResponse(type="error", content="Native turn is blocked.",
                         reason=exc.reason_code, session_id=session.id, seq=_next_seq()).model_dump_json())
                     continue
                 except MessageIngressConflictError as exc:
+                    if resource is not None and native_job is None:
+                        resource.owner.release_unclaimed(resource)
                     await log_chat_ingress_event(
                         session_id=session.id,
                         envelope=ingress,
@@ -1225,11 +1237,22 @@ async def websocket_chat(websocket: WebSocket):
                 if native_turn is not None:
                     native_turn.prepare_agent(agent)
                     await native_turn.initialize_family()
-                    worker_future = loop.run_in_executor(None, run_ctx.run, native_turn.run_callback, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                    start_gate = Event()
+                    def _original_started_callback():
+                        start_gate.wait()
+                        if native_turn.stop.is_set():
+                            error = NativeTurnBlocked("native_turn_cancelled_before_callback")
+                            loop.call_soon_threadsafe(queue.put_nowait, error)
+                            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+                            return error
+                        return run_ctx.run(native_turn.run_callback, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                    worker_future = loop.run_in_executor(None, _original_started_callback)
                 else:
                     worker_future = loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
                 if native_turn is not None:
                     native_turn.worker = worker_future
+                    native_turn.register_worker(worker_future)
+                    start_gate.set()
 
                 async def _drain_queue():
                     nonlocal step_num, final_result, tool_call_count

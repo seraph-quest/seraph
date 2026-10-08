@@ -1462,6 +1462,43 @@ class SessionManager:
                     lines.append(f"{role}: {msg.content}")
                 return "\n".join(lines)
 
+    async def native_turn_message_page(self, db, *, execution, conversation_ref, limit, before_message_ref):
+        """Finite same-writer transcript; validate metadata before selecting bytes."""
+        from sqlalchemy import and_, or_
+        from src.agent.turn_execution import NativeTurnBlocked
+        from src.runtime_plugins.contracts import validate_request, succeeded
+        validate_request("conversation.read", {"conversation_ref": conversation_ref,
+            "limit": limit, "before_message_ref": before_message_ref})
+        ingress = execution.admission.ingress
+        if conversation_ref != ingress.conversation_id or conversation_ref != ingress.session_id:
+            raise NativeTurnBlocked("native_turn_conversation_reference_changed")
+        fields = (Message.id, Message.session_id, Message.owner_principal_id,
+            Message.operator_session_id, Message.conversation_id, Message.role, Message.created_at)
+        def owned(row):
+            return (row.session_id == ingress.session_id and row.owner_principal_id == ingress.principal_id
+                and row.operator_session_id == ingress.operator_session_id
+                and row.conversation_id == ingress.conversation_id and row.role in {"user", "assistant", "step", "error"})
+        condition = Message.session_id == ingress.session_id
+        if before_message_ref is not None:
+            cursor = (await db.execute(select(*fields).where(Message.id == before_message_ref))).one_or_none()
+            if cursor is None or not owned(cursor):
+                raise NativeTurnBlocked("native_turn_transcript_cursor_changed")
+            condition = and_(condition, or_(Message.created_at < cursor.created_at,
+                and_(Message.created_at == cursor.created_at, Message.id < cursor.id)))
+        rows = (await db.execute(select(*fields).where(condition)
+            .order_by(Message.created_at.desc(), Message.id.desc()).limit(limit + 1))).all()
+        if any(not owned(row) for row in rows):
+            raise NativeTurnBlocked("native_turn_transcript_owner_changed")
+        selected = rows[:limit]
+        bodies = dict((await db.execute(select(Message.id, Message.content)
+            .where(Message.id.in_([row.id for row in selected])))).all()) if selected else {}
+        if any(type(bodies.get(row.id)) is not str or len(bodies[row.id].encode()) > 8192 for row in selected):
+            raise NativeTurnBlocked("native_turn_transcript_content_unsupported")
+        value = {"messages": [{"message_ref": row.id, "role": row.role, "content": bodies[row.id]}
+            for row in reversed(selected)], "next_cursor": selected[-1].id if len(rows) > limit else None}
+        succeeded("conversation.read", value)
+        return value
+
     async def get_messages(
         self,
         session_id: str,

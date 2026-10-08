@@ -6626,7 +6626,23 @@ class WorkBoardDispatcher:
             finally:
                 if not admission_only:
                     self._active_worker_tasks.pop((task.task_id, attempt.attempt_id),None)
-        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        if capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import execute_report
+            from src.work_board.pipelines import runtime_guard, utc
+            _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)
+            if attempt.started_at is None:
+                raise DurableJobLeaseError("original report attempt start is unavailable")
+            deadline = min(utc(datetime.fromisoformat(operation["deadline_at"])),
+                utc(attempt.started_at) + timedelta(seconds=min(runtime_seconds, 30)))
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute_report(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                    deadline=deadline, admission_only=admission_only, session_provider=self.session_provider)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
+        if capability_id == "work.evidence-dossier.v1":
             from src.work_board.pipelines import runtime_guard, validate_cpu_current, utc
             from src.work_board.pipeline_cpu import execute
             _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)

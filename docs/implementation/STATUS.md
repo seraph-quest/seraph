@@ -65,7 +65,15 @@ Availability follows the independently reviewed installed revision containing
 the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
 owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,
 returns exact citations and immutable original digests, and retains encrypted
-private source/evidence readback. Selected-file cockpit intake, bounded isolated
+private source/evidence readback. Bounded isolated parsing and a local
+acknowledged preparation through a persisted reviewed Work
+task share the current owners. The static one-step native adapter uses zero
+inference, produces a verified reference-only artifact, and exposes at most 16
+selected leaf citations in a complete authenticated private view capped at 16 KiB.
+Reload uses explicit private readback from the existing task card; late authority
+or fence changes cannot adopt a successful preparation. These local mechanics
+remain Partial pending independent whole-journey review and integration.
+Selected-file cockpit intake, bounded isolated
 parsing, unsupported reasons and positive original-reader cleanup share current
 canonical ownership and quota. Local extraction does not authorize model egress
 or learning. A bounded per-start local cross-process lock proof gates new general

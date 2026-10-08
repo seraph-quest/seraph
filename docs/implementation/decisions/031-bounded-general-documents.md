@@ -132,8 +132,24 @@ output; unknown cleanup does not make that output readable.
 
 Local extraction performs no inference or learning. Returning private evidence
 to the selecting authenticated owner is separate from source/model egress.
-C1 may consume it only under current task-specific source and model-egress consent,
-existing authority, budgets and the shared inference broker. Selection grants
+C1 local preparation uses a separate exact task-specific local-source acknowledgement,
+one static `document_prepare` step, `inference_egress_acknowledged=false` and zero
+inference calls, inference cost and children. Bind at most 16 unique existing leaf
+citations to the adopted source revision and canonical metadata digest, which
+covers its original owner/Root, Goal revision, generation, source/read-selection
+digests and encrypted evidence receipt. Table containers cannot implicitly include
+unselected cells. The complete authenticated selected-literal preparation is at
+most 16,384 UTF-8 bytes including citations, formulas, cached values and metadata;
+oversize and missing selections block instead of truncating. Generic task input,
+events, checkpoints and the physically verified step artifact carry provenance
+references and digests only. The async native owner rechecks current source,
+Root/Goal, original job deadline, attempt and lease fence before private bytes
+and in the same writer as successful readback adoption. The private view verifies
+that exact succeeded task/readback and fresh source authority before delivering
+the selected literal excerpts. It never reparses, adopts arbitrary output or
+automatically accepts a task. Any later model route separately requires exact
+source-and-model egress consent, existing authority, budgets and the shared
+inference broker. Selection grants
 neither provider consent nor instruction authority. Every result says no_learning.
 
 ## Verification and limits

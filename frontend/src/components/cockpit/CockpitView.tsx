@@ -16710,7 +16710,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("outputs_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
-                  <DocumentReader goals={activeGoalsForCockpit} ownerPrincipalId={operatorAuth.principalId} ownerSessionId={operatorAuth.sessionId} />
+                  <DocumentReader
+                    goals={activeGoalsForCockpit}
+                    ownerPrincipalId={operatorAuth.principalId}
+                    ownerSessionId={operatorAuth.sessionId}
+                    onOpenTask={(taskId) => {
+                      setFocusTaskId(taskId);
+                      selectCockpitSection("work");
+                    }}
+                  />
                   <div className="cockpit-list">
                     {artifacts.map((artifact) => {
                       const lineage = resolveArtifactLineage(artifact);

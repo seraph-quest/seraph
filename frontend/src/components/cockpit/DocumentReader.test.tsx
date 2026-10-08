@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
 import type { GoalInfo } from "../../types";
@@ -90,4 +90,43 @@ it("shows unavailable upload proof while retained source inspection and local re
   expect(screen.getByText(/New uploads are blocked until this host proves/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Inspect document source" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Read cited document evidence" })).toBeEnabled();
+});
+it("persists an explicit bounded local preparation and only reads its authenticated cited view on demand", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response({ ...source, revision: 2, state: "uploading" })).mockResolvedValueOnce(response({ ...source, revision: 3, state: "sealed" }))
+    .mockResolvedValueOnce(response({ status: "succeeded", provider_contacts: 0, cleanup: "wait_reaped", evidence: { source_digest: digest, no_learning: true, warnings: [], sections: [{ source_ref: "source#sheet=CSV&row=1", text: "row container", table_cells: [{ source_ref: "source#sheet=CSV&cell=A1", text: "=1+1", formula: "=1+1", cached_value: null }] }] } }))
+    .mockResolvedValueOnce(response({ task: { task_id: "task-document-1", status: "triage", capability_id: "agent.task.v1" } }))
+    .mockResolvedValueOnce(response({ task_id: "task-document-1", status: "succeeded", sections: [{ source_ref: "source#sheet=CSV&cell=A1", text: "=1+1", formula: "=1+1", cached_value: null }], no_learning: true, provider_contacts: 0 }));
+  render(<DocumentReader {...props} goals={[goal]} />); await upload(); fireEvent.click(screen.getByRole("button", { name: "Read cited document evidence" })); await screen.findByRole("region", { name: "Cited document evidence" });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select citation source#sheet=CSV&cell=A1" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Acknowledge local document use" }));
+  fireEvent.click(screen.getByRole("button", { name: "Prepare cited local task" }));
+  await screen.findByText(/Persisted preparation task task-document-1/);
+  expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(5);
+  const preparationBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls[4][1]?.body));
+  expect(preparationBody).toMatchObject({ artifact_ref: source.artifact_ref, expected_source_revision: 3, citation_refs: ["source#sheet=CSV&cell=A1"], acknowledge_local_use: true });
+  expect(preparationBody.idempotency_key).toMatch(/^[A-Za-z0-9_.:-]{1,128}$/);
+  expect(String(vi.mocked(apiFetch).mock.calls[4][0])).toContain("/api/documents/preparations");
+  expect(String(vi.mocked(apiFetch).mock.calls[4][0])).not.toContain("work-board");
+  expect(screen.queryByRole("region", { name: "Authenticated private cited preparation" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh cited preparation" }));
+  const privateView = await screen.findByRole("region", { name: "Authenticated private cited preparation" });
+  expect(within(privateView).getAllByText("=1+1").length).toBeGreaterThan(0);
+  expect(within(privateView).getByText("Cached value unavailable; freshness unknown. Formula remains inert.")).toBeInTheDocument();
+});
+it("retains the exact preparation idempotency key after an uncertain response", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response({ ...source, revision: 2, state: "uploading" })).mockResolvedValueOnce(response({ ...source, revision: 3, state: "sealed" }))
+    .mockResolvedValueOnce(response({ status: "succeeded", provider_contacts: 0, cleanup: "wait_reaped", evidence: { source_digest: digest, no_learning: true, warnings: [], sections: [{ source_ref: "source#page=1", text: "private paragraph", table_cells: [] }] } }))
+    .mockRejectedValueOnce(Error("preparation response lost"))
+    .mockResolvedValueOnce(response({ task: { task_id: "task-document-reconciled", status: "triage" } }));
+  render(<DocumentReader {...props} goals={[goal]} />); await upload(); fireEvent.click(screen.getByRole("button", { name: "Read cited document evidence" })); await screen.findByRole("region", { name: "Cited document evidence" });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select citation source#page=1" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Acknowledge local document use" }));
+  fireEvent.click(screen.getByRole("button", { name: "Prepare cited local task" }));
+  await screen.findByRole("alert");
+  expect(screen.getByRole("button", { name: "Retry exact preparation request" })).toBeEnabled();
+  const firstBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls[4][1]?.body));
+  fireEvent.click(screen.getByRole("button", { name: "Retry exact preparation request" }));
+  await screen.findByText(/Persisted preparation task task-document-reconciled/);
+  const retryBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls[5][1]?.body));
+  expect(retryBody).toEqual(firstBody);
 });

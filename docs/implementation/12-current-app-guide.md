@@ -318,6 +318,20 @@ Scanned, protected, malformed, external-link and oversized sources show unsuppor
 and recovery instead of invented content. Private evidence never enters generic
 task events, and selection grants no source/model egress or learning authority.
 
+After a successful private read, select at most 16 individual cited paragraphs,
+pages or table cells and acknowledge their local use. “Propose local preparation”
+persists an inert one-step Work task; review and accept it in its existing Work
+card. This path makes no model call and grants no model egress. After execution,
+explicitly open the authenticated private preparation from that same card,
+including after reload. It presents only the exact selected literal excerpts
+with citations and separate inert formula/cached-value fields; cached freshness
+remains unknown. The complete private view is capped at 16 KiB and is never
+truncated. Missing or changed source/Goal/Root, incomplete native execution or
+unverified readback blocks that view. Ordinary artifacts contain references and
+digests, never these excerpts. Response loss offers an explicit retry of the
+same proposal key; selection changes clear it and do not automatically create,
+accept or execute another task.
+
 The source index preserves redacted owned reservations after reload. Explicit
 deletion requires the current revision, tombstones first and frees charged quota
 only after exact private cleanup. It shows whether this host's actual bounded

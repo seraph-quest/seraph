@@ -11,7 +11,7 @@ from enum import Enum
 import re
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from src.db.models import WorkBoardStatus
 
@@ -33,6 +33,29 @@ class TaskLimits(ClosedTaskModel):
     max_cost_microusd: int = Field(default=0, ge=0)
 
 
+class DocumentTaskBinding(ClosedTaskModel):
+    artifact_ref: str = Field(pattern=r"^document-source:[a-f0-9-]{36}$")
+    source_revision: int = Field(ge=1)
+    metadata_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    citation_refs: list[str] = Field(min_length=1, max_length=16)
+    selection_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    acknowledge_local_use: Literal[True]
+
+    @field_validator("acknowledge_local_use", mode="before")
+    @classmethod
+    def literal_local_ack(cls, value):
+        if value is not True:
+            raise ValueError("explicit literal local-use acknowledgement required")
+        return value
+
+    @field_validator("citation_refs")
+    @classmethod
+    def exact_unique_refs(cls, value):
+        if len(set(value)) != len(value) or any(not ref or len(ref.encode()) > 512 for ref in value):
+            raise ValueError("unique bounded document citations required")
+        return value
+
+
 class GeneralTaskInput(ClosedTaskModel):
     schema_version: Literal[1] = 1
     goal_ref: str = Field(min_length=1, max_length=128)
@@ -42,6 +65,14 @@ class GeneralTaskInput(ClosedTaskModel):
     limits: TaskLimits = Field(default_factory=TaskLimits)
     tool_set_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     inference_egress_acknowledged: bool = False
+    document_source: DocumentTaskBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_input(self, handler):
+        result = handler(self)
+        if self.document_source is None:
+            result.pop("document_source", None)
+        return result
 
     @field_validator("intent")
     @classmethod

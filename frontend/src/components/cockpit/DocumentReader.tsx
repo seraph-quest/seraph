@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import {
+  citationLeaves,
+  parseDocumentPreparationTask,
+  parseDocumentPreparationView,
+  serializeDocumentPreparation,
+  type DocumentPreparationTask,
+  type DocumentPreparationView,
+} from "../../lib/documentPreparation";
 import type { GoalInfo } from "../../types";
 
 type Format = "pdf" | "docx" | "xlsx" | "csv";
@@ -26,21 +34,32 @@ function sourceRead(value: unknown): Source {
     || ![null, "parser", "upload"].includes(value.writer_kind as null | string)) throw Error("Private source readback is invalid. Inspect the original receipt before continuing.");
   return value as unknown as Source;
 }
-export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { goals: GoalInfo[]; ownerPrincipalId?: string | null; ownerSessionId?: string | null }) {
+export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId, onOpenTask }: { goals: GoalInfo[]; ownerPrincipalId?: string | null; ownerSessionId?: string | null; onOpenTask?: (taskId: string) => void }) {
   const [file, setFile] = useState<File | null>(null), [goalId, setGoalId] = useState("");
   const [source, setSource] = useState<Source | null>(null), [evidence, setEvidence] = useState<Evidence | null>(null);
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [ack, setAck] = useState(false);
+  const [selectedRefs, setSelectedRefs] = useState<string[]>([]), [prepareAck, setPrepareAck] = useState(false);
+  const [preparationTask, setPreparationTask] = useState<DocumentPreparationTask | null>(null);
+  const [preparationRefs, setPreparationRefs] = useState<string[]>([]), [preparationView, setPreparationView] = useState<DocumentPreparationView | null>(null);
+  const [preparationPending, setPreparationPending] = useState(false);
   const [pages, setPages] = useState(""), [sheets, setSheets] = useState("");
   const [retained, setRetained] = useState<Source[]>([]), [nextOffset, setNextOffset] = useState<number | null>(null);
   const [uploadReadiness, setUploadReadiness] = useState<"ready" | "blocked" | "unknown">("unknown");
-  const pending = useRef<{ request: string; file: File; digest: string; goal: GoalInfo } | null>(null), generation = useRef(0);
+  const pending = useRef<{ request: string; file: File; digest: string; goal: GoalInfo } | null>(null);
+  const preparationRequest = useRef<{ body: string; idempotency_key: string } | null>(null), generation = useRef(0);
   const eligible = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
   const goal = eligible.find(g => g.id === goalId), owned = Boolean(ownerPrincipalId && ownerSessionId);
-  useEffect(() => { ++generation.current; setFile(null); setGoalId(""); setSource(null); setEvidence(null); setRetained([]); setNextOffset(null); setUploadReadiness("unknown"); setError(null); setBusy(false); setAck(false); pending.current = null; return () => { ++generation.current; }; }, [ownerPrincipalId, ownerSessionId]);
+  useEffect(() => { ++generation.current; setFile(null); setGoalId(""); setSource(null); setEvidence(null); setSelectedRefs([]); setPrepareAck(false); setPreparationTask(null); setPreparationRefs([]); setPreparationView(null); setPreparationPending(false); setRetained([]); setNextOffset(null); setUploadReadiness("unknown"); setError(null); setBusy(false); setAck(false); pending.current = null; preparationRequest.current = null; return () => { ++generation.current; }; }, [ownerPrincipalId, ownerSessionId]);
   const body = (value: unknown) => JSON.stringify(value);
+  function resetPreparationTask() {
+    preparationRequest.current = null; setPreparationPending(false); setPreparationTask(null); setPreparationRefs([]); setPreparationView(null);
+  }
+  function clearPreparation() {
+    setSelectedRefs([]); setPrepareAck(false); resetPreparationTask();
+  }
   async function selectAndUpload() {
     if (!owned || busy || (!pending.current && (!file || !goal?.revision || !ack))) return;
-    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null); clearPreparation();
     try {
       if (!pending.current) {
         const selected = file!, selectedGoal = goal!;
@@ -66,7 +85,7 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
   }
   async function inspect() {
     if (!source || busy) return;
-    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null); clearPreparation();
     try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}`)); if (result.artifact_id !== source.artifact_id || result.source_digest !== source.source_digest) throw Error("Source identity changed."); if (version === generation.current) setSource(result); }
     catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
@@ -85,14 +104,14 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
   }
   async function reconcile() {
     if (!source || busy) return;
-    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null); clearPreparation();
     try { const action = source.writer_kind === "upload" ? "reconcile-upload" : "reconcile"; const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}/${action}?expected_revision=${source.revision}`, "POST")); if (version === generation.current) setSource(result); }
     catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
   }
   async function read() {
     if (!source || busy || source.state !== "sealed" || source.cleanup === "unknown_writer_retained") return;
-    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null); clearPreparation();
     try {
       const selectedPages = pages.trim() ? pages.split(",").map(p => Number(p.trim())) : [];
       const selectedSheets = sheets.trim() ? sheets.split("\n").map(s => s.trim()).filter(Boolean) : [];
@@ -105,13 +124,41 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
         || !Array.isArray(result.evidence.sections) || !Array.isArray(result.evidence.warnings)
         || !result.evidence.warnings.every(w => typeof w === "string") || result.evidence.sections.some(s => !record(s) || typeof s.source_ref !== "string" || typeof s.text !== "string" || !Array.isArray(s.table_cells)
           || s.table_cells.some(c => !record(c) || typeof c.source_ref !== "string" || typeof c.text !== "string" || !(c.formula === null || typeof c.formula === "string") || !(c.cached_value === null || typeof c.cached_value === "string")))) throw Error("Cited document evidence does not match the sealed source.");
-      if (version === generation.current) setEvidence(result.evidence as unknown as Evidence);
+      const parsedEvidence = result.evidence as unknown as Evidence;
+      citationLeaves(parsedEvidence);
+      if (version === generation.current) setEvidence(parsedEvidence);
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function prepare() {
+    if (!source || !evidence || busy || source.state !== "sealed" || source.cleanup === "unknown_writer_retained" || !prepareAck || !selectedRefs.length) return;
+    const version = generation.current; setBusy(true); setError(null); setPreparationView(null);
+    try {
+      const current = preparationRequest.current ?? (() => {
+        const idempotency_key = crypto.randomUUID();
+        const payload = serializeDocumentPreparation({ artifact_ref: source.artifact_ref, expected_source_revision: source.revision, citation_refs: selectedRefs, acknowledge_local_use: true, idempotency_key });
+        const requestBody = { body: payload, idempotency_key };
+        preparationRequest.current = requestBody; setPreparationPending(true);
+        return requestBody;
+      })();
+      const task = parseDocumentPreparationTask(await request("/preparations", "POST", current.body, { "Content-Type": "application/json" }));
+      if (version === generation.current) { preparationRequest.current = null; setPreparationPending(false); setPreparationTask(task); setPreparationRefs([...selectedRefs]); }
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function refreshPreparation() {
+    if (!preparationTask || busy) return;
+    const version = generation.current; setBusy(true); setError(null);
+    try {
+      const result = await request(`/preparations/${encodeURIComponent(preparationTask.task_id)}`);
+      const view = parseDocumentPreparationView(result, preparationRefs);
+      if (version === generation.current) { setPreparationTask(previous => previous ? { ...previous, status: view.status } : previous); setPreparationView(view.status === "succeeded" ? view : null); }
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
   }
   async function remove() {
     if (!source || busy) return;
-    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null); clearPreparation();
     try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}?expected_revision=${source.revision}`, "DELETE")); if (version === generation.current) { setSource(result); if (result.state === "deleted") pending.current = null; } }
     catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
@@ -120,7 +167,7 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
     <p>Select a private file for bounded CPU extraction into cited evidence. File content stays local; no provider contact and no learning.</p>
     <button type="button" disabled={busy || !owned} onClick={() => void discover()}>Refresh retained document sources</button>
     {uploadReadiness === "blocked" && <p role="status">New uploads are blocked until this host proves private writer exclusion. Restart the managed document service and refresh. Retained sources remain inspectable.</p>}
-    {retained.length > 0 && <ul aria-label="Retained private document sources">{retained.map(item => <li key={item.artifact_id}><button type="button" disabled={busy} onClick={() => { setSource(item); setEvidence(null); setError(null); setFile(null); setAck(false); setPages(""); setSheets(""); pending.current = null; }}>{item.format} · {item.state} · {item.artifact_ref} · Goal {item.goal_id}</button></li>)}</ul>}
+    {retained.length > 0 && <ul aria-label="Retained private document sources">{retained.map(item => <li key={item.artifact_id}><button type="button" disabled={busy} onClick={() => { setSource(item); setEvidence(null); clearPreparation(); setError(null); setFile(null); setAck(false); setPages(""); setSheets(""); pending.current = null; }}>{item.format} · {item.state} · {item.artifact_ref} · Goal {item.goal_id}</button></li>)}</ul>}
     {nextOffset !== null && <button type="button" disabled={busy} onClick={() => void discover(nextOffset)}>Load more retained document sources</button>}
     {error && <p role="alert" className="text-amber-200">{error}</p>}
     <fieldset disabled={busy || !owned || Boolean(source && source.state !== "deleted") || Boolean(pending.current)}>
@@ -145,6 +192,36 @@ export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { go
       {evidence.sections.map((section, i) => <section key={i}><h4 className="font-mono break-all">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>
         {section.table_cells.length > 0 && <table><thead><tr><th>Source</th><th>Text</th><th>Formula (inert)</th><th>Cached value</th></tr></thead><tbody>{section.table_cells.map((cell, j) => <tr key={j}><td>{cell.source_ref}</td><td>{cell.text}</td><td>{cell.formula ?? "none"}</td><td>{cell.cached_value ?? "unavailable"}</td></tr>)}</tbody></table>}
       </section>)}
+      <section aria-label="Select cited document spans" className="mt-3 rounded border border-white/10 p-2">
+        <p>Select exact existing citations for a local preparation task. Table sections are containers; select individual cells so unselected cells stay private. {selectedRefs.length}/16 selected.</p>
+        <ul aria-label="Available document citations">
+          {citationLeaves(evidence).map((leaf) => <li key={leaf.source_ref}>
+            <label className="flex gap-2">
+              <input type="checkbox" aria-label={`Select citation ${leaf.source_ref}`} checked={selectedRefs.includes(leaf.source_ref)} disabled={busy || (!selectedRefs.includes(leaf.source_ref) && selectedRefs.length >= 16)} onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                resetPreparationTask();
+                setSelectedRefs((previous) => checked
+                  ? (previous.includes(leaf.source_ref) || previous.length >= 16 ? previous : [...previous, leaf.source_ref])
+                  : previous.filter((ref) => ref !== leaf.source_ref));
+              }} />
+              <span className="break-all">{leaf.source_ref} · {leaf.text.slice(0, 160)}{leaf.text.length > 160 ? "…" : ""}</span>
+            </label>
+          </li>)}
+        </ul>
+        <label className="mt-2 flex gap-2"><input type="checkbox" aria-label="Acknowledge local document use" checked={prepareAck} disabled={busy} onChange={(event) => { resetPreparationTask(); setPrepareAck(event.currentTarget.checked); }} />I acknowledge using these exact citations for this Goal's local preparation task. Document content stays local; model egress is false, inference calls and cost are zero.</label>
+        {preparationPending && <p role="status">The exact preparation request has no confirmed receipt. Retry it with the same idempotency key or inspect Work; no new task request is generated.</p>}
+        <button type="button" className="mt-2" disabled={busy || source?.state !== "sealed" || source?.cleanup === "unknown_writer_retained" || !selectedRefs.length || !prepareAck} onClick={() => void prepare()}>{preparationPending ? "Retry exact preparation request" : "Prepare cited local task"}</button>
+      </section>
+      {preparationTask && <section aria-label="Document preparation task" className="mt-3 rounded border border-white/10 p-2">
+        <p role="status">Persisted preparation task {preparationTask.task_id} · {preparationTask.status}. Review and accept this exact one-step task in Work; this reader never accepts or executes it.</p>
+        <p className="text-xs">Selected citations are bound to the sealed source revision and Goal. Local preparation has no model or provider contact and no learning.</p>
+        {onOpenTask && <button type="button" disabled={busy} onClick={() => onOpenTask(preparationTask.task_id)}>Review task in Work</button>}
+        <button type="button" disabled={busy} onClick={() => void refreshPreparation()}>Refresh cited preparation</button>
+        {preparationView && <section aria-label="Authenticated private cited preparation" className="mt-2 rounded border border-emerald-500/30 p-2">
+          <p role="status">Authenticated private cited preparation · {preparationView.task_id} · no provider contact · no learning.</p>
+          {preparationView.sections.map((section) => <article key={section.source_ref} className="mt-2"><h4 className="font-mono break-all">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>{(section.formula !== null || section.cached_value !== null) && <dl><dt>Formula (inert)</dt><dd className="whitespace-pre-wrap break-all">{section.formula ?? "none"}</dd><dt>Cached value (freshness unknown)</dt><dd className="whitespace-pre-wrap break-all">{section.cached_value ?? "unavailable"}</dd></dl>}{section.cached_value === null && <p role="status">Cached value unavailable; freshness unknown. Formula remains inert.</p>}</article>)}
+        </section>}
+      </section>}
     </div>}
   </section></details>;
 }

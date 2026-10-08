@@ -25,6 +25,45 @@ async def lifespan(app):
 
 router = APIRouter(prefix="/documents", lifespan=lifespan)
 
+from src.work_board.document_preparation import PreparationCreate
+
+
+@router.post("/preparations")
+async def propose_preparation(request: Request, body: PreparationCreate):
+    from src.api.work_board import dispatcher, _safe_task_payload
+    from src.work_board.document_preparation import propose
+    operator = _operator(request)
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("document_preparation_unavailable", "Restore the local task service", status_code=503)
+        async with get_session() as db:
+            mutation = await propose(db, _owner(operator), operator, dispatcher.general_tasks, body)
+            return {"task": await _safe_task_payload(mutation.task, db=db), "idempotent_replay": mutation.idempotent_replay}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "document_preparation_readback_changed", "recovery": "Read and select the exact current private source."}) from None
+    except AuthFailure:
+        raise HTTPException(status_code=401, detail={"code": "session_revoked", "recovery": "Sign in again and inspect the original private source."}) from None
+
+
+@router.get("/preparations/{task_id}")
+async def read_preparation(request: Request, task_id: str):
+    from src.api.work_board import dispatcher
+    from src.work_board.document_preparation import private_view
+    operator = _operator(request)
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("document_preparation_unavailable", "Restore the local task service", status_code=503)
+        async with get_session() as db:
+            return await private_view(db, _owner(operator), operator, dispatcher.general_tasks, dispatcher.jobs, task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "document_preparation_readback_changed", "recovery": "Inspect the original task and private source."}) from None
+    except AuthFailure:
+        raise HTTPException(status_code=401, detail={"code": "session_revoked", "recovery": "Sign in again and inspect the original private source."}) from None
+
 
 @router.get("/sources")
 async def list_sources(request: Request, limit: int = Query(default=50, ge=1, le=50), offset: int = Query(default=0, ge=0, le=10000)):

@@ -16,6 +16,9 @@ from src.goals.contracts import (
     GoalCandidateRequest,
     GoalCandidateSetRequest,
     GoalSuccessCriterion,
+    GoalProgrammeRequest,
+    GoalProgrammeAccept,
+    GoalProgrammeControl,
 )
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
@@ -50,6 +53,45 @@ from src.guardian.opportunities import OpportunityError, policy_projection, save
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _programme_call(http_request: Request, method: str, **kwargs):
+    from src.auth.service import AuthFailure
+    from src.guardian.goal_programmes import GoalProgrammeError, goal_programme_service
+
+    operator = _require_authenticated_operator(http_request)
+    try:
+        return await getattr(goal_programme_service, method)(operator=operator, **kwargs)
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+    except GoalProgrammeError as exc:
+        status = 404 if exc.code in {"goal_not_found", "programme_not_found"} else 503 if exc.code == "programme_service_unavailable" else 403 if "owner" in exc.code or "identity" in exc.code else 409
+        raise HTTPException(status_code=status, detail={"code": exc.code, "recovery": "Review current goal, finite public brief, owner and route authority."}) from exc
+
+
+@router.get("/goals/{goal_id}/programmes")
+async def list_goal_programmes(goal_id: str, request: Request):
+    return await _programme_call(request, "inspect", goal_id=goal_id)
+
+
+@router.post("/goals/{goal_id}/programmes/preview")
+async def preview_goal_programme(goal_id: str, body: GoalProgrammeRequest, request: Request):
+    return await _programme_call(request, "preview", goal_id=goal_id, request=body)
+
+
+@router.post("/goals/{goal_id}/programmes/accept")
+async def accept_goal_programme(goal_id: str, body: GoalProgrammeAccept, request: Request):
+    return await _programme_call(request, "accept", goal_id=goal_id, request=body)
+
+
+@router.post("/goals/{goal_id}/programmes/{programme_id}/pause")
+async def pause_goal_programme(goal_id: str, programme_id: str, body: GoalProgrammeControl, request: Request):
+    return await _programme_call(request, "control", goal_id=goal_id, programme_id=programme_id, request=body, action="pause")
+
+
+@router.post("/goals/{goal_id}/programmes/{programme_id}/revoke")
+async def revoke_goal_programme(goal_id: str, programme_id: str, body: GoalProgrammeControl, request: Request):
+    return await _programme_call(request, "control", goal_id=goal_id, programme_id=programme_id, request=body, action="revoke")
 
 
 class GoalCreate(BaseModel):

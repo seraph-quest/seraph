@@ -27,6 +27,103 @@ from src.tools.browser_tool import browse_webpage, redact_browser_error
 
 router = APIRouter()
 
+# V2 uses the canonical authenticated Root/Goal, not caller conversation IDs.
+from src.browser.interaction_contracts import (
+    InteractionPrepare, InteractionActionRequest, InteractionClose, InteractionError,
+)
+from src.browser.sessions import profiled_interaction_sessions
+from src.work_board.contracts import WorkBoardOwner
+
+
+class InteractionOwner(WorkBoardOwner):
+    authenticated_token_hash: str | None = Field(default=None, exclude=True, repr=False)
+
+
+def _interaction_owner(request: Request):
+    from src.api.work_board import _operator, _owner
+    from src.security.trust_contract import AuthorityGrant
+    operator = _operator(request)
+    grants = {getattr(v, "value", v) for v in operator.principal.grants}
+    if AuthorityGrant.CAPABILITY_EXECUTE.value not in grants:
+        raise HTTPException(403, detail={"code": "browser_current_operator_grant_required"})
+    bound = _owner(operator)
+    return InteractionOwner(principal_id=bound.principal_id, session_id=bound.session_id,
+        authenticated_token_hash=getattr(operator, "_token_hash", None))
+
+
+async def _interaction_response(call):
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import DurableJobError
+    try:
+        return await call
+    except InteractionError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from None
+    except BoardError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from None
+    except DurableJobError:
+        raise HTTPException(409, detail={"code": "browser_durable_job_conflict"}) from None
+    except asyncio.TimeoutError:
+        raise HTTPException(409, detail={"code": "browser_original_deadline_expired"}) from None
+
+
+@router.get("/capabilities/browser-interactions/profiles")
+async def interaction_profiles(request: Request):
+    _interaction_owner(request)
+    from src.browser.task_lane import browser_task_lane_wait_reason
+    return {"capability_id": "browser.interact.v2",
+        "runtime_state": "active" if profiled_interaction_sessions.started else "inactive",
+        "blocked_reason": browser_task_lane_wait_reason(settings.workspace_dir), "profiles": [{
+        "id": "httpbin.forms.v1", "url": "https://httpbin.org/forms/post",
+        "name": "HTTPBin public form preview", "authenticated": False,
+        "read_effect": "One public document contact and site access logging",
+        "preparation": "offline", "submission": "blocked_exact_effect_authority_required",
+        "max_actions": 20, "max_origins": 1, "max_runtime_seconds": 180,
+        "private_field_max_bytes": 2048, "no_learning": True}]}
+
+
+@router.post("/capabilities/browser-interactions/jobs")
+async def open_interaction(request: Request, body: InteractionPrepare):
+    return await _interaction_response(profiled_interaction_sessions.open(_interaction_owner(request), body))
+
+
+@router.get("/capabilities/browser-interactions/jobs")
+async def list_interactions(request: Request):
+    return await _interaction_response(profiled_interaction_sessions.list_jobs(_interaction_owner(request)))
+
+
+@router.get("/capabilities/browser-interactions/jobs/{job_id}")
+async def inspect_interaction(request: Request, job_id: str):
+    return await _interaction_response(profiled_interaction_sessions.inspect(_interaction_owner(request), job_id))
+
+
+@router.get("/capabilities/browser-interactions/requests/{request_key}")
+async def inspect_interaction_request(request: Request, request_key: str):
+    import uuid
+    from src.browser.interaction_contracts import digest
+    try:
+        if str(uuid.UUID(request_key)) != request_key:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(422, detail={"code": "browser_request_key_invalid"}) from None
+    owner = _interaction_owner(request)
+    job_id = "browser-interact-" + digest([owner.principal_id, owner.session_id, request_key])[:32]
+    return await _interaction_response(profiled_interaction_sessions.inspect(owner, job_id))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/actions")
+async def action_interaction(request: Request, job_id: str, body: InteractionActionRequest):
+    return await _interaction_response(profiled_interaction_sessions.action(_interaction_owner(request), job_id, body))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/close")
+async def close_interaction(request: Request, job_id: str, body: InteractionClose):
+    return await _interaction_response(profiled_interaction_sessions.close(_interaction_owner(request), job_id, body))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/snapshot")
+async def refresh_interaction(request: Request, job_id: str, body: InteractionClose):
+    return await _interaction_response(profiled_interaction_sessions.refresh(_interaction_owner(request), job_id, body))
+
 
 class BrowserSessionOpenRequest(BaseModel):
     owner_session_id: str = Field(..., min_length=1)

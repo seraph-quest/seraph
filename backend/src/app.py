@@ -472,7 +472,12 @@ async def lifespan(app: FastAPI):
         await context_manager.refresh()
     except Exception:
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    yield
+    from src.browser.sessions import profiled_interaction_sessions
+    await profiled_interaction_sessions.start()
+    try:
+        yield
+    finally:
+        await profiled_interaction_sessions.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

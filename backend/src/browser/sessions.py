@@ -834,3 +834,355 @@ class BrowserSessionRuntime:
 
 
 browser_session_runtime = BrowserSessionRuntime()
+
+
+class ProfiledInteractionSessions:
+    """Explicit current-Python lifecycle over the canonical durable job owner.
+
+    Live pages are ephemeral resource handles, never an authority ledger. All
+    action history and original bounds remain in existing durable job rows.
+    """
+
+    def __init__(self, *, jobs=None, request=None, browser_launcher=None, source_digest=None):
+        from src.workflows.job_runtime import durable_job_repository
+        self.jobs = jobs or durable_job_repository
+        self.request, self.browser_launcher = request, browser_launcher
+        self.source_digest = source_digest
+        self.active = {}
+        self.started = False
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        for job_id in list(self.active):
+            await self._close(job_id, reason="runtime_stopped")
+        self.started = False
+
+    @staticmethod
+    async def _root(db, owner):
+        from sqlmodel import select
+        from src.db.models import OperatorSession
+        from .interaction_contracts import InteractionError
+        now = datetime.now(timezone.utc)
+        row = await db.scalar(select(OperatorSession).where(
+            OperatorSession.id == owner.session_id,
+            OperatorSession.principal_id == owner.principal_id,
+            OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
+            OperatorSession.is_bearer_tombstone.is_(False),
+            OperatorSession.absolute_expires_at > now, OperatorSession.idle_expires_at > now))
+        if row is None or not getattr(owner, "authenticated_token_hash", None) or row.token_hash != owner.authenticated_token_hash:
+            raise InteractionError("browser_original_root_inactive", status_code=403)
+        return row
+
+    async def _current(self, owner, job_id, *, db=None, run=None, historical=False):
+        from src.db import engine
+        from src.work_board.repository import WorkBoardRepository
+        from src.workflows.job_runtime import _digest
+        from .interaction_contracts import CAPABILITY, JOB_KIND, PROFILE, SOURCE_SHA256, InteractionError
+        if db is None:
+            async with engine.get_session() as session:
+                return await self._current(owner, job_id, db=session, historical=historical)
+        if run is None:
+            run = await self.jobs._fetch(db, job_id)
+        if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
+            or run.session_id != owner.session_id or run.owner_kind != "user"
+            or run.job_kind != JOB_KIND or run.capability_version != "2"):
+            raise InteractionError("browser_interaction_not_found", status_code=404)
+        await self._root(db, owner)
+        authority = json.loads(run.declared_authority_json)
+        if (run.authority_digest != _digest(authority) or authority.get("capability_id") != CAPABILITY
+            or authority.get("profile_id") != PROFILE
+            or authority.get("principal") != owner.principal_id or authority.get("session_id") != owner.session_id
+            or authority.get("no_learning") is not True
+            or authority.get("goal_id") != run.goal_id or authority.get("goal_revision") != run.goal_revision
+            or authority.get("request_body_digest") != run.input_digest
+            or authority.get("profile_source_digest") != (self.source_digest or SOURCE_SHA256)
+            or authority.get("root_binding_digest") != hashlib.sha256(owner.authenticated_token_hash.encode()).hexdigest()):
+            raise InteractionError("browser_original_authority_changed")
+        if not historical:
+            await WorkBoardRepository._validate_goal(db, owner, goal_id=run.goal_id, goal_revision=run.goal_revision)
+            deadline = run.deadline_at
+            if deadline is None or deadline.replace(tzinfo=deadline.tzinfo or timezone.utc) <= datetime.now(timezone.utc):
+                raise InteractionError("browser_original_deadline_expired")
+        return run
+
+    async def _authority(self, owner, job_id):
+        from .interaction_contracts import InteractionError
+        state = self.active.get(job_id)
+        if state is None or state.get("closing"):
+            raise InteractionError("browser_live_page_unavailable")
+        await self._current(owner, job_id)
+        run = await self.jobs.assert_active_lease(job_id, owner=state["lease_owner"], fencing_token=state["fence"])
+        if run["revision"] != state["revision"]:
+            raise InteractionError("browser_current_job_revision_changed")
+
+    async def _record(self, job_id, event):
+        state = self.active[job_id]
+        entry = {"sequence": len(state["history"]) + 1, "recorded_at": _utc_now(), **event}
+        # Only structural intent/output metadata. No private input is passed.
+        history = [*state["history"], entry]
+        run = await self.jobs.record_checkpoint(job_id, checkpoint_id=f"browser-interact:event:{entry['sequence']}",
+            state=entry, checkpoint_payload=entry,
+            owner=state["lease_owner"], fencing_token=state["fence"],
+            expected_revision=state["revision"], safe=True)
+        state["revision"], state["history"] = run["revision"], history
+
+    async def open(self, owner, inputs):
+        import asyncio
+        from datetime import timedelta
+        from src.db import engine
+        from src.work_board.repository import WorkBoardRepository
+        from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
+        from .interaction_contracts import CAPABILITY, JOB_KIND, PROFILE, SOURCE_SHA256, InteractionError, digest
+        from .task_lane import try_acquire_browser_task_lane
+        from .task_runner import ProfiledInteractionPage
+        if not self.started:
+            raise InteractionError("browser_interaction_runtime_inactive", status_code=503)
+        job_id = "browser-interact-" + digest([owner.principal_id, owner.session_id, inputs.request_key])[:32]
+        existing = await self.jobs.get_job(job_id)
+        if existing is not None:
+            await self._current(owner, job_id, historical=True)
+            if existing["declared_authority"].get("request_body_digest") != digest(inputs.model_dump()):
+                raise InteractionError("browser_request_key_body_changed")
+            return await self.inspect(owner, job_id)
+        async with engine.get_session() as db:
+            root = await self._root(db, owner)
+            await WorkBoardRepository._validate_goal(db, owner, goal_id=inputs.goal_id, goal_revision=inputs.goal_revision)
+            deadline = min(datetime.now(timezone.utc) + timedelta(seconds=180),
+                root.absolute_expires_at.replace(tzinfo=root.absolute_expires_at.tzinfo or timezone.utc),
+                root.idle_expires_at.replace(tzinfo=root.idle_expires_at.tzinfo or timezone.utc))
+        lane = try_acquire_browser_task_lane(settings.workspace_dir)
+        if lane is None:
+            from .task_lane import browser_task_lane_wait_reason
+            raise InteractionError(browser_task_lane_wait_reason(settings.workspace_dir) or "browser_lane_busy")
+        state = None
+        try:
+            spec = DurableJobSpec(identity=DurableJobIdentity(job_id, "user", owner.principal_id,
+                JOB_KIND, "2", CAPABILITY + ":" + owner.session_id, inputs.request_key),
+                inputs=inputs.model_dump(), session_id=owner.session_id, operator_session_id=owner.session_id,
+                goal_id=inputs.goal_id, goal_revision=inputs.goal_revision,
+                resource_claims=("browser-task-lane",), max_attempts=1,
+                deadline_at=deadline, budget_microusd=0,
+                declared_authority={"capability_id": CAPABILITY, "profile_id": PROFILE,
+                    "principal": owner.principal_id, "session_id": owner.session_id,
+                    "goal_id": inputs.goal_id, "goal_revision": inputs.goal_revision,
+                    "profile_source_digest": self.source_digest or SOURCE_SHA256,
+                    "root_binding_digest": hashlib.sha256(owner.authenticated_token_hash.encode()).hexdigest(),
+                    "request_body_digest": digest(inputs.model_dump()), "no_learning": True})
+            row = await self.jobs.admit_job(spec)
+            row = await self.jobs.queue_job(job_id, expected_revision=row["revision"])
+            lease_owner = "browser-interact:" + uuid.uuid4().hex
+            row = await self.jobs.claim_job(job_id, owner=lease_owner, lease_seconds=180,
+                expected_revision=row["revision"],
+                claim_authority_check=lambda db, run: self._current(owner, job_id, db=db, run=run))
+            state = {"owner": owner, "lane": lane, "history": [], "revision": row["revision"],
+                "fence": row["lease"]["fencing_token"], "lease_owner": lease_owner, "closing": False,
+                "lock": asyncio.Lock(), "deadline": deadline, "timer": None, "page": None}
+            self.active[job_id] = state
+            state["cleanup_witness"] = lane.require_positive_cleanup(job_id)
+            page = ProfiledInteractionPage(authority=lambda: self._authority(owner, job_id),
+                intent=lambda event: self._record(job_id, {**event, "status": "intent"}),
+                result=lambda event: self._record(job_id, event),
+                request=self.request, browser_launcher=self.browser_launcher, source_digest=self.source_digest)
+            state["page"] = page
+            # Original finite deadline includes teardown; timer releases no capacity
+            # without positive cleanup. It cannot renew an old Root or attempt.
+            state["timer"] = asyncio.create_task(self._expire(job_id,
+                max(0.001, (deadline - datetime.now(timezone.utc)).total_seconds() - 12)))
+            async with state["lock"]:
+                await asyncio.wait_for(page.start(), timeout=min(25,
+                    max(0.001, (deadline - datetime.now(timezone.utc)).total_seconds() - 12)))
+            return await self.inspect(owner, job_id)
+        except BaseException:
+            if state is not None:
+                await self._close(job_id, reason="browser_open_failed")
+            else:
+                lane.release()
+            raise
+
+    async def _expire(self, job_id, seconds):
+        import asyncio
+        await asyncio.sleep(seconds)
+        await self._close(job_id, reason="browser_original_deadline")
+
+    async def inspect(self, owner, job_id):
+        await self._current(owner, job_id, historical=True)
+        row = await self.jobs.get_job(job_id)
+        history = []
+        for checkpoint in row.get("checkpoints", []):
+            if str(checkpoint.get("checkpoint_id", "")).startswith("browser-interact:event:"):
+                history.append(checkpoint.get("payload", {}))
+        state = self.active.get(job_id)
+        payload = {"capability_id": "browser.interact.v2", "job_id": job_id,
+            "revision": row["revision"], "fencing_token": row["lease"]["fencing_token"],
+            "status": row["status"], "history": history, "no_learning": True,
+            "live": state is not None and not state["closing"],
+            "recovery": "none" if state else "read_only_history_new_job_required"}
+        payload["blocked_reason"] = row.get("failure_reason")
+        payload["durable_status"] = row["status"]
+        if state is None and row["status"] in {"running", "queued"}:
+            from .task_lane import browser_task_lane_wait_reason
+            reason = browser_task_lane_wait_reason(settings.workspace_dir)
+            payload["status"] = "blocked"
+            payload["blocked_reason"] = reason or "browser_live_page_unavailable"
+            if reason:
+                payload["recovery"] = "positive_original_cleanup_required"
+        if state and state["page"] and state["page"].latest:
+            payload["page"] = state["page"].latest.model_dump(mode="json")
+        return payload
+
+    async def list_jobs(self, owner):
+        from sqlmodel import select
+        from src.db import engine
+        from src.db.models import WorkflowRunState
+        from .interaction_contracts import JOB_KIND
+        async with engine.get_session() as db:
+            await self._root(db, owner)
+            ids = (await db.execute(select(WorkflowRunState.run_identity).where(
+                WorkflowRunState.owner_principal_id == owner.principal_id,
+                WorkflowRunState.operator_session_id == owner.session_id,
+                WorkflowRunState.job_kind == JOB_KIND).order_by(WorkflowRunState.updated_at.desc()).limit(21))).scalars().all()
+        return {"jobs": [await self.inspect(owner, job_id) for job_id in ids[:20]], "has_more": len(ids) > 20}
+
+    async def action(self, owner, job_id, request):
+        import asyncio
+        from .interaction_contracts import InteractionError, MAX_ACTIONS
+        state = self.active.get(job_id)
+        await self._current(owner, job_id)
+        if state is None:
+            raise InteractionError("browser_fresh_read_job_required")
+        async with state["lock"]:
+            await self._authority(owner, job_id)
+            if request.expected_revision != state["revision"] or request.fencing_token != state["fence"]:
+                raise InteractionError("browser_current_job_revision_changed")
+            if state["page"].actions >= MAX_ACTIONS:
+                raise InteractionError("browser_action_limit")
+            if request.private_input is not None:
+                await self._private_input(owner, job_id, request.action.input_value_ref, request.private_input)
+            remaining = (state["deadline"] - datetime.now(timezone.utc)).total_seconds() - 12
+            if remaining <= 0:
+                raise InteractionError("browser_original_deadline_expired")
+            if request.action.kind in {"fill", "select", "check", "click"}:
+                state["preview_verified"] = False
+            result = await asyncio.wait_for(state["page"].apply(request.action, request.private_input),
+                timeout=min(10, remaining))
+            if "preview" in result:
+                preview_path, preview_digest = await self._private_input(owner, job_id, "preview-" + uuid.uuid4().hex, result["preview"])
+                row = await self.jobs.record_effect(job_id, effect_type="browser_private_preview",
+                    effect_id="browser-preview:" + uuid.uuid4().hex, receipt_kind="readback",
+                    status="succeeded", target_path=preview_path, content_sha256=preview_digest,
+                    details={"verified": True, "private": True, "no_learning": True},
+                    owner=state["lease_owner"], fencing_token=state["fence"],
+                    expected_revision=state["revision"],
+                    readback_authority_check=lambda db, run: self._current(owner, job_id, db=db, run=run))
+                state["revision"] = row["revision"]
+                await self._record(job_id, {"kind": "preview_readback", "status": "completed",
+                    "private_artifact_ref": preview_path, "no_learning": True})
+                state["preview_verified"] = True
+                state["preview_document_digest"] = state["page"].latest.document_digest
+                state["preview_artifact"] = (preview_path, preview_digest)
+            return {**await self.inspect(owner, job_id), **result}
+
+    async def refresh(self, owner, job_id, request):
+        from .interaction_contracts import InteractionError, MAX_ACTIONS
+        state = self.active.get(job_id)
+        await self._current(owner, job_id)
+        if state is None:
+            raise InteractionError("browser_fresh_read_job_required")
+        async with state["lock"]:
+            await self._authority(owner, job_id)
+            if request.expected_revision != state["revision"] or request.fencing_token != state["fence"]:
+                raise InteractionError("browser_current_job_revision_changed")
+            if state["page"].actions >= MAX_ACTIONS:
+                raise InteractionError("browser_action_limit")
+            state["page"].actions += 1
+            await self._record(job_id, {"kind": "snapshot", "status": "intent"})
+            import asyncio
+            remaining = max(0.001, min(10, (state["deadline"] - datetime.now(timezone.utc)).total_seconds() - 12))
+            await asyncio.wait_for(state["page"].snapshot(), timeout=remaining)
+            await self._record(job_id, {"kind": "snapshot", "status": "completed"})
+            return await self.inspect(owner, job_id)
+
+    async def _private_input(self, owner, job_id, ref, value):
+        from src.vault.crypto import encrypt, decrypt
+        from .task_runner import browser_artifact_path_for_job, _write_browser_artifact_bytes, read_browser_artifact_bytes
+        from .interaction_contracts import canonical, InteractionError
+        await self._authority(owner, job_id)
+        path = browser_artifact_path_for_job(job_id + ":" + ref)
+        # Single immutable value ref per job. Private literal readback precedes event.
+        prior = read_browser_artifact_bytes(path)
+        if prior is None:
+            raw = encrypt(canonical(value).decode()).encode()
+            _write_browser_artifact_bytes(path, raw)
+        raw = read_browser_artifact_bytes(path)
+        if raw is None or json.loads(decrypt(raw.decode())) != value:
+            raise InteractionError("browser_private_value_reference_changed")
+        await self._authority(owner, job_id)
+        return path, hashlib.sha256(raw).hexdigest()
+
+    async def close(self, owner, job_id, request):
+        from .interaction_contracts import InteractionError
+        await self._current(owner, job_id, historical=True)
+        state = self.active.get(job_id)
+        if state is None:
+            return await self.inspect(owner, job_id)
+        if request.expected_revision != state["revision"] or request.fencing_token != state["fence"]:
+            raise InteractionError("browser_current_job_revision_changed")
+        await self._close(job_id, reason="operator_closed")
+        return await self.inspect(owner, job_id)
+
+    async def _close(self, job_id, *, reason):
+        import asyncio
+        state = self.active.get(job_id)
+        if state is None:
+            return
+        async with state["lock"]:
+            if state["closing"]:
+                return
+            state["closing"] = True
+            timer = state.get("timer")
+            if timer is not None and timer != asyncio.current_task():
+                timer.cancel()
+            preview_current = False
+            if state.get("preview_verified"):
+                from .task_runner import read_browser_artifact_bytes
+                try:
+                    _, document_digest = await asyncio.wait_for(state["page"]._state(), timeout=1)
+                    preview_path, preview_digest = state["preview_artifact"]
+                    raw = read_browser_artifact_bytes(preview_path)
+                    preview_current = (document_digest == state["preview_document_digest"]
+                        and raw is not None and hashlib.sha256(raw).hexdigest() == preview_digest)
+                except Exception:
+                    preview_current = False
+            cleanup_remaining = max(0.001, min(10, (state["deadline"] - datetime.now(timezone.utc)).total_seconds()))
+            try:
+                clean = state["page"] is None or await asyncio.wait_for(state["page"].stop(), timeout=cleanup_remaining)
+            except BaseException:
+                clean = False
+            try:
+                row = await self.jobs.record_effect(job_id, effect_type="browser_context_cleanup",
+                    status="succeeded" if clean else "unknown", effect_id="browser-cleanup:" + job_id,
+                    details={"cleanup_status": "closed" if clean else "cleanup_unknown", "no_learning": True},
+                    owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"])
+                state["revision"] = row["revision"]
+                if clean:
+                    state["lane"].confirm_positive_cleanup(state["cleanup_witness"])
+                completed = clean and reason == "operator_closed" and preview_current
+                terminal = "succeeded" if completed else "cancelled" if clean and reason == "operator_closed" else "blocked"
+                await self.jobs.transition_job(job_id, terminal,
+                    owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
+                    reason=reason if clean else "browser_cleanup_required", result={"no_learning": True},
+                    terminal_authority_check=lambda db, run: self._current(state["owner"], job_id, db=db, run=run))
+            except Exception:
+                # Positive local closure does not erase an unknown durable receipt.
+                clean = False
+            if clean:
+                state["lane"].release()
+            else:
+                state["lane"].quarantine(job_id)
+            self.active.pop(job_id, None)
+
+
+# No start, context, network or task creation at import time.
+profiled_interaction_sessions = ProfiledInteractionSessions()

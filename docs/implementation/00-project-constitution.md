@@ -161,6 +161,7 @@ The following architecture decisions are normative:
 24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md)
 25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
 26. [ADR-026: All-plugin Cordis agent architecture](./decisions/026-all-plugin-cordis-architecture.md)
+29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

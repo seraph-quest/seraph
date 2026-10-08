@@ -964,6 +964,43 @@ target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
 
+### Profiled public form preparation (#1012)
+
+`browser.interact.v2` adds a separate registered HTTPBin public form preview
+under [ADR-029](./decisions/029-profiled-browser-interactions.md). This branch's
+implementation is **Planned** until its independently reviewed merge to develop.
+The existing public browser v1 remains navigate/extract only. From the public
+browser Work form, explicitly open the HTTPBin preparation controls, select a
+current Goal, acknowledge one public document contact/site access logging, and
+open the bounded job. Fill fields using the displayed current opaque nodes,
+check/radio controls, and request the literal private preview. Submission stays
+blocked; this public echo form does not place an order or mutate a business
+object. It imports no credentials, cookies or authenticated session.
+
+The profile pins the reviewed source bytes and exact GET `/forms/post`; any
+source drift blocks before Chromium receives the document. Preparation disables
+JavaScript, service workers, requests, WebSockets, downloads and popups. Fresh
+DOM revisions and original Root/Goal authority are checked before every action.
+At most 20 actions and 180 seconds occupy the existing shared browser lane.
+Stale or ambiguous nodes stop with a fresh-snapshot requirement. Explicit
+snapshot refresh consumes one bounded action and never replays a click.
+
+Reload uses the read-only owned-job list or exact request-key lookup to inspect
+completed/blocked history; it does not reopen a page or renew consent. Private
+inputs and preview artifacts are encrypted and excluded from generic journals.
+Success requires a current literal preview, private artifact readback and
+positive browser cleanup. Closing without a current preview cancels the job.
+Unknown cleanup retains the physical lane witness, including after owner death;
+absence of a process, time or an unlocked file cannot clear it. Recovering a
+lost owning process's context is unsupported and remains visibly blocked rather
+than clearing another browser. Every outcome records `no_learning`.
+
+The local Linux Chromium/TCP/SQLite receipts exercise multi-field preparation,
+select/check controls, policy denial, DOM drift, private readback and reloaded
+history with external sockets/inference denied. These receipts establish those
+mechanics; they do not establish a useful business form workflow or production
+HTTPBin availability. macOS execution is unverified.
+
 ### Bounded public browser tasks
 
 The bounded capability adds `browser.public-task.v1` through the existing Work

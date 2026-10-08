@@ -3126,3 +3126,200 @@ __all__ = [
     "BrowserUnknownExternalEffect",
     "BrowserVerificationError",
 ]
+
+
+class ProfiledInteractionPage:
+    """Current DOM actions in one registered, enforced offline public form.
+
+    No caller selectors or scripts cross this boundary. Element handles and
+    opaque references belong to one captured document, never a recovered job.
+    """
+
+    # Trusted introspection code; values are used only in private preview/digest.
+    _STATE = """() => {const html=document.documentElement.outerHTML;
+      const elements=Array.from(document.querySelectorAll('form input, form textarea, form select, form button'));
+      if(new TextEncoder().encode(html).length>65536 || elements.length>64)
+        return {blocked:'browser_document_bounds'};
+      if(elements.some(e=>new TextEncoder().encode(e.value||'').length>2048 || (e.options&&e.options.length>64)))
+        return {blocked:'browser_profile_field_bounds'};
+      return {html,
+      controls: elements
+        .map(e => ({tag:e.tagName.toLowerCase(),type:e.type||'',field:e.name||'',
+          value:e.value,checked:!!e.checked,disabled:!!e.disabled,
+          name:(e.getAttribute('aria-label') || Array.from(e.labels||[])
+            .map(l=>{const c=l.cloneNode(true);c.querySelectorAll('input,select,textarea,button')
+              .forEach(n=>n.remove());return c.textContent}).join(' ') || e.textContent || '').trim(),
+          options:e.tagName==='SELECT'?Array.from(e.options).map(o=>o.value):[]})),
+      forms: Array.from(document.forms).map(f=>({method:f.method,action:f.action}))}}"""
+
+    def __init__(self, *, authority, intent, result, request=None, browser_launcher=None, source_digest=None):
+        self.authority, self.intent, self.result = authority, intent, result
+        self.request, self.browser_launcher = request, browser_launcher
+        self.source_digest = source_digest
+        self.resources = _BrowserLaunchResources()
+        self.transport = None
+        self.page = None
+        self.nodes = {}
+        self.latest = None
+        self.actions = 0
+        self.lock = asyncio.Lock()
+
+    async def start(self):
+        from .interaction_contracts import DOCUMENT_URL, InteractionError
+        from .pinned_transport import ProfiledPreparationTransport
+        await self.authority()
+        # Reuse v1's positively owned launch/teardown with identical isolation.
+        launcher = BrowserTaskRunner(browser_launcher=self.browser_launcher)
+        await launcher._launch_session(self.resources)
+        self.page = await self.resources.context.new_page()
+
+        async def reject_page(new_page):
+            if new_page != self.page:
+                await new_page.close()
+
+        self.resources.context.on("page", reject_page)
+        self.page.on("download", lambda download: asyncio.create_task(download.cancel()))
+        self.transport = ProfiledPreparationTransport(request=self.request, source_digest=self.source_digest)
+        await self.transport.install(self.resources.context, self.page,
+            authority=self.authority,
+            contact_intent=lambda: self.intent({"kind": "document", "phase": "document"}),
+            contact_result=lambda response_digest: self.result({"kind": "document",
+                "status": "completed", "response_digest": response_digest}))
+        try:
+            await self.page.goto(DOCUMENT_URL, wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            raise InteractionError(self.transport.failure_reason or "browser_document_navigation_blocked") from None
+        self.transport.preparation()
+        if self.transport.denials:
+            raise InteractionError("browser_profile_document_request_denied")
+        return await self.snapshot()
+
+    async def _state(self):
+        from .interaction_contracts import DOCUMENT_URL, FIELDS, InteractionError, digest
+        if self.page is None or self.page.url != DOCUMENT_URL:
+            raise InteractionError("browser_origin_changed")
+        state = await self.page.evaluate(self._STATE)
+        if state.get("blocked"):
+            raise InteractionError(state["blocked"])
+        if len(str(state).encode()) > 65536 or len(state["controls"]) > 64:
+            raise InteractionError("browser_document_bounds")
+        if state["forms"] != [{"method": "post", "action": "https://httpbin.org/post"}]:
+            raise InteractionError("browser_profile_form_changed")
+        controls = state["controls"]
+        if not controls or not {"custname", "comments", "size", "topping"}.issubset(
+            {node["field"] for node in controls}):
+            raise InteractionError("browser_profile_fields_changed")
+        for node in controls:
+            if node["tag"] == "button":
+                continue
+            if (node["field"] not in FIELDS or node["type"] in {"password", "file", "hidden"}
+                or node["tag"] not in {"input", "textarea", "select"}
+                or len(node["name"]) > 256):
+                raise InteractionError("browser_profile_control_unsupported")
+            if len(str(node["value"]).encode()) > 2048:
+                raise InteractionError("browser_profile_field_bounds")
+        return state, digest(state)
+
+    async def snapshot(self):
+        import uuid
+        from .interaction_contracts import PageSnapshot, AccessibleNode, DOCUMENT_URL, InteractionError
+        await self.authority()
+        state, revision = await self._state()
+        handles = await self.page.query_selector_all("form input, form textarea, form select, form button")
+        if len(handles) != len(state["controls"]):
+            raise InteractionError("browser_snapshot_drift")
+        self.nodes = {}
+        public = []
+        # Reject equal accessibility identities rather than guessing a node.
+        identities = [(n["tag"], n["type"], n["name"]) for n in state["controls"]]
+        for handle, control, identity in zip(handles, state["controls"], identities):
+            node_id = "node-" + uuid.uuid4().hex
+            kind, tag = control["type"], control["tag"]
+            actions = ([] if control["disabled"] or identities.count(identity) != 1 else
+                ["check", "click"] if kind in {"checkbox", "radio"} else
+                ["select"] if tag == "select" else
+                ["fill"] if tag in {"input", "textarea"} and kind not in {"submit", "button", "reset"}
+                else [])
+            role = ("checkbox" if kind == "checkbox" else "radio" if kind == "radio" else
+                "combobox" if tag == "select" else "button" if not actions else "textbox")
+            self.nodes[node_id] = (handle, control, actions)
+            public.append(AccessibleNode(node_id=node_id, role=role, name=control["name"], actions=actions))
+        self.latest = PageSnapshot(url=DOCUMENT_URL, document_digest=revision,
+            accessible_nodes=public, captured_at=datetime.now(timezone.utc))
+        if len(self.latest.model_dump_json().encode()) > 32768:
+            raise InteractionError("browser_snapshot_bounds")
+        return self.latest.model_dump(mode="json")
+
+    async def apply(self, action, private_value=None):
+        from .interaction_contracts import InteractionError, MAX_ACTIONS
+        async with self.lock:
+            await self.authority()
+            if self.actions >= MAX_ACTIONS:
+                raise InteractionError("browser_action_limit")
+            self.actions += 1
+            # Persist intent even for rejected actions: reload explains the stop.
+            intent = {"kind": action.kind, "locator_ref": action.locator_ref,
+                "expected_page_revision": action.expected_page_revision, "phase": "preparation"}
+            await self.intent(intent)
+            try:
+                _, revision = await self._state()
+                if revision != action.expected_page_revision or self.latest is None:
+                    raise InteractionError("browser_fresh_snapshot_required")
+                target = self.nodes.get(action.locator_ref)
+                if action.kind in {"click", "fill", "select", "check"}:
+                    if target is None:
+                        raise InteractionError("browser_fresh_snapshot_required")
+                    handle, control, allowed = target
+                    if action.kind not in allowed:
+                        raise InteractionError("browser_exact_effect_authority_required")
+                    await self.authority()
+                    _, revision = await self._state()
+                    if revision != action.expected_page_revision:
+                        raise InteractionError("browser_fresh_snapshot_required")
+                    if self.transport.phase != "preparation":
+                        raise InteractionError("browser_preparation_not_offline")
+                    if (action.kind in {"fill", "select"} and
+                        (type(private_value) is not str or len(private_value.encode()) > 2048)):
+                        raise InteractionError("browser_private_field_bounds")
+                    if action.kind == "check" and type(private_value) is not bool:
+                        raise InteractionError("browser_private_boolean_required")
+                    if action.kind == "fill":
+                        await handle.fill(private_value, timeout=2000)
+                    elif action.kind == "select":
+                        if private_value not in control["options"]:
+                            raise InteractionError("browser_select_value_not_available")
+                        await handle.select_option(value=private_value, timeout=2000)
+                    elif action.kind == "check":
+                        await handle.set_checked(private_value, timeout=2000)
+                    elif action.kind == "click":
+                        await handle.click(timeout=2000)
+                elif action.kind == "navigate":
+                    # Reopening is a new job/read consent, never an old contact replay.
+                    raise InteractionError("browser_new_read_job_required")
+                elif action.kind == "wait":
+                    await self.page.wait_for_timeout(50)
+                if self.transport.denials:
+                    raise InteractionError("browser_preparation_egress_denied")
+                state, _ = await self._state()
+                payload = {"page": await self.snapshot()}
+                if action.kind == "extract":
+                    payload["preview"] = [{"field": n["field"], "value": n["value"],
+                        "checked": n["checked"]} for n in state["controls"] if n["tag"] != "button"]
+                    from .interaction_contracts import canonical
+                    if len(canonical(payload["preview"])) > 16384:
+                        raise InteractionError("browser_preview_bounds")
+                await self.result({**intent, "status": "completed"})
+                return payload
+            except Exception as exc:
+                code = exc.code if isinstance(exc, InteractionError) else "browser_action_failed"
+                await self.result({**intent, "status": "blocked", "reason": code})
+                raise InteractionError(code) from None
+
+    async def stop(self):
+        self.nodes.clear()
+        try:
+            clean = await asyncio.wait_for(self.resources.close(), timeout=10)
+        except BaseException:
+            clean = False
+        return (clean and (self.resources.has_resources or self.resources.context_not_started)
+                and (self.transport is None or self.transport.quiescent()))

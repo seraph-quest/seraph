@@ -22,6 +22,20 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+**Profiled browser interaction: Partial, bounded public-form preparation.**
+[ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
+`browser.interact.v2` HTTPBin public form preparation profile to the current
+Python lifecycle. Its bounded offline fill/select/check/radio-click and private
+literal preview reuse native jobs, current Root/Goal authority and the existing
+browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
+submission, imported sessions and arbitrary-site writes remain excluded.
+Private values are encrypted; redacted action history survives reload without
+reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
+mechanics with zero inference/provider spend. Business-form usefulness, production
+HTTPBin availability and macOS execution remain unverified. The owning
+[operator flow](./12-current-app-guide.md#profiled-public-form-preparation-1012)
+records bounds and the unsupported lost-process cleanup recovery limit.
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.

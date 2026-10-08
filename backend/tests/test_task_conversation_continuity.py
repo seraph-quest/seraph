@@ -445,7 +445,22 @@ async def test_actual_guardian_prompt_never_selects_foreign_recent_transcripts(c
     await session_manager.get_or_create("foreign-history", owner_principal_id="operator:root:other-owner")
     await session_manager.add_message("foreign-history", "assistant", "FOREIGN_OWNER_TRANSCRIPT_MARKER")
     await session_manager.get_or_create("current-owned-history", owner_principal_id=operator.principal.principal_id)
-    await session_manager.add_message("current-owned-history", "assistant", "CURRENT_OWNED_TRANSCRIPT_MARKER")
+    await session_manager.add_message("current-owned-history", "assistant", "CURRENT_OWNED_TRANSCRIPT_MARKER",
+        metadata_json=json.dumps({"lineage": {"owner_principal_id": operator.principal.principal_id,
+            "operator_session_id": operator.session_id}}))
+    for name, lineage in [
+        ("PRIOR_ROOT", {"owner_principal_id": operator.principal.principal_id, "operator_session_id": "previous-root"}),
+        ("NULL_ROOT", {"owner_principal_id": operator.principal.principal_id}),
+        ("NULL_OWNER", {"operator_session_id": operator.session_id}),
+        ("NULL_LINEAGE", {}),
+        ("TITLE_ONLY", None),
+    ]:
+        chat = f"unproven-{name}"
+        await session_manager.get_or_create(chat, owner_principal_id=operator.principal.principal_id)
+        await session_manager.update_title(chat, f"{name}_TITLE_SENTINEL")
+        if lineage is not None:
+            await session_manager.add_message(chat, "assistant", f"{name}_TRANSCRIPT_SENTINEL",
+                metadata_json=json.dumps({"lineage": lineage}))
     monkeypatch.setattr("src.memory.hybrid_retrieval.search_with_status", lambda *args, **kwargs: ([], False))
     state = await build_guardian_state(session_id="new-chat", user_message="Continue",
         owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id,
@@ -453,6 +468,9 @@ async def test_actual_guardian_prompt_never_selects_foreign_recent_transcripts(c
     prompt = state.to_prompt_block()
     assert "CURRENT_OWNED_TRANSCRIPT_MARKER" in prompt
     assert "FOREIGN_OWNER_TRANSCRIPT_MARKER" not in prompt
+    for name in ("PRIOR_ROOT", "NULL_ROOT", "NULL_OWNER", "NULL_LINEAGE", "TITLE_ONLY"):
+        assert f"{name}_TITLE_SENTINEL" not in prompt
+        assert f"{name}_TRANSCRIPT_SENTINEL" not in prompt
 
 
 @pytest.mark.parametrize("denial", ["no_principal", "no_model_grant", "wrong_chat", "revoked_root"])

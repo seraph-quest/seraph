@@ -1,6 +1,7 @@
 """Tests for explicit guardian-state synthesis."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+import json
 
 import pytest
 
@@ -35,6 +36,11 @@ async def _current_chat_principal(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_secret", "disposable-owned-chat-test-secret")
     _, operator = await create_session()
     return bind_operator_principal(operator, "current")
+
+
+def _current_root_metadata(principal):
+    return json.dumps({"lineage": {"owner_principal_id": principal.principal_id,
+        "operator_session_id": principal.operator_session_id}})
 
 
 def _make_guardian_state() -> GuardianState:
@@ -166,7 +172,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     )
     await sm.get_or_create("prior", owner_principal_id=principal.principal_id)
     await sm.update_title("prior", "Prior roadmap")
-    await sm.add_message("prior", "assistant", "Land guardian-state synthesis next.")
+    await sm.add_message("prior", "assistant", "Land guardian-state synthesis next.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -779,10 +785,10 @@ async def test_build_guardian_state_prioritizes_live_project_cross_thread_contin
     await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
     await sm.get_or_create("prior-atlas", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-atlas", "Atlas follow-up")
-    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.", metadata_json=_current_root_metadata(principal))
     await sm.get_or_create("prior-hermes", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-hermes", "Hermes migration")
-    await sm.add_message("prior-hermes", "assistant", "Prepare the Hermes rollout note.")
+    await sm.add_message("prior-hermes", "assistant", "Prepare the Hermes rollout note.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -847,7 +853,7 @@ async def test_build_guardian_state_surfaces_follow_through_risk_from_cross_thre
     await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
     await sm.get_or_create("prior-atlas", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-atlas", "Atlas follow-up")
-    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",

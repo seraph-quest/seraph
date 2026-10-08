@@ -531,10 +531,10 @@ class SessionManager:
                     .join(Session, Session.id == Message.session_id)
                     .where(Session.owner_principal_id == principal.principal_id,
                         Message.role.in_(["user", "assistant"]),
-                        or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id),
-                        or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
+                        Message.owner_principal_id == principal.principal_id,
+                        Message.operator_session_id == principal.operator_session_id)
                     .group_by(Message.session_id).subquery())
-                stmt = (select(Session).outerjoin(recency, Session.id == recency.c.session_id)
+                stmt = (select(Session).join(recency, Session.id == recency.c.session_id)
                     .where(Session.owner_principal_id == principal.principal_id, Session.id != current_id)
                     .order_by(func.coalesce(recency.c.latest_at, Session.created_at).desc())
                     .limit(limit_sessions))
@@ -548,13 +548,15 @@ class SessionManager:
                     msg_result = await db.execute(
                         select(Message)
                         .where(Message.session_id == session.id)
-                        .where(or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id))
-                        .where(or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
+                        .where(Message.owner_principal_id == principal.principal_id)
+                        .where(Message.operator_session_id == principal.operator_session_id)
                         .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                         .order_by(col(Message.created_at).desc())
                         .limit(1)
                     )
                     latest = msg_result.scalars().first()
+                    if latest is None:
+                        continue
                     title = session.title or "Untitled session"
                     if latest and latest.content:
                         snippet = latest.content.replace("\n", " ").strip()

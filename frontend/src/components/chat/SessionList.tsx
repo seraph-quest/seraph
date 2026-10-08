@@ -19,6 +19,9 @@ export function SessionList() {
   const [editingTitle, setEditingTitle] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const [tasks, setTasks] = useState<{ task_id: string; title: string }[]>([]);
+  const [nextAfter, setNextAfter] = useState<number | null>(null);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const taskListAbort = useRef<AbortController | null>(null);
   const [taskId, setTaskId] = useState("");
   const [packet, setPacket] = useState<TaskContextPacket | null>(null);
   const [contextError, setContextError] = useState("");
@@ -28,16 +31,46 @@ export function SessionList() {
 
   useEffect(() => {
     const controller = new AbortController();
+    taskListAbort.current = controller;
+    setLoadingTasks(true);
     apiFetch(`${API_URL}/api/work-board/tasks?limit=100`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("task_list_unavailable");
         const result = await response.json();
-        if (!controller.signal.aborted) setTasks(result.tasks);
+        if (!controller.signal.aborted) {
+          setTasks(result.tasks);
+          setNextAfter(result.next_after ?? null);
+        }
       }).catch((error) => {
         if (!controller.signal.aborted) setContextError(error instanceof Error ? error.message : "task_list_unavailable");
+      }).finally(() => {
+        if (!controller.signal.aborted) setLoadingTasks(false);
       });
-    return () => controller.abort();
+    return () => taskListAbort.current?.abort();
   }, [reload]);
+
+  const loadMoreTasks = async () => {
+    if (nextAfter === null || loadingTasks) return;
+    const controller = new AbortController();
+    taskListAbort.current = controller;
+    setLoadingTasks(true);
+    try {
+      const response = await apiFetch(`${API_URL}/api/work-board/tasks?limit=100&after=${nextAfter}`, { signal: controller.signal });
+      if (!response.ok) throw new Error("task_list_unavailable");
+      const result = await response.json();
+      if (!controller.signal.aborted) {
+        setTasks((current) => {
+          const known = new Set(current.map((task) => task.task_id));
+          return [...current, ...result.tasks.filter((task: { task_id: string }) => !known.has(task.task_id))];
+        });
+        setNextAfter(result.next_after ?? null);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setContextError(error instanceof Error ? error.message : "task_list_unavailable");
+    } finally {
+      if (!controller.signal.aborted) setLoadingTasks(false);
+    }
+  };
 
   useEffect(() => {
     const linked = sessions.find((session) => session.id === sessionId)?.continuity_task_id;
@@ -102,9 +135,13 @@ export function SessionList() {
         <select aria-label="Task to continue" value={taskId} disabled={continuing}
           onChange={(event) => setTaskId(event.target.value)} className="w-full bg-retro-panel text-retro-text">
           <option value="">Choose task</option>
+          {taskId && !tasks.some((task) => task.task_id === taskId) && <option value={taskId}>{packet?.task_title || "Current linked task"}</option>}
           {tasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title}</option>)}
         </select>
       </label>
+      {nextAfter !== null && <button disabled={loadingTasks || continuing} onClick={loadMoreTasks} className="text-[9px] px-2 text-left text-retro-highlight">
+        {loadingTasks ? "Loading tasks…" : "Load more tasks"}
+      </button>}
       {packet && <div className="text-[9px] px-2" aria-label="Task continuity context">
         <p>{packet.task_title}</p>
         <p>{packet.summary}</p>

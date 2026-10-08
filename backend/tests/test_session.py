@@ -514,14 +514,16 @@ class TestRecentSessionSummary:
         from src.auth.service import bind_operator_principal, create_session
         _, operator = await create_session()
         principal = bind_operator_principal(operator, "current")
+        metadata = json.dumps({"lineage": {"owner_principal_id": principal.principal_id,
+            "operator_session_id": operator.session_id}})
         await sm.get_or_create("current", owner_principal_id=principal.principal_id)
         await sm.get_or_create("stale", owner_principal_id=principal.principal_id)
         await sm.update_title("stale", "Older thread")
-        await sm.add_message("stale", "assistant", "Older conversation")
+        await sm.add_message("stale", "assistant", "Older conversation", metadata_json=metadata)
 
         await sm.get_or_create("fresh", owner_principal_id=principal.principal_id)
         await sm.update_title("fresh", "Newer thread")
-        await sm.add_message("fresh", "assistant", "Newer conversation")
+        await sm.add_message("fresh", "assistant", "Newer conversation", metadata_json=metadata)
 
         await sm.replace_todos("stale", [{"content": "Unrelated checklist", "completed": False}])
 

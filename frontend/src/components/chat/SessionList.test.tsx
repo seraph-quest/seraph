@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "./SessionList";
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), read: vi.fn(), continue: vi.fn(),
-  load: vi.fn(), switch: vi.fn(), clear: vi.fn(), newSession: vi.fn(), delete: vi.fn(), rename: vi.fn() }));
+  load: vi.fn(), switch: vi.fn(), clear: vi.fn(), newSession: vi.fn(), delete: vi.fn(), rename: vi.fn(),
+  sessions: [] as { id: string; title: string; continuity_task_id?: string }[], sessionId: null as string | null }));
 vi.mock("../../lib/api", () => ({ apiFetch: mocks.fetch }));
 vi.mock("../../lib/taskContinuity", () => ({ readTaskContext: mocks.read, continueTask: mocks.continue }));
 vi.mock("../../stores/chatStore", () => ({ useChatStore: (selector: (value: unknown) => unknown) => selector({
-  sessions: [], sessionId: null, sessionContinuity: {}, loadSessions: mocks.load,
+  sessions: mocks.sessions, sessionId: mocks.sessionId, sessionContinuity: {}, loadSessions: mocks.load,
   switchSession: mocks.switch, clearSessionContinuity: mocks.clear, newSession: mocks.newSession,
   deleteSession: mocks.delete, renameSession: mocks.rename,
 }) }));
@@ -23,6 +24,8 @@ const packet = { task_id: "task-one", goal_id: "goal-one", revision: 7, status: 
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.sessions = [];
+  mocks.sessionId = null;
   mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ tasks: [{ task_id: "task-one", title: "Same durable task" }] }) });
   mocks.read.mockResolvedValue(packet);
   mocks.continue.mockResolvedValue("new-owned-chat");
@@ -37,6 +40,38 @@ async function chooseTask() {
 }
 
 describe("task conversation continuity", () => {
+  it("loads the next bounded page and continues a task beyond the first hundred", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({ task_id: `task-${index + 1}`, title: `Task ${index + 1}` }));
+    const nextPage = Array.from({ length: 51 }, (_, index) => ({ task_id: `task-${index + 101}`, title: `Task ${index + 101}` }));
+    mocks.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ tasks: firstPage, next_after: 100 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ tasks: nextPage, next_after: null }) });
+    const laterPacket = { ...packet, task_id: "task-151", task_title: "Task 151" };
+    mocks.read.mockResolvedValue(laterPacket);
+    render(<SessionList />);
+    await screen.findByRole("option", { name: "Task 100" });
+    expect(screen.queryByRole("option", { name: "Task 151" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load more tasks" }));
+    await screen.findByRole("option", { name: "Task 151" });
+    expect(mocks.fetch.mock.calls[1][0]).toContain("limit=100&after=100");
+    expect(screen.getAllByRole("option")).toHaveLength(152);
+    expect(screen.queryByRole("button", { name: "Load more tasks" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Task to continue"), { target: { value: "task-151" } });
+    await screen.findByText(laterPacket.summary);
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new chat" }));
+    await waitFor(() => expect(mocks.continue).toHaveBeenCalledWith(laterPacket, expect.any(String)));
+  });
+
+  it("keeps the current linked task selected while its page has not been loaded", async () => {
+    mocks.sessions = [{ id: "linked-chat", title: "Linked chat", continuity_task_id: "task-151" }];
+    mocks.sessionId = "linked-chat";
+    mocks.read.mockResolvedValue({ ...packet, task_id: "task-151", task_title: "Later linked task" });
+    render(<SessionList />);
+    await screen.findByRole("option", { name: "Later linked task" });
+    expect(screen.getByLabelText("Task to continue")).toHaveValue("task-151");
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new chat" }));
+    await waitFor(() => expect(mocks.continue).toHaveBeenCalledWith(expect.objectContaining({ task_id: "task-151" }), expect.any(String)));
+  });
+
   it("shows recovered read-only context, unanswered input, permitted action and Unknown separately", async () => {
     mocks.read.mockResolvedValue({ ...packet, corrections: [...packet.corrections,
       { ...packet.corrections[0], ref: "worker-note", classification: "worker_note", body: "WORKER_NOTE_SENTINEL" },

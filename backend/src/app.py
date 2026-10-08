@@ -471,6 +471,8 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    from src.guardian.goal_programmes import goal_programme_service
+    await goal_programme_service.start()
     init_scheduler()
     await sync_scheduled_jobs()
     try:
@@ -478,9 +480,14 @@ async def lifespan(app: FastAPI):
         await context_manager.refresh()
     except Exception:
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    yield
-    session_manager.bind_task_continuity(None)
-    await app.state.task_continuity.stop()
+    try:
+        yield
+    finally:
+        session_manager.bind_task_continuity(None)
+        try:
+            await app.state.task_continuity.stop()
+        finally:
+            await goal_programme_service.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

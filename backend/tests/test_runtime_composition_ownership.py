@@ -546,40 +546,71 @@ async def test_original_turn_claim_without_completed_output_remains_unknown_and_
         assert (run.attempt_count, run.fencing_token, run.deadline_at, run.checkpoint_receipts_json) == original
 
 
+@pytest.mark.asyncio
+async def test_claimed_turn_missing_original_claim_is_not_preinitialization(composition_db, monkeypatch):
+    from tests.test_native_turn_bootstrap import prepare_turn, reserve
+    from src.runtime_plugins.bridge import CordisHost
+    from src.agent.turn_execution import validate_native_turn_claim
+    root, _, _, workspace = composition_db
+    manager, ingress, admission, content = await prepare_turn(monkeypatch)
+    _, _, admitted = await reserve(manager, ingress, admission, content)
+    host = CordisHost()
+    host.reviewed, host.boot_nonce, host.state = admission.reviewed_composition, "d" * 64, "ready"
+    host.process, host._cleanup_state = SimpleNamespace(returncode=None), "pending"
+    repo = DurableJobRepository()
+    queued = await repo.queue_job(admission.job_id, expected_revision=admitted["revision"])
+    async def check(db, run):
+        await validate_native_turn_claim(db, run, admission)
+    await repo.claim_service_job(admission.job_id, host=host, owner="original-pending",
+        expected_revision=queued["revision"], claim_authority_check=check)
+    before = read_lifecycle_receipt(workspace)
+    # Simulate stopped-file corruption outside the protected writer. It must
+    # never become a legitimate claimed-but-not-yet-initialized execution.
+    with sqlite3.connect(root / "seraph.db") as db:
+        db.execute("UPDATE workflow_run_states SET checkpoint_receipts_json='[]' WHERE run_identity=?", (admission.job_id,))
+    with pytest.raises(ProductionWorkspaceReconciliationError, match="composition_turn_family_claim_missing"):
+        async with canonical_session() as db:
+            await begin_native_writer(db, owner="durable_jobs")
+    assert read_lifecycle_receipt(workspace) == before
+
+
 async def original_sdk_controlled_exception(execution, *, approval):
-    """Actual canonical producer and stock SDK callback, with zero model calls."""
+    """Actual stock SDK callback/accounting owners; final transport scripted."""
     import asyncio
     from smolagents import ToolCallingAgent
-    from smolagents.memory import ActionStep, Timing
-    from smolagents.utils import AgentToolExecutionError
     from src.approval.runtime import set_runtime_context, reset_runtime_context
     from src.tools.approval import ApprovalTool
     from src.tools.clarify_tool import clarify
     from tests.test_approval_tools import DummyExecuteCodeTool
-    from tests.test_native_turn_transport import ScriptedModel
-    model = ScriptedModel()
+    from tests.test_native_turn_transport import (ScriptedModel, _scripted_accounted_result,
+        ChatMessage, ChatMessageToolCall, ChatMessageToolCallFunction)
     leaf = DummyExecuteCodeTool() if approval else clarify
     tool = ApprovalTool(leaf, force_approval=True) if approval else leaf
+    class ControlledModel(ScriptedModel):
+        def generate(self, messages, **kwargs):
+            self.calls += 1
+            assert self.calls == 1
+            return _scripted_accounted_result(ChatMessage(role="assistant", content="", tool_calls=[ChatMessageToolCall(
+                id="owned-retained-controlled", type="function", function=ChatMessageToolCallFunction(
+                    name=tool.name, arguments={"code": "never execute before approval"} if approval else
+                    {"question": "Private clarification question", "reason": "", "options": ""}))]))
+    model = ControlledModel()
     agent = ToolCallingAgent(tools=[tool], model=model, max_steps=1, verbosity_level=0)
     execution.prepare_agent(agent)
-    def callback():
-        tokens = set_runtime_context(execution.admission.ingress.session_id, "high_risk",
-            trust_principal=execution.admission.principal)
-        try:
-            try:
-                agent.execute_tool_call(tool.name,
-                    {"code": "never execute before approval"} if approval else {"question": "Private clarification question"})
-            except AgentToolExecutionError as error:
-                agent.step_callbacks.callback(ActionStep(step_number=1,
-                    timing=Timing(start_time=0, end_time=1), error=error), agent=agent)
-        finally:
-            reset_runtime_context(tokens)
+    from tests.test_inference_accounting import setup_configuration
+    setup_configuration()
+    await DurableJobRepository().configure_inference_accounting(1000)
     from src.agent.exceptions import ClarificationRequired
     from src.approval.exceptions import ApprovalRequired
     expected = ApprovalRequired if approval else ClarificationRequired
-    with pytest.raises(expected) as observed:
-        await execution.execute(asyncio.to_thread(execution.run_callback, callback))
-    assert execution.worker.done() and model.calls == 0
+    tokens = set_runtime_context(execution.admission.ingress.session_id, "high_risk",
+        trust_principal=execution.admission.principal)
+    try:
+        with pytest.raises(expected) as observed:
+            await execution.execute(asyncio.to_thread(execution.run_callback, agent.run, "Inspect this short item"))
+    finally:
+        reset_runtime_context(tokens)
+    assert execution.worker.done() and model.calls == 1
     if approval:
         assert leaf.calls == []
     return observed.value
@@ -604,7 +635,9 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
     from src.workspace.accounting_continuity import retain_inference_accounting
     from src.workflows.job_runtime import _native_turn_pending
     root, _, _, workspace = composition_db
-    manager, ingress, admission, content = await prepare_turn(monkeypatch)
+    # This owner proof invokes the captured stock SDK agent callback, whose
+    # canonical admission route is generic_turn.
+    manager, ingress, admission, content = await prepare_turn(monkeypatch, route="generic_turn")
     _, _, admitted = await reserve(manager, ingress, admission, content)
     host = CordisHost()
     host.reviewed, host.boot_nonce, host.state = admission.reviewed_composition, "d" * 64, "ready"
@@ -618,6 +651,9 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
     execution = NativeTurnExecution(admission, host, claim, None)
     is_approval = outcome.startswith("approval")
     if outcome == "approval_forged":
+        from smolagents import ToolCallingAgent
+        from tests.test_native_turn_transport import ScriptedModel
+        execution.prepare_agent(ToolCallingAgent(tools=[], model=ScriptedModel(), max_steps=1, verbosity_level=0))
         exception = ApprovalRequired(approval_id="f" * 32, session_id=ingress.session_id,
             tool_name="execute_code", risk_level="high", summary="Fabricated public exception")
         async def forged_callback():
@@ -699,8 +735,22 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
         if outcome == "clarification_rollback":
             assert read_accounting_checkpoint(workspace)["composition_target"] != before_failure["runtime_composition"]
         return
+    if outcome == "approval_cost":
+        with pytest.raises(DurableJobLeaseError, match="native_turn_family_unknown_external_effect"):
+            await settle()
+        assert read_lifecycle_receipt(workspace) == before_failure
+        async with canonical_session() as db:
+            run = await db.scalar(select(WorkflowRunState))
+            assert run.status == "running" and _native_turn_pending(run)
+            assert json.loads(run.effect_receipts_json) == original_effects
+            assert not any(item["checkpoint_id"] == "conversation:controlled-outcome" for item in json.loads(run.checkpoint_receipts_json))
+        blocked = await repo.transition_job(admission.job_id, "failed", owner="original-controlled",
+            fencing_token=claim.checkpoint["payload"]["fencing_token"])
+        assert blocked["status"] == "cost_liability"
+        assert blocked["effects"] == original_effects
+        return
     await settle()
-    expected_status = "cost_liability" if outcome == "approval_cost" else "awaiting_approval" if is_approval else "paused"
+    expected_status = "awaiting_approval" if is_approval else "paused"
     async with canonical_session() as db:
         run = await db.scalar(select(WorkflowRunState))
         assert run.status == expected_status

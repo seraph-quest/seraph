@@ -242,12 +242,27 @@ class NativeTurnExecution:
 
     def prepare_agent(self, agent):
         from src.agent.controlled_origin import install_controlled_callback
+        from src.agent.native_turn_family import prepare_generic_family
         install_controlled_callback(self, agent)
+        prepare_generic_family(self, agent)
 
     def run_callback(self, callback, *args):
         from src.agent.controlled_origin import original_execution_context
+        from src.agent.native_turn_family import original_generic_callback
         with original_execution_context(self):
-            return callback(*args)
+            with original_generic_callback(self, callback, args):
+                return callback(*args)
+
+    async def initialize_family(self):
+        from src.agent.native_turn_family import prepare_direct_family
+        from src.workflows.job_runtime import durable_job_repository as jobs
+        if getattr(self, "_family_initialized", False):
+            raise NativeTurnBlocked("native_turn_family_already_initialized")
+        if self.admission.native_route == "direct_turn":
+            prepare_direct_family(self)
+        async with jobs._writer_session() as db:
+            await jobs.initialize_native_turn_family_in_session(db, native_execution=self)
+        self._family_initialized = True
 
     def guard(self, root=None):
         return _TurnGuard(self.stop, root)
@@ -303,7 +318,15 @@ class NativeTurnExecution:
             if hasattr(awaitable, "close"):
                 awaitable.close()
             raise
-        task = asyncio.ensure_future(awaitable)
+        from src.agent.controlled_origin import original_execution_context
+        try:
+            await self.initialize_family()
+        except BaseException:
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise
+        with original_execution_context(self):
+            task = asyncio.ensure_future(awaitable)
         self.worker = task
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
@@ -314,6 +337,10 @@ class NativeTurnExecution:
                 raise
             self.close_transport()
             task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            from src.agent.native_turn_family import original_family_failure
+            failure = original_family_failure(exc, self)
+            if failure is not exc:
+                raise failure
             raise
         except BaseException:
             self.close_transport()

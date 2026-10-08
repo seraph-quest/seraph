@@ -126,7 +126,9 @@ class NativeServiceDispatcher:
     """Current owners remain the sole source of permission and effects."""
     supported_methods = frozenset({"authority.resolve", "goals.read", "tasks.inspect",
         "agent-loop.inspectTurn", "conversation.accept", "agent-loop.startTurn",
-        "conversation.append", "source-extraction.extract"})
+        "conversation.append", "source-extraction.extract", "capabilities.list", "capabilities.describe",
+        "connections.inspect", "memory.retrieve", "artifacts.stage", "artifacts.adopt",
+        "artifacts.read", "audit.append"})
     def __init__(self, *, jobs=None):
         from src.workflows.job_runtime import durable_job_repository
         self.jobs = jobs or durable_job_repository
@@ -212,8 +214,33 @@ class NativeServiceDispatcher:
                 or frame["deadline_at"] != call_scope.deadline_at
                 or frame["deadline_at"] > original_scope.deadline_at):
                 raise NativeServiceBlocked("native_original_frame_changed")
+            if method in {"artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}:
+                from .read_artifacts import dispatch_artifact_operation
+                return await dispatch_artifact_operation(self, frame, payload, original_scope)
             async with self.jobs._session() as db:
                 run, witness, binding = await self._current_in_db(db, frame["invocation_ref"], method, original_scope)
+                if method in {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}:
+                    from .read_admission import NativeServiceReadAdmission, capability_read_projection, memory_read_projection
+                    from .read_journal import read_candidate, validate_read_policy, seal_read_result
+                    await validate_read_policy(db, run)
+                    candidate = read_candidate(run)
+                    admission = NativeServiceReadAdmission.from_candidate(candidate)
+                    if candidate["method"] != method or payload != admission.wire_inputs(run.run_identity):
+                        raise NativeServiceBlocked("native_read_original_inputs_changed")
+                    if method in {"capabilities.list", "capabilities.describe"}:
+                        value = capability_read_projection(candidate)
+                    elif method == "memory.retrieve":
+                        value = await memory_read_projection(db, owner_session_id=run.operator_session_id, candidate=candidate)
+                    else:
+                        from src.api.calendar import _native_read_connection_metadata
+                        from src.work_board.contracts import WorkBoardOwner
+                        value = await _native_read_connection_metadata(db,
+                            WorkBoardOwner(principal_id=run.owner_principal_id, session_id=run.operator_session_id),
+                            connection_id=candidate["connection_ref"], expected_revision=candidate["expected_connection_revision"])
+                    result = succeeded(method, value)
+                    seal_read_result(db, run, result, invocation_ref=run.run_identity, claim_ref=witness["claim_ref"])
+                    await db.flush()
+                    return result
                 if method == "authority.resolve":
                     return succeeded(method, {"authority_ref": run.run_identity, "revision": run.revision,
                         "mode": "operator-root"})

@@ -550,7 +550,8 @@ class InferenceAccountingRepositoryMixin:
 
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str,
-                                         near_contact_witness: object = None) -> dict[str, object]:
+                                         near_contact_witness: object = None,
+                                         native_turn_operation_witness: object = None) -> dict[str, object]:
         denial = None
         result = None
         denial_binding = None
@@ -652,6 +653,18 @@ class InferenceAccountingRepositoryMixin:
                     or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
                         and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None)))
                 if not _provider_contact_denied(row):
+                    if not denial:
+                        from src.agent.controlled_origin import _current_execution
+                        from src.agent.native_turn_family import NativeOperationWitness
+                        original_execution = _current_execution.get()
+                        if native_turn_operation_witness is not None or original_execution is not None:
+                            if (type(native_turn_operation_witness) is not NativeOperationWitness
+                                or native_turn_operation_witness.execution is not original_execution):
+                                from src.agent.turn_execution import NativeTurnBlocked
+                                raise NativeTurnBlocked("native_turn_family_producer_missing")
+                            await self.append_native_turn_family_in_session(db,
+                                native_execution=original_execution, operation_witness=native_turn_operation_witness,
+                                operation_run=run, reservation=row)
                     history = json.loads(row.evidence_json)
                     if denial:
                         row.recovery_reason = "provider_contact_denied"

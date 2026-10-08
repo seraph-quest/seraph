@@ -496,6 +496,8 @@ def _invoke_adopted_tool(
     approval_binding: dict[str, Any] | None = None,
 ) -> Any:
     """Cross the durable host for adopted local filesystem/process tools."""
+    from src.agent.native_turn_family import require_original_tool
+    require_original_tool(wrapped_tool)
     if tool_name not in _ADOPTED_CAPABILITIES:
         return wrapped_tool(
             *args,

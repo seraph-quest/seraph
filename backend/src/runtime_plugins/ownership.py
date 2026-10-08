@@ -183,6 +183,8 @@ def method_closure(origin_method, native_branch):
         raise CompositionBindingError("composition_method_unsupported")
     if native_branch == "base":
         return (origin_method,)
+    if native_branch == "artifact" and origin_method in {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}:
+        return tuple(sorted({origin_method, "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}))
     if native_branch in {"artifact", "workflow"} and origin_method in {"tasks.admit", "capabilities.invoke"}:
         return tuple(sorted({origin_method, "tasks.inspect", "tasks.cancel", "tasks.checkpoint", "tasks.settle",
                              "artifacts.read", "artifacts.stage", "artifacts.adopt"}))
@@ -226,7 +228,9 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
              "agent-loop.cancelTurn": {"conversation"}, "agent-loop.inspectTurn": {"conversation"},
              "conversation.cancel": {"agent-loop"}}
     names.update(fixed.get(method, ()))
-    if native_branch == "artifact" and method in {"tasks.admit", "tasks.checkpoint", "tasks.settle", "capabilities.invoke", "memory.propose", "memory.applyReviewed"}:
+    if native_branch == "artifact" and method in {"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"}:
+        names.update({"artifacts", "audit"})
+    elif native_branch == "artifact" and method in {"tasks.admit", "tasks.checkpoint", "tasks.settle", "capabilities.invoke", "memory.propose", "memory.applyReviewed"}:
         names.add("artifacts")
     elif native_branch == "workflow" and method.startswith("tasks."):
         pass

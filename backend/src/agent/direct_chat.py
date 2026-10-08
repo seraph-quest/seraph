@@ -178,8 +178,12 @@ async def run_direct_local_chat(
     task_context = await session_manager.get_task_continuity_context(session_id)
     if task_context:
         messages[0]["content"] += "\n\n" + task_context
+    from src.agent.native_turn_family import capture_direct_completion
+    callback = capture_direct_completion(completion_with_fallback_sync)
+    callback_args = (completion_with_fallback_sync,) if callback is not completion_with_fallback_sync else ()
     response = await asyncio.to_thread(
-        completion_with_fallback_sync,
+        callback,
+        *callback_args,
         messages=messages,
         temperature=settings.model_temperature,
         max_tokens=min(settings.model_max_tokens, 512),
@@ -226,16 +230,18 @@ async def stream_direct_local_chat(
         streaming=True,
     )
     parts: list[str] = []
-    async for delta in stream_completion_with_fallback(
-        messages=messages,
-        temperature=settings.model_temperature,
-        max_tokens=min(settings.model_max_tokens, 512),
-        runtime_path=runtime_path,
-        request_context=context,
-        request_id=context.request_id,
-    ):
-        parts.append(delta)
-        yield delta
+    from src.agent.native_turn_family import original_direct_stream
+    with original_direct_stream(stream_completion_with_fallback):
+        async for delta in stream_completion_with_fallback(
+            messages=messages,
+            temperature=settings.model_temperature,
+            max_tokens=min(settings.model_max_tokens, 512),
+            runtime_path=runtime_path,
+            request_context=context,
+            request_id=context.request_id,
+        ):
+            parts.append(delta)
+            yield delta
 
     if not parts:
         fallback = "I am here. What should we focus on first?"

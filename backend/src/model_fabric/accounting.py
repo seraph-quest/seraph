@@ -115,6 +115,7 @@ class _AccountingHandle:
     ephemeral: bool
     contacted: bool = False
     committed_denial: object | None = None
+    native_turn_operation_witness: object | None = None
 
 
 @dataclass
@@ -418,6 +419,8 @@ class DurableInferenceBrokerMixin:
         from src.workflows.inference_accounting import InferenceProviderContactDenied
         try:
             contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
+            if handle.native_turn_operation_witness is not None:
+                contact_kwargs["native_turn_operation_witness"] = handle.native_turn_operation_witness
             await handle.repository.contact_inference_provider(handle.request.operation_id,
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:
@@ -490,9 +493,13 @@ class DurableInferenceBrokerMixin:
             self._durable_order[handle.request.operation_id] = handle.sequence
 
     async def execute(self, request, operation, **kwargs):
+        from src.agent.native_turn_family import require_original_accounting
+        require_original_accounting(self.durable_accounting)
         if not self.durable_accounting:
             return await super().execute(request, operation, **kwargs)
         handle = await self._prepare_accounting(request)
+        from src.agent.native_turn_family import bind_original_operation
+        handle.native_turn_operation_witness = bind_original_operation(handle)
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
@@ -532,6 +539,8 @@ class DurableInferenceBrokerMixin:
                 _near_billing.reset(billing_token)
 
     def execute_sync(self, request, operation, **kwargs):
+        from src.agent.native_turn_family import require_original_accounting
+        require_original_accounting(self.durable_accounting)
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
@@ -539,6 +548,8 @@ class DurableInferenceBrokerMixin:
         from .execution import _run_awaitable_sync
 
         handle = _run_awaitable_sync(self._prepare_accounting(request))
+        from src.agent.native_turn_family import bind_original_operation
+        handle.native_turn_operation_witness = bind_original_operation(handle)
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
@@ -574,6 +585,8 @@ class DurableInferenceBrokerMixin:
                 _current_policy_digest.reset(policy_token)
 
     async def stream(self, request, operation, **kwargs):
+        from src.agent.native_turn_family import require_original_accounting
+        require_original_accounting(self.durable_accounting)
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
@@ -581,6 +594,8 @@ class DurableInferenceBrokerMixin:
                 yield item
             return
         handle = await self._prepare_accounting(request)
+        from src.agent.native_turn_family import bind_original_operation
+        handle.native_turn_operation_witness = bind_original_operation(handle)
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)

@@ -9,7 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.ownership import _current_root
-from src.db.models import OperatorSession, Session, WorkBoardAttempt, WorkBoardEvent, WorkBoardComment, WorkflowRunState
+from src.db.models import OperatorSession, RuntimeCompositionState, Session, WorkBoardAttempt, WorkBoardEvent, WorkBoardComment, WorkflowRunState
 from src.auth.service import AuthenticatedOperator, AuthFailure, authenticate_session
 from src.security.trust_contract import AuthorityGrant, TrustPrincipal
 from src.memory.evidence_working_set import _PUBLIC_TYPES, _read_file, read_evidence
@@ -19,6 +19,34 @@ from src.work_board.repository import BoardError, WorkBoardRepository, _UNRESOLV
 
 MAX_CONTEXT_REFS = 32
 MAX_TIMELINE = 16
+
+
+async def _require_absent_task_factory_composition(db: AsyncSession) -> None:
+    """Deny-only absence check; repeat under the original legacy writer lock."""
+    from pathlib import Path
+    from sqlalchemy.exc import SQLAlchemyError
+    from config.settings import settings
+    from src.workspace.production import (ProductionWorkspace, ProductionWorkspaceError,
+        read_lifecycle_receipt, read_accounting_checkpoint)
+    try:
+        with db.no_autoflush:
+            present = await db.scalar(select(RuntimeCompositionState.runtime_domain).limit(1))
+            bound = await db.scalar(select(WorkflowRunState.run_identity).where(
+                WorkflowRunState.composition_binding_json.is_not(None)).limit(1))
+        workspace = ProductionWorkspace(host_root=Path(settings.workspace_dir).resolve())
+        receipt = read_lifecycle_receipt(workspace) or {}
+        checkpoint = read_accounting_checkpoint(workspace) or {}
+    except (ProductionWorkspaceError, SQLAlchemyError) as exc:
+        await db.rollback()
+        code = getattr(exc, "reason_code", None) or "composition_availability_metadata_unavailable"
+        raise BoardError(code, "Retry Task continuity after composition reconciliation", status_code=503) from exc
+    code = "composition_continuity_unavailable" if present is not None else (
+        "composition_retained_inventory_missing" if bound is not None
+        or receipt.get("runtime_composition") is not None
+        or any(checkpoint.get(key) is not None for key in ("composition_base", "composition_target")) else None)
+    if code is not None:
+        await db.rollback()
+        raise BoardError(code, "Retry Task continuity after composition reconciliation", status_code=503)
 
 
 class ContinueTaskRequest(BaseModel):
@@ -276,7 +304,19 @@ class TaskContinuityService:
 
     async def continue_task(self, db: AsyncSession, operator: AuthenticatedOperator, request: ContinueTaskRequest) -> dict:
         self._ready()
-        await _begin_sqlite_immediate(db)
+        guard = None
+        if db.info.get("composition_read_guard") is not None:
+            from src.runtime_plugins.ownership import begin_native_writer, CompositionBindingError
+            from src.workspace.production import ProductionWorkspaceReconciliationError
+            try:
+                guard = await begin_native_writer(db, owner="finite_service")
+            except (CompositionBindingError, ProductionWorkspaceReconciliationError) as exc:
+                code = getattr(exc, "reason_code", None) or str(exc)
+                raise BoardError(code, "Task continuity requires current healthy composition", status_code=503) from exc
+        else:
+            await _require_absent_task_factory_composition(db)
+            await _begin_sqlite_immediate(db)
+            await _require_absent_task_factory_composition(db)
         packet = await self.packet(db, operator, request.task_id)
         if packet.revision != request.expected_revision:
             raise BoardError("task_context_revision_stale", "Reload current task context; old chat intent was not replayed", status_code=409)
@@ -287,6 +327,19 @@ class TaskContinuityService:
                 raise BoardError("task_conversation_conflict", "Choose a new conversation identity", status_code=409)
             replay = True
         else:
+            if guard is not None:
+                # Selected Messages necessarily select their Session in canonical closure.
+                selected = ("sessions", request.new_conversation_id) in guard.members
+                with db.no_autoflush:
+                    bound_job = await db.scalar(select(WorkflowRunState.run_identity).where(
+                        WorkflowRunState.composition_binding_json.is_not(None),
+                        or_(WorkflowRunState.conversation_id == request.new_conversation_id,
+                            WorkflowRunState.session_id == request.new_conversation_id)).limit(1))
+                pending = any(isinstance(row, WorkflowRunState) and row.composition_binding_json is not None
+                    and request.new_conversation_id in {row.conversation_id, row.session_id}
+                    for row in (*db.new, *db.dirty))
+                if selected or bound_job is not None or pending:
+                    raise BoardError("task_conversation_conflict", "Choose a conversation without native provenance", status_code=409)
             conversation = Session(id=request.new_conversation_id,
                 owner_principal_id=operator.principal.principal_id,
                 continuity_task_id=request.task_id, title="Continue task")

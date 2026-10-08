@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 import json
 import os
 import tempfile
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import select
 
 from config.settings import settings
@@ -192,6 +192,45 @@ def _require_authenticated_capability_operator(request: Request) -> Authenticate
     ):
         raise HTTPException(status_code=401, detail={"code": "authentication_required"})
     return operator
+
+
+class NativeCapabilityListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    method: Literal["capabilities.list"]
+    cursor: str | None = None
+    limit: int = Field(default=20, ge=1, le=50)
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+class NativeCapabilityDescribeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    method: Literal["capabilities.describe"]
+    capability_id: str
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+@router.post("/capabilities/native-read")
+async def native_capability_read(request: Request, body: NativeCapabilityListRequest | NativeCapabilityDescribeRequest):
+    operator = _require_authenticated_capability_operator(request)
+    from src.runtime_plugins.read_admission import NativeServiceReadAdmission, native_capability_inventory, capability_read_projection
+    from src.runtime_plugins.read_execution import native_read_http
+    from src.runtime_plugins.dispatch import NativeServiceBlocked
+    from src.runtime_plugins.protocol import ProtocolError
+    _, digest = native_capability_inventory()
+    candidate = {"schema_version": 1, "native_inventory_digest": digest,
+        **body.model_dump(exclude={"idempotency_key"})}
+    try:
+        admission = NativeServiceReadAdmission.from_candidate(candidate)
+        capability_read_projection(candidate)
+    except (ProtocolError, NativeServiceBlocked) as exc:
+        raise HTTPException(status_code=422, detail={"code": "native_capability_read_input_invalid"}) from exc
+    async def recheck(db, current_candidate):
+        current = _require_authenticated_capability_operator(request)
+        if current != operator:
+            raise NativeServiceBlocked("native_capability_original_owner_changed")
+        capability_read_projection(current_candidate)
+    return await native_read_http(operator=operator, admission=admission,
+        idempotency_key=body.idempotency_key, owner_recheck=recheck)
 
 
 @router.post("/capabilities/source-evidence")

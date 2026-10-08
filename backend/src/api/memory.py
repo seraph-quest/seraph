@@ -44,6 +44,35 @@ from src.security.trust_contract import AuthorityGrant, PrincipalType
 router = APIRouter()
 
 
+class MemoryNativeReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    query: str = Field(default="", max_length=200)
+    limit: int = Field(default=20, ge=1, le=20)
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+@router.post("/memory/records/native-read")
+async def native_memory_read(http_request: Request, body: MemoryNativeReadRequest):
+    context = authenticated_memory_context(http_request)
+    from src.runtime_plugins.read_admission import NativeServiceReadAdmission
+    from src.runtime_plugins.read_execution import native_read_http
+    from src.runtime_plugins.protocol import ProtocolError
+    try:
+        admission = NativeServiceReadAdmission.from_candidate({"schema_version": 1,
+            "method": "memory.retrieve", "query": body.query, "limit": body.limit, "status": "active"})
+    except ProtocolError as exc:
+        raise HTTPException(status_code=422, detail={"code": "native_memory_read_input_invalid"}) from exc
+    async def recheck(db, candidate):
+        # Middleware context remains the original Root. Recovered scopes are
+        # never admitted to this finite private read.
+        current = authenticated_memory_context(http_request)
+        if current != context or candidate != admission.candidate():
+            from src.runtime_plugins.dispatch import NativeServiceBlocked
+            raise NativeServiceBlocked("native_memory_original_owner_changed")
+    return await native_read_http(operator=http_request.state.operator, admission=admission,
+        idempotency_key=body.idempotency_key, owner_recheck=recheck)
+
+
 @router.post("/memory/task-lessons", status_code=201)
 async def post_task_lesson(http_request: Request, request: LessonRequest):
     authenticated_memory_context(http_request)

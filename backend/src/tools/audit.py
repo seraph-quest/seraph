@@ -130,6 +130,8 @@ class AuditedTool(Tool):
         return None
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        from src.agent.native_turn_family import require_original_tool
+        require_original_tool(self)
         assert_runtime_not_revoked()
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)

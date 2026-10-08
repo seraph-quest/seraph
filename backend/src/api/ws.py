@@ -231,6 +231,8 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
         for step in agent.run(message, stream=True):
             loop.call_soon_threadsafe(queue.put_nowait, step)
     except Exception as exc:
+        from src.agent.native_turn_family import original_family_failure
+        exc = original_family_failure(exc)
         loop.call_soon_threadsafe(queue.put_nowait, exc)
         return exc
     finally:
@@ -1222,6 +1224,7 @@ async def websocket_chat(websocket: WebSocket):
                 reset_current_llm_request_id(llm_request_token)
                 if native_turn is not None:
                     native_turn.prepare_agent(agent)
+                    await native_turn.initialize_family()
                     worker_future = loop.run_in_executor(None, run_ctx.run, native_turn.run_callback, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
                 else:
                     worker_future = loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)

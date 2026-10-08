@@ -431,6 +431,18 @@ class WorkflowStateRepository:
             for step in sorted(steps or [], key=lambda item: (item.step_index, item.step_id))
         ]
         checkpoint_context = _loads(run.checkpoint_context_json, {})
+        checkpoint_receipts = _loads(getattr(run, "checkpoint_receipts_json", None), [])
+        if getattr(run, "job_kind", None) == "runtime_service_read_v1":
+            # Original read candidates and sealed native records belong only
+            # to the private canonical claim, including legacy workflow views.
+            from src.workflows.job_runtime import _protected_composition_checkpoint
+            checkpoint_context = {}
+            checkpoint_receipts = [item for item in checkpoint_receipts
+                if not isinstance(item, dict) or not _protected_composition_checkpoint(item.get("checkpoint_id"))]
+        elif getattr(run, "job_kind", None) == "conversation_turn_v1":
+            from src.workflows.job_runtime import _protected_composition_checkpoint
+            checkpoint_receipts = [item for item in checkpoint_receipts
+                if not isinstance(item, dict) or not _protected_composition_checkpoint(item.get("checkpoint_id"))]
         return {
             "id": run.id,
             "run_identity": run.run_identity,
@@ -486,7 +498,7 @@ class WorkflowStateRepository:
             "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
             "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
             "failure_reason": getattr(run, "failure_reason", None),
-            "checkpoint_receipts": _loads(getattr(run, "checkpoint_receipts_json", None), []),
+            "checkpoint_receipts": checkpoint_receipts,
             "artifact_receipts": _loads(getattr(run, "artifact_receipts_json", None), []),
             "effect_receipts": _loads(getattr(run, "effect_receipts_json", None), []),
             "step_records": step_records,

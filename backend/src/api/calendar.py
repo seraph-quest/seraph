@@ -559,6 +559,32 @@ async def _native_read_connection_metadata(db, owner: WorkBoardOwner, *, connect
         "reason_code": None if state in {"ready", "revoked"} else "native_connection_unavailable"}
 
 
+class CalendarNativeReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_connection_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(pattern=r"^[\x21-\x7e]{1,128}$")
+
+
+@router.post("/calendar/connections/{connection_id}/native-read")
+async def native_calendar_read(request: Request, connection_id: str, body: CalendarNativeReadRequest):
+    operator = _operator(request)
+    owner = _owner(operator)
+    from src.runtime_plugins.read_admission import NativeServiceReadAdmission
+    from src.runtime_plugins.read_execution import native_read_http
+    from src.runtime_plugins.protocol import ProtocolError
+    try:
+        admission = NativeServiceReadAdmission.from_candidate({"schema_version": 1,
+            "method": "connections.inspect", "connection_ref": connection_id,
+            "expected_connection_revision": body.expected_connection_revision})
+    except ProtocolError as exc:
+        raise HTTPException(status_code=422, detail={"code": "native_connection_read_input_invalid"}) from exc
+    async def recheck(db, candidate):
+        await _native_read_connection_metadata(db, owner, connection_id=candidate["connection_ref"],
+            expected_revision=candidate["expected_connection_revision"])
+    return await native_read_http(operator=operator, admission=admission,
+        idempotency_key=body.idempotency_key, owner_recheck=recheck)
+
+
 async def _assert_live_operator_session(db, owner: WorkBoardOwner) -> None:
     """Recheck the persisted session at Calendar control boundaries."""
 

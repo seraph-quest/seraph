@@ -12,6 +12,24 @@ from src.db.session_refs import ensure_sessions_exist
 
 
 class AuditRepository:
+    async def _log_event_in_session(
+        self, db, *, event_type: str, summary: str, session_id: str | None = None,
+        actor: str = "agent", tool_name: str | None = None, risk_level: str = "low",
+        policy_mode: str = "full", details: dict[str, Any] | None = None,
+        event_id: str | None = None, flush: bool = True,
+    ) -> AuditEvent:
+        """Caller owns authority, Session FK, one writer and operation receipt."""
+        event = AuditEvent(
+            session_id=session_id, actor=actor, event_type=event_type,
+            tool_name=tool_name, risk_level=risk_level, policy_mode=policy_mode,
+            summary=summary, details_json=json.dumps(details) if details is not None else None,
+            **({"id": event_id} if event_id is not None else {}),
+        )
+        db.add(event)
+        if flush:
+            await db.flush()
+        return event
+
     async def log_event(
         self,
         *,
@@ -36,18 +54,9 @@ class AuditRepository:
                     await _begin_sqlite_immediate(db)
                 await composition_authority_check(db)
             await ensure_sessions_exist(db, [session_id], retained_native=retained_native)
-            event = AuditEvent(
-                session_id=session_id,
-                actor=actor,
-                event_type=event_type,
-                tool_name=tool_name,
-                risk_level=risk_level,
-                policy_mode=policy_mode,
-                summary=summary,
-                details_json=json.dumps(details) if details is not None else None,
-            )
-            db.add(event)
-            await db.flush()
+            event = await self._log_event_in_session(db, event_type=event_type,
+                summary=summary, session_id=session_id, actor=actor, tool_name=tool_name,
+                risk_level=risk_level, policy_mode=policy_mode, details=details)
             db.expunge(event)
             return event
 

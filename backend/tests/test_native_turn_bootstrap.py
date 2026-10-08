@@ -18,7 +18,7 @@ from tests.test_runtime_composition_ownership import composition_db
 
 
 @pytest.mark.asyncio
-async def test_native_transport_cancel_retains_actual_thread_and_original_root_guard():
+async def test_native_transport_cancel_retains_actual_thread_and_original_root_guard(monkeypatch):
     """Callback completion is proved separately from transport cancellation."""
     import asyncio
     from threading import Event
@@ -27,6 +27,10 @@ async def test_native_transport_cancel_retains_actual_thread_and_original_root_g
     started, release, root = Event(), Event(), Event()
     admission = SimpleNamespace(deadline_at=datetime.now(timezone.utc) + timedelta(seconds=30))
     execution = NativeTurnExecution(admission, None, None, None)
+    # This isolated thread-lifetime test has no admitted job. The complete
+    # native tests separately prove the real protected initialization writer.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(execution, "initialize_family", AsyncMock())
     def callback():
         started.set()
         assert release.wait(5)

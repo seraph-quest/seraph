@@ -74,6 +74,13 @@ async def _persist_bound_admission_receipt(
 
 def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
     """Resolve repository coroutines from sync callers, including active loops."""
+    from src.agent.native_turn_family import verify_original_inference_bridge
+    try:
+        verify_original_inference_bridge()
+    except BaseException:
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise
     try:
         asyncio.get_running_loop()
     except RuntimeError:

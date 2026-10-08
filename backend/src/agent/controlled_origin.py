@@ -182,6 +182,11 @@ def install_controlled_callback(execution, agent):
         if type(error) is not AgentToolExecutionError:
             return
         cause = error.__cause__
+        family_failure = getattr(execution, "_family_failure_exception", None)
+        if family_failure is not None and cause is family_failure:
+            # The actual pre-execution owner gate already denied the effect.
+            # Propagate only its privately retained identical exception.
+            raise family_failure
         from src.agent.exceptions import ClarificationRequired
         from src.approval.exceptions import ApprovalRequired
         if type(cause) not in (ClarificationRequired, ApprovalRequired):
@@ -202,4 +207,5 @@ def install_controlled_callback(execution, agent):
         except (ValueError, asyncio.TimeoutError) as exc:
             raise NativeTurnBlocked("native_turn_controlled_origin_unproven") from exc
         raise cause
+    execution._controlled_callback = callback
     agent.step_callbacks.register(ActionStep, callback)

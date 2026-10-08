@@ -48,6 +48,22 @@ describe("CalendarPrepForm", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+  it("extends the calendar window only with separate finite metadata sync acknowledgement", async () => {
+    fetchMock.mockResolvedValueOnce(response({ connections: [connection] }))
+      .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 10080, max_events: 20, sync_metadata_limit: 50, allow_remote_model: false, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: new Date().toISOString(), updated_at: new Date().toISOString() } }))
+      .mockResolvedValueOnce(response({ events: [], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: new Date().toISOString(), pages_read: 1, truncated: false }));
+    render(<CalendarPrepForm goals={[goal]} onCreated={vi.fn()} onClose={vi.fn()} />);
+    await screen.findByText("Work calendar · active · revision 2");
+    fireEvent.click(screen.getByRole("button", { name: "Verify calendars" })); await screen.findByRole("option", { name: "Work" });
+    const ack = screen.getByRole("checkbox", { name: /Also grant bounded metadata sync/ }); expect(ack).not.toBeChecked();
+    fireEvent.click(ack); fireEvent.change(screen.getByLabelText("Window minutes"), { target: { value: "10080" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create finite consent and read events" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    const body = JSON.parse(String(fetchMock.mock.calls[2][1].body));
+    expect(body.acknowledge_sync_metadata).toBe(true); expect(body.window_minutes).toBe(10080); expect(body.allow_remote_model).toBe(false);
+    expect(screen.getByRole("region", { name: "Calendar connected context sync" })).toBeInTheDocument();
+  });
 
   it("allows readonly event selection without model consent while meeting preparation stays blocked", async () => {
     fetchMock

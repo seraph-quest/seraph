@@ -221,6 +221,15 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
+Scoped connected-source synchronization remains **Planned** until reviewed
+integration. Its bounded Python implementation uses explicit metadata grants,
+one fixed scope and canonical root reservation per connection, encrypted page
+cursors with complete-page adoption/readback, fifty metadata items/three pages,
+ten separately selected private reads, and original-grant recovery/revocation.
+Disposable SQLite, local HTTP and separate-process checks establish mechanics;
+they do not establish real-account or production usefulness. See the
+[owning contract](./12-current-app-guide.md#scoped-connected-source-synchronization).
+
 - [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
   native public browser → deterministic CPU dossier → local plain-text report
   chain, exact plan review, an original finite deadline and attempt counters,

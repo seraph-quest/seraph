@@ -1130,6 +1130,75 @@ Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
 
+### Scoped connected-source synchronization
+
+Scoped Gmail and Calendar synchronization is **Planned** until reviewed
+integration. Its bounded Python contract extends the existing connection,
+finite source-consent, vault, canonical durable-job and private-artifact owners.
+It introduces no second queue, credential-fetch surface, store or bridge.
+
+The existing Mail and Calendar connection routes own `POST /sync` and
+`GET /sync`. `ConnectionSyncInput` contains only `goal_ref`, `connection_ref`,
+`source_scope`, `window` and `max_items`. A request carries its own opaque
+`request_uuid`. Metadata synchronization requires an explicit
+`acknowledge_sync_metadata` grant; upgraded legacy consents retain a zero sync
+limit. The bound is a seven-day fixed window, at most fifty metadata records
+per provider/run and three pages. Gmail remains selected-label and optional
+selected-thread scoped. Calendar uses at most three exact selected calendar
+grants. A seven-day Calendar grant requires the explicit sync acknowledgement;
+existing narrower grants are preserved. Separate private-item acknowledgement
+selects at most ten bodies/details, with Gmail's existing ten-item body grant
+unchanged. No sync operation admits inference, send or reschedule work.
+
+Each connection has one fixed provider/scope digest. Changing it requires an
+explicit cursor reset after the old active root has positively settled or been
+reconciled. Before vault/provider contact, a serialized reservation mirrors
+the existing claimed durable root; every contact, adoption and private read
+revalidates the original owner/session, goal, connection, consent and vaulted
+credential binding. The reservation grants no authority independently of the
+canonical root's lease, fence and deadline. Provider contacts have a two-second
+maximum timeout clamped to that original deadline; metadata concurrency is two
+and the entire operation remains bounded by 120 seconds and original consent
+expiry. Fifty is an upper cap, never a completeness guarantee.
+
+`ConnectionCursor` contains exactly `connection_id`, `revision`, `scope_digest`,
+`provider_cursor` and `last_complete_at`. The cursor and provider token remain
+in an encrypted private page artifact; the connection row contains only its
+canonical job/page pointer, CAS revision, scope digest and active-job reference.
+Only complete page adoption with an artifact hash and durable readback advances
+that pointer. Interrupted pages retain the last complete cursor and an explicit
+unknown root. Exact replay cannot repeat an uncertain contact. OAuth refresh
+POSTs and source GETs remain uncertain in the original effect ledger. Explicit
+physical cleanup can release only the connection slot after positive original
+callback quiescence or verified original process death; it does not settle the
+Unknown job, adopt output, decrypt a page, advance the cursor or retry work.
+Elapsed lease time is never proof of physical closure. A single rate-limit response
+may schedule one thirty-second cooldown under the same root/grant/deadline;
+another rate limit or an interruption stays visible for recovery. Restart does
+not replay an unknown contact or clear its reservation by age. Physical-only
+cleanup validates the authenticated stable operator identity and exact original
+root/session/attempt/fence/reservation while preserving all Goal and output
+fences. A changed or revoked Goal never authorizes private readback or output
+adoption; old Unknown roots remain separately visible after a slot is released.
+
+Generic citations are `SourceItemRef` values: provider, opaque local identity,
+revision, content digest, privacy and expiry. Public discovery, API status and
+browser persistence receive no provider token, body or calendar private detail.
+`GET /sync` exposes coverage, freshness, the current root/revision, safe failure
+and cooldown metadata, and the exact redacted metadata selection for reload.
+Private readback requires a separate acknowledged owner API read and the original
+grant must still be current. Revocation blocks sync/readback while retaining
+audit. Explicit provider deletions become tombstones; list omission alone does
+not prove deletion. The typed `collect_connected_source_items` callable reads
+exact current citations for the connected task without granting model egress.
+
+Isolated regression/security checks use disposable SQLite/workspaces, a local
+paginated HTTP source fixture, separate-process reservation contention,
+encrypted artifact readback and negative authority/schema/migration cases.
+They establish these mechanics only. Real Google accounts, production operation
+and model usefulness remain external-unverified; no inference or eval is part
+of implementation or acceptance.
+
 ### Exact owned-calendar reschedule
 
 [ADR-019](./decisions/019-exact-calendar-reschedule.md) accepts one literal

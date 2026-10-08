@@ -1502,6 +1502,7 @@ export type CalendarAllowedField =
 export type CalendarConsentState = "active" | "revoked" | "expired" | "consumed";
 
 export interface CalendarConsentMetadata {
+  sync_metadata_limit?: number;
   consent_id: string;
   connection_id: string;
   connection_revision: number;
@@ -1520,6 +1521,7 @@ export interface CalendarConsentMetadata {
 }
 
 export interface CreateCalendarReadConsentRequest {
+  acknowledge_sync_metadata?: boolean;
   schema_version: 1;
   connection_id: string;
   calendar_id: string;

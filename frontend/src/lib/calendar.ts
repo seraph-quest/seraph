@@ -209,7 +209,7 @@ function verifyResponse(value: unknown): CalendarVerifyResponse {
 
 function consent(value: unknown): CalendarConsentMetadata {
   if (!isRecord(value)) fail("The consent receipt was not an object.");
-  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "allowed_fields", "window_minutes", "max_events", "allow_remote_model", "expires_at", "state", "revision", "consent_digest", "created_at", "updated_at"], "consent");
+  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "allowed_fields", "window_minutes", "max_events", "allow_remote_model", "expires_at", "state", "revision", "consent_digest", "created_at", "updated_at", ...(value.sync_metadata_limit === undefined ? [] : ["sync_metadata_limit"])], "consent");
   const allowedFields = value.allowed_fields;
   if (!Array.isArray(allowedFields) || allowedFields.length === 0 || allowedFields.some((field) => !["summary", "start", "end", "location", "description", "attendees"].includes(String(field)))) {
     fail("The consent allowed fields are invalid.");
@@ -222,7 +222,8 @@ function consent(value: unknown): CalendarConsentMetadata {
     goal_id: requiredString(value.goal_id, "goal ID"),
     goal_revision: positiveInteger(value.goal_revision, "goal revision"),
     allowed_fields: allowedFields as CalendarConsentMetadata["allowed_fields"],
-    window_minutes: boundedInteger(value.window_minutes, "window", 5, 1440),
+    window_minutes: boundedInteger(value.window_minutes, "window", 5, Number(value.sync_metadata_limit) > 0 ? 10080 : 1440),
+    sync_metadata_limit: value.sync_metadata_limit === undefined ? 0 : boundedInteger(value.sync_metadata_limit, "sync metadata limit", 0, 50),
     max_events: boundedInteger(value.max_events, "max events", 1, 50),
     allow_remote_model: booleanValue(value.allow_remote_model, "remote model choice"),
     expires_at: timestamp(value.expires_at, "expiry"),

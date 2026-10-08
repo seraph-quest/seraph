@@ -184,6 +184,21 @@ describe("MailConnectionPanel", () => {
     expect(JSON.stringify(post)).toContain("refresh-secret");
     expect(screen.queryByText("refresh-secret")).not.toBeInTheDocument();
   });
+  it("adds metadata sync only by separate explicit acknowledgement while preserving the body limit", async () => {
+    render(<MailConnectionPanel ownerPrincipalId="operator:single" ownerSessionId="session-1" />);
+    await screen.findByRole("checkbox", { name: /Inbox/ });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Inbox/ }));
+    const syncAck = screen.getByRole("checkbox", { name: /Also grant bounded metadata sync/ });
+    expect(syncAck).not.toBeChecked(); fireEvent.click(syncAck);
+    fireEvent.click(screen.getByRole("checkbox", { name: /I acknowledge one bounded metadata\/body read/ }));
+    fetchMock.mockResolvedValueOnce(response({ consent: { ...consent, sync_metadata_limit: 50, created_at: new Date().toISOString() } }));
+    fireEvent.click(screen.getByRole("button", { name: "Create source consent" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true));
+    const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    const body = JSON.parse(String((call?.[1] as RequestInit).body));
+    expect(body.acknowledge_sync_metadata).toBe(true); expect(body.max_messages).toBeLessThanOrEqual(10);
+    expect(body.label_ids).toHaveLength(1); expect(body.allowed_body_fields).toEqual(["subject", "plainbody", "replyintent"]);
+  });
 
   it("fails closed when opaque recovery storage cannot be written", async () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("storage unavailable"); });

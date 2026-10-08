@@ -20,6 +20,33 @@ from src.security.site_policy import evaluate_site_access
 from config.settings import settings
 
 
+async def collect_connected_source_items(runtime, owner, connection_id: str, item_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Read exact scoped citations through the current connected-source owner.
+
+    This typed Python seam is separate from public discovery. It cannot fetch
+    credentials, choose a provider URL, expand a source selection or infer
+    permission from an installed connector. A future bridge binds this callable.
+    """
+    from src.integrations.connection_sync import SourceItemRef, SyncError
+
+    if not 1 <= len(item_refs) <= 10:
+        raise SyncError("connected_context_selection_invalid", "Select at most ten connected source citations", status_code=422)
+    refs = [SourceItemRef.model_validate(value) for value in item_refs]
+    if len({value.opaque_id for value in refs}) != len(refs):
+        raise SyncError("connected_context_selection_invalid", "Connected source citations must be unique", status_code=422)
+    items = []
+    coverage = {}
+    freshness = {}
+    for ref in refs:
+        readback = await runtime.read_item(owner, connection_id, ref.opaque_id)
+        if readback["item"]["ref"] != ref.model_dump():
+            raise SyncError("connected_context_revision_stale", "The selected connected source citation changed", recovery_action="refresh_source_citation")
+        items.append(readback["item"])
+        coverage = readback["coverage"]
+        freshness = readback["freshness"]
+    return {"items": items, "coverage": coverage, "freshness": freshness, "memory_status": "no_learning"}
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

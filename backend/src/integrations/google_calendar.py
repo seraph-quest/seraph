@@ -738,6 +738,9 @@ class GoogleCalendarReadonlyAdapter:
         resolver: Any = None,
         authority_check: Callable[[], Awaitable[None]] | None = None,
         contact_observer: Callable[[], None] | None = None,
+        contact_timeout_seconds: float = 10,
+        deadline_at: datetime | None = None,
+        require_scope_evidence: bool = False,
     ):
         self.connection = connection
         self.owner_principal_id = owner_principal_id
@@ -745,6 +748,9 @@ class GoogleCalendarReadonlyAdapter:
         self.resolver = resolver
         self.authority_check = authority_check
         self.contact_observer = contact_observer
+        self.contact_timeout_seconds = max(0.01, min(float(contact_timeout_seconds), 10))
+        self.deadline_at = deadline_at
+        self.require_scope_evidence = require_scope_evidence
         self._access_token: str | None = None
         self._credential_values: tuple[str, ...] = ()
         self._transport_lifecycle = _TransportLifecycleMarker()
@@ -772,6 +778,14 @@ class GoogleCalendarReadonlyAdapter:
         """Current number of Calendar operations without close proof."""
 
         return int(self._transport_lifecycle.snapshot()["unsettled_operations"])
+
+    def _contact_timeout(self) -> float:
+        remaining = self.contact_timeout_seconds
+        if self.deadline_at is not None:
+            remaining = min(remaining, (self.deadline_at - datetime.now(timezone.utc)).total_seconds())
+        if remaining <= 0:
+            raise CalendarIntegrationError("source_deadline_expired", "The original source read deadline expired", status_code=409, recovery_action="reconcile_existing_sync")
+        return remaining
 
     async def _check_authority(self) -> None:
         if self.authority_check is not None:
@@ -839,7 +853,7 @@ class GoogleCalendarReadonlyAdapter:
                 form_body=urlencode(form).encode("utf-8"),
                 resolver=self.resolver or default_resolver,
                 transport=self.transport,
-                timeout_seconds=10,
+                timeout_seconds=self._contact_timeout(),
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
                 authority_check=self._check_authority,
@@ -862,6 +876,8 @@ class GoogleCalendarReadonlyAdapter:
         token = body.get("access_token") if isinstance(body, Mapping) else None
         if not isinstance(token, str) or not token or _CONTROL.search(token):
             raise CalendarIntegrationError("calendar_token_refresh_failed", "Calendar authorization response is invalid", status_code=502)
+        if self.require_scope_evidence and (not isinstance(body.get("scope"), str) or set(body["scope"].split()) != {"https://www.googleapis.com/auth/calendar.readonly"}):
+            raise CalendarIntegrationError("source_scope_missing", "Exact read-only provider scope evidence is missing", status_code=403, recovery_action="restore_prerequisite")
         self._access_token = token
         self._credential_values = tuple((*self._credential_values, token))
         return token
@@ -875,7 +891,7 @@ class GoogleCalendarReadonlyAdapter:
                 headers={"Accept": "application/json"},
                 resolver=self.resolver or default_resolver,
                 transport=self.transport,
-                timeout_seconds=10,
+                timeout_seconds=self._contact_timeout(),
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
                 authority_check=self._check_authority,
@@ -885,6 +901,10 @@ class GoogleCalendarReadonlyAdapter:
         await self._check_authority()
         if response.status_code in {401, 403}:
             raise CalendarIntegrationError("calendar_provider_unauthorized", "Calendar authorization was refused", status_code=403, recovery_action="restore_prerequisite")
+        if response.status_code == 429:
+            raise CalendarIntegrationError("calendar_rate_limited", "Calendar reads are temporarily rate limited", status_code=429, recovery_action="bounded_cooldown")
+        if response.status_code == 404:
+            raise CalendarIntegrationError("calendar_item_deleted", "The selected Calendar item was deleted", status_code=404)
         if response.status_code != 200:
             raise CalendarIntegrationError("calendar_provider_read_failed", "Calendar provider read failed", status_code=502, recovery_action="retry")
         _validate_json_content_type(response)
@@ -908,7 +928,7 @@ class GoogleCalendarReadonlyAdapter:
                 headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
                 resolver=self.resolver or default_resolver,
                 transport=self.transport,
-                timeout_seconds=10,
+                timeout_seconds=self._contact_timeout(),
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
                 authority_check=self._check_authority,
@@ -918,6 +938,10 @@ class GoogleCalendarReadonlyAdapter:
         await self._check_authority()
         if response.status_code in {401, 403}:
             raise CalendarIntegrationError("calendar_provider_unauthorized", "Calendar authorization was refused", status_code=403, recovery_action="restore_prerequisite")
+        if response.status_code == 429:
+            raise CalendarIntegrationError("calendar_rate_limited", "Calendar reads are temporarily rate limited", status_code=429, recovery_action="bounded_cooldown")
+        if response.status_code == 404:
+            raise CalendarIntegrationError("calendar_item_deleted", "The selected Calendar item was deleted", status_code=404)
         if response.status_code != 200:
             raise CalendarIntegrationError("calendar_provider_read_failed", "Calendar provider read failed", status_code=502, recovery_action="retry")
         _validate_json_content_type(response)
@@ -1033,6 +1057,55 @@ class GoogleCalendarReadonlyAdapter:
                 fields=projection,
             ))
         return selected, CalendarListRevision(digest=list_revision, pages_read=pages, truncated=truncated)
+
+    async def list_sync_page(
+        self, calendar_id: str, *, time_min: datetime, time_max: datetime,
+        max_events: int, page_token: str | None = None,
+        private_event_keys: set[str] | None = None, allowed_fields: set[str] | None = None,
+    ) -> tuple[list[CalendarEventSnapshot], str | None]:
+        """Read one selected calendar page, including explicit tombstones.
+
+        Descriptions/attendees are projected only for separately selected keys.
+        Cursor tokens never leave the private source owner.
+        """
+        if not 1 <= max_events <= 50 or not 0 < (_utc(time_max) - _utc(time_min)).total_seconds() <= 7 * 86400:
+            raise CalendarIntegrationError("calendar_sync_limit_invalid", "The Calendar sync bound is invalid", status_code=422)
+        query = [("timeMin", _utc(time_min).isoformat()), ("timeMax", _utc(time_max).isoformat()), ("singleEvents", "true"), ("showDeleted", "true"), ("maxResults", str(max_events)), ("fields", "items(id,recurringEventId,originalStartTime,status,etag,updated,summary,start,end),nextPageToken")]
+        if page_token is not None:
+            if not isinstance(page_token, str) or not page_token or len(page_token.encode("utf-8")) > 2048 or _CONTROL.search(page_token):
+                raise CalendarIntegrationError("calendar_cursor_invalid", "The Calendar cursor is invalid", status_code=422)
+            query.append(("pageToken", page_token))
+        payload = await self._authorized_get(_fixed_url(GOOGLE_API_ORIGIN, f"{EVENTS_PATH}/{_calendar_segment(calendar_id, field='calendar id')}/events", query))
+        raw = payload.get("items")
+        if not isinstance(raw, list) or len(raw) > max_events or any(not isinstance(item, Mapping) for item in raw):
+            raise CalendarIntegrationError("calendar_provider_schema_invalid", "The Calendar sync page is invalid", status_code=502)
+        token = payload.get("nextPageToken")
+        if token is not None and (not isinstance(token, str) or not token or len(token.encode("utf-8")) > 2048 or _CONTROL.search(token)):
+            raise CalendarIntegrationError("calendar_provider_schema_invalid", "The Calendar sync cursor is invalid", status_code=502)
+        revision = "sha256:" + digest({"calendar": calendar_id, "items": raw})
+        result = []
+        seen: set[str] = set()
+        for item in raw:
+            key = canonical_event_key(self.owner_principal_id, self.connection.connection_id, calendar_id, item)
+            if key in seen:
+                raise CalendarIntegrationError("calendar_duplicate_event_identity", "Calendar returned duplicate identities", status_code=502)
+            seen.add(key)
+            if item.get("status") == "cancelled":
+                projection = self._scrub({"provider_event_id": _bounded_text(item.get("id"), limit=1024, field="event id"), "recurrence_identity": _recurrence_identity(item), "status": "cancelled", "updated": _bounded_text(item.get("updated"), limit=128, field="updated", nullable=True), "etag": _bounded_text(item.get("etag"), limit=256, field="etag", nullable=True)})
+            else:
+                fields = {"summary", "start", "end"}
+                if key in (private_event_keys or set()):
+                    fields |= (allowed_fields or set())
+                    # Metadata pages never request private details. Read only
+                    # the separately selected event through its fixed route.
+                    event = await self.get_event(calendar_id, str(item.get("id")))
+                    if canonical_event_key(self.owner_principal_id, self.connection.connection_id, calendar_id, event) != key or event.get("etag") != item.get("etag"):
+                        raise CalendarIntegrationError("calendar_sync_event_changed", "The selected event changed during private read", status_code=409)
+                    item = event
+                projection = self._scrub(_selected_event(item, allowed_fields=fields))
+            item_revision = event_revision(projection)
+            result.append(CalendarEventSnapshot(key, item_revision, revision, projection.pop("provider_event_id"), projection.pop("recurrence_identity"), projection))
+        return result, token
 
     async def get_event(self, calendar_id: str, provider_event_id: str, *, allowed_fields: set[str] | None = None) -> dict[str, Any]:
         path = f"{EVENTS_PATH}/{_calendar_segment(calendar_id, field='calendar id')}/events/{_calendar_segment(provider_event_id, field='event id')}"

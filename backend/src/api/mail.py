@@ -202,6 +202,7 @@ class ConsentCreate(_Strict):
     # Source access is a deliberate operator acknowledgement.  Omitting the
     # field must fail validation instead of silently granting a read scope.
     acknowledge_source_read: Literal[True]
+    acknowledge_sync_metadata: bool = False
     idempotency_key: str = Field(min_length=1, max_length=256)
 
     @field_validator("expires_at", mode="before")
@@ -724,6 +725,8 @@ def _consent_metadata(row: MailReadConsent) -> dict[str, Any]:
         "label_ids": labels if isinstance(labels, list) else [],
         "window_days": row.window_days,
         "max_messages": row.max_messages,
+        "sync_metadata_limit": row.sync_metadata_limit,
+        "created_at": _aware(row.created_at).isoformat(),
         "source_read_allowed": bool(row.source_read_allowed),
         "source_revision": row.source_revision,
         "model_egress_allowed": bool(row.model_egress_allowed),
@@ -1849,7 +1852,7 @@ async def create_consent(request: Request) -> Any:
             if len(labels) != len(set(body.label_ids)):
                 raise HTTPException(status_code=409, detail={"code": "mail_labels_refresh_required", "message": "Refresh Gmail labels before creating consent", "recovery_action": "refresh_labels"})
             allowed = list(dict.fromkeys(body.allowed_body_fields))
-            request_digest = "sha256:" + digest({"connection_id": connection.connection_id, "connection_revision": connection.revision, "goal_id": body.goal_id, "goal_revision": body.expected_goal_revision, "label_ids": sorted(body.label_ids), "window_days": 7, "max_messages": body.max_messages, "allowed_body_fields": allowed, "expires_at": expires_at.isoformat(), "idempotency_key": body.idempotency_key})
+            request_digest = "sha256:" + digest({"connection_id": connection.connection_id, "connection_revision": connection.revision, "goal_id": body.goal_id, "goal_revision": body.expected_goal_revision, "label_ids": sorted(body.label_ids), "window_days": 7, "max_messages": body.max_messages, "allowed_body_fields": allowed, **({"sync_metadata_limit": 50} if body.acknowledge_sync_metadata else {}), "expires_at": expires_at.isoformat(), "idempotency_key": body.idempotency_key})
             existing = (
                 await db.execute(
                     select(MailReadConsent).where(
@@ -1863,7 +1866,7 @@ async def create_consent(request: Request) -> Any:
                 if existing.creation_request_digest != request_digest:
                     raise HTTPException(status_code=409, detail={"code": "mail_consent_idempotency_conflict", "message": "The consent key is bound to another request", "recovery_action": "use_new_idempotency_key"})
                 return {"consent": _consent_metadata(existing)}
-            source_digest = "sha256:" + digest({"owner": owner.principal_id, "session": owner.session_id, "connection_id": connection.connection_id, "connection_revision": connection.revision, "goal_id": body.goal_id, "goal_revision": body.expected_goal_revision, "label_ids": sorted(body.label_ids), "window_days": 7, "max_messages": body.max_messages, "allowed_body_fields": allowed, "expires_at": expires_at.isoformat()})
+            source_digest = "sha256:" + digest({"owner": owner.principal_id, "session": owner.session_id, "connection_id": connection.connection_id, "connection_revision": connection.revision, "goal_id": body.goal_id, "goal_revision": body.expected_goal_revision, "label_ids": sorted(body.label_ids), "window_days": 7, "max_messages": body.max_messages, "allowed_body_fields": allowed, **({"sync_metadata_limit": 50} if body.acknowledge_sync_metadata else {}), "expires_at": expires_at.isoformat()})
             row = MailReadConsent(
                 owner_principal_id=owner.principal_id,
                 owner_session_id=owner.session_id,
@@ -1876,6 +1879,7 @@ async def create_consent(request: Request) -> Any:
                 label_ids_json=json.dumps(sorted(body.label_ids), separators=(",", ":")),
                 window_days=7,
                 max_messages=body.max_messages,
+                sync_metadata_limit=50 if body.acknowledge_sync_metadata else 0,
                 source_read_allowed=True,
                 source_revision=1,
                 source_digest=source_digest,
@@ -3390,3 +3394,26 @@ async def get_mail_watch(request: Request, watch_id: str) -> dict[str, Any]:
 
 
 __all__ = ["router"]
+
+
+# Connected context uses the existing authenticated source surface.
+
+@router.post("/capabilities/mail/connections/{connection_id}/sync")
+async def connection_sync_sync(request: Request, connection_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "gmail", "sync")
+
+@router.get("/capabilities/mail/connections/{connection_id}/sync")
+async def connection_sync_status(request: Request, connection_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "gmail", "status")
+
+@router.post("/capabilities/mail/connections/{connection_id}/sync/items/{opaque_id}")
+async def connection_sync_read(request: Request, connection_id: str, opaque_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "gmail", "read", opaque_id=opaque_id)
+
+@router.post("/capabilities/mail/connections/{connection_id}/sync/{job_id}/reconcile")
+async def connection_sync_reconcile(request: Request, connection_id: str, job_id: str):
+    from src.api.connection_sync import handle
+    return await handle(request, connection_id, "gmail", "reconcile", job_id=job_id)

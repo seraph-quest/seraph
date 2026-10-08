@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { GoalInfo } from "../../types";
-import { isGoalProgramme, ProgrammeError, programmeApi } from "./goalProgrammeApi";
-import type { GoalProgramme, ProgrammePreview, ProgrammeRequest } from "./goalProgrammeApi";
+import { isGoalProgramme, isDiscoveryRun, ProgrammeError, programmeApi } from "./goalProgrammeApi";
+import type { GoalProgramme, ProgrammePreview, ProgrammeRequest, DiscoveryRun } from "./goalProgrammeApi";
 
 export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: GoalInfo; goalDraftChanged?: boolean }) {
   const [brief, setBrief] = useState("");
@@ -16,6 +16,8 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<{ programme: GoalProgramme; action: "pause" | "revoke" } | null>(null);
   const [recoverAck, setRecoverAck] = useState(false);
+  const [runs, setRuns] = useState<DiscoveryRun[]>([]);
+  const [discoveryBrief, setDiscoveryBrief] = useState<string | null>(null);
   const mounted = useRef(false);
   const currentDraft = useRef("");
   const signature = JSON.stringify([brief, days, ceiling, notifications, goal.revision, goalDraftChanged]);
@@ -87,11 +89,32 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
       } else { setError(err instanceof Error ? err.message : "Programme control failed."); setRecovery(null); setRecoverAck(false); }
     } finally { if (mounted.current) setBusy(false); }
   };
+  const inspectDiscovery = async () => {
+    setBusy(true); setError(""); setDiscoveryBrief(null);
+    try {
+      const result = await programmeApi<{ goal_id: string; runs: unknown[]; no_learning: true; current_day_only: true }>(goal.id, "/discovery");
+      if (result.goal_id !== goal.id || result.no_learning !== true || result.current_day_only !== true
+        || !Array.isArray(result.runs) || !result.runs.every(isDiscoveryRun)) throw new Error("Discovery history incomplete. Review retained receipts before new work.");
+      if (mounted.current) setRuns(result.runs);
+    } catch (err) { if (mounted.current) setError(err instanceof Error ? err.message : "Discovery history unavailable."); }
+    finally { if (mounted.current) setBusy(false); }
+  };
+  const readDiscovery = async (run: DiscoveryRun) => {
+    setBusy(true); setError(""); setDiscoveryBrief(null);
+    try {
+      const result = await programmeApi<{ job_id: string; programme_id: string; physical_readback: boolean; no_learning: boolean; brief: unknown }>(goal.id,
+        `/${encodeURIComponent(run.programme_id)}/discovery/${encodeURIComponent(run.job_id)}/brief`);
+      if (result.job_id !== run.job_id || result.programme_id !== run.programme_id || result.physical_readback !== true
+        || result.no_learning !== true || !result.brief || typeof result.brief !== "object") throw new Error("Selected discovery brief lacks current physical readback.");
+      if (mounted.current) setDiscoveryBrief(JSON.stringify(result.brief, null, 2));
+    } catch (err) { if (mounted.current) setError(err instanceof Error ? err.message : "Discovery brief readback denied."); }
+    finally { if (mounted.current) setBusy(false); }
+  };
   return <section aria-label="Public goal programme" className="space-y-3 border border-slate-700 rounded p-3 text-xs">
     <div className="cockpit-card-title">Public goal programme</div>
     <p>Enter a separate public brief locally. Your private priority title and description are never copied into this review. No query, URL or output path is required.</p>
     <p>Daily cadence · one outstanding run · maximum seven days. Logout and a new login do not renew the grant. Changing the public brief and clicking Preview immediately pauses previous programmes. Abandoning this review will not resume them. An unchanged-brief renewal pauses its predecessor on acceptance.</p>
-    <p>These controls configure finite public authority. Discovery and digest execution are not included in this milestone. A zero inference ceiling or unavailable governed route keeps the programme blocked.</p>
+    <p>The reviewed public brief can produce one bounded daily discovery brief. The inference ceiling covers the whole generation. A zero ceiling, unavailable governed route or unresolved previous occurrence blocks new work. No learning or external mutation is performed.</p>
     {goalDraftChanged && <p role="status">Save and reopen your changed priority before reviewing a programme for its current revision.</p>}
     <label className="block">Public brief<textarea aria-label="Public brief" value={brief} maxLength={2000} onChange={(e) => setBrief(e.target.value)} className="cockpit-input w-full" /></label>
     <label className="block">Programme duration (days)<input aria-label="Programme duration (days)" type="number" min="1" max="7" value={days} onChange={(e) => setDays(e.target.value)} className="cockpit-input" /></label>
@@ -117,6 +140,19 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
       <button type="button" disabled={busy || programme.state === "revoked" || programme.state === "paused"} onClick={() => void control(programme, "pause")} className="cockpit-action">Pause programme {programme.grant_revision}</button>
       <button type="button" disabled={busy || programme.state === "revoked"} onClick={() => void control(programme, "revoke")} className="cockpit-action">Revoke programme {programme.grant_revision}</button>
     </article>)}
+    <button type="button" disabled={busy} onClick={() => void inspectDiscovery()} className="cockpit-action">Inspect discovery runs</button>
+    {runs.map((run) => <article key={run.job_id} aria-label={`Discovery ${run.job_id}`}>
+      <div>{run.occurrence_day} · {run.status} · grant revision {run.grant_revision} · original deadline {run.deadline_at}</div>
+      <div>External effect: {run.external_effect_state} · {run.outstanding_held ? "Outstanding occurrence held" : "Occurrence closed"} · no_learning</div>
+      {run.accounting_liability && <div>Original accounting liability is unresolved.</div>}
+      {run.denial_cause && <div>Untouched occurrence cancelled: {run.denial_cause}. No contact or replay was admitted.</div>}
+      {run.search_blocked_reason && <div role="status">Public search blocked: {run.search_blocked_reason}. Inspect the original occurrence; provider replay is forbidden.</div>}
+      {run.outcome && <div>{run.outcome.state} · coverage {run.outcome.coverage} · freshness {run.outcome.freshness}</div>}
+      {run.recovery && <p>{run.recovery}</p>}
+      <button type="button" disabled={busy || !run.outcome || !["succeeded", "degraded"].includes(run.status) || run.external_effect_state === "unknown"}
+        onClick={() => void readDiscovery(run)} className="cockpit-action">Read selected discovery brief {run.occurrence_day}</button>
+    </article>)}
+    {discoveryBrief && <pre aria-label="Discovery brief physical readback" className="whitespace-pre-wrap">{discoveryBrief}</pre>}
     {recovery && <div role="status">
       <p>A fresh login needs explicit owner recovery to {recovery.action} programme {recovery.programme.id}, grant revision {recovery.programme.grant_revision}. This only controls that old programme and never accepts or renews authority.</p>
       <label><input type="checkbox" checked={recoverAck} onChange={(e) => setRecoverAck(e.target.checked)} /> I acknowledge recovery for this exact old programme control</label>

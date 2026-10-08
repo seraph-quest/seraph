@@ -159,6 +159,108 @@ original clocks, exact generations, current identity/policy fences and explicit
 operator revocation are mandatory. It does not claim that in-process dependency
 injection is isolation or that all future public sources are supported.
 
+## Accepted public discovery execution contract
+
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) extends this authority
+contract with `guardian.goal-discovery.v1` under the current Python owner. This
+accepted target is independent of the later Cordis research cutover. It does not
+introduce composition ownership state, another queue, an inference ledger, or a
+synthetic browser Root.
+
+`GoalResearchPlanSpecV1` is the sole closed plan schema. Its canonical `goal_id`
+is the existing bounded safe-reference string (1–128 characters), byte-equal to
+the live Goal and immutable programme binding. Existing eight-character and
+setup Goal IDs are retained without UUID conversion. Plan, programme and
+idempotency identifiers remain UUIDs; programme and grant aliases identify one
+immutable generation. The four stages are exactly `plan_queries`,
+`search_public`, `extract_sources`, and `prepare_brief`, with their version-1
+capabilities. Search emits both the immutable manifest and its bound opaque-ID
+selection; extraction never accepts a model-provided URL.
+Only whole-output references in that exact graph are executable: search consumes
+the original query output, extraction consumes its manifest and selection, and
+brief preparation consumes the original snapshots output. Nonempty JSON pointers
+or alternate graphs are rejected. Each executed stage reopens those exact
+original-job artifact identities and bytes. A no-contact unsupported outcome is
+a local negative receipt bound to the accepted plan and complete public brief;
+it does not claim nonexistent producer outputs or successful brief preparation.
+
+One original daily UTC occurrence enters the canonical native job queue. The
+original deadline is at most 300 seconds and is assigned once, intersected with
+the original grant expiry. No queue wait, restart, new plan ID, or renewal grants
+more time. There are at most three queries, fifteen combined deduplicated search
+results, four selected sources, and four total governed inference requests.
+The existing broker remains the single remote lane.
+Accepted narrower query/result/source/inference and output-byte limits remain
+binding at their owning stages; the maxima above do not override them.
+Generation spend includes
+all settled charges and reserved, contacted or Unknown liabilities across every
+accounting period. A previous outstanding occurrence for the same canonical Goal
+and stable operator identity retains its hold across new generations. A different
+Goal for the same identity is not counted as that Goal's discovery occurrence.
+
+Public search is a pinned HTTPS POST only to
+`https://html.duckduckgo.com/html/`, with only bounded `q`, empty `b`, and fixed
+locale `kl` form fields. It permits neither credentials/cookies/proxies nor
+redirects, DDGS routing, fallback backends, or retries. Each transfer is bounded
+to the plan's per-request limits, at most twenty seconds and 512 KiB, intersected
+with the original occurrence deadline. Recognized no-result markup is distinct from
+CAPTCHA, unexpected markup, and response loss. Selected sources additionally
+require current site policy, public address pinning, a 256 KiB raw cap, and
+supported UTF-8 text/plain or text/html. Normalized stored text is at most
+64 KiB; unsupported content is never silently truncated.
+Complete responses retain their exact raw-body SHA-256 in the original HTTP
+readback ledger, even when parsing blocks. The unchanged three-field manifest
+has protected adoption metadata binding its own identity and digest to the
+ordered query and HTTP response receipts; its digest is never presented as an
+HTTP response digest. Normalized source hashes remain distinct artifact evidence.
+Finite safe search-block codes persist in authenticated occurrence history and
+the Goal inspector across lifecycle recovery, without exposing queries or HTML
+or authorizing replay. Incomplete, oversized or timed-out transfers remain
+unresolved rather than acquiring an invented complete-response receipt.
+
+The complete reviewed public brief is staged and physically read back through
+the existing safe artifact owner before admission, then adopted by the original
+native writer. Unadopted staging is not authority and cannot grant contact.
+Partial or altered immutable files fail readback; they are not overwritten to
+manufacture successful recovery. The 2,048-character legacy question, 8 KiB
+serialized prompt, 16 KiB child, and 64 KiB dossier limits remain intact. An
+unsupported full brief or prompt produces explicit coverage before that contact.
+
+`DiscoveryBrief.v1` has findings, citations, uncertainties, prepared artifact
+references, inert proposed next steps, and native coverage. Coverage binds the
+entire original brief digest/byte count and each represented snapshot/span
+digest, while disclosing omitted lines. Mechanical citations do not establish
+semantic truth. Prepared checklists remain local and require separate acceptance
+for further work. First useful evidence can produce findings immediately; later
+unchanged URL/content pairs produce a quiet outcome. All outcomes explicitly
+record `no_learning`.
+
+The native service starts/stops in the existing App lifecycle and the dispatcher
+holds only its exact server-owned pointer. Scheduler registration is bounded and
+coalesced, admitting the current UTC slot without historical catch-up. Before
+every contact and adoption, physical artifacts are reopened outside the short
+writer, then their original job/input/authority/checkpoint digests and current
+programme/Goal/identity/route are checked under the existing configuration fence.
+An optional current `StrategyResolver` supplies the pinned typed method binding;
+absence remains an explicit baseline with no future-module import.
+An active binding applies only canonical `ResearchStrategy.v1` directives:
+query templates during query planning, finite source preferences and evidence
+fields during selection, and draft sections, evidence fields and stop conditions
+during brief preparation. The full accepted data stays immutable and must pass
+vault-aware safety checks before staging; each request contains only its stage's
+projection, with the original binding rechecked before contact and adoption.
+Unsafe, unrepresentable or oversized inputs fail closed within the existing
+8 KiB prompt bound; they cannot add tools, permissions, contacts or private Goal
+context. An absent strategy preserves the baseline request shapes.
+
+Authenticated operators inspect retained canonical occurrence history and
+explicitly select a completed local brief for current-authority readback. A new
+login uses the existing selected read-only Goal recovery. It cannot renew old
+work, replay a provider, hide Unknown effects, or release accounting liability.
+Implementation availability and unresolved recovery limits are recorded in
+[Development Status](../STATUS.md); isolated local scripted transport receipts
+are not provider reachability, model-quality, or overall review approval.
+
 The initial independent review identified two holds: a read-return alone cannot
 linearize contacts/adoption, and changed-brief preview must disclose its pause
 effect. Both findings are accepted in this branch contract: the DB-only binding

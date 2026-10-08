@@ -148,3 +148,87 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
             raise DurableJobLeaseError("research creation lost its parent CAS")
         await db.flush()
         return creation
+
+
+async def adopt_discovery_artifact(jobs, *, job_id, owner, fence, artifact):
+    """Exact staged programme output, under the current native artifact CAS."""
+    from src.work_board.research_artifacts import DiscoveryStagedArtifact, DISCOVERY_ARTIFACT_LIMITS, discovery_prefix, sha
+    from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND
+    from src.artifacts.registry import artifact_id_for
+    from src.workflows.research_guard import assert_discovery_authority
+    from src.workflows.job_runtime import _canonical, _append_goal_fence_condition, _effect_ledger_or_raise, DurableJobLeaseError
+    if type(artifact) is not DiscoveryStagedArtifact or artifact.job_id != job_id:
+        raise ValueError("exact native discovery artifact proof required")
+    if (artifact.kind not in DISCOVERY_ARTIFACT_LIMITS or type(artifact.slot) is not int
+            or not 0 <= artifact.slot < 4 or type(artifact.content) is not bytes
+            or not 0 < len(artifact.content) <= DISCOVERY_ARTIFACT_LIMITS[artifact.kind]
+            or sha(artifact.content) != artifact.reference.digest
+            or not artifact.file_path.startswith(discovery_prefix(artifact.programme_id))
+            or any(p in {"", ".", ".."} for p in artifact.file_path.split("/"))):
+        raise ValueError("discovery staged artifact binding invalid")
+    expected_id = artifact_id_for(file_path=artifact.file_path, artifact_type="goal_discovery_" + artifact.kind,
+        producer=DISCOVERY_KIND, run_id=job_id, content_sha256=artifact.reference.digest)
+    if artifact.reference.artifact_id != expected_id:
+        raise ValueError("discovery canonical artifact identity changed")
+    now = datetime.now(timezone.utc)
+    async with jobs._session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        run = await jobs._fetch(db, job_id)
+        jobs._assert_lease(run, owner=owner, fencing_token=fence)
+        await assert_discovery_authority(db, run.declared_authority_json, run=run)
+        authority = discovery_authority(run.declared_authority_json)
+        if run.status != "running" or run.deadline_at.replace(tzinfo=timezone.utc) <= now or authority.programme_binding.programme_id != artifact.programme_id:
+            raise DurableJobLeaseError("discovery output has no current original attempt")
+        identifier = f"discovery:artifact:{artifact.kind}:{artifact.slot}"
+        payload = {"artifact_ref": artifact.reference.model_dump(mode="json"), "file_path": artifact.file_path,
+            "kind": artifact.kind, "slot": artifact.slot, "job_id": job_id,
+            "programme_id": artifact.programme_id, "byte_count": len(artifact.content),
+            "producer_fence": fence, "no_learning": True}
+        from src.workflows.research_guard import current_discovery_witness
+        witness = current_discovery_witness()
+        declared = next((output for step in witness.plan.steps for output in step.output_slots if output.slot == artifact.kind), None)
+        if (declared is not None and len(artifact.content) > min(declared.max_bytes, witness.plan.limits.max_output_bytes)
+                or artifact.kind in {"snapshot", "draft"} and len(artifact.content) > witness.plan.limits.max_output_bytes):
+            raise ValueError("discovery output exceeds its original declared byte cap")
+        if artifact.kind == "manifest":
+            from src.workflows.research_sources import compile_discovery_search_derivation
+            from src.guardian.research_plan_contracts import SearchManifestV1
+            payload["search_derivation"] = compile_discovery_search_derivation(witness.plan, witness.artifacts,
+                _effect_ledger_or_raise(run.effect_receipts_json), SearchManifestV1.model_validate_json(artifact.content),
+                artifact.reference, job_id=job_id)
+        if artifact.kind == "brief":
+            from src.workflows.research_sources import discovery_stage_inputs, is_local_unsupported_discovery_brief
+            value = json.loads(artifact.content)
+            local_negative = is_local_unsupported_discovery_brief(value, witness.artifacts, _effect_ledger_or_raise(run.effect_receipts_json))
+            discovery_stage_inputs(witness.plan, witness.artifacts, "plan_queries" if local_negative else "prepare_brief")
+        history = json.loads(run.checkpoint_receipts_json)
+        existing = [p.get("payload") for p in history if p.get("checkpoint_id") == identifier]
+        if existing:
+            if len(existing) != 1 or any(existing[0].get(key) != value for key, value in payload.items() if key != "producer_fence"):
+                raise DurableJobLeaseError("original discovery artifact cannot be rebound")
+            return existing[0]
+        history.append({"checkpoint_id": identifier, "payload": payload, "recorded_at": now.isoformat()})
+        artifacts = json.loads(run.artifact_receipts_json)
+        artifacts.append({"artifact_id": expected_id, "artifact_type": "goal_discovery_" + artifact.kind,
+            "file_path": artifact.file_path, "producer": DISCOVERY_KIND,
+            "content_sha256": artifact.reference.digest, "size_bytes": len(artifact.content),
+            "exists": True, "recorded_at": now.isoformat()})
+        readbacks = _effect_ledger_or_raise(run.effect_receipts_json)
+        readbacks.append({"effect_id": "discovery-artifact:" + expected_id, "receipt_kind": "readback",
+            "readback_id": "discovery-readback-" + expected_id,
+            "effect_type": "research_artifact_readback", "target_path": artifact.file_path,
+            "target_digest": artifact.reference.digest, "content_sha256": artifact.reference.digest,
+            "status": "succeeded", "verified_at": now.isoformat(), "recorded_at": now.isoformat(),
+            "fencing_token": fence, "reconciled": True, "reconciliation_status": "resolved",
+            "details": {"verified": True, "no_learning": True}})
+        conditions = [WorkflowRunState.id == run.id, WorkflowRunState.revision == run.revision,
+            WorkflowRunState.status == "running", WorkflowRunState.lease_owner == owner,
+            WorkflowRunState.fencing_token == fence, WorkflowRunState.lease_expires_at > now]
+        _append_goal_fence_condition(conditions, run)
+        result = await db.execute(update(WorkflowRunState).where(*conditions).values(
+            checkpoint_receipts_json=_canonical(history), artifact_receipts_json=_canonical(artifacts),
+            effect_receipts_json=_canonical(readbacks), revision=run.revision + 1))
+        if result.rowcount != 1:
+            raise DurableJobLeaseError("discovery original output CAS lost")
+        await db.commit()
+        return payload

@@ -115,6 +115,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
     from src.work_board.dispatcher import run_work_board_dispatch
     from src.guardian.opportunity_runtime import run_opportunity_tick
+    from src.guardian.goal_discovery import run_goal_discovery_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -127,6 +128,14 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
 
     jobs = [
+        {
+            "func": _async_job_wrapper(run_goal_discovery_tick, loop, job_id="goal_public_discovery"),
+            "trigger": IntervalTrigger(seconds=60),
+            "id": "goal_public_discovery",
+            "name": "Finite public Goal discovery",
+            "next_run_time": _startup_next_run(True, delay_seconds=5),
+            "misfire_grace_time": 60,
+        },
         {
             "func": _async_job_wrapper(run_memory_consolidation, loop, job_id="memory_consolidation", allow_model_inference=True),
             "trigger": IntervalTrigger(minutes=settings.memory_consolidation_interval_min),

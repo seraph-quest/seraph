@@ -40,6 +40,51 @@ export interface ProgrammePreview {
   preview_only: true;
   paused_programme_ids: string[];
 }
+
+export interface DiscoveryRun {
+  job_id: string;
+  programme_id: string;
+  goal_revision: number;
+  grant_revision: number;
+  occurrence_day: string;
+  status: string;
+  deadline_at: string;
+  external_effect_state: "none" | "unknown" | "settled";
+  outstanding_held: boolean;
+  accounting_liability: boolean;
+  denial_cause?: string | null;
+  search_blocked_reason?: string | null;
+  outcome: null | { state: "findings" | "quiet" | "empty"; coverage: string; freshness: "current"; no_learning: true };
+  no_learning: true;
+  recovery: string | null;
+}
+
+export function isDiscoveryRun(value: unknown): value is DiscoveryRun {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<DiscoveryRun>;
+  return typeof item.job_id === "string" && /^goal-discovery:[a-f0-9]{32}$/.test(item.job_id)
+    && typeof item.programme_id === "string" && /^[a-f0-9]{32}$/.test(item.programme_id)
+    && Number.isSafeInteger(item.goal_revision) && item.goal_revision! > 0
+    && Number.isSafeInteger(item.grant_revision) && item.grant_revision! > 0
+    && typeof item.occurrence_day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item.occurrence_day)
+    && typeof item.deadline_at === "string" && Number.isFinite(Date.parse(item.deadline_at))
+    && ["accepted", "queued", "running", "paused", "blocked", "failed", "succeeded", "degraded", "cancelled", "cost_liability", "unknown_external_effect"].includes(item.status ?? "")
+    && ["none", "unknown", "settled"].includes(item.external_effect_state ?? "")
+    && typeof item.outstanding_held === "boolean" && typeof item.accounting_liability === "boolean"
+    && (item.denial_cause === undefined || item.denial_cause === null || [
+      "programme_unclaimed_original_paused", "programme_unclaimed_original_revoked",
+      "programme_unclaimed_identity_revoked", "programme_unclaimed_goal_changed",
+      "programme_unclaimed_original_expired",
+    ].includes(item.denial_cause))
+    && (item.search_blocked_reason === undefined || item.search_blocked_reason === null || [
+      "search_limits_invalid", "search_query_invalid", "search_deadline_expired", "search_timeout",
+      "search_response_byte_cap", "search_response_unsupported", "search_captcha", "search_markup_drift",
+      "search_redirect_wrapper_invalid", "search_result_url_unsupported", "search_title_unsupported",
+    ].includes(item.search_blocked_reason))
+    && item.no_learning === true && (item.recovery === null || typeof item.recovery === "string")
+    && (item.outcome === null || (Boolean(item.outcome) && ["findings", "quiet", "empty"].includes(item.outcome!.state)
+      && typeof item.outcome!.coverage === "string" && item.outcome!.freshness === "current" && item.outcome!.no_learning === true));
+}
 export function isGoalProgramme(value: unknown): value is GoalProgramme {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<GoalProgramme>;

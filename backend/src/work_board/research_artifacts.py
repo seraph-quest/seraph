@@ -148,3 +148,76 @@ def dossier_bytes(question, children):
     if len(raw) > OUTPUT_BYTES:
         raise ValueError("deterministic dossier exceeds 64 KiB")
     return raw
+
+
+from dataclasses import dataclass
+from src.guardian.research_plan_contracts import ArtifactRef
+
+DISCOVERY_ARTIFACT_LIMITS = {"public_brief": 8000, "plan": 65536, "queries": 16384,
+    "manifest": 65536, "selection": 8192, "snapshot": 65536, "snapshots": 65536,
+    "coverage": 16384, "brief": 65536, "draft": 16384, "prompt": 8192, "child": 16384}
+
+
+@dataclass(frozen=True)
+class DiscoveryStagedArtifact:
+    programme_id: str
+    job_id: str
+    kind: str
+    slot: int
+    file_path: str
+    reference: ArtifactRef
+    content: bytes
+
+
+def discovery_prefix(programme_id):
+    import re
+    if not isinstance(programme_id, str) or re.fullmatch(r"[0-9a-f]{32}", programme_id) is None:
+        raise ValueError("discovery artifact requires its canonical generation identity")
+    return f"goal-programmes/{programme_id}/"
+
+
+def read_discovery(reference, expected_digest, *, programme_id, max_bytes=OUTPUT_BYTES):
+    """Exact programme namespace uses the same no-follow safe byte owner."""
+    from src.work_board.input_artifacts import _open_input_artifact_parent, _safe_file_bytes
+    prefix = discovery_prefix(programme_id)
+    if (not isinstance(reference, str) or not reference.startswith(prefix)
+            or any(part in {"", ".", ".."} for part in reference.split("/"))):
+        raise ValueError("discovery artifact is outside its exact programme directory")
+    path = canonical_workspace_root(settings.workspace_dir) / reference
+    parent_fd, leaf = _open_input_artifact_parent(path, create=False)
+    try:
+        fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        try:
+            size = os.fstat(fd).st_size
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    if not 0 < size <= max_bytes:
+        raise ValueError("discovery artifact exceeds its immutable byte allowance")
+    return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
+
+
+def stage_discovery_artifact(*, programme_id, job_id, kind, slot, content):
+    """Physical preparation only; native writer must adopt this exact output."""
+    from src.work_board.input_artifacts import _write_payload
+    from src.artifacts.registry import artifact_id_for
+    from src.work_board.research_parent import DISCOVERY_KIND
+    if (kind not in DISCOVERY_ARTIFACT_LIMITS or type(slot) is not int or not 0 <= slot < 4
+            or not isinstance(job_id, str) or not job_id.startswith("goal-discovery:")
+            or type(content) is not bytes or not 0 < len(content) <= DISCOVERY_ARTIFACT_LIMITS[kind]):
+        raise ValueError("discovery artifact kind, lineage or original cap invalid")
+    content_digest = sha(content)
+    key = sha(json_bytes([job_id, kind, slot]))
+    path = f"{discovery_prefix(programme_id)}{key}-{content_digest}.json"
+    try:
+        actual = read_discovery(path, content_digest, programme_id=programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind])
+    except FileNotFoundError:
+        _write_payload(canonical_workspace_root(settings.workspace_dir) / path, content)
+        actual = read_discovery(path, content_digest, programme_id=programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind])
+    if actual != content:
+        raise ValueError("discovery immutable physical artifact changed")
+    identifier = artifact_id_for(file_path=path, artifact_type="goal_discovery_" + kind,
+        producer=DISCOVERY_KIND, run_id=job_id, content_sha256=content_digest)
+    return DiscoveryStagedArtifact(programme_id=programme_id, job_id=job_id, kind=kind, slot=slot,
+        file_path=path, reference=ArtifactRef(artifact_id=identifier, digest=content_digest, schema_version=1), content=actual)

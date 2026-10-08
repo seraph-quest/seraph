@@ -13,6 +13,7 @@ from typing import Any
 
 from .composition import CHILD_ENV, CORDIS_VERSION, CompositionBlocked, ReviewedComposition, reviewed_composition
 from .protocol import CONTROL_TIMEOUT, MAX_PENDING, ProtocolError, encode_frame, read_frame
+from .contracts import SERVICE_METHODS, validate_request, validate_result
 
 STDERR_LIMIT = 65_536
 
@@ -25,10 +26,15 @@ class HostBlocked(RuntimeError):
 class Pending:
     frame: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
+    native_binding: Any = None
+    native_forwarded: bool = False
 
 
 class CordisHost:
-    def __init__(self, *, node_path: Path | None = None):
+    def __init__(self, *, node_path: Path | None = None, service_dispatch=None, native_services=False):
+        # Only a fixed native owner may resolve/dispatch canonical invocations.
+        self.service_dispatch = service_dispatch
+        self._native_services = native_services
         self.node_path = node_path
         self.state = "stopped"
         self.reason: str | None = "not_started"
@@ -43,6 +49,7 @@ class CordisHost:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        self._native_inflight: set[str] = set()
         self._reaped = False
         self._cleanup_state = "not_started"
         self._cordis_disposal = "not_started"
@@ -69,9 +76,13 @@ class CordisHost:
             state, reason = "blocked", "readiness_not_checked"
         elif state in {"blocked", "cleanup_unknown"}:
             readiness = "blocked"
+        supported = sorted(getattr(self.service_dispatch, "supported_methods", ()))
         return {
             "runtime_role": "lifecycle_host", "state": state, "reason": reason,
             "readiness": {"state": readiness, "checked_at": self._readiness_checked_at},
+            "native_services": {"state": "partial" if supported and self.admitting else "blocked",
+                "supported_methods": supported,
+                "blocked_methods": sorted(SERVICE_METHODS - set(supported))},
             "profile_id": self.reviewed.profile["profile_id"] if self.reviewed else None,
             "cordis_version": CORDIS_VERSION,
             "node_version": self.reviewed.node_version if self.reviewed else None,
@@ -120,6 +131,11 @@ class CordisHost:
                 self.state, self.reason = "blocked", exc.reason
                 self._plugins = []
                 return False
+            if self._native_services and self.service_dispatch is None:
+                # Construction has no DB/import/contact side effects. Resolve
+                # the fixed owner only after the reviewed package preflight.
+                from .dispatch import NativeServiceDispatcher
+                self.service_dispatch = NativeServiceDispatcher()
             self.state, self.reason = "starting", None
             self.boot_nonce = secrets.token_hex(32)
             self._readiness_checked_at = None
@@ -167,8 +183,29 @@ class CordisHost:
         try:
             while True:
                 frame = await read_frame(self.process.stdout)
-                if frame["kind"] != "response" or frame["boot_nonce"] != self.boot_nonce or frame["seq"] != self._in_seq + 1:
-                    raise ProtocolError("boot, kind or sequence mismatch")
+                if (frame["boot_nonce"] != self.boot_nonce or frame["seq"] != self._in_seq + 1
+                    or self.reviewed is None or frame["composition_digest"] != self.reviewed.composition_digest
+                    or frame["package_digest"] != self.reviewed.package_digest):
+                    raise ProtocolError("boot, package or sequence mismatch")
+                if frame["kind"] == "request":
+                    if (frame["method"] not in SERVICE_METHODS or self.service_dispatch is None
+                        or not self.admitting or frame["request_id"] != f"c-{frame['seq']}"
+                        or self._unresolved >= MAX_PENDING
+                        or not int(time.time() * 1000) < frame["deadline_at"] <= int(time.time() * 1000) + 5000):
+                        raise ProtocolError("unadmitted native service request")
+                    originals = [entry for entry in self._pending.values()
+                        if entry.native_binding is not None and not entry.future.done() and not entry.native_forwarded
+                        and all(entry.frame[key] == frame[key] for key in (
+                            "method", "invocation_ref", "composition_epoch", "deadline_at",
+                            "boot_nonce", "package_digest", "composition_digest"))]
+                    if len(originals) != 1:
+                        raise ProtocolError("native request lacks unique original scoped invocation")
+                    originals[0].native_forwarded = True
+                    self._in_seq = frame["seq"]
+                    self._unresolved += 1
+                    name = f"service-{frame['seq']}"
+                    self._task(name, self._serve_native(frame, name, originals[0].native_binding))
+                    continue
                 pending = self._pending.get(frame["request_id"])
                 if pending is None or pending.future.done():
                     raise ProtocolError("unsolicited or duplicate response")
@@ -185,6 +222,69 @@ class CordisHost:
         except (ProtocolError, OSError, ValueError, TypeError, KeyError):
             if self.state not in {"quiescing", "stopped", "cleanup_unknown"}:
                 self._fence("protocol_rejected_or_pipe_lost")
+
+    async def _serve_native(self, request: dict[str, Any], name: str, original_scope) -> None:
+        """One bounded native admission/result; lost ACK never renews the job."""
+        original_boot = self.boot_nonce
+        try:
+            from .dispatch import CalledServiceInvocation
+            pending = self._pending.get(getattr(original_scope, "parent_request_id", None))
+            if (type(original_scope) is not CalledServiceInvocation or pending is None
+                or pending.future.done() or pending.native_binding is not original_scope
+                or pending.frame["request_id"] != original_scope.parent_request_id
+                or original_scope.host_boot_nonce != original_boot):
+                raise ProtocolError("native parent correlation no longer active")
+            remaining = max(0, (request["deadline_at"] - int(time.time() * 1000)) / 1000)
+            async with asyncio.timeout(remaining):
+                payload = await self.service_dispatch.dispatch(request, original_scope=original_scope)
+                validate_result(request["method"], payload)
+                async with self._write_lock:
+                    if (self.boot_nonce != original_boot or not self.admitting
+                        or int(time.time() * 1000) >= request["deadline_at"]
+                        or self.process is None or self.process.stdin is None):
+                        raise ProtocolError("native result lost original boot/deadline")
+                    response = {**request, "kind": "response", "seq": self._out_seq + 1, "payload": payload}
+                    wire = encode_frame(response)
+                    self._out_seq = response["seq"]
+                    self.process.stdin.write(wire)
+                    await self.process.stdin.drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No native exception message/private payload enters a child/log.
+            self._fence("native_service_failed_or_ack_lost")
+        finally:
+            self._unresolved -= 1
+            self._tasks.pop(name, None)
+
+    async def request_service(self, method: str, payload: dict[str, Any], *, original_scope) -> dict[str, Any]:
+        """Forward only an already captured original native claim scope."""
+        from .dispatch import OriginalServiceInvocation
+        from .ownership import RuntimeCompositionBinding
+        validate_request(method, payload)
+        if self.service_dispatch is None or not self.admitting:
+            raise HostBlocked("native_services_unavailable")
+        if (type(original_scope) is not OriginalServiceInvocation
+            or type(original_scope.binding) is not RuntimeCompositionBinding
+            or not original_scope.binding.allows(method)):
+            raise HostBlocked("native_original_scope_missing_or_method_changed")
+        if (original_scope.host_boot_nonce != self.boot_nonce or self.reviewed is None
+            or original_scope.witness["package_digest"] != self.reviewed.package_digest
+            or original_scope.witness["host_composition_digest"] != self.reviewed.composition_digest):
+            raise HostBlocked("native_original_host_changed")
+        key = original_scope.witness["invocation_ref"]
+        if key in self._native_inflight:
+            raise HostBlocked("native_original_scope_already_pending")
+        # The native ingress captures the scope once. A bare locator must never
+        # fetch a later claim/fence or renew an old host invocation here.
+        self._native_inflight.add(key)
+        try:
+            response = await self._rpc(method, invocation_ref=key,
+                deadline_at=original_scope.deadline_at, composition_epoch=original_scope.binding.epoch_for(method),
+                payload=payload, native_binding=original_scope)
+            return validate_result(method, response["payload"])
+        finally:
+            self._native_inflight.discard(key)
 
     async def _stderr_loop(self) -> None:
         assert self.process is not None and self.process.stderr is not None
@@ -234,7 +334,8 @@ class CordisHost:
         return self._snapshot(verified=True)
 
     async def _rpc(self, method: str, *, internal: bool = False, invocation_ref: str | None = None,
-                   deadline_at: int | None = None) -> dict[str, Any]:
+                   deadline_at: int | None = None, composition_epoch: int | None = None,
+                   payload: dict[str, Any] | None = None, native_binding=None) -> dict[str, Any]:
         if not internal and not self.admitting:
             raise HostBlocked("runtime_not_ready")
         if self.process is None or self.process.stdin is None or self.reviewed is None or self.boot_nonce is None:
@@ -263,11 +364,15 @@ class CordisHost:
             request_id = f"r-{seq}"
             frame = {"protocol": 1, "boot_nonce": self.boot_nonce, "request_id": request_id, "seq": seq,
                      "kind": "request", "method": method, "invocation_ref": invocation_ref,
-                     "composition_epoch": None, "composition_digest": self.reviewed.composition_digest,
-                     "package_digest": self.reviewed.package_digest, "deadline_at": deadline, "payload": {}}
+                     "composition_epoch": composition_epoch, "composition_digest": self.reviewed.composition_digest,
+                     "package_digest": self.reviewed.package_digest, "deadline_at": deadline, "payload": payload if payload is not None else {}}
             wire = encode_frame(frame)  # Validate before consuming a sequence.
             self._out_seq = seq
-            self._pending[request_id] = Pending(frame, future)
+            if native_binding is not None:
+                from .dispatch import CalledServiceInvocation
+                native_binding = CalledServiceInvocation(native_binding, method, composition_epoch,
+                    deadline, request_id, original_boot)
+            self._pending[request_id] = Pending(frame, future, native_binding)
             self.process.stdin.write(wire)
             await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
             self._write_lock.release()
@@ -323,6 +428,8 @@ class CordisHost:
             return
         # Admission closes before any drain/restart. No original RPC gets renewed.
         self.state = "quiescing"
+        shutdown_disposal_proof = None
+        original_boot = self.boot_nonce
         now = int(time.time() * 1000)
         drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
         if process.returncode is None and not preserve_blocked:
@@ -331,6 +438,9 @@ class CordisHost:
                 response = await self._rpc("runtime.shutdown", internal=True, deadline_at=drain_deadline)
                 payload = response["payload"]
                 self._cordis_disposal = payload["cordis_disposal"]
+                if payload["resources_remaining"] == 0 and self._cordis_disposal == "confirmed":
+                    # _rpc verified the exact original shutdown frame identity.
+                    shutdown_disposal_proof = original_boot
                 if payload["resources_remaining"] != 0 or self._cordis_disposal != "confirmed":
                     self._cleanup_state = "unknown"
                 await asyncio.wait_for(process.wait(), max(0.001, min(1.0, (drain_deadline - int(time.time() * 1000)) / 1000)))
@@ -370,6 +480,9 @@ class CordisHost:
             self._cleanup_state = "unknown"
         if not self._reaped:
             self._cleanup_state = "unknown"
+        if (self._reaped and self._cleanup_state != "unknown"
+            and shutdown_disposal_proof is not None and self.boot_nonce == shutdown_disposal_proof):
+            self._cordis_disposal = "confirmed"
         # This release owns only process-local resources. Positive OS reap proves
         # pipe/listener/timer destruction even when Cordis disposal is unconfirmed.
         if self._cleanup_state != "unknown":
@@ -381,4 +494,4 @@ class CordisHost:
             self._plugins = [{**plugin, "state": "stopped", "reason": None} for plugin in self._plugins]
 
 
-cordis_host = CordisHost()
+cordis_host = CordisHost(native_services=True)

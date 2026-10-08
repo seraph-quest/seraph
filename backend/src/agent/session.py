@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -38,6 +39,15 @@ from src.memory.flush import flush_session_memory
 from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 
 logger = logging.getLogger(__name__)
+
+
+async def _begin_retained_session_write(db) -> bool:
+    """Upgrade this existing owner only when composition protects its rows."""
+    if db.info.get("composition_read_guard") is None:
+        return db.info.get("composition_guard") is not None
+    from src.runtime_plugins.ownership import begin_native_writer
+    await begin_native_writer(db, owner="native_ingress")
+    return True
 
 
 class SessionOwnerMismatchError(Exception):
@@ -147,6 +157,7 @@ class SessionManager:
             raise ValueError("owner_principal_id must not be blank")
         normalized_owner_principal_id = str(owner_principal_id or "").strip() or None
         async with get_session() as db:
+            retained_writer = await _begin_retained_session_write(db)
             if session_id:
                 result = await db.execute(select(Session).where(Session.id == session_id))
                 session = result.scalars().first()
@@ -179,7 +190,7 @@ class SessionManager:
                         )
                         db.expunge(existing)
                         return existing
-                    if attempt == 1:
+                    if retained_writer or attempt == 1:
                         raise
                     new_id = uuid.uuid4().hex
                 else:
@@ -269,6 +280,7 @@ class SessionManager:
     ) -> bool:
         await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
             if not session:
@@ -814,6 +826,7 @@ class SessionManager:
         owner_principal_id: str | None = None,
     ) -> bool:
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             stmt = select(Session).where(Session.id == session_id)
             if owner_principal_id is not None:
                 stmt = stmt.where(Session.owner_principal_id == owner_principal_id)
@@ -858,6 +871,95 @@ class SessionManager:
                 "attachment_refs",
             )
         )
+
+    async def reserve_native_turn_message(
+        self, session_id: str, content: str, *, message_id: str,
+        metadata_json: str, admission,
+    ) -> tuple[Message, bool, dict]:
+        """One original writer owns both plain ingress and its canonical turn job.
+
+        This does not retrofit legacy messages or execute/restart a duplicate.
+        Audio confirmation and attachment ingress retain their existing owner.
+        """
+        from src.agent.turn_execution import (
+            NativeTurnAdmission, NativeTurnBlocked, native_turn_spec, validate_native_turn_owner,
+        )
+        from src.runtime_plugins.ownership import begin_native_writer
+        from src.workflows.job_runtime import durable_job_repository, _serialize
+        if type(admission) is not NativeTurnAdmission:
+            raise NativeTurnBlocked("native_turn_admission_missing")
+        ingress = admission.ingress
+        if (session_id != ingress.session_id or message_id != ingress.message_id
+            or hashlib.sha256(content.encode()).hexdigest() != ingress.content_digest
+            or json.loads(metadata_json).get("ingress") != ingress.model_dump(mode="json")):
+            raise MessageIngressConflictError(message_id)
+        async with get_session() as db:
+            await begin_native_writer(db, owner="native_ingress")
+            await validate_native_turn_owner(db, admission)
+            existing = await db.get(Message, message_id)
+            if existing is not None:
+                if (existing.session_id != session_id or existing.role != "user"
+                    or existing.content != content
+                    or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)):
+                    raise MessageIngressConflictError(message_id)
+                from src.db.models import WorkflowRunState
+                run = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == admission.job_id))
+                if (run is None or run.job_kind != "conversation_turn_v1"
+                    or run.capability_version != "conversation-turn.v1" or run.owner_kind != "user"
+                    or run.operator_session_id != ingress.operator_session_id
+                    or run.session_id != ingress.operator_session_id
+                    or run.conversation_id != ingress.conversation_id
+                    or run.owner_principal_id != ingress.principal_id
+                    or run.idempotency_key != ingress.idempotency_key_digest
+                    or json.loads(run.arguments_json) != admission.inputs
+                    or not run.composition_binding_json):
+                    raise NativeTurnBlocked("turn_admission_provenance_unavailable")
+                projection = _serialize(run)
+                db.expunge(existing)
+                return existing, True, projection
+            spec = await native_turn_spec(db, admission)
+            message = await self._add_message_in_db(db, session_id, "user", content,
+                metadata_json=metadata_json, message_id=message_id, attachment_refs=[])
+            projection = await durable_job_repository._admit_in_session(db, spec, native_turn_admission=admission)
+            if projection["status"] != "accepted" or projection.get("deduped"):
+                raise NativeTurnBlocked("native_turn_admission_not_accepted")
+            return message, False, projection
+
+    async def add_native_turn_result(self, session_id, content, *, message_id, metadata_json, execution):
+        """Actual output and protected success share the existing native writer."""
+        from src.runtime_plugins.ownership import begin_native_writer
+        from src.workflows.job_runtime import durable_job_repository
+        execution.remaining()
+        async with get_session() as db:
+            await begin_native_writer(db, owner="native_ingress")
+            run = await durable_job_repository._fetch(db, execution.admission.job_id)
+            await execution.authority_check(db, run)
+            message = await self._add_message_in_db(db, session_id, "assistant", content,
+                metadata_json=metadata_json, message_id=message_id, attachment_refs=[],
+                native_execution=execution)
+            return message
+
+    async def record_native_turn_controlled(self, session_id, exception, *, execution,
+                                           content=None, message_id=None, metadata_json=None):
+        from src.runtime_plugins.ownership import begin_native_writer
+        from src.workflows.job_runtime import durable_job_repository as jobs
+        execution.validate_completed_exception(exception)
+        if content is not None and len(content.encode()) > 65536:
+            from src.agent.turn_execution import NativeTurnBlocked
+            raise NativeTurnBlocked("native_turn_output_limit_exceeded")
+        async with get_session() as db:
+            await begin_native_writer(db, owner="native_ingress")
+            run = await jobs._fetch(db, execution.admission.job_id)
+            await execution.authority_check(db, run)
+            if content is None:
+                await jobs._record_turn_controlled_in_session(db, run,
+                    native_execution=execution, completed_exception=exception,
+                    authority_check=execution.authority_check)
+                return None
+            return await self._add_message_in_db(db, session_id, "assistant", content,
+                message_id=message_id, metadata_json=metadata_json, attachment_refs=[],
+                native_execution=execution, native_controlled_exception=exception)
 
     async def reserve_ingress_message(
         self,
@@ -906,6 +1008,7 @@ class SessionManager:
             # the same transaction.  Cancellation can win before this update;
             # once it does, no message reservation is possible.
             async with get_session() as db:
+                await _begin_retained_session_write(db)
                 # The worker's request-time re-authentication closes the
                 # normal path, but session revocation can race that check.  A
                 # A row lock makes this transaction the linearization point on
@@ -1012,6 +1115,8 @@ class SessionManager:
         metadata_json: str | None = None,
         message_id: str | None = None,
         attachment_refs: object = None,
+        native_execution=None,
+        native_controlled_exception=None,
     ) -> Message:
         """Insert a message while retaining the caller's transaction."""
         if len(content) > 50_000:
@@ -1065,6 +1170,22 @@ class SessionManager:
             metadata_json=metadata_json,
         )
         db.add(msg)
+        if native_execution is not None:
+            from src.agent.turn_execution import NativeTurnExecution
+            from src.workflows.job_runtime import durable_job_repository
+            if type(native_execution) is not NativeTurnExecution or role != "assistant":
+                raise ValueError("original native output owner required")
+            with db.no_autoflush:
+                run = await durable_job_repository._fetch(db, native_execution.admission.job_id)
+                if native_controlled_exception is None:
+                    await durable_job_repository._record_turn_result_in_session(db, run,
+                        message=msg, original_claim=native_execution.claim,
+                        authority_check=native_execution.authority_check)
+                else:
+                    await durable_job_repository._record_turn_controlled_in_session(db, run,
+                        message=msg, native_execution=native_execution,
+                        completed_exception=native_controlled_exception,
+                        authority_check=native_execution.authority_check)
         result = await db.execute(select(Session).where(Session.id == session_id))
         session = result.scalars().first()
         if session:
@@ -1152,6 +1273,7 @@ class SessionManager:
             lineage.get("thread_id") or lineage_conversation_id
         ).strip() or lineage_conversation_id
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             msg = Message(
                 id=message_id or uuid.uuid4().hex,
                 session_id=session_id,
@@ -1349,7 +1471,8 @@ class SessionManager:
 
     async def replace_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
-            await ensure_sessions_exist(db, [session_id])
+            retained_writer = await _begin_retained_session_write(db)
+            await ensure_sessions_exist(db, [session_id], retained_native=retained_writer)
             existing = await db.execute(
                 select(SessionTodo).where(SessionTodo.session_id == session_id)
             )
@@ -1378,7 +1501,8 @@ class SessionManager:
 
     async def append_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
-            await ensure_sessions_exist(db, [session_id])
+            retained_writer = await _begin_retained_session_write(db)
+            await ensure_sessions_exist(db, [session_id], retained_native=retained_writer)
             existing = await db.execute(
                 select(SessionTodo)
                 .where(SessionTodo.session_id == session_id)
@@ -1416,6 +1540,7 @@ class SessionManager:
         completed: bool,
     ) -> list[dict] | None:
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             todo = await self._resolve_todo(db, session_id, item_ref)
             if todo is None:
                 return None
@@ -1432,6 +1557,7 @@ class SessionManager:
 
     async def remove_todo(self, session_id: str, item_ref: str) -> list[dict] | None:
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             todo = await self._resolve_todo(db, session_id, item_ref)
             if todo is None:
                 return None
@@ -1457,6 +1583,7 @@ class SessionManager:
 
     async def clear_todos(self, session_id: str) -> None:
         async with get_session() as db:
+            await _begin_retained_session_write(db)
             existing = await db.execute(
                 select(SessionTodo).where(SessionTodo.session_id == session_id)
             )

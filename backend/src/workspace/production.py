@@ -624,6 +624,16 @@ def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Map
     payload = dict(receipt)
     # Lifecycle status updates must not erase the accounting high-water mark.
     prior = read_lifecycle_receipt(workspace)
+    if (prior is not None and "runtime_composition" in prior and payload.get("operation") in {"restore", "rollback"}
+            and payload.get("status") in {"restored", "rolled_back"}):
+        from src.workspace.accounting_continuity import verify_promoted_composition
+        payload["runtime_composition"] = verify_promoted_composition(workspace)
+    if prior is not None and "runtime_composition" in prior:
+        previous = prior["runtime_composition"]
+        incoming = payload.get("runtime_composition", previous)
+        from src.workspace.accounting_witness import validate_composition_progression
+        validate_composition_progression(previous, incoming)
+        payload["runtime_composition"] = incoming
     for name in ("provider_policy", "deployment_binding", "legacy_lifecycle_migration"):
         if prior is None or name not in prior:
             continue
@@ -704,6 +714,13 @@ def write_accounting_checkpoint(workspace: ProductionWorkspace, payload: Mapping
     """Retain one content-free transaction delta under the accounting lock."""
     path = workspace.lifecycle_directory / "accounting-checkpoint.json"
     prior = read_accounting_checkpoint(workspace)
+    if prior is not None and prior.get("schema_version") == 2:
+        receipt = read_lifecycle_receipt(workspace) or {}
+        if (receipt.get("runtime_composition") != prior.get("composition_target")
+            or (prior.get("witness") is not None and receipt.get("inference_accounting") != prior["witness"])):
+            raise ProductionWorkspaceError("composition pending checkpoint requires reconciliation")
+        if payload.get("schema_version") != 2:
+            raise ProductionWorkspaceError("composition checkpoint component cannot be dropped")
     if prior is not None and prior.get("witness", {}).get("revision", 0) > payload.get("witness", {}).get("revision", 0):
         raise ProductionWorkspaceError("accounting checkpoint cannot regress")
     _write_private_checkpoint(path, payload)

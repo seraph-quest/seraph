@@ -22,6 +22,7 @@ from src.agent.direct_chat import (
     stream_direct_local_chat,
 )
 from src.agent.factory import build_agent
+from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
     MessageIngressConflictError,
@@ -45,6 +46,8 @@ from src.api.chat import (
     _approval_transport_metadata,
     validate_chat_ingress_identity,
     validate_chat_message,
+    persist_turn_output,
+    persist_controlled_turn,
 )
 from src.conversation.identity import ConversationIdentityError
 from src.auth.middleware import authenticate_websocket
@@ -228,6 +231,7 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
             loop.call_soon_threadsafe(queue.put_nowait, step)
     except Exception as exc:
         loop.call_soon_threadsafe(queue.put_nowait, exc)
+        return exc
     finally:
         loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
@@ -533,6 +537,7 @@ async def websocket_chat(websocket: WebSocket):
     _seq = 0
     active_turn_session_id: str | None = None
     active_turn_ingress: ChatIngressEnvelope | None = None
+    active_native_turn = None
     active_turn_completed = True
     revocation_guard_token = None
 
@@ -546,6 +551,9 @@ async def websocket_chat(websocket: WebSocket):
         if active_turn_completed or not active_turn_session_id:
             return
         active_turn_completed = True
+        if active_native_turn is not None:
+            active_native_turn.close_transport()
+            return
         with suppress(Exception):
             if active_turn_ingress is not None:
                 message_id = assistant_message_id_for_ingress(active_turn_ingress, suffix="interrupted")
@@ -725,6 +733,9 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
             ingress = None
+            native_turn = None
+            profile = None
+            active_native_turn = None
             if ws_msg.type != "resume_message":
                 try:
                     ingress = build_chat_ingress_envelope(
@@ -751,13 +762,30 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 try:
-                    _ingress_message, duplicate = await session_manager.reserve_ingress_message(
-                        session.id,
-                        ws_msg.message,
-                        message_id=ingress.message_id,
-                        metadata_json=chat_ingress_metadata(ingress),
-                        attachment_refs=ws_msg.attachments,
-                    )
+                    host = available_turn_host(ingress, ws_msg.message)
+                    if host is not None:
+                        profile = await get_or_create_profile()
+                        onboarding = not profile.onboarding_completed
+                        runtime_path = "onboarding_agent" if onboarding else "chat_agent"
+                        route = "direct_turn" if should_use_direct_local_chat(ws_msg.message,
+                            runtime_path=runtime_path, is_onboarding=onboarding) else "generic_turn"
+                        admission = NativeTurnAdmission.capture(ingress, principal=chat_principal,
+                            reviewed_composition=host.reviewed, native_route=route)
+                        _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
+                            session.id, ws_msg.message, message_id=ingress.message_id,
+                            metadata_json=chat_ingress_metadata(ingress), admission=admission)
+                        if not duplicate:
+                            native_turn = await claim_native_turn(admission, host, native_job)
+                            active_native_turn = native_turn
+                    else:
+                        _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+                            session.id, ws_msg.message, message_id=ingress.message_id,
+                            metadata_json=chat_ingress_metadata(ingress), attachment_refs=ws_msg.attachments)
+                except NativeTurnBlocked as exc:
+                    active_turn_completed = True
+                    await websocket.send_text(WSResponse(type="error", content="Native turn is blocked.",
+                        reason=exc.reason_code, session_id=session.id, seq=_next_seq()).model_dump_json())
+                    continue
                 except MessageIngressConflictError as exc:
                     await log_chat_ingress_event(
                         session_id=session.id,
@@ -831,7 +859,7 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
-            profile = await get_or_create_profile()
+            profile = profile or await get_or_create_profile()
             direct_is_onboarding = not profile.onboarding_completed
             direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
             try:
@@ -890,7 +918,7 @@ async def websocket_chat(websocket: WebSocket):
                     get_current_approval_mode(),
                     trust_principal=chat_principal,
                 )
-                revocation_guard_token = set_revocation_guard(revocation_guard)
+                revocation_guard_token = set_revocation_guard(native_turn.guard(revocation_guard) if native_turn else revocation_guard)
                 try:
                     await websocket.send_text(
                     WSResponse(
@@ -912,6 +940,8 @@ async def websocket_chat(websocket: WebSocket):
                             is_onboarding=direct_is_onboarding,
                             session_id=session.id,
                         ):
+                            if native_turn is not None:
+                                native_turn.remaining()
                             streamed_parts.append(delta)
                             safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
                                 "".join(streamed_parts),
@@ -931,7 +961,7 @@ async def websocket_chat(websocket: WebSocket):
 
                     try:
                         final_result = await _authorized_with_timeout(
-                            _stream_direct_reply(),
+                            native_turn.execute(_stream_direct_reply()) if native_turn else _stream_direct_reply(),
                             auth_revoked,
                             timeout=min(settings.agent_chat_timeout, 60),
                         )
@@ -1085,7 +1115,7 @@ async def websocket_chat(websocket: WebSocket):
                 direct_assistant_message_id = (
                     assistant_message_id_for_ingress(ingress) if ingress is not None else None
                 )
-                await session_manager.add_message(
+                await persist_turn_output(native_turn,
                     session.id,
                     "assistant",
                     final_result,
@@ -1178,12 +1208,14 @@ async def websocket_chat(websocket: WebSocket):
                     ).approval_mode,
                     trust_principal=chat_principal,
                 )
-                revocation_guard_token = set_revocation_guard(revocation_guard)
+                revocation_guard_token = set_revocation_guard(native_turn.guard(revocation_guard) if native_turn else revocation_guard)
                 llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
                 reset_current_llm_request_id(llm_request_token)
-                loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                worker_future = loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                if native_turn is not None:
+                    native_turn.worker = worker_future
 
                 async def _drain_queue():
                     nonlocal step_num, final_result, tool_call_count
@@ -1237,9 +1269,21 @@ async def websocket_chat(websocket: WebSocket):
                     await _authorized_with_timeout(
                         drain_task,
                         auth_revoked,
-                        timeout=settings.agent_chat_timeout,
+                        timeout=native_turn.remaining() if native_turn else settings.agent_chat_timeout,
                     )
-                except Exception:
+                    if native_turn is not None:
+                        await asyncio.wait_for(asyncio.shield(worker_future), timeout=native_turn.remaining())
+                except BaseException as exc:
+                    if native_turn is not None:
+                        if isinstance(exc, (ClarificationRequired, ApprovalRequired)):
+                            try:
+                                await asyncio.wait_for(asyncio.shield(worker_future), timeout=native_turn.remaining())
+                                native_turn.validate_completed_exception(exc)
+                            except BaseException:
+                                native_turn.close_transport()
+                                raise
+                        else:
+                            native_turn.close_transport()
                     if not drain_task.done():
                         drain_task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -1305,6 +1349,7 @@ async def websocket_chat(websocket: WebSocket):
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
 
             except ApprovalRequired as exc:
+                await persist_controlled_turn(native_turn, exc, session.id)
                 await approval_repository.merge_details(
                     exc.approval_id,
                     {"resume_message": ws_msg.message},
@@ -1353,10 +1398,8 @@ async def websocket_chat(websocket: WebSocket):
                     if ingress is not None
                     else None
                 )
-                await session_manager.add_message(
-                    session.id,
-                    "assistant",
-                    rendered,
+                await persist_controlled_turn(
+                    native_turn, exc, session.id, content=rendered,
                     metadata_json=(
                         chat_assistant_metadata(
                             ingress,
@@ -1449,7 +1492,7 @@ async def websocket_chat(websocket: WebSocket):
             generic_assistant_message_id = (
                 assistant_message_id_for_ingress(ingress) if ingress is not None else None
             )
-            await session_manager.add_message(
+            await persist_turn_output(native_turn,
                 session.id,
                 "assistant",
                 final_result,
@@ -1504,7 +1547,7 @@ async def websocket_chat(websocket: WebSocket):
                     logger.info("Onboarding completed")
 
             # Trigger memory consolidation in background (only for assistant responses)
-            if final_result:
+            if final_result and native_turn is None:
                 try:
                     from src.memory.flush import flush_session_memory
                     from src.utils.background import track_task

@@ -2087,6 +2087,7 @@ async def create_memory_proposal(
     candidate_kind: MemoryKind | str | None = None,
     preferred_capability_id: str | None = None,
     decision_effect: MemoryProposalDecisionEffect | str = MemoryProposalDecisionEffect.none,
+    composition_authority_check=None,
 ) -> dict[str, Any]:
     """Create or replay one source verified proposal.
 
@@ -2104,6 +2105,8 @@ async def create_memory_proposal(
         from src.work_board.repository import _begin_sqlite_immediate
 
         await _begin_sqlite_immediate(db)
+        if composition_authority_check is not None:
+            await composition_authority_check(db)
         task = (
             await db.execute(
                 select(WorkBoardTask).where(
@@ -2566,6 +2569,7 @@ async def apply_memory_proposal_action(
     reason: str | None = None,
     corrects_memory_id: str | None = None,
     preferred_capability_id: str | None = None,
+    composition_authority_check=None,
 ) -> dict[str, Any]:
     # Procedure preferences require their specialized staged, Root-bound
     # branch. Reject before the generic writer or source/redaction helpers.
@@ -2591,6 +2595,8 @@ async def apply_memory_proposal_action(
         from src.work_board.repository import _begin_sqlite_immediate
 
         await _begin_sqlite_immediate(db)
+        if composition_authority_check is not None:
+            await composition_authority_check(db)
         proposal = (
             await db.execute(
                 select(MemoryProposal).where(

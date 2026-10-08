@@ -796,6 +796,7 @@ async def forget_memory(
     reason: str | None = None,
     mode: str = "archive",
     privacy_boundary: str | None = None,
+    composition_authority_check=None,
 ) -> dict[str, Any]:
     normalized_mode = "redact" if str(mode or "").strip().lower() == "redact" else "archive"
     boundary = _normalize_privacy_boundary(privacy_boundary)
@@ -818,9 +819,10 @@ async def forget_memory(
     if normalized_mode == "redact":
         update_kwargs["content"] = "[forgotten by operator]"
         update_kwargs["summary"] = "[forgotten by operator]"
-    memory = await memory_repository.update_memory_control_metadata(memory_id, **update_kwargs)
+    memory = await memory_repository.update_memory_control_metadata(memory_id, composition_authority_check=composition_authority_check, **update_kwargs)
     audit_event = await audit_repository.log_event(
         actor=actor,
+        composition_authority_check=composition_authority_check,
         event_type="memory_forgotten",
         tool_name="memory_control",
         risk_level="medium" if normalized_mode == "redact" else "low",

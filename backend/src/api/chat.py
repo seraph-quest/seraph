@@ -30,6 +30,7 @@ from src.agent.direct_chat import (
     should_use_direct_local_chat,
 )
 from src.agent.factory import build_agent
+from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
     MessageIngressConflictError,
@@ -513,6 +514,32 @@ async def log_chat_ingress_event(
     )
 
 
+async def persist_turn_output(native_turn, session_id, role, content, *, metadata_json=None, message_id=None):
+    if native_turn is None:
+        return await session_manager.add_message(session_id, role, content,
+            metadata_json=metadata_json, message_id=message_id)
+    if role != "assistant" or native_turn.worker is None or not native_turn.worker.done() or native_turn.worker.cancelled():
+        raise NativeTurnBlocked("native_turn_completion_unproven")
+    if len(content.encode()) > 65536:
+        raise NativeTurnBlocked("native_turn_output_limit_exceeded")
+    message = await session_manager.add_native_turn_result(session_id, content,
+        metadata_json=metadata_json, message_id=message_id, execution=native_turn)
+    await native_turn.forward("conversation.append", {"message_ref": message.id})
+    return message
+
+
+async def persist_controlled_turn(native_turn, exception, session_id, *, content=None,
+                                 metadata_json=None, message_id=None):
+    if native_turn is None:
+        if content is not None:
+            return await session_manager.add_message(session_id, "assistant", content,
+                metadata_json=metadata_json, message_id=message_id)
+        return None
+    return await session_manager.record_native_turn_controlled(session_id, exception,
+        execution=native_turn, content=content, metadata_json=metadata_json,
+        message_id=message_id)
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, http_request: HttpRequest):
     """Send a message and receive an AI response."""
@@ -592,14 +619,29 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=422,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
+    native_turn = None
+    profile = None
+    host = available_turn_host(ingress, request.message)
     try:
-        _ingress_message, duplicate = await session_manager.reserve_ingress_message(
-            session.id,
-            request.message,
-            message_id=ingress.message_id,
-            metadata_json=chat_ingress_metadata(ingress),
-            attachment_refs=request.attachments,
-        )
+        if host is not None:
+            profile = await get_or_create_profile()
+            is_onboarding = not profile.onboarding_completed
+            runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
+            route = "direct_turn" if should_use_direct_local_chat(request.message,
+                runtime_path=runtime_path, is_onboarding=is_onboarding) else "generic_turn"
+            admission = NativeTurnAdmission.capture(ingress, principal=chat_principal,
+                reviewed_composition=host.reviewed, native_route=route)
+            _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
+                session.id, request.message, message_id=ingress.message_id,
+                metadata_json=chat_ingress_metadata(ingress), admission=admission)
+            if not duplicate:
+                native_turn = await claim_native_turn(admission, host, native_job)
+        else:
+            _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+                session.id, request.message, message_id=ingress.message_id,
+                metadata_json=chat_ingress_metadata(ingress), attachment_refs=request.attachments)
+    except NativeTurnBlocked as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.reason_code}) from exc
     except MessageIngressConflictError as exc:
         await log_chat_ingress_event(
             session_id=session.id,
@@ -635,7 +677,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
     )
 
     # Check onboarding status
-    profile = await get_or_create_profile()
+    profile = profile or await get_or_create_profile()
     is_onboarding = not profile.onboarding_completed
     direct_runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
     try:
@@ -676,15 +718,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             trust_principal=chat_principal,
         )
         revocation_scope = _begin_rest_revocation_watch(http_request)
+        native_guard_token = set_revocation_guard(native_turn.guard(revocation_scope[0] if revocation_scope else None)) if native_turn else None
         try:
-            response_text = await asyncio.wait_for(
-                run_direct_local_chat(
+            direct_execution = run_direct_local_chat(
                     request.message,
                     runtime_path=direct_runtime_path,
                     is_onboarding=is_onboarding,
                     session_id=session.id,
                     request_id=llm_request_id,
-                ),
+                )
+            response_text = await asyncio.wait_for(
+                native_turn.execute(direct_execution) if native_turn else direct_execution,
                 timeout=min(settings.agent_chat_timeout, 60),
             )
             response_text = await redact_secrets_in_text(response_text)
@@ -762,13 +806,15 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             )
             raise HTTPException(status_code=500, detail=safe_detail)
         finally:
+            if native_guard_token is not None:
+                reset_revocation_guard(native_guard_token)
             reset_runtime_context(auth_tokens)
             _finish_request(llm_request_id)
             await _end_rest_revocation_watch(revocation_scope)
 
         await _ensure_rest_authorized(http_request, revocation_scope)
         assistant_message_id = assistant_message_id_for_ingress(ingress)
-        await session_manager.add_message(
+        await persist_turn_output(native_turn,
             session.id,
             "assistant",
             response_text,
@@ -836,6 +882,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         llm_request_id = f"agent-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         revocation_scope = _begin_rest_revocation_watch(http_request)
+        native_guard_token = set_revocation_guard(native_turn.guard(revocation_scope[0] if revocation_scope else None)) if native_turn else None
         tokens = set_runtime_context(
             session.id,
             obs_manager.get_context(
@@ -848,8 +895,9 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
         reset_current_llm_request_id(llm_request_token)
+        agent_execution = asyncio.to_thread(run_ctx.run, agent.run, request.message)
         result = await asyncio.wait_for(
-            asyncio.to_thread(run_ctx.run, agent.run, request.message),
+            native_turn.execute(agent_execution) if native_turn else agent_execution,
             timeout=settings.agent_chat_timeout,
         )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
@@ -862,6 +910,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         ) from exc
     except ApprovalRequired as exc:
         await _ensure_rest_authorized(http_request, revocation_scope)
+        await persist_controlled_turn(native_turn, exc, session.id)
         await approval_repository.merge_details(
             exc.approval_id,
             {"resume_message": request.message},
@@ -900,10 +949,8 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         await _ensure_rest_authorized(http_request, revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
         clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
-        await session_manager.add_message(
-            session.id,
-            "assistant",
-            rendered,
+        await persist_controlled_turn(
+            native_turn, exc, session.id, content=rendered,
             metadata_json=chat_assistant_metadata(
                 ingress,
                 message_id=clarification_message_id,
@@ -1007,13 +1054,15 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
         raise HTTPException(status_code=500, detail=safe_detail)
     finally:
+        if "native_guard_token" in locals() and native_guard_token is not None:
+            reset_revocation_guard(native_guard_token)
         if "llm_request_id" in locals():
             _finish_request(llm_request_id)
         await _end_rest_revocation_watch(revocation_scope)
 
     await _ensure_rest_authorized(http_request, revocation_scope)
     assistant_message_id = assistant_message_id_for_ingress(ingress)
-    await session_manager.add_message(
+    await persist_turn_output(native_turn,
         session.id,
         "assistant",
         response_text,
@@ -1045,7 +1094,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             logger.info("Onboarding completed via REST")
 
     # Trigger memory consolidation in background
-    if response_text:
+    if response_text and native_turn is None:
         try:
             from src.memory.flush import flush_session_memory
             from src.utils.background import track_task

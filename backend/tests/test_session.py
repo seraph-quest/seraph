@@ -196,6 +196,7 @@ class TestGetOrCreate:
 
         class _Db:
             def __init__(self):
+                self.info = {}
                 self.flush_calls = 0
                 self.execute_calls = 0
 

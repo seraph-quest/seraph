@@ -649,6 +649,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
             "source_task_id": "VARCHAR",
+            "composition_binding_json": "VARCHAR",
             "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
@@ -1912,8 +1913,14 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield an async DB session."""
     factory = _session_factory_override.get() or async_session_factory
     async with factory() as session:
+        from src.workspace.accounting_witness import prepare_composition_read_session
+        read_guard = await prepare_composition_read_session(session)
+        composition_guard = None
         try:
             yield session
+            composition_guard = session.info.get("composition_guard", composition_guard)
+            if composition_guard is not None:
+                await composition_guard.publish()
             await session.commit()
             pending_work_board_events = session.info.pop(
                 "work_board_events_after_commit", []
@@ -1924,10 +1931,16 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
                 from src.work_board.events import publish_work_board_events
 
                 await publish_work_board_events(pending_work_board_events)
-        except Exception:
+        except BaseException:
             await session.rollback()
             session.info.pop("work_board_events_after_commit", None)
             raise
+        finally:
+            composition_guard = session.info.get("composition_guard", composition_guard)
+            if composition_guard is not None:
+                composition_guard.close()
+            if read_guard is not None:
+                read_guard.close()
 
 
 async def check_required_tables(required_tables: Iterable[str]) -> dict[str, object]:

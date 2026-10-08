@@ -164,6 +164,9 @@ def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
 
 @contextmanager
 def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None):
+    if held_workspace is None:
+        from src.workspace.accounting_witness import _HELD_COMPOSITION_WORKSPACE
+        held_workspace = _HELD_COMPOSITION_WORKSPACE.get()
     if held_workspace is not None:
         from src.workspace.accounting_witness import assert_deployment_binding
         if held_workspace.host_root != root:
@@ -217,7 +220,13 @@ class InferenceAccountingRepositoryMixin:
     async def _accounting_begin(self, db: Any) -> None:
         if db.get_bind().dialect.name != "sqlite":
             raise InferenceAccountingError("accounting_storage_unsupported")
+        if getattr(db, "info", {}).get("composition_read_guard") is not None:
+            from src.workspace.accounting_witness import prepare_composition_session
+            await prepare_composition_session(db)
+            db.info["composition_writer_owner"] = "durable_jobs"
         await db.execute(text("BEGIN IMMEDIATE"))
+        if getattr(db, "info", {}).get("composition_guard") is not None:
+            db.info["native_writer_started"] = True
 
     async def record_provider_denial_quiescence(self, proof):
         """Durable completion proof from the real closed broker callback path."""
@@ -404,9 +413,15 @@ class InferenceAccountingRepositoryMixin:
         await db.flush()
         receipt = read_lifecycle_receipt(workspace) or {"secret_values_included": False}
         receipt["inference_accounting"] = _witness(account)
-        write_accounting_checkpoint(workspace, {"schema_version": 1, "base": base,
+        payload = {"schema_version": 1, "base": base,
             "account": account.model_dump(mode="json"), "operations": [_operation_payload(row) for row in changed],
-            "witness": _witness(account), "secret_values_included": False})
+            "witness": _witness(account), "secret_values_included": False}
+        if db.info.get("composition_guard") is not None:
+            if db.info.get("composition_accounting_payload") is not None:
+                raise InferenceAccountingError("accounting_composition_second_publication_denied")
+            db.info["composition_accounting_payload"] = payload
+            return
+        write_accounting_checkpoint(workspace, payload)
         write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
 
     async def configure_inference_accounting(self, ceiling_microusd: int, *, reserve_review_microusd: int | None = None, continuity_workspace=None) -> dict[str, object]:

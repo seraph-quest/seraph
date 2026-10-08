@@ -15,7 +15,7 @@ _JOB_BINDING_FIELDS = (
     "session_id", "conversation_id", "operator_session_id", "branch_kind", "branch_depth",
     "run_fingerprint", "arguments_json", "record_schema_version", "parent_job_id", "parent_fencing_token",
     "job_kind", "owner_kind", "owner_principal_id", "service_id", "goal_id", "goal_revision",
-    "plan_revision", "candidate_id", "capability_version", "input_digest", "authority_digest",
+    "plan_revision", "candidate_id", "source_task_id", "composition_binding_json", "capability_version", "input_digest", "authority_digest",
     "budget_digest", "idempotency_scope", "idempotency_key", "idempotency_binding", "priority",
     "dependencies_json", "resource_claims_json", "declared_authority_json", "deadline_at", "max_attempts",
 )
@@ -141,11 +141,27 @@ def rebind_accounting_root(*, active, target):
     revoke_restored_policy(active=active, target=target.host_root)
     with maintenance_accounting_lock(active) as workspace:
         receipt = read_lifecycle_receipt(workspace)
+        if receipt.get("runtime_composition") is not None:
+            receipt["runtime_composition"] = verify_promoted_composition(target)
         receipt["deployment_binding"] = {"revision": receipt["deployment_binding"]["revision"] + 1,
             "root_path_digest": target.identity_digest, "host_bind_identity": target.bind_identity_digest}
         write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
     return {"status": "rebound", "deployment_id": receipt["inference_accounting"]["deployment_id"],
         "liabilities_retained": retained["operations"], "job_authority_changed": False, "memory_status": "no_learning"}
+
+
+def verify_promoted_composition(workspace):
+    from src.workspace.accounting_witness import composition_closure, native_composition_files
+    from src.workspace.production import read_accounting_checkpoint, ProductionWorkspaceReconciliationError
+    checkpoint = read_accounting_checkpoint(workspace)
+    if checkpoint is None or checkpoint.get("schema_version") != 2:
+        raise ProductionWorkspaceReconciliationError("composition_promotion_checkpoint_unavailable")
+    with sqlite3.connect(workspace.host_root / "seraph.db") as connection:
+        actual, _ = composition_closure(connection,
+            verify_files=lambda table, row: native_composition_files(table, row, root=workspace.host_root))
+    if actual is None or actual != checkpoint.get("composition_target"):
+        raise ProductionWorkspaceReconciliationError("composition_promotion_canonical_generation_missing")
+    return actual
 
 
 def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object]:
@@ -162,7 +178,15 @@ def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object
     with _continuity_lock(root.resolve()) as workspace:
         receipt = read_lifecycle_receipt(workspace) or {}
         checkpoint = read_accounting_checkpoint(workspace)
-        if checkpoint is None or checkpoint.get("witness") != receipt.get("inference_accounting") or checkpoint.get("schema_version") != 1:
+        if checkpoint is not None and checkpoint.get("schema_version") == 2:
+            actual = verify_promoted_composition(workspace)
+            from src.workspace.production import write_lifecycle_receipt
+            receipt["runtime_composition"] = actual
+            write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
+            if checkpoint.get("witness") is None:
+                return {"status": "already_reconciled", "execution_authority_changed": False,
+                        "memory_status": "no_learning"}
+        if checkpoint is None or checkpoint.get("witness") != receipt.get("inference_accounting") or checkpoint.get("schema_version") not in {1, 2}:
             raise ProductionWorkspaceReconciliationError("accounting checkpoint authority unavailable")
         database = root / registry.config.database_path
         if not database.is_file() or database.is_symlink():
@@ -232,7 +256,7 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
                     raise ProductionWorkspaceReconciliationError("accounting continuity restore authority unavailable")
             finally:
                 target_has.close()
-            return {"status": "not_initialized"}
+            return retain_runtime_composition(active=active, target=target, database_path=database_path)
     with _continuity_lock(active.resolve()) as workspace:
         source = sqlite3.connect(source_path)
         destination = sqlite3.connect(target_path)
@@ -300,8 +324,134 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
                 else:
                     names = ",".join('"' + column + '"' for column in values)
                     destination.execute(f'INSERT INTO workflow_run_states ({names}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
+            composition = _retain_composition_in_transaction(source, destination, workspace=workspace,
+                source_root=active, target_root=target, account=account)
             destination.commit()
             return {"status": "retained_latest", "revision": account["revision"], "operations": len(rows)}
         finally:
             source.close()
             destination.close()
+
+
+def _retain_composition_in_transaction(source, destination, *, workspace, source_root, target_root, account=None):
+    """Copy the verified latest canonical rows/bytes, never reconstruct hashes.
+
+    Caller already owns stopped maintenance, the one external lock and target
+    writer. Missing native extensions/private bytes remain a hard block.
+    """
+    from src.workspace.accounting_witness import (composition_closure, native_composition_files,
+        RETAINED_FIELDS, COMPOSITION_KEYS, composition_row_digest, _composition_row)
+    from src.workspace.production import (read_lifecycle_receipt, read_accounting_checkpoint,
+        write_accounting_checkpoint, write_lifecycle_receipt, ProductionWorkspaceReconciliationError)
+    source_witness, members = composition_closure(source,
+        verify_files=lambda table, row: native_composition_files(table, row, root=source_root))
+    receipt = read_lifecycle_receipt(workspace) or {}
+    if source_witness is None:
+        if receipt.get("runtime_composition") is not None:
+            raise ProductionWorkspaceReconciliationError("composition_latest_inventory_missing")
+        return {"status": "not_initialized"}
+    if source_witness != receipt.get("runtime_composition"):
+        raise ProductionWorkspaceReconciliationError("composition_latest_witness_mismatch")
+    checkpoint = read_accounting_checkpoint(workspace)
+    if checkpoint and checkpoint.get("schema_version") == 2 and checkpoint.get("composition_target") != source_witness:
+        if checkpoint.get("composition_base") != source_witness:
+            raise ProductionWorkspaceReconciliationError("composition_pending_checkpoint_requires_reconciliation")
+        existing_target, _ = composition_closure(destination,
+            verify_files=lambda table, row: native_composition_files(table, row, root=target_root))
+        if existing_target == checkpoint.get("composition_target"):
+            return {"status": "already_retained", "witness": existing_target}
+        raise ProductionWorkspaceReconciliationError("composition_pending_checkpoint_requires_reconciliation")
+    # A copied generation must retain actual private bytes before rows gain a
+    # canonical address. A digest does not substitute for missing target files.
+    for table, key in members:
+        if table in {"work_board_input_artifacts", "workflow_run_states"}:
+            row = _composition_row(source, table, key)
+            list(native_composition_files(table, row, root=target_root))
+    target_tables = {row[0] for row in destination.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table, fields in RETAINED_FIELDS.items():
+        if table not in target_tables:
+            ddl = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
+            destination.execute(ddl)
+        columns = {row[1] for row in destination.execute(f'PRAGMA table_info("{table}")')}
+        if columns != set(fields):
+            raise ProductionWorkspaceReconciliationError("composition_restore_schema_unavailable")
+    destination_witness, destination_members = composition_closure(destination,
+        verify_files=lambda table, row: native_composition_files(table, row, root=target_root))
+    if destination_members - members:
+        raise ProductionWorkspaceReconciliationError("composition_foreign_restore_closure")
+    source_inventory = {row["runtime_domain"]: row for row in source_witness["inventory"]}
+    if destination_witness is not None:
+        for row in destination_witness["inventory"]:
+            current = source_inventory[row["runtime_domain"]]
+            if row["epoch"] > current["epoch"] or (row["epoch"] == current["epoch"] and
+                    (row["owner_kind"], row["composition_digest"]) != (current["owner_kind"], current["composition_digest"])):
+                raise ProductionWorkspaceReconciliationError("composition_restore_high_water_conflict")
+    neutral = account or {"deployment_id": source_witness["inventory_digest"], "revision": 0}
+    retained = []
+    for table, key in sorted(members):
+        values = _composition_row(source, table, key)
+        key_field = COMPOSITION_KEYS[table]
+        existing = destination.execute(f'SELECT * FROM "{table}" WHERE "{key_field}"=?', (key,)).fetchone()
+        prior = dict(existing) if existing is not None else None
+        if table == "workflow_run_states":
+            values = _retained_job_values(values, prior, neutral)
+        elif table == "runtime_composition_states":
+            from src.runtime_plugins.ownership import restored_recovery_reference
+            values = {**values, "state": "blocked", "recovery_receipt_ref": restored_recovery_reference(
+                source_witness["closure_digest"], values["recovery_receipt_ref"])}
+        elif table == "work_board_attempts":
+            source_fence = values["fencing_token"]
+            values = {**values, "lease_owner": None, "lease_expires_at": None,
+                "fencing_token": max(values["fencing_token"], prior["fencing_token"] if prior else -1) + 1}
+            if prior is not None and prior["lease_owner"] is None and prior["lease_expires_at"] is None:
+                mutable = {"fencing_token"}
+                if prior["fencing_token"] > source_fence and all(prior[field] == value for field, value in values.items() if field not in mutable):
+                    values = prior
+        elif table == "production_workflow_authority_states" and values["workflow_phase"] not in {"blocked", "cancelled", "failed"}:
+            values.update(workflow_phase="blocked", safe_replay_decision="unsafe",
+                          blocked_replay_reason="workspace_restore_requires_reconciliation")
+        if prior != values:
+            if len(retained) >= 128:
+                raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+            retained.append({"table_id": table, "key": key,
+                "before_digest": composition_row_digest(table, key, prior) if prior is not None else None,
+                "after_digest": composition_row_digest(table, key, values)})
+            if prior is None:
+                names = ",".join('"' + field + '"' for field in values)
+                destination.execute(f'INSERT INTO "{table}" ({names}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
+            else:
+                names = ",".join('"' + field + '"=?' for field in values if field != key_field)
+                destination.execute(f'UPDATE "{table}" SET {names} WHERE "{key_field}"=?',
+                    (*[value for field, value in values.items() if field != key_field], key))
+    target_witness, _ = composition_closure(destination,
+        verify_files=lambda table, row: native_composition_files(table, row, root=target_root))
+    # Source deployment receipt stays its latest stopped generation. The
+    # target witness travels in the already-existing shared checkpoint and
+    # only becomes the promoted receipt during native root reconciliation.
+    operations = checkpoint.get("operations", []) if checkpoint and checkpoint.get("schema_version") == 2 else []
+    if len(operations) + len(retained) > 128:
+        raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+    write_accounting_checkpoint(workspace, {**(checkpoint or {}), "schema_version": 2,
+        "composition_base": source_witness, "composition_target": target_witness,
+        "composition_delta": retained, "secret_values_included": False})
+    return {"status": "retained_latest", "jobs": sum(table == "workflow_run_states" for table, _ in members),
+            "witness": target_witness}
+
+
+def retain_runtime_composition(*, active: Path, target: Path, database_path: str):
+    from src.workspace.accounting_witness import maintenance_accounting_lock
+    from src.workspace.production import ProductionWorkspace, read_lifecycle_receipt, ProductionWorkspaceReconciliationError
+    with sqlite3.connect(active / database_path) as probe:
+        exists = probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'").fetchone()
+        initialized = exists and probe.execute("SELECT 1 FROM runtime_composition_states LIMIT 1").fetchone()
+    if not initialized:
+        if (read_lifecycle_receipt(ProductionWorkspace(host_root=active.resolve())) or {}).get("runtime_composition"):
+            raise ProductionWorkspaceReconciliationError("composition_latest_inventory_missing")
+        return {"status": "not_initialized"}
+    with maintenance_accounting_lock(active.resolve()) as workspace:
+        with sqlite3.connect(active / database_path) as source, sqlite3.connect(target / database_path) as destination:
+            source.row_factory = destination.row_factory = sqlite3.Row
+            destination.execute("BEGIN IMMEDIATE")
+            _retain_composition_in_transaction(source, destination, workspace=workspace,
+                source_root=active, target_root=target)
+            return {"status": "not_initialized"}

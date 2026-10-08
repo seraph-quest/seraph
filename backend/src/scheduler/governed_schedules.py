@@ -611,6 +611,7 @@ async def reserve_occurrence(
     *,
     slot_utc: datetime,
     now_utc: datetime | None = None,
+    composition_authority_check=None,
 ) -> tuple[GovernedScheduleOccurrence, bool]:
     """Reserve one slot before provider contact."""
     now = _utc(now_utc or _now())
@@ -619,6 +620,8 @@ async def reserve_occurrence(
     if not binding_id:
         raise ValueError("governed schedule binding is unavailable")
     await _begin_serialized(db)
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
     # SQLite DateTime binds are timezone-naive. Store one canonical UTC wall
     # value there; _utc restores its semantic timezone at comparison/receipt
     # boundaries.
@@ -764,6 +767,7 @@ async def claim_occurrence(
     claim_token: str | None = None,
     fencing_token: int | None = None,
     now_utc: datetime | None = None,
+    composition_authority_check=None,
 ) -> GovernedScheduleOccurrence:
     """CAS a reserved receipt into running and advance its fence."""
     now = _utc(now_utc or _now())
@@ -771,6 +775,9 @@ async def claim_occurrence(
     fence = int(occurrence.fencing_token if fencing_token is None else fencing_token)
     if not token or occurrence.state != "reserved":
         raise ValueError("governed occurrence is not claimable")
+    if composition_authority_check is not None:
+        await _begin_serialized(db)
+        await composition_authority_check(db)
     result = await db.execute(
         update(GovernedScheduleOccurrence)
         .where(
@@ -803,6 +810,7 @@ async def settle_occurrence(
     recovery_action: str | None = None,
     claim_token: str | None = None,
     fencing_token: int | None = None,
+    composition_authority_check=None,
 ) -> GovernedScheduleOccurrence:
     """CAS a running occurrence to a terminal/unknown receipt."""
     if state not in {"succeeded", "blocked", "cancelled", "coalesced", "unknown"}:
@@ -811,6 +819,9 @@ async def settle_occurrence(
     fence = int(occurrence.fencing_token if fencing_token is None else fencing_token)
     if occurrence.state != "running" or not token:
         raise ValueError("governed occurrence is not settleable")
+    if composition_authority_check is not None:
+        await _begin_serialized(db)
+        await composition_authority_check(db)
     result = await db.execute(
         update(GovernedScheduleOccurrence)
         .where(
@@ -1195,13 +1206,15 @@ async def write_server_cleanup_proof(
     return occurrence
 
 
-async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, Any]) -> GovernedScheduleBinding:
+async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, Any], *, composition_authority_check=None) -> GovernedScheduleBinding:
     """Create a shared binding row with registry and idempotency validation."""
     principal = str(owner.principal_id or "").strip()
     session = str(owner.session_id or "").strip()
     if not principal or not session:
         raise ValueError("governed schedule owner is unavailable")
     await _begin_serialized(db)
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
     action = str(request.get("action_type") or GOVERNED_ACTION)
     spec = action_spec(action)
     if str(request.get("capability_id") or spec["capability_id"]) != spec["capability_id"]:
@@ -1319,6 +1332,7 @@ async def apply_control(
     expected_revision: int,
     idempotency_key: str,
     reason: str | None = None,
+    composition_authority_check=None,
 ) -> dict[str, Any]:
     """Apply one schedule control and return its immutable public receipt.
 
@@ -1343,6 +1357,8 @@ async def apply_control(
     if normalized_reason is not None and len(normalized_reason) > 500:
         raise ValueError("governed schedule control reason is too long")
     await _begin_serialized(db)
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
     if not owner.principal_id or not owner.session_id:
         raise RuntimeError("governed_schedule_session_unavailable")
     session = await db.get(OperatorSession, owner.session_id)

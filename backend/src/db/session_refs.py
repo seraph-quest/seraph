@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from src.db.models import Session
 
 
-async def ensure_sessions_exist(db, session_ids: Iterable[str | None]) -> None:
+async def ensure_sessions_exist(db, session_ids: Iterable[str | None], *, retained_native: bool = False) -> None:
     """Create placeholder sessions for referenced IDs when code writes session-bound rows."""
     normalized_ids = {
         session_id
@@ -23,6 +23,18 @@ async def ensure_sessions_exist(db, session_ids: Iterable[str | None]) -> None:
     values = [{"id": session_id} for session_id in sorted(normalized_ids)]
     dialect_name = getattr(getattr(db, "bind", None), "dialect", None)
     dialect_name = getattr(dialect_name, "name", "")
+    if retained_native and dialect_name == "sqlite":
+        if (not db.in_transaction()
+            or not db.info.get("native_writer_started") or db.info.get("composition_guard") is None
+            or db.info.get("composition_writer_owner") not in {"durable_jobs", "native_ingress"}):
+            raise RuntimeError("retained native Session FK writer required")
+        # The original native BEGIN IMMEDIATE owns this lookup and insertion.
+        # Existing rows are true no-ops, never false creation deltas.
+        for identifier in sorted(normalized_ids):
+            if await db.get(Session, identifier) is None:
+                db.add(Session(id=identifier))
+        await db.flush()
+        return
     if dialect_name == "sqlite":
         # Do not SELECT then INSERT: concurrent durable admissions can both
         # observe a missing redacted placeholder.  Conflict-ignore changes

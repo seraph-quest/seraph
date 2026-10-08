@@ -7180,6 +7180,7 @@ class MemoryRepository:
         reinforcement: float | None = None,
         metadata_updates: dict[str, Any] | None = None,
         last_confirmed_at: datetime | None = None,
+        composition_authority_check=None,
     ) -> Memory:
         normalized_memory_id = str(memory_id or "").strip()
         if not normalized_memory_id:
@@ -7194,6 +7195,8 @@ class MemoryRepository:
 
         async with get_session() as db:
             await _begin_canonical_write(db)
+            if composition_authority_check is not None:
+                await composition_authority_check(db)
             memory = (
                 await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
             ).scalars().first()

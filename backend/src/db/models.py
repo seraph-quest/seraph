@@ -1847,6 +1847,9 @@ class WorkflowRunState(SQLModel, table=True):
     # Address projection only. Selected context checks immutable native
     # authority before using this field to locate a private task attachment.
     source_task_id: Optional[str] = Field(default=None)
+    # Server-derived immutable composition vector; absent legacy rows never
+    # gain plugin execution authority through a default epoch.
+    composition_binding_json: Optional[str] = Field(default=None)
     # Quota address projection only; charged until positively verified cleanup.
     selected_context_reserved_bytes: Optional[int] = Field(default=None)
     capability_version: str = Field(default="workflow-v1", index=True)
@@ -1884,6 +1887,16 @@ class WorkflowRunState(SQLModel, table=True):
     github_capacity_closure_json: Optional[str] = Field(default=None)
     result_digest: Optional[str] = Field(default=None)
     result_summary: Optional[str] = Field(default=None)
+
+
+class RuntimeCompositionState(SQLModel, table=True):
+    __tablename__ = "runtime_composition_states"
+    runtime_domain: str = Field(primary_key=True)
+    owner_kind: str
+    epoch: int
+    composition_digest: str
+    state: str
+    recovery_receipt_ref: Optional[str] = Field(default=None)
 
 
 class InferenceAccountingOwner(SQLModel, table=True):

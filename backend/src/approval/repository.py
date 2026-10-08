@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -25,6 +26,15 @@ from src.conversation.identity import (
 
 
 _DEFAULT_PENDING_TTL_SECONDS = 5 * 60.0
+
+
+@asynccontextmanager
+async def _approval_writer_session():
+    async with get_session() as db:
+        if getattr(db, "info", {}).get("composition_read_guard") is not None:
+            from src.runtime_plugins.ownership import begin_native_writer
+            await begin_native_writer(db, owner="native_ingress")
+        yield db
 
 
 def _approval_expiry(value: object) -> datetime | None:
@@ -232,7 +242,7 @@ async def _expire_approval_for_attachment_failure(
     quarantine in its own session so the fail-closed expiry and redaction
     survive that caller error.
     """
-    async with get_session() as quarantine_db:
+    async with _approval_writer_session() as quarantine_db:
         persisted = (
             await quarantine_db.execute(
                 select(ApprovalRequest).where(ApprovalRequest.id == request.id)
@@ -482,8 +492,9 @@ class ApprovalRepository:
                             owner_principal_id: str, operator_session_id: str):
         from src.work_board.repository import _begin_sqlite_immediate
         from src.auth.service import authenticate_principal, AuthFailure
-        async with get_session() as db:
-            await _begin_sqlite_immediate(db)
+        async with _approval_writer_session() as db:
+            if not db.info.get("native_writer_started"):
+                await _begin_sqlite_immediate(db)
             try:
                 operator = await authenticate_principal(owner_principal_id, db=db)
             except AuthFailure as exc:
@@ -525,7 +536,7 @@ class ApprovalRepository:
         """
         if not approval_id or not owner_principal_id or not operator_session_id:
             return None
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             result = await db.execute(
                 select(ApprovalRequest).where(
                     ApprovalRequest.id == approval_id,
@@ -623,7 +634,7 @@ class ApprovalRepository:
             require_owner=False,
         )
 
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             existing = await db.execute(
                 select(ApprovalRequest)
                 .where(ApprovalRequest.session_id == canonical_session_id)
@@ -708,7 +719,8 @@ class ApprovalRepository:
             details["approval_id"] = str(request.id)
             details["durable_approval_id"] = str(request.id)
             request.details_json = json.dumps(details, sort_keys=True)
-            await ensure_sessions_exist(db, [canonical_session_id])
+            await ensure_sessions_exist(db, [canonical_session_id],
+                retained_native=db.info.get("composition_guard") is not None)
             if canonical_session_id and supplied_owner:
                 session_result = await db.execute(
                     select(Session).where(Session.id == canonical_session_id)
@@ -733,7 +745,7 @@ class ApprovalRepository:
             return request
 
     async def resolve(self, approval_id: str, decision: str) -> ApprovalRequest | None:
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             result = await db.execute(
                 select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
             )
@@ -782,7 +794,7 @@ class ApprovalRepository:
     async def revoke_unconsumed(self, approval_id: str, *, expected_revision: int,
             owner_principal_id: str, operator_session_id: str) -> str:
         """CAS against consume; a spent receipt cannot claim effect undo."""
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             row = await db.get(ApprovalRequest, approval_id)
             if row is None or row.owner_principal_id != owner_principal_id or row.operator_session_id != operator_session_id:
                 raise LookupError("approval_not_found")
@@ -807,7 +819,7 @@ class ApprovalRepository:
 
     async def merge_details(self, approval_id: str, details: dict[str, Any]) -> ApprovalRequest | None:
         """Merge additional metadata into an existing approval request."""
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             result = await db.execute(
                 select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
             )
@@ -853,7 +865,7 @@ class ApprovalRepository:
         approval_binding: Mapping[str, Any] | None = None,
         approval_id: str | None = None,
     ) -> dict[str, Any] | bool | None:
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             query = (
                 select(ApprovalRequest)
                 .where(ApprovalRequest.session_id == session_id)
@@ -1016,7 +1028,7 @@ class ApprovalRepository:
         synthetic approval mapping.
         """
         if db is None:
-            async with get_session() as session:
+            async with _approval_writer_session() as session:
                 return await self._consume_approved_for_resume_in_session(
                     session,
                     quarantine_in_separate_session=False,
@@ -1376,7 +1388,7 @@ class ApprovalRepository:
         owner_principal_id: str | None = None,
         approval_binding: Mapping[str, Any] | None = None,
     ) -> bool:
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             result = await db.execute(
                 select(ApprovalRequest)
                 .where(ApprovalRequest.session_id == session_id)
@@ -1418,7 +1430,7 @@ class ApprovalRepository:
         limit: int = 20,
     ) -> list[dict]:
         limit = min(max(limit, 1), 100)
-        async with get_session() as db:
+        async with _approval_writer_session() as db:
             stmt = (
                 select(ApprovalRequest)
                 .where(ApprovalRequest.status == "pending")

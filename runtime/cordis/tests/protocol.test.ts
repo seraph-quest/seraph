@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Readable } from 'node:stream';
@@ -53,7 +54,7 @@ test('cleanup errors retain owned resources instead of falsely passing disposal'
   assert.equal(resources.remaining, 1);
 });
 test('real stock Cordis host plugin starts and explicitly disposes its service', async () => {
-  const profile = validateProfile(decodeJson(Buffer.from('{"protocol":1,"profile_id":"seraph-cordis-bootstrap-v1","plugins":[{"id":"seraph.host-lifecycle@1.0.0","required":true,"dependencies":[],"config":{}}]}')));
+  const profile = validateProfile(decodeJson(readFileSync(new URL("../../profile.json", import.meta.url))));
   const composition = new Composition(profile);
   await composition.start();
   assert.equal(composition.states()[0]?.state, 'ready');
@@ -63,7 +64,7 @@ test('real stock Cordis host plugin starts and explicitly disposes its service',
   assert.throws(() => composition.assertReady(), /unavailable/);
 });
 test('required service loss fences readiness and invalid literal config never starts', async () => {
-  const profile = validateProfile(decodeJson(Buffer.from('{"protocol":1,"profile_id":"seraph-cordis-bootstrap-v1","plugins":[{"id":"seraph.host-lifecycle@1.0.0","required":true,"dependencies":[],"config":{}}]}')));
+  const profile = validateProfile(decodeJson(readFileSync(new URL("../../profile.json", import.meta.url))));
   const composition = new Composition(profile);
   await composition.start();
   const fibers = [...composition.context.registry.values()].flatMap(runtime => [...runtime.fibers]);

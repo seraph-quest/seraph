@@ -23,9 +23,19 @@ class AuditRepository:
         risk_level: str = "low",
         policy_mode: str = "full",
         details: dict[str, Any] | None = None,
+        composition_authority_check=None,
     ) -> AuditEvent:
         async with get_session() as db:
-            await ensure_sessions_exist(db, [session_id])
+            retained_native = db.info.get("composition_read_guard") is not None
+            if retained_native:
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="native_ingress")
+            if composition_authority_check is not None:
+                if not retained_native:
+                    from src.work_board.repository import _begin_sqlite_immediate
+                    await _begin_sqlite_immediate(db)
+                await composition_authority_check(db)
+            await ensure_sessions_exist(db, [session_id], retained_native=retained_native)
             event = AuditEvent(
                 session_id=session_id,
                 actor=actor,

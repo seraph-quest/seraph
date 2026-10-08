@@ -59,8 +59,59 @@ class DelegationReservationV1(ClosedTaskModel):
     callback_fence: int = Field(ge=1)
     callback_owner: str = Field(min_length=1, max_length=128)
     child_publication_key: str = Field(pattern=r"^specialist:[a-f0-9]{64}$")
+    child_task_id: TaskIdentity
+    child_attempt_id: TaskIdentity
+    child_job_id: TaskIdentity
     original_deadline_at: str = Field(min_length=1, max_length=64)
     child_deadline_at: str = Field(min_length=1, max_length=64)
+
+
+_PUBLICATION_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _SpecialistPublication:
+    invocation_id: str
+    reservation_digest: str
+    envelope_digest: str
+    task_id: str
+    _seal: object
+
+
+async def specialist_publication(db, context, envelope):
+    from src.work_board.general_task import digest
+    from src.work_board.input_artifacts import _canonical_json
+    import hashlib
+    current = await current_delegation(db, context.callback.run_identity)
+    if current.request != context.request or current.reservation != context.reservation:
+        _deny()
+    return _SpecialistPublication(current.callback.run_identity,
+        digest(current.reservation.model_dump(mode="json")),
+        hashlib.sha256(_canonical_json({"schema_version":1,"capability_id":"agent.task.v1",
+            "input":envelope.model_dump(mode="json", exclude_none=True)})).hexdigest(),
+        current.reservation.child_task_id, _PUBLICATION_SEAL)
+
+
+async def verify_specialist_publication(db, owner, request, witness):
+    """The existing Board writer consumes an original reserved publication."""
+    from src.work_board.general_task import digest
+    from src.db.models import WorkBoardInputArtifact
+    if type(witness) is not _SpecialistPublication or witness._seal is not _PUBLICATION_SEAL:
+        _deny("specialist_delegation_publication_denied")
+    context = await current_delegation(db, witness.invocation_id)
+    artifact = await db.get(WorkBoardInputArtifact, request.input_artifact_id, populate_existing=True)
+    if (digest(context.reservation.model_dump(mode="json")) != witness.reservation_digest
+        or witness.task_id != context.reservation.child_task_id
+        or (owner.principal_id, owner.session_id) != (context.task.owner_principal_id, context.task.owner_session_id)
+        or request.idempotency_scope != "general-task"
+        or request.idempotency_key != context.reservation.child_publication_key
+        or request.origin_thread_id != witness.invocation_id
+        or request.capability_id != "agent.task.v1" or request.goal_id != context.task.goal_id
+        or request.goal_revision != context.task.goal_revision
+        or artifact is None or artifact.payload_sha256 != witness.envelope_digest
+        or artifact.owner_principal_id != owner.principal_id or artifact.owner_session_id != owner.session_id):
+        _deny("specialist_delegation_publication_changed")
+    return witness.task_id
 
 
 @dataclass(frozen=True)
@@ -151,6 +202,8 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
     if require_reservation and reservation is None:
         _deny("specialist_delegation_reservation_missing")
     if reservation is not None:
+        if reservation.child_job_id != "work-board:" + reservation.child_task_id + ":" + reservation.child_attempt_id:
+            _deny()
         expected = dict(delegation_invocation_id=callback.run_identity,
             delegation_request_digest=digest(request.model_dump(mode="json")),
             parent_job_id=parent.run_identity, parent_task_id=task.task_id,
@@ -162,6 +215,8 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
             goal_id=task.goal_id, goal_revision=task.goal_revision,
             callback_fence=callback.fencing_token, callback_owner=callback.lease_owner,
             child_publication_key="specialist:" + digest([callback.run_identity, native.input_digest]),
+            child_task_id=reservation.child_task_id, child_attempt_id=reservation.child_attempt_id,
+            child_job_id=reservation.child_job_id,
             original_deadline_at=manifest.original_deadline_at.isoformat(),
             child_deadline_at=reservation.child_deadline_at)
         if reservation != DelegationReservationV1(**expected):
@@ -238,6 +293,7 @@ async def specialist_for_task(db, task):
     context = await current_delegation(db, task.origin_thread_id)
     envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
     if (task.idempotency_key != context.reservation.child_publication_key
+        or task.task_id != context.reservation.child_task_id
         or task.owner_principal_id != context.task.owner_principal_id
         or task.owner_session_id != context.task.owner_session_id
         or task.goal_id != context.task.goal_id or task.goal_revision != context.task.goal_revision
@@ -266,6 +322,8 @@ async def assert_specialist_root_current(db, run):
         _deny()
     context = await specialist_for_task(db, task)
     if (context is None or context.callback.run_identity != invocation
+        or attempt.attempt_id != context.reservation.child_attempt_id
+        or run.run_identity != context.reservation.child_job_id
         or run.job_kind != "agent.task.v1" or run.capability_version != "1"
         or run.owner_kind != "user" or run.branch_depth != 2
         or run.parent_job_id != invocation or run.parent_run_identity != invocation
@@ -468,6 +526,8 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
             parent_allowed_tool_ids=[item.tool_id for item in context.envelope.descriptors],
             parent_evidence_refs=context.envelope.task_input.evidence_refs,
             existing_children=retained, parent_is_child=False)
+        from uuid import uuid4
+        child_task_id, child_attempt_id = uuid4().hex, uuid4().hex
         reservation = DelegationReservationV1(delegation_invocation_id=invocation_id,
             delegation_request_digest=digest(context.request.model_dump(mode="json")),
             parent_job_id=context.parent.run_identity, parent_task_id=context.task.task_id,
@@ -479,6 +539,8 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
             goal_id=context.task.goal_id, goal_revision=context.task.goal_revision,
             callback_fence=fence, callback_owner=owner,
             child_publication_key="specialist:" + digest([invocation_id, context.native_binding.input_digest]),
+            child_task_id=child_task_id, child_attempt_id=child_attempt_id,
+            child_job_id="work-board:" + child_task_id + ":" + child_attempt_id,
             original_deadline_at=context.manifest.original_deadline_at.isoformat(),
             child_deadline_at=min(context.manifest.native_deadline_at,
                 datetime.now(timezone.utc) + timedelta(seconds=context.request.limits.wall_seconds)).isoformat())

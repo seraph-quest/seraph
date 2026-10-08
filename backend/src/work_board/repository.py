@@ -1139,9 +1139,10 @@ class WorkBoardRepository:
         *,
         origin_session_id: str | None = None,
         publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
+        _specialist_publication=None,
     ) -> BoardMutation:
         return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
-            publication_authority_check=publication_authority_check)
+            publication_authority_check=publication_authority_check, _specialist_publication=_specialist_publication)
 
     async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
                                   staged_input=None, publication_witness=None) -> BoardMutation:
@@ -1154,7 +1155,7 @@ class WorkBoardRepository:
 
     async def _create_task(self, db, owner, request, *, origin_session_id=None,
                            publication_authority_check=None, staged_text=None,
-                           staged_input=None, publication_witness=None) -> BoardMutation:
+                           staged_input=None, publication_witness=None, _specialist_publication=None) -> BoardMutation:
         self._validate_task_fields(request)
         if request.capability_id == "inference.near-text.v1":
             from uuid import UUID
@@ -1327,7 +1328,11 @@ class WorkBoardRepository:
         safe_title = staged_text.title if staged_text else await self._safe_text(request.title, db=db)
         safe_body = staged_text.body if staged_text else await self._safe_text(request.body, db=db)
 
-        task = WorkBoardTask(
+        reserved_identity = {}
+        if _specialist_publication is not None:
+            from src.workflows.specialist_delegation import verify_specialist_publication
+            reserved_identity["task_id"] = await verify_specialist_publication(db, owner, request, _specialist_publication)
+        task = WorkBoardTask(**reserved_identity,
             owner_principal_id=owner.principal_id,
             owner_session_id=owner.session_id,
             origin_session_id=origin_session_id or owner.session_id,
@@ -3125,7 +3130,14 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt = WorkBoardAttempt(
+        reserved_identity = {}
+        if task.capability_id == "agent.task.v1" and task.idempotency_key.startswith("specialist:"):
+            from src.workflows.specialist_delegation import specialist_for_task
+            context = await specialist_for_task(db, task)
+            if context is None or previous_fence or attempt_count:
+                raise BoardError("specialist_delegation_attempt_changed", "Original reserved specialist attempt required", status_code=409)
+            reserved_identity["attempt_id"] = context.reservation.child_attempt_id
+        attempt = WorkBoardAttempt(**reserved_identity,
             task_id=task.task_id,
             task_revision_at_claim=int(expected_revision),
             lease_owner=str(lease_owner)[:256],

@@ -376,6 +376,8 @@ class GeneralTaskService:
         return envelope
 
     async def create(self, db, owner, request: GeneralTaskCreate, *, _specialist_context=None):
+        if request.idempotency_key.startswith("specialist:") and _specialist_context is None:
+            raise BoardError("specialist_delegation_publication_denied", "Specialist publication namespace is private", status_code=422)
         if request.input.document_source is not None and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
@@ -472,6 +474,10 @@ class GeneralTaskService:
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
         from src.work_board.general_task_proposal import seal_proposal_publication
         publication = await seal_proposal_publication(db, owner, envelope, goal_revision=request.goal_revision)
+        specialist_witness = None
+        if _specialist_context is not None:
+            from src.workflows.specialist_delegation import specialist_publication
+            specialist_witness = await specialist_publication(db, _specialist_context, envelope)
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=CAPABILITY, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision, input=envelope.model_dump(mode="json"),
@@ -485,7 +491,8 @@ class GeneralTaskService:
             status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
             idempotency_scope="general-task", idempotency_key=request.idempotency_key,
             requires_review=_specialist_context is None,
-            origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None))
+            origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None),
+            _specialist_publication=specialist_witness)
 
     async def plan(self, db, owner, task_id):
         from src.work_board.dispatcher import _parse_typed_input

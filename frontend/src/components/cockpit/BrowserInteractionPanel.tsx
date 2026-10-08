@@ -5,7 +5,7 @@ import type { GoalInfo } from "../../types";
 
 type Kind = "fill" | "select" | "check" | "click" | "extract" | "wait";
 interface Profile { id: string; url: string; name: string; read_effect: string; preparation: string; submission: string; max_actions: number; max_runtime_seconds: number; private_field_max_bytes: number }
-interface CleanupCandidate { job_id: string; durable_status: string; physical_proof_state: "owned_positive_close" | "linux_boot_changed" | "linux_reboot_required" | "boot_proof_unavailable" }
+interface CleanupCandidate { job_id: string; durable_status: string; physical_proof_state: "owned_positive_close" | "owned_no_child" | "linux_boot_changed" | "darwin_boot_changed" | "host_reboot_required" | "boot_proof_unavailable" }
 interface Snapshot { capability_id: "browser.interact.v2"; job_id: string; revision: number; fencing_token: number; status: string;
   no_learning: true; live: boolean; recovery: string; blocked_reason?: string;
   page: { url: string; origin: string; document_digest: string; captured_at: string;
@@ -105,20 +105,20 @@ export function BrowserInteractionPanel({ goals, ownerPrincipalId, ownerSessionI
       const result = await request("/jobs/cleanup-candidates");
       if (!record(result) || !Array.isArray(result.candidates) || result.candidates.length > 20
         || result.candidates.some(c => !record(c) || typeof c.job_id !== "string" || typeof c.durable_status !== "string"
-          || !["owned_positive_close", "linux_boot_changed", "linux_reboot_required", "boot_proof_unavailable"].includes(String(c.physical_proof_state)))) throw Error("Physical browser cleanup candidates are unavailable.");
+          || !["owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed", "host_reboot_required", "boot_proof_unavailable"].includes(String(c.physical_proof_state)))) throw Error("Physical browser cleanup candidates are unavailable.");
       if (version === generation.current) setCleanupCandidates(result.candidates as CleanupCandidate[]);
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
   }
   async function reconcileCleanup(candidate: CleanupCandidate) {
-    if (!owned || busy || !cleanupAck || !["owned_positive_close", "linux_boot_changed"].includes(candidate.physical_proof_state)) return;
+    if (!owned || busy || !cleanupAck || !["owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed"].includes(candidate.physical_proof_state)) return;
     const version = generation.current; setBusy(true); setError(null); setCleanupAck(false); setValue(""); setLocator(""); setActionAck(false);
     setJob(current => current ? { ...current, preview: undefined } : current);
     try {
       const result = await request(`/jobs/${encodeURIComponent(candidate.job_id)}/cleanup`, { cleanup_ack: true });
       if (!record(result) || result.job_id !== candidate.job_id || !Number.isSafeInteger(result.revision) || typeof result.status !== "string"
         || !record(result.receipt) || result.receipt.scope !== "physical_cleanup_only" || result.receipt.no_learning !== true
-        || !["owned_positive_close", "linux_boot_changed"].includes(String(result.receipt.proof_kind))) throw Error("Exact physical cleanup receipt is unavailable. Find the original cleanup candidate again.");
+        || !["owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed"].includes(String(result.receipt.proof_kind))) throw Error("Exact physical cleanup receipt is unavailable. Find the original cleanup candidate again.");
       if (version === generation.current) { setCleanupCandidates(current => current.filter(c => c.job_id !== candidate.job_id)); setCleanupReceipt(`Job ${candidate.job_id}: physical cleanup recorded; original durable status remains ${result.status}.`); }
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
     finally { if (version === generation.current) setBusy(false); }
@@ -169,16 +169,16 @@ export function BrowserInteractionPanel({ goals, ownerPrincipalId, ownerSessionI
   return <section aria-label="Reviewed public browser interaction" className="rounded border border-white/10 p-3 text-xs">
     <h3>Public form preparation</h3><p>The fixed reviewed public profile permits private, offline preparation after one public page read. Submission remains blocked until exact effect authority exists. No authenticated browser or arbitrary URL, selector or script.</p>
     {error && <p role="alert" className="text-amber-200">{error}</p>}
-    {profileBlocked && <p role="status">Browser preparation blocked: {profileBlocked}.{profileBlocked === "browser_operator_continuity_required" && " Enroll the current operator in the existing ownership controls before opening this form, so original physical cleanup can be recovered."}</p>}
+    {profileBlocked && <p role="status">Browser preparation blocked: {profileBlocked}.{profileBlocked === "browser_operator_continuity_required" && " Open Operator ownership and recovery, select Enroll this authenticated scope, then refresh reviewed browser profiles. Enrollment binds recovery of the original physical browser."}</p>}
     <button type="button" disabled={busy || !owned} onClick={() => void discoverJobs()}>Find original browser jobs</button>
     <button type="button" disabled={busy || !owned} onClick={() => void discoverCleanup()}>Find physical browser cleanup</button>
     {cleanupCandidates.length > 0 && <div role="region" aria-label="Physical browser cleanup">
       <p>Cleanup releases only the original physical browser reservation. It does not resolve an external outcome, adopt a preview, reopen a page or renew the original Goal.</p>
       <label><input type="checkbox" checked={cleanupAck} onChange={e => setCleanupAck(e.target.checked)} />Approve physical cleanup only for the displayed original browser job.</label>
       <ul>{cleanupCandidates.map(c => <li key={c.job_id}>{c.job_id} · {c.durable_status} · {c.physical_proof_state}
-        {c.physical_proof_state === "linux_reboot_required" && <p>The lost owner cannot prove cleanup on this Linux boot. An operator-managed reboot is required before this cleanup proof can be accepted.</p>}
-        {c.physical_proof_state === "boot_proof_unavailable" && <p>A verified native boot proof is unavailable. Cleanup stays blocked; macOS boot recovery is unsupported.</p>}
-        <button type="button" disabled={busy || !owned || !cleanupAck || !["owned_positive_close", "linux_boot_changed"].includes(c.physical_proof_state)} onClick={() => void reconcileCleanup(c)}>Record physical cleanup for {c.job_id}</button>
+        {c.physical_proof_state === "host_reboot_required" && <p>The lost owner cannot prove cleanup on this host boot. An operator-managed reboot is required before this cleanup proof can be accepted.</p>}
+        {c.physical_proof_state === "boot_proof_unavailable" && <p>A verified native boot proof is unavailable. Cleanup stays blocked until the native kernel boot witness can be verified.</p>}
+        <button type="button" disabled={busy || !owned || !cleanupAck || !["owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed"].includes(c.physical_proof_state)} onClick={() => void reconcileCleanup(c)}>Record physical cleanup for {c.job_id}</button>
       </li>)}</ul>
     </div>}
     {cleanupReceipt && <p role="status">{cleanupReceipt}</p>}

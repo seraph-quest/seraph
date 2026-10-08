@@ -29,7 +29,7 @@ router = APIRouter()
 
 # V2 uses the canonical authenticated Root/Goal, not caller conversation IDs.
 from src.browser.interaction_contracts import (
-    InteractionPrepare, InteractionActionRequest, InteractionClose, InteractionError,
+    InteractionPrepare, InteractionActionRequest, InteractionClose, InteractionCleanup, InteractionError,
 )
 from src.browser.sessions import profiled_interaction_sessions
 from src.work_board.contracts import WorkBoardOwner
@@ -72,12 +72,14 @@ async def interaction_profiles(request: Request):
     from src.browser.task_lane import browser_task_lane_wait_reason
     from src.browser.task_runner import _playwright_browser_executable_present
     from src.db import engine
+    from src.browser.task_lane import native_boot_session
     continuity_reason = None
     async with engine.get_session() as db:
         try:
             await profiled_interaction_sessions._stable_root(db, owner)
         except InteractionError as exc:
             continuity_reason = exc.code
+    continuity_reason = continuity_reason or ("browser_native_boot_proof_unavailable" if native_boot_session() is None else None)
     ready = profiled_interaction_sessions.started and (
         profiled_interaction_sessions.browser_launcher is not None or _playwright_browser_executable_present()) and not continuity_reason
     return {"capability_id": "browser.interact.v2",
@@ -100,6 +102,16 @@ async def open_interaction(request: Request, body: InteractionPrepare):
 @router.get("/capabilities/browser-interactions/jobs")
 async def list_interactions(request: Request):
     return await _interaction_response(profiled_interaction_sessions.list_jobs(_interaction_owner(request)))
+
+
+@router.get("/capabilities/browser-interactions/jobs/cleanup-candidates")
+async def browser_cleanup_candidates(request: Request):
+    return await _interaction_response(profiled_interaction_sessions.cleanup_candidates(_interaction_owner(request)))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/cleanup")
+async def reconcile_browser_cleanup(request: Request, job_id: str, body: InteractionCleanup):
+    return await _interaction_response(profiled_interaction_sessions.reconcile_cleanup(_interaction_owner(request), job_id))
 
 
 @router.get("/capabilities/browser-interactions/jobs/{job_id}")

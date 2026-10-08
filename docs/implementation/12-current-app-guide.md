@@ -1024,20 +1024,31 @@ completed/blocked history; it does not reopen a page or renew consent. Private
 inputs and preview artifacts are encrypted and excluded from generic journals.
 Success requires a current literal preview, private artifact readback and
 positive browser cleanup. Closing without a current preview cancels the job.
-Missing local Playwright files report inactive before any child starts and do
-not retain browser capacity. Positive physical closure releases the exact
-original resource witness even when stale authority or a durable CAS conflict
-prevents success settlement; unresolved durable state remains available for
-reconciliation and never grants success from stale Root/Goal authority.
-Exact cleanup-receipt reconciliation after a durable revision conflict is
-currently unsupported: the closed resource releases capacity, but the original
-job can remain `running` with read-only history. History inspection does not
-settle that job or replay any action. This remains a recoverable-cleanup
-acceptance gap alongside lost-process recovery.
-Unknown cleanup retains the physical lane witness, including after owner death;
-absence of a process, time or an unlocked file cannot clear it. Recovering a
-lost owning process's context is unsupported and remains visibly blocked rather
-than clearing another browser. Every outcome records `no_learning`.
+Admission first requires the existing **Operator ownership and recovery**
+control's **Enroll this authenticated scope** action and a live stable operator
+identity. Refresh profiles after enrollment. Missing local Playwright files or
+a verified native kernel boot UUID report inactive before any child starts.
+The canonical physical reservation commits before the same-inode positive
+marker is synced and the driver starts. A crash between reservation and marker
+keeps unresolved read-only history; inspecting or replaying the request never
+launches another browser or infers no-child proof from missing metadata.
+
+Positive physical closure retains the exact lane witness until its cleanup-only
+journal receipt commits. A durable CAS conflict keeps capacity reserved.
+**Find physical browser cleanup** exposes only original job identity, proof
+state and unchanged durable status to the same stable authenticated operator,
+including after authenticating through existing ownership recovery. Explicit
+acknowledgement records exact physical cleanup; it never adopts output, grants
+success, renews old Root/Goal authority, retries an action or resolves an
+external outcome. Exact receipt replay cannot clear a later job's reservation.
+
+After lost owner-process cleanup, a changed verified native kernel boot UUID
+proves original resources are gone; the same boot stays blocked and requires an
+operator-managed reboot if no positive closure witness exists. Linux reads its
+kernel boot UUID; Darwin uses the fixed read-only `kern.bootsessionuuid`.
+Unavailable native proof or mismatched workspace/inode/job remains blocked.
+Process absence, elapsed time and an unlocked file are never cleanup proof.
+Every outcome records `no_learning`.
 
 The local Linux Chromium/TCP/SQLite receipts exercise multi-field preparation,
 select/check controls, policy denial, DOM drift, private readback and reloaded

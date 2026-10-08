@@ -158,12 +158,12 @@ it("records only explicitly approved physical cleanup without original history o
 });
 it("keeps same-boot and unsupported boot cleanup blocked with explicit recovery guidance", async () => {
   vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response({ candidates: [
-    { job_id: "old-linux", durable_status: "running", physical_proof_state: "linux_reboot_required" },
+    { job_id: "old-linux", durable_status: "running", physical_proof_state: "host_reboot_required" },
     { job_id: "old-mac", durable_status: "running", physical_proof_state: "boot_proof_unavailable" }], has_more: false }));
   render(<BrowserInteractionPanel {...owner} goals={[goal]} />);
   fireEvent.click(screen.getByRole("button", { name: "Find physical browser cleanup" }));
   await screen.findByText(/operator-managed reboot is required/);
-  expect(screen.getByText(/macOS boot recovery is unsupported/)).toBeInTheDocument();
+  expect(screen.getByText(/native kernel boot witness can be verified/)).toBeInTheDocument();
   fireEvent.click(screen.getByText("Approve physical cleanup only for the displayed original browser job."));
   expect(screen.getByRole("button", { name: "Record physical cleanup for old-linux" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Record physical cleanup for old-mac" })).toBeDisabled();
@@ -172,7 +172,7 @@ it("keeps same-boot and unsupported boot cleanup blocked with explicit recovery 
 it("blocks public contact until existing operator ownership enrollment is ready", async () => {
   vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...profiles, runtime_state: "inactive", blocked_reason: "browser_operator_continuity_required" }));
   render(<BrowserInteractionPanel {...owner} goals={[goal]} />);
-  await screen.findByText(/Enroll the current operator in the existing ownership controls/);
+  await screen.findByText(/Open Operator ownership and recovery, select Enroll this authenticated scope/);
   expect(screen.getByRole("button", { name: "Open reviewed public page" })).toBeDisabled();
   expect(apiFetch).toHaveBeenCalledTimes(1);
 });

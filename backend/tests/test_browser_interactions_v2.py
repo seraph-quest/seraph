@@ -166,7 +166,7 @@ def test_no_selector_script_secret_or_unknown_profile_grammar():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cleanup_case", ["normal", "root_revoked", "goal_changed", "deadline", "audit_cas", "prelaunch"])
+@pytest.mark.parametrize("cleanup_case", ["normal", "root_revoked", "goal_changed", "deadline", "audit_cas", "prelaunch", "reserve_cas", "no_boot", "crash_before_marker", "pointer_clear", "unknown_cleanup", "unknown_root_revoked", "unknown_launch"])
 async def test_native_api_durable_history_private_inputs_and_shared_lane(accounting_db, local_form, monkeypatch, cleanup_case):
     from fastapi import FastAPI
     from src.api import auth, browser, goals
@@ -198,7 +198,11 @@ async def test_native_api_durable_history_private_inputs_and_shared_lane(account
         assert (await client.post("/api/auth/login", json={"password": "browser-native-root"})).status_code == 200
         inventory = (await client.get("/api/capabilities/browser-interactions/profiles")).json()
         assert inventory["runtime_state"] == "inactive" and inventory["blocked_reason"] == "browser_operator_continuity_required"
-        assert (await client.post("/api/auth/ownership/enroll")).status_code == 200
+        assert (await client.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")).status_code == 403
+        enrolled = await client.post("/api/auth/ownership/enroll")
+        assert enrolled.status_code == 200
+        recovery_code = enrolled.json()["recovery_code"]
+        assert (await client.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")).json() == {"candidates": [], "has_more": False}
         goal = (await client.post("/api/goals", json={"title": "Preview the registered public form"})).json()
         payload = {"profile_id": "httpbin.forms.v1", "goal_id": goal["id"], "goal_revision": goal["revision"],
             "request_key": str(uuid.uuid4()), "read_ack": True}
@@ -207,6 +211,93 @@ async def test_native_api_durable_history_private_inputs_and_shared_lane(account
             monkeypatch.setattr(task_runner, "_playwright_browser_executable_present", lambda: False)
             inventory = (await client.get("/api/capabilities/browser-interactions/profiles")).json()
             assert inventory["runtime_state"] == "inactive" and inventory["blocked_reason"] == "browser_interaction_runtime_unavailable"
+        if cleanup_case == "no_boot":
+            from src.browser import task_lane
+            monkeypatch.setattr(task_lane, "native_boot_session", lambda: None)
+            inventory = (await client.get("/api/capabilities/browser-interactions/profiles")).json()
+            assert inventory["blocked_reason"] == "browser_native_boot_proof_unavailable"
+            rejected = await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
+            assert rejected.status_code == 503
+            async with factory.accounting_sessions() as db:
+                assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+            assert contacts == [] and service.active == {}
+            return
+        if cleanup_case == "reserve_cas":
+            from src.workflows.job_runtime import DurableJobLeaseError
+            async def reject_reservation(*args, **kwargs):
+                raise DurableJobLeaseError("fixture prechild reserve CAS")
+            monkeypatch.setattr(service.jobs, "reserve_native_physical_resource", reject_reservation)
+            rejected = await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
+            assert rejected.status_code == 409, rejected.text
+            assert contacts == [] and service.active == {}
+            assert browser_task_lane_wait_reason(root) is None
+            free = BrowserTaskLane(root).acquire()
+            free.release()
+            return
+        if cleanup_case == "unknown_launch":
+            from src.browser import task_lane
+            async def unknown_launcher():
+                raise RuntimeError("fixture unknown launch result")
+            service.browser_launcher = unknown_launcher
+            with pytest.raises(RuntimeError, match="unknown launch result"):
+                await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
+            assert service.active == {} and contacts == [] and denied == []
+            candidates = (await client.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")).json()["candidates"]
+            assert len(candidates) == 1 and candidates[0]["physical_proof_state"] == "host_reboot_required"
+            job_id = candidates[0]["job_id"]
+            before = await service.jobs.get_job(job_id)
+            assert before["status"] == "unknown_external_effect"
+            rejected = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup", json={"cleanup_ack": True})
+            assert rejected.status_code == 409
+            assert not BrowserTaskLane(root).try_acquire()
+            # Controlled kernel boot fixture proves the negative cleanup path;
+            # no child was returned by this fixture's launcher.
+            # Rechecks require the same stable boot UUID, not a value per read.
+            next_boot = str(uuid.uuid4())
+            monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: next_boot)
+            resolved = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup", json={"cleanup_ack": True})
+            assert resolved.status_code == 200, resolved.text
+            after = await service.jobs.get_job(job_id)
+            assert after["status"] == before["status"] and after["effects"] == before["effects"]
+            free = BrowserTaskLane(root).acquire()
+            free.release()
+            return
+        if cleanup_case == "crash_before_marker":
+            import os
+            original_close = service._close
+            original_marker = BrowserTaskLane.require_positive_cleanup
+            async def simulate_lost_owner(*args, **kwargs):
+                pass
+            def before_marker(*args, **kwargs):
+                raise RuntimeError("fixture crash after canonical reserve, before marker")
+            monkeypatch.setattr(service, "_close", simulate_lost_owner)
+            monkeypatch.setattr(BrowserTaskLane, "require_positive_cleanup", before_marker)
+            with pytest.raises(RuntimeError, match="before marker"):
+                await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
+            job_id, state = next(iter(service.active.items()))
+            assert state["reservation_committed"] and state["page"].resources.context_not_started
+            before = await service.jobs.get_job(job_id)
+            assert any(c["checkpoint_id"] == "native-physical-resource-reservation" for c in before["checkpoints"])
+            assert json.loads(state["lane"].lock_path.read_text())["schema_version"] == 1
+            os.close(state["lane"]._descriptor)
+            state["lane"]._descriptor = None
+            service.active.clear()
+            monkeypatch.setattr(service, "_close", original_close)
+            monkeypatch.setattr(BrowserTaskLane, "require_positive_cleanup", original_marker)
+            replay = await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["status"] == "blocked" and not replay.json()["live"]
+            assert replay.json()["durable_status"] == "running"
+            free = BrowserTaskLane(root).acquire()
+            free.release()
+            rejected = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup",
+                json={"cleanup_ack": True})
+            assert rejected.status_code == 409, rejected.text
+            after = await service.jobs.get_job(job_id)
+            for key in ("revision", "status", "lease", "checkpoints", "effects"):
+                assert after[key] == before[key]
+            assert contacts == [] and denied == []
+            return
         response = await client.post("/api/capabilities/browser-interactions/jobs", json=payload)
         if cleanup_case == "prelaunch":
             assert response.status_code == 503 and response.json()["detail"]["code"] == "browser_interaction_runtime_unavailable"
@@ -297,14 +388,34 @@ async def test_native_api_durable_history_private_inputs_and_shared_lane(account
             from datetime import datetime, timedelta, timezone
             from src.db.models import OperatorSession, Goal
             state = service.active[job_id]
-            if cleanup_case == "audit_cas":
+            if cleanup_case == "pointer_clear":
+                original_pointer_clear = BrowserTaskLane.commit_cleanup_receipt
+                def failed_pointer_clear(*args, **kwargs):
+                    raise RuntimeError("fixture journal committed before pointer clear")
+                monkeypatch.setattr(BrowserTaskLane, "commit_cleanup_receipt", failed_pointer_clear)
+            elif cleanup_case in {"unknown_cleanup", "unknown_root_revoked"}:
+                actual_stop = state["page"].stop
+                async def unknown_cleanup():
+                    # Actual fixture teardown prevents a host leak. The runtime
+                    # deliberately receives no positive receipt, as with lost
+                    # teardown acknowledgement from a real resource owner.
+                    assert await actual_stop()
+                    return False
+                monkeypatch.setattr(state["page"], "stop", unknown_cleanup)
+                if cleanup_case == "unknown_root_revoked":
+                    async with factory.accounting_sessions() as db:
+                        target = await db.scalar(select(OperatorSession).where(OperatorSession.id == state["owner"].session_id))
+                        target.revoked_at = datetime.now(timezone.utc)
+                        await db.commit()
+            elif cleanup_case == "audit_cas":
                 async def failed_audit(*args, **kwargs):
                     async with factory.accounting_sessions() as db:
                         target = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
                         target.revision += 1
                         await db.commit()
                     raise RuntimeError("simulated durable CAS loss after positive physical cleanup")
-                monkeypatch.setattr(service.jobs, "record_effect", failed_audit)
+                original_cleanup_writer = service.jobs.record_native_physical_cleanup
+                monkeypatch.setattr(service.jobs, "record_native_physical_cleanup", failed_audit)
             else:
                 async with factory.accounting_sessions() as db:
                     if cleanup_case == "root_revoked":
@@ -319,13 +430,90 @@ async def test_native_api_durable_history_private_inputs_and_shared_lane(account
                     await db.commit()
             await service._close(job_id, reason="operator_closed")
             row = await service.jobs.get_job(job_id)
-            assert row["status"] == ("running" if cleanup_case == "audit_cas" else "cancelled")
-            if cleanup_case in {"root_revoked", "deadline"}:
-                assert row["effects"][-1]["status"] == "succeeded"
+            pending_cleanup = cleanup_case in {"audit_cas", "root_revoked", "pointer_clear", "unknown_cleanup", "unknown_root_revoked"}
+            unknown_cleanup_case = cleanup_case in {"unknown_cleanup", "unknown_root_revoked"}
+            expected_status = "unknown_external_effect" if unknown_cleanup_case else "running" if pending_cleanup else "cancelled"
+            assert row["status"] == expected_status
             assert job_id not in service.active
-            assert browser_task_lane_wait_reason(root) is None
-            assert lane.try_acquire() is True
-            lane.release()
+            if pending_cleanup:
+                assert browser_task_lane_wait_reason(root) == "browser_cleanup_required"
+                assert lane.try_acquire() is False
+                proof_kind = "owned_positive_close"
+                if unknown_cleanup_case:
+                    from src.browser import task_lane
+                    import os
+                    cleanup_effect = next(e for e in row["effects"] if e["effect_type"] == "browser_context_cleanup")
+                    assert cleanup_effect["status"] == "unknown"
+                    old_effects = row["effects"]
+                    # Controlled changed-boot fixture; native reader is tested
+                    # separately, and the actual local browser is already closed.
+                    os.close(state["lane"]._descriptor)
+                    state["lane"]._descriptor = None
+                    task_lane._QUARANTINED_LANES.pop(str(root), None)
+                    monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: str(uuid.UUID("d8af4e9c-b3e9-4e36-b3fc-73829c9f7509")))
+                    proof_kind = "linux_boot_changed"
+                else:
+                    assert json.loads((root / ".browser-task-lane.lock").read_text())["cleanup_proof"] == "owned_positive_close"
+                if cleanup_case == "pointer_clear":
+                    monkeypatch.setattr(BrowserTaskLane, "commit_cleanup_receipt", original_pointer_clear)
+                if cleanup_case == "audit_cas":
+                    monkeypatch.setattr(service.jobs, "record_native_physical_cleanup", original_cleanup_writer)
+                elif cleanup_case in {"root_revoked", "unknown_root_revoked"}:
+                    # A fresh authenticated Root recovers the same canonical
+                    # operator through the real immutable ownership relation.
+                    recovered = await client.post("/api/auth/login", json={
+                        "password": "browser-native-root", "recovery_code": recovery_code})
+                    assert recovered.status_code == 200, recovered.text
+                if cleanup_case == "audit_cas":
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                            headers={"origin": "http://localhost:3001"}) as foreign:
+                        unauthenticated = await foreign.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")
+                        assert unauthenticated.status_code == 401
+                        assert (await foreign.post("/api/auth/login", json={"password": "browser-native-root", "start_new_scope": True})).status_code == 200
+                        assert (await foreign.post("/api/auth/ownership/enroll")).status_code == 200
+                        assert (await foreign.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")).json()["candidates"] == []
+                        wrong_owner = await foreign.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup", json={"cleanup_ack": True})
+                        assert wrong_owner.status_code == 404, wrong_owner.text
+                    from src.db.models import OperatorIdentity
+                    async with factory.accounting_sessions() as db:
+                        original_root = await db.get(OperatorSession, state["owner"].session_id)
+                        identity = await db.get(OperatorIdentity, original_root.operator_identity_id)
+                        identity.revoked_at = datetime.now(timezone.utc)
+                        await db.commit()
+                    for route in ("cleanup-candidates",):
+                        denied_identity = await client.get("/api/capabilities/browser-interactions/jobs/" + route)
+                        assert denied_identity.status_code == 403
+                    denied_identity = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup", json={"cleanup_ack": True})
+                    assert denied_identity.status_code == 403
+                    async with factory.accounting_sessions() as db:
+                        identity = await db.get(OperatorIdentity, original_root.operator_identity_id)
+                        identity.revoked_at = None
+                        await db.commit()
+                candidates = await client.get("/api/capabilities/browser-interactions/jobs/cleanup-candidates")
+                assert candidates.status_code == 200, candidates.text
+                assert candidates.json()["candidates"] == [{"job_id": job_id,
+                    "durable_status": expected_status, "physical_proof_state": proof_kind}]
+                assert "Private native literal" not in candidates.text and "goal_id" not in candidates.text
+                resolved = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup",
+                    json={"cleanup_ack": True})
+                assert resolved.status_code == 200, resolved.text
+                assert resolved.json()["status"] == expected_status
+                if unknown_cleanup_case:
+                    assert (await service.jobs.get_job(job_id))["effects"] == old_effects
+                assert resolved.json()["receipt"]["scope"] == "physical_cleanup_only"
+                assert browser_task_lane_wait_reason(root) is None
+                assert lane.try_acquire() is True
+                # Exact replay cannot release this later independent lane.
+                replayed = await client.post(f"/api/capabilities/browser-interactions/jobs/{job_id}/cleanup",
+                    json={"cleanup_ack": True})
+                assert replayed.status_code == 200, replayed.text
+                assert replayed.json()["revision"] == resolved.json()["revision"]
+                assert BrowserTaskLane(root).try_acquire() is False
+                lane.release()
+            else:
+                assert browser_task_lane_wait_reason(root) is None
+                assert lane.try_acquire() is True
+                lane.release()
             assert state["page"].page.is_closed()
             assert not state["page"].resources.browser.is_connected()
             assert contacts == [("GET", "/forms/post")] and denied == []
@@ -493,11 +681,14 @@ def test_actual_linux_boot_reader_and_controlled_exact_boot_cleanup(tmp_path, mo
         actual = task_lane.linux_boot_session_id()
         assert actual == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         assert str(uuid.UUID(actual)) == actual
+    with monkeypatch.context() as platform_patch:
+        platform_patch.setattr(sys, "platform", "darwin")
+        assert task_lane.linux_boot_session_id() is None
     old_boot, new_boot = str(uuid.uuid4()), str(uuid.uuid4())
     monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: old_boot)
     original = task_lane.BrowserTaskLane(tmp_path).acquire()
     witness = original.require_positive_cleanup("exact-job")
-    assert witness["linux_boot_id"] == old_boot
+    assert witness["boot_session_id"] == old_boot
     os.close(original._descriptor)
     original._descriptor = None
     assert not task_lane.BrowserTaskLane(tmp_path).try_acquire()
@@ -510,6 +701,11 @@ def test_actual_linux_boot_reader_and_controlled_exact_boot_cleanup(tmp_path, mo
     monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: None)
     observer = task_lane.acquire_browser_cleanup_lane(tmp_path, "exact-job")
     with pytest.raises(task_lane.BrowserTaskLaneBusy):
+        observer.cleanup_proof("exact-job")
+    observer.close_cleanup_observer()
+    monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: "invalid-boot")
+    observer = task_lane.acquire_browser_cleanup_lane(tmp_path, "exact-job")
+    with pytest.raises(task_lane.BrowserTaskLaneError):
         observer.cleanup_proof("exact-job")
     observer.close_cleanup_observer()
     monkeypatch.setattr(task_lane, "linux_boot_session_id", lambda: new_boot)
@@ -540,3 +736,80 @@ def test_positive_cleanup_witness_retained_until_exact_receipt_commit(tmp_path):
     same.release()
     next_job = task_lane.BrowserTaskLane(tmp_path).acquire()
     next_job.release()
+
+
+@pytest.mark.parametrize("body", [{"cleanup_ack": False}, {"cleanup_ack": 1},
+    {"cleanup_ack": "true"}, {"cleanup_ack": True, "proof_kind": "linux_boot_changed"},
+    {"cleanup_ack": True, "pid": 1}, {"cleanup_ack": True, "witness_digest": "a" * 64}])
+def test_cleanup_contract_rejects_caller_proofs_and_nonliteral_ack(body):
+    from src.browser.interaction_contracts import InteractionCleanup
+    with pytest.raises(ValidationError):
+        InteractionCleanup(**body)
+
+
+def test_darwin_fixed_boot_reader_and_changed_boot_fixture(tmp_path, monkeypatch):
+    import ctypes
+    import os
+    from src.browser import task_lane
+    boot = str(uuid.uuid4())
+    calls = []
+    class Query:
+        def __call__(self, name, buffer, size, new_value, new_size):
+            calls.append((name, new_value, new_size))
+            ctypes.memmove(buffer, boot.encode() + b"\0", 37)
+            size._obj.value = 37
+            return 0
+    class Library:
+        sysctlbyname = Query()
+    def fixed_library(path, **kwargs):
+        assert path == "/usr/lib/libSystem.B.dylib" and kwargs == {"use_errno": True}
+        return Library()
+    monkeypatch.setattr(task_lane.sys, "platform", "darwin")
+    monkeypatch.setattr(task_lane.ctypes, "CDLL", fixed_library)
+    assert task_lane.darwin_boot_session_id() == boot
+    assert calls == [(b"kern.bootsessionuuid", None, 0)]
+    original = task_lane.BrowserTaskLane(tmp_path).acquire()
+    witness = original.require_positive_cleanup("darwin-exact-job")
+    assert witness["schema_version"] == 4 and witness["boot_platform"] == "darwin"
+    os.close(original._descriptor)
+    original._descriptor = None
+    observer = task_lane.acquire_browser_cleanup_lane(tmp_path, "darwin-exact-job")
+    with pytest.raises(task_lane.BrowserTaskLaneBusy):
+        observer.cleanup_proof("darwin-exact-job")
+    boot = str(uuid.uuid4())
+    exact, proof = observer.cleanup_proof("darwin-exact-job")
+    assert proof == "darwin_boot_changed" and exact == witness
+    observer.commit_cleanup_receipt(exact, proof)
+    observer.release()
+    boot = str(uuid.UUID(int=0))
+    assert task_lane.darwin_boot_session_id() is None
+    assert task_lane.native_boot_session() is None
+
+
+def test_in_memory_prelaunch_witness_before_original_no_child_release(tmp_path):
+    from src.browser import task_lane
+    lane = task_lane.BrowserTaskLane(tmp_path).acquire()
+    witness = lane.stage_prelaunch("no-child-original")
+    marker = json.loads(lane.lock_path.read_text())
+    assert marker["schema_version"] == 1 and "positive_cleanup_required" not in marker
+    assert not task_lane.BrowserTaskLane(tmp_path).try_acquire()
+    lane.confirm_positive_cleanup(witness)
+    lane.release()
+    next_job = task_lane.BrowserTaskLane(tmp_path).acquire()
+    next_job.release()
+
+
+def test_darwin_local_playwright_cache_preflight_without_launch(tmp_path, monkeypatch):
+    from pathlib import Path
+    from src.browser import task_runner
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    executable = (tmp_path / "Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/"
+        "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    executable.parent.mkdir(parents=True)
+    executable.write_text("local preflight fixture")
+    executable.chmod(0o700)
+    monkeypatch.setattr(task_runner.sys, "platform", "darwin")
+    assert task_runner._playwright_browser_executable_present() is True
+    executable.chmod(0o600)
+    assert task_runner._playwright_browser_executable_present() is False

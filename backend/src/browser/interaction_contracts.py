@@ -119,3 +119,13 @@ class InteractionActionRequest(Strict):
 class InteractionClose(Strict):
     expected_revision: int = Field(ge=1)
     fencing_token: int = Field(ge=1)
+
+
+class InteractionCleanup(Strict):
+    cleanup_ack: StrictBool
+
+    @model_validator(mode="after")
+    def explicit_cleanup(self):
+        if self.cleanup_ack is not True:
+            raise ValueError("explicit physical cleanup acknowledgement is required")
+        return self

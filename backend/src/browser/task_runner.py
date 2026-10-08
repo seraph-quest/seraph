@@ -698,6 +698,8 @@ def _playwright_browser_executable_present() -> bool:
         roots = [package_root / ".local-browsers"]
     elif configured_root:
         roots = [Path(configured_root).expanduser()]
+    elif sys.platform == "darwin":
+        roots = [Path.home() / "Library" / "Caches" / "ms-playwright"]
     else:
         roots = [Path.home() / ".cache" / "ms-playwright"]
     executable_names = {
@@ -707,6 +709,7 @@ def _playwright_browser_executable_present() -> bool:
         "chrome-headless-shell.exe",
         "chromium",
         "chromium.exe",
+        "Google Chrome for Testing",
     }
     for root in roots:
         if not root.is_dir():

@@ -946,7 +946,7 @@ class ProfiledInteractionSessions:
         from src.work_board.repository import WorkBoardRepository
         from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
         from .interaction_contracts import CAPABILITY, JOB_KIND, PROFILE, SOURCE_SHA256, InteractionError, digest
-        from .task_lane import try_acquire_browser_task_lane
+        from .task_lane import try_acquire_browser_task_lane, native_boot_session
         from .task_runner import ProfiledInteractionPage
         if not self.started:
             raise InteractionError("browser_interaction_runtime_inactive", status_code=503)
@@ -963,12 +963,20 @@ class ProfiledInteractionSessions:
             deadline = min(datetime.now(timezone.utc) + timedelta(seconds=180),
                 root.absolute_expires_at.replace(tzinfo=root.absolute_expires_at.tzinfo or timezone.utc),
                 root.idle_expires_at.replace(tzinfo=root.idle_expires_at.tzinfo or timezone.utc))
+        if native_boot_session() is None:
+            raise InteractionError("browser_native_boot_proof_unavailable", status_code=503)
         lane = try_acquire_browser_task_lane(settings.workspace_dir)
         if lane is None:
             from .task_lane import browser_task_lane_wait_reason
             raise InteractionError(browser_task_lane_wait_reason(settings.workspace_dir) or "browser_lane_busy")
         state = None
+        staged_witness = None
         try:
+            from .task_lane import BrowserTaskLaneError
+            try:
+                staged_witness = lane.stage_prelaunch(job_id)
+            except BrowserTaskLaneError:
+                raise InteractionError("browser_native_boot_proof_unavailable", status_code=503) from None
             spec = DurableJobSpec(identity=DurableJobIdentity(job_id, "user", owner.principal_id,
                 JOB_KIND, "2", CAPABILITY + ":" + owner.session_id, inputs.request_key),
                 inputs=inputs.model_dump(), session_id=owner.session_id, operator_session_id=owner.session_id,
@@ -991,12 +999,21 @@ class ProfiledInteractionSessions:
                 "fence": row["lease"]["fencing_token"], "lease_owner": lease_owner, "closing": False,
                 "lock": asyncio.Lock(), "deadline": deadline, "timer": None, "page": None}
             self.active[job_id] = state
-            state["cleanup_witness"] = lane.require_positive_cleanup(job_id)
             page = ProfiledInteractionPage(authority=lambda: self._authority(owner, job_id),
                 intent=lambda event: self._record(job_id, {**event, "status": "intent"}),
                 result=lambda event: self._record(job_id, event),
                 request=self.request, browser_launcher=self.browser_launcher, source_digest=self.source_digest)
             state["page"] = page
+            # The actual runner state exists before any fallible marker work;
+            # absence of a marker alone is never a no-child cleanup proof.
+            state["cleanup_witness"] = staged_witness
+            state["reservation_committed"] = False
+            binding = self._physical_binding(row, staged_witness)
+            row = await self.jobs.reserve_native_physical_resource(binding, witness=staged_witness,
+                current_owner=owner, authenticated_token_hash=owner.authenticated_token_hash)
+            state["revision"] = row["revision"]
+            state["reservation_committed"] = True
+            lane.require_positive_cleanup(job_id)
             # Original finite deadline includes teardown; timer releases no capacity
             # without positive cleanup. It cannot renew an old Root or attempt.
             state["timer"] = asyncio.create_task(self._expire(job_id,
@@ -1009,6 +1026,9 @@ class ProfiledInteractionSessions:
             if state is not None:
                 await self._close(job_id, reason="browser_open_failed")
             else:
+                # This original owner has not entered any launcher boundary.
+                if staged_witness is not None:
+                    lane.confirm_positive_cleanup(staged_witness)
                 lane.release()
             raise
 
@@ -1055,6 +1075,156 @@ class ProfiledInteractionSessions:
                 WorkflowRunState.operator_session_id == owner.session_id,
                 WorkflowRunState.job_kind == JOB_KIND).order_by(WorkflowRunState.updated_at.desc()).limit(21))).scalars().all()
         return {"jobs": [await self.inspect(owner, job_id) for job_id in ids[:20]], "has_more": len(ids) > 20}
+
+    async def _cleanup_job(self, owner, job_id):
+        """Negative resource cleanup authority never transfers old page reads."""
+        from sqlmodel import select
+        from src.db import engine
+        from src.db.models import OperatorSession, WorkflowRunState
+        from .interaction_contracts import InteractionError, JOB_KIND
+        async with engine.get_session() as db:
+            current = await self._stable_root(db, owner)
+            run = await db.scalar(select(WorkflowRunState).join(OperatorSession,
+                WorkflowRunState.operator_session_id == OperatorSession.id).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.job_kind == JOB_KIND,
+                WorkflowRunState.capability_version == "2", WorkflowRunState.owner_kind == "user",
+                WorkflowRunState.owner_principal_id == OperatorSession.principal_id,
+                OperatorSession.operator_identity_id == current.operator_identity_id))
+            if run is None:
+                raise InteractionError("browser_interaction_not_found", status_code=404)
+        return await self.jobs.get_job(job_id)
+
+    async def cleanup_candidates(self, owner):
+        from sqlmodel import select
+        from src.db import engine
+        from src.db.models import OperatorSession, WorkflowRunState
+        from .interaction_contracts import JOB_KIND
+        from .task_lane import (browser_cleanup_witness, acquire_browser_cleanup_lane,
+            BrowserTaskLaneError, BrowserTaskLaneBusy, native_boot_session)
+        async with engine.get_session() as db:
+            current = await self._stable_root(db, owner)
+            try:
+                witness = browser_cleanup_witness(settings.workspace_dir)
+            except (BrowserTaskLaneError, OSError):
+                from .interaction_contracts import InteractionError
+                raise InteractionError("browser_cleanup_witness_invalid") from None
+            if witness is None:
+                return {"candidates": [], "has_more": False}
+            rows = (await db.execute(select(WorkflowRunState.run_identity, WorkflowRunState.status)
+                .join(OperatorSession, WorkflowRunState.operator_session_id == OperatorSession.id).where(
+                    WorkflowRunState.job_kind == JOB_KIND, WorkflowRunState.capability_version == "2",
+                    WorkflowRunState.owner_kind == "user", WorkflowRunState.owner_principal_id == OperatorSession.principal_id,
+                    OperatorSession.operator_identity_id == current.operator_identity_id)
+                .order_by(WorkflowRunState.updated_at.desc()).limit(20))).all()
+        candidates = []
+        for job_id, status in rows:
+            if hashlib.sha256(job_id.encode()).hexdigest() != witness.get("job_digest"):
+                continue
+            lane = None
+            try:
+                lane = acquire_browser_cleanup_lane(settings.workspace_dir, job_id)
+                _, proof = lane.cleanup_proof(job_id)
+            except BrowserTaskLaneBusy:
+                proof = "host_reboot_required" if native_boot_session() and witness.get("boot_session_id") else "boot_proof_unavailable"
+            except BrowserTaskLaneError:
+                proof = "boot_proof_unavailable"
+            finally:
+                if lane is not None:
+                    lane.close_cleanup_observer()
+            candidates.append({"job_id": job_id, "durable_status": status, "physical_proof_state": proof})
+        return {"candidates": candidates, "has_more": False}
+
+    @staticmethod
+    def _physical_binding(row, witness):
+        from src.workflows.job_runtime import NativePhysicalCleanupBinding, _digest
+        return NativePhysicalCleanupBinding(job_id=row["job_id"], expected_revision=row["revision"],
+            original_owner_principal_id=row["owner"]["principal_id"],
+            original_operator_session_id=row["operator_session_id"], original_session_id=row["session_id"],
+            input_digest=row["input_digest"], authority_digest=row["authority_digest"],
+            run_fingerprint=row["run_fingerprint"], attempt_count=row["attempt_count"],
+            lease_owner=row["lease"]["owner"], fencing_token=row["lease"]["fencing_token"],
+            resource_claim="browser-task-lane", witness_digest=_digest(witness))
+
+    async def _physical_cleanup_receipt(self, owner, job_id, *, lane=None, row=None):
+        from src.workflows.job_runtime import (NativePhysicalCleanupBinding, NativePhysicalCleanupProof,
+            BrowserPhysicalCleanupOwner, _digest)
+        from .interaction_contracts import InteractionError
+        from .task_lane import acquire_browser_cleanup_lane, browser_cleanup_witness, BrowserTaskLaneError
+        row = row or await self.jobs.get_job(job_id)
+        reservations = [c for c in row.get("checkpoints", []) if c.get("checkpoint_id") == "native-physical-resource-reservation"]
+        if len(reservations) != 1:
+            raise InteractionError("browser_cleanup_reservation_unavailable")
+        reservation = reservations[0].get("payload")
+        if not isinstance(reservation, dict) or set(reservation) != {"binding", "witness"}:
+            raise InteractionError("browser_cleanup_reservation_invalid")
+        try:
+            binding = NativePhysicalCleanupBinding(**reservation["binding"], expected_revision=row["revision"])
+        except (TypeError, KeyError):
+            raise InteractionError("browser_cleanup_reservation_invalid") from None
+        if binding.job_id != job_id or _digest(reservation["witness"]) != binding.witness_digest:
+            raise InteractionError("browser_cleanup_reservation_invalid")
+        previous = [c for c in row.get("checkpoints", []) if c.get("checkpoint_id") == "native-physical-resource-cleanup"]
+        proof_kind = previous[0].get("payload", {}).get("proof_kind") if len(previous) == 1 else None
+        already_committed = proof_kind is not None
+        acquired = False
+        # Exact committed replay does not acquire or release a later job's lane.
+        pending = browser_cleanup_witness(settings.workspace_dir) if lane is None and already_committed else None
+        exact_pending = pending == reservation["witness"]
+        if lane is None and (not already_committed or exact_pending):
+            try:
+                lane = acquire_browser_cleanup_lane(settings.workspace_dir, job_id)
+            except (BrowserTaskLaneError, OSError):
+                raise InteractionError("browser_positive_cleanup_proof_unavailable") from None
+            acquired = True
+        try:
+            if lane is not None and already_committed:
+                lane._validate_inode_witness(reservation["witness"])
+            elif lane is not None:
+                witness, actual_kind = lane.cleanup_proof(job_id)
+                if witness != reservation["witness"] or (proof_kind is not None and proof_kind != actual_kind):
+                    raise InteractionError("browser_cleanup_witness_changed")
+                proof_kind = actual_kind
+            if proof_kind not in {"owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed"}:
+                raise InteractionError("browser_positive_cleanup_proof_unavailable")
+
+            async def verify_cleanup(db, run, original):
+                # Actual awaited shutdown finished outside the writer. This
+                # callback does only bounded local witness/inode/boot rechecks.
+                if lane is None or original != reservation:
+                    raise InteractionError("browser_cleanup_witness_changed")
+                if proof_kind == "owned_no_child":
+                    resources = getattr(lane, "_no_child_resources", None)
+                    if resources is None or not resources.context_not_started:
+                        raise InteractionError("browser_original_no_child_proof_unavailable")
+                witness, current_kind = lane.cleanup_proof(job_id)
+                if witness != original["witness"] or current_kind != proof_kind:
+                    raise InteractionError("browser_cleanup_witness_changed")
+                return NativePhysicalCleanupProof(binding.witness_digest, current_kind)
+
+            receipt = await self.jobs.record_native_physical_cleanup(binding, current_owner=owner,
+                authenticated_token_hash=owner.authenticated_token_hash, proof_kind=proof_kind,
+                cleanup_owner=BrowserPhysicalCleanupOwner(verify_cleanup))
+            if lane is not None:
+                if already_committed:
+                    lane.clear_committed_cleanup_pointer(reservation["witness"], proof_kind)
+                else:
+                    lane.commit_cleanup_receipt(reservation["witness"], proof_kind)
+            return receipt
+        except (BrowserTaskLaneError, OSError):
+            raise InteractionError("browser_positive_cleanup_proof_unavailable") from None
+        finally:
+            if acquired and lane is not None:
+                if lane._cleanup_confirmed:
+                    lane.release()
+                else:
+                    lane.close_cleanup_observer()
+
+    async def reconcile_cleanup(self, owner, job_id):
+        from .interaction_contracts import InteractionError
+        if job_id in self.active:
+            raise InteractionError("browser_context_still_live")
+        row = await self._cleanup_job(owner, job_id)
+        return await self._physical_cleanup_receipt(owner, job_id, row=row)
 
     async def action(self, owner, job_id, request):
         import asyncio
@@ -1171,15 +1341,33 @@ class ProfiledInteractionSessions:
                 clean = state["page"] is None or await asyncio.wait_for(state["page"].stop(), timeout=cleanup_remaining)
             except BaseException:
                 clean = False
-            # Physical resource closure is independent from job CAS/authority.
-            # A failed audit write cannot turn a positively closed browser into
-            # an unknown live context. Exact marker confirmation still gates
-            # capacity release.
+            cleanup_committed = False
             if clean:
                 try:
-                    state["lane"].confirm_positive_cleanup(state["cleanup_witness"])
+                    no_child = state["page"] is not None and state["page"].resources.context_not_started
+                    if not state.get("reservation_committed"):
+                        # Canonical reserve failed before the launcher boundary.
+                        # Only this still-held original actual no-child owner can
+                        # clear its exact stage; no synthetic journal is minted.
+                        if not no_child:
+                            raise RuntimeError("browser no-child proof unavailable")
+                        state["lane"].confirm_positive_cleanup(state["cleanup_witness"])
+                        cleanup_committed = True
+                    else:
+                        if no_child:
+                            state["lane"]._no_child_resources = state["page"].resources
+                        state["lane"].retain_positive_cleanup(state["cleanup_witness"],
+                            proof="owned_no_child" if no_child else "owned_positive_close")
+                        receipt = await self._physical_cleanup_receipt(state["owner"], job_id, lane=state["lane"])
+                        state["revision"] = receipt["revision"]
+                        cleanup_committed = True
                 except Exception:
-                    clean = False
+                    # Preserve positive physical evidence and capacity until an
+                    # exact current authenticated cleanup-only receipt commits.
+                    state["lane"].quarantine(job_id)
+            if clean and not cleanup_committed:
+                self.active.pop(job_id, None)
+                return
             try:
                 row = await self.jobs.record_effect(job_id, effect_type="browser_context_cleanup",
                     status="succeeded" if clean else "unknown", effect_id="browser-cleanup:" + job_id,
@@ -1187,7 +1375,7 @@ class ProfiledInteractionSessions:
                     owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"])
                 state["revision"] = row["revision"]
                 completed = clean and reason == "operator_closed" and preview_current
-                terminal = "succeeded" if completed else "cancelled" if clean and reason == "operator_closed" else "blocked"
+                terminal = "unknown_external_effect" if not clean else "succeeded" if completed else "cancelled" if reason == "operator_closed" else "blocked"
                 try:
                     await self.jobs.transition_job(job_id, terminal,
                         owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
@@ -1211,7 +1399,7 @@ class ProfiledInteractionSessions:
                             reason="browser_closed_settlement_unresolved", result={"no_learning": True})
                     except Exception:
                         pass
-            if clean:
+            if clean and cleanup_committed:
                 state["lane"].release()
             else:
                 state["lane"].quarantine(job_id)

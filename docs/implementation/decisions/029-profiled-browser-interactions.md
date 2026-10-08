@@ -104,6 +104,61 @@ page compares current state; uncertain events are never automatically re-clicked
 Lost cleanup keeps the browser lane quarantined until positive owned-resource
 closure; process absence is not proof. Outcome includes explicit `no_learning`.
 
+Recoverable admission requires the current Root's existing canonical ownership
+enrollment and a live, unrevoked `OperatorIdentity`; absent binding blocks before
+job admission or contact. This uses the existing operator ownership controls,
+never automatic enrollment or a browser-specific owner table. Record the exact
+native physical reservation in the existing job journal before launch, with the
+original job/attempt/fence/input/authority identity and the same lane inode's
+workspace identity, process/context nonces and an actual native kernel boot UUID.
+The immutable witness is staged only in memory under the original lane flock.
+Commit the typed canonical reservation, then write and fsync the positive marker
+on that same inode, then enter the browser driver. A crash before the marker
+leaves read-only unresolved job history; exact request replay never retries or
+infers no-child proof from an absent marker. No browser can launch before both
+records are durable. An original initialized runner that never entered launch
+may prove `owned_no_child`; callers cannot supply that assertion.
+
+Physical cleanup and durable job outcome remain distinct. Actual awaited owned
+closure is completed outside the canonical writer. Its exact positive witness
+stays in the required lane marker until a typed physical-only journal receipt
+commits. Failed receipt CAS retains the witness and reservation, so later jobs
+cannot overwrite the only cleanup proof. Explicit reconciliation uses the current
+authenticated Root's same stable canonical identity, derived through the original
+immutable session relation. It does not require or renew old Goal execution
+authority. A bounded local callback rechecks the exact retained witness under the
+lane lock inside the writer; it performs no network operation or cleanup wait.
+
+After owner-process loss, only a changed valid actual native kernel boot UUID
+proves all resources from the original boot are dead. Same boot, missing or
+unreadable boot identity, changed workspace/lock inode, wrong job or mismatched
+reservation fail closed. Recovery therefore requires an operator-managed
+reboot when original positive closure is unavailable. No PID kill, process
+absence, elapsed time, unlocked descriptor or generic IPC is a cleanup proof.
+Linux reads only `/proc/sys/kernel/random/boot_id`. Darwin reads only the
+verified read-only `kern.bootsessionuuid` through the fixed system library and a
+37-byte UUID buffer. The schema records `boot_platform` and `boot_session_id`;
+proof kinds are `linux_boot_changed` and `darwin_boot_changed`. Unknown platform
+or unavailable native boot proof blocks admission before any browser starts.
+Darwin native execution remains unverified on this Linux test host. The
+read-only boot sysctl registration and boot-cycle semantics were independently
+verified on 2026-10-08 against official
+[XNU kern_sysctl.c](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sysctl.c)
+and [Apple IOPM.h](https://raw.githubusercontent.com/apple/darwin-xnu/main/iokit/IOKit/pwr_mgt/IOPM.h).
+
+Cleanup-only discovery exposes only same-stable-owner job identity, physical
+proof state and unchanged durable status. It exposes no old session, Goal, URL,
+page nodes, history or preview. The explicit typed cleanup endpoint accepts only
+acknowledgement, deriving the original witness and job binding on the server.
+A genuinely attempted unverified close retains canonical
+`unknown_external_effect`, or `running` if original authority no longer permits
+that transition; the UI projects blocked readiness separately.
+Its journal receipt preserves original durable status, leases, external-effect
+uncertainty and outputs. It cannot adopt a result, grant success, retry actions,
+reconcile external effects or transfer the original history authority. Exact
+receipt replay deduplicates without releasing any later resource reservation;
+conflicting cleanup proof fails closed.
+
 ## Validation and limitations
 
 Provider-free isolated local Chromium acceptance must prove multi-field fill,

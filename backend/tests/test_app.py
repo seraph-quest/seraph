@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from config.settings import settings
 from src.runtime_plugins.bridge import CordisHost
@@ -363,6 +363,22 @@ async def test_optional_cordis_failure_preserves_health_and_redacted_runtime_sta
     assert snapshot["runtime_role"] == "lifecycle_host"
     assert snapshot["cleanup"]["state"] == "not_started"
     assert not {"boot_nonce", "pid", "stderr", "env"} & snapshot.keys()
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_awaits_current_cordis_readback_not_cached_ready(client, monkeypatch):
+    host = CordisHost()
+    cached = host.snapshot()
+    actual = {**cached, "state": "ready", "reason": None,
+              "readiness": {"state": "verified", "checked_at": 123}}
+    refresh = AsyncMock(return_value=actual)
+    monkeypatch.setattr(host, "refresh_status", refresh)
+    monkeypatch.setattr(host, "snapshot", lambda: (_ for _ in ()).throw(AssertionError("cached API readiness")))
+    monkeypatch.setattr("src.app.cordis_host", host)
+    response = await client.get("/api/runtime/status")
+    assert response.status_code == 200
+    assert response.json()["cordis_runtime"] == actual
+    refresh.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

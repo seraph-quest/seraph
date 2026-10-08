@@ -18,9 +18,25 @@ it("preserves last confirmed state through failed metadata refresh", async () =>
   vi.mocked(apiFetch).mockResolvedValueOnce(response({ cordis_runtime: snapshot })).mockResolvedValueOnce(response({}, 503));
   render(<CordisRuntimePanel />); await screen.findByText("blocked · node_unsupported");
   fireEvent.click(screen.getByRole("button", { name: "Refresh Cordis host" }));
-  expect(await screen.findByText(/Last confirmed: blocked/)).toBeInTheDocument();
+  expect(await screen.findByText(/Host readiness unknown · stale metadata/)).toBeInTheDocument();
   expect(screen.getByText(/Artifact settings remain usable/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Refresh Cordis host" })).toBeEnabled();
+});
+it("shows current verified readiness, then removes every active ready label after refresh failure", async () => {
+  const ready = { ...snapshot, state: "ready", reason: null, readiness: { state: "verified", checked_at: 1700000000000 }, plugins: [{ id: "authority", state: "ready", reason: null }] };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ cordis_runtime: ready })).mockRejectedValueOnce(Error("timeout"));
+  render(<CordisRuntimePanel />);
+  await screen.findByText("ready");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh Cordis host" }));
+  await screen.findByText("Host readiness unknown · stale metadata");
+  expect(screen.queryByText("ready")).toBeNull();
+  expect(screen.getByText("authority: unknown · stale metadata")).toBeInTheDocument();
+  expect(screen.getByText(/Readiness: unknown · last verified: 2023-11-14/)).toBeInTheDocument();
+});
+it("treats legacy cached ready snapshots as unknown instead of current readiness", () => {
+  const parsed = normalizeCordisRuntime({ ...snapshot, state: "ready", reason: null, plugins: [{ id: "authority", state: "ready", reason: null }] });
+  expect(parsed?.state).toBe("blocked"); expect(parsed?.readiness.state).toBe("unknown");
+  expect(parsed?.plugins[0].state).toBe("blocked");
 });
 it("strips unexpected sensitive fields from its retained public projection", async () => {
   const unsafe = { ...snapshot, api_key: "sensitive-token", pid: 123, nonce: "sensitive-nonce", environment: { SECRET: "value" }, plugins: [{ ...snapshot.plugins[0], stderr: "sensitive-stderr" }] };

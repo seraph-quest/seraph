@@ -35,12 +35,13 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>
-      <p role="status">{error ? "Last confirmed: " : ""}{snapshot.state}{snapshot.reason ? ` · ${snapshot.reason}` : ""}</p>
+      <p role="status">{error ? "Host readiness unknown · stale metadata" : `${snapshot.state}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`}</p>
+      <p>Readiness: {error ? "unknown" : snapshot.readiness.state} · last verified: {snapshot.readiness.checked_at === null ? "unavailable" : new Date(snapshot.readiness.checked_at).toISOString()}</p>
       <p>Profile: {snapshot.profile_id ?? "none"} · Cordis {snapshot.cordis_version} · Node {snapshot.node_version ?? "unavailable"}</p>
       <p>Composition: {snapshot.composition_digest ?? "unavailable"}</p><p>Package: {snapshot.package_digest ?? "unavailable"}</p>
-      <ul>{snapshot.plugins.map(p => <li key={p.id}>{p.id}: {p.state}{p.reason ? ` · ${p.reason}` : ""}</li>)}</ul>
+      <ul>{snapshot.plugins.map(p => <li key={p.id}>{p.id}: {error ? "unknown · stale metadata" : `${p.state}${p.reason ? ` · ${p.reason}` : ""}`}</li>)}</ul>
       <p>Cleanup: {snapshot.cleanup.state} · process {snapshot.cleanup.process_reaped ? "reaped" : "unconfirmed"} · resources {snapshot.cleanup.resources_remaining ?? "unknown"} · Cordis disposal {snapshot.cleanup.cordis_disposal}</p>
-      {snapshot.state !== "ready" && <p>Dependent work stays blocked until mandatory services are ready. Restore the reviewed host build and supported Node profile, then refresh. Unknown cleanup requires reconciliation before restart.</p>}
+      {(error || snapshot.state !== "ready") && <p>Dependent work stays blocked until mandatory services are ready. Restore the reviewed host build and supported Node profile, then refresh. Unknown cleanup requires reconciliation before restart.</p>}
     </>}
   </section>;
 }

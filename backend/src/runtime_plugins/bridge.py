@@ -47,6 +47,7 @@ class CordisHost:
         self._cleanup_state = "not_started"
         self._cordis_disposal = "not_started"
         self._plugins: list[dict[str, Any]] = []
+        self._readiness_checked_at: int | None = None
         self.stderr_bytes = 0
 
     @property
@@ -54,13 +55,23 @@ class CordisHost:
         return self.state == "ready" and self.process is not None and self.process.returncode is None and self._cleanup_state == "pending"
 
     def snapshot(self) -> dict[str, Any]:
+        """Cached diagnostics cannot establish current child readiness."""
+        return self._snapshot(verified=False)
+
+    def _snapshot(self, *, verified: bool) -> dict[str, Any]:
         active_tasks = sum(task is None or not task.done() for task in self._tasks.values())
         resources = active_tasks + (1 if self.process is not None and not self._reaped else 0)
         state, reason = self.state, self.reason
         if state == "ready" and not self.admitting:
             state, reason = "blocked", reason or "child_unavailable"
+        readiness = "verified" if verified and self.admitting else "unknown"
+        if state == "ready" and not verified:
+            state, reason = "blocked", "readiness_not_checked"
+        elif state in {"blocked", "cleanup_unknown"}:
+            readiness = "blocked"
         return {
             "runtime_role": "lifecycle_host", "state": state, "reason": reason,
+            "readiness": {"state": readiness, "checked_at": self._readiness_checked_at},
             "profile_id": self.reviewed.profile["profile_id"] if self.reviewed else None,
             "cordis_version": CORDIS_VERSION,
             "node_version": self.reviewed.node_version if self.reviewed else None,
@@ -111,6 +122,7 @@ class CordisHost:
                 return False
             self.state, self.reason = "starting", None
             self.boot_nonce = secrets.token_hex(32)
+            self._readiness_checked_at = None
             self._in_seq = self._out_seq = 0
             self._pending.clear()
             self._tasks.clear()
@@ -194,6 +206,32 @@ class CordisHost:
         if method not in {"runtime.status", "invocation.cancel"}:
             raise HostBlocked("control_not_public")
         return (await self._rpc(method, invocation_ref=invocation_ref, deadline_at=deadline_at))["payload"]
+
+    async def refresh_status(self, *, deadline_at: int | None = None) -> dict[str, Any]:
+        """One current-boot readback, bounded below the browser's five seconds.
+
+        The caller's original deadline also bounds writer admission and response;
+        historical plugin details and timestamps never imply live readiness.
+        """
+        if not self.admitting:
+            return self.snapshot()
+        now = int(time.time() * 1000)
+        if deadline_at is not None and type(deadline_at) is not int:
+            return self.snapshot()
+        deadline = min(now + 4000, deadline_at if deadline_at is not None else now + 4000)
+        original_boot = self.boot_nonce
+        try:
+            payload = await self.request(deadline_at=deadline)
+        except (HostBlocked, ProtocolError):
+            return self.snapshot()
+        if original_boot != self.boot_nonce or not self.admitting or int(time.time() * 1000) >= deadline:
+            return self.snapshot()
+        if payload["state"] != "ready":
+            self._fence("runtime_not_ready")
+            return self.snapshot()
+        self._plugins = payload["plugins"]
+        self._readiness_checked_at = int(time.time() * 1000)
+        return self._snapshot(verified=True)
 
     async def _rpc(self, method: str, *, internal: bool = False, invocation_ref: str | None = None,
                    deadline_at: int | None = None) -> dict[str, Any]:

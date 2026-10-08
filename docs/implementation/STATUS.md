@@ -32,6 +32,9 @@ Python backend remains parent and sole existing authority/state/admission owner;
 this host supplies lifecycle readiness, not a migrated agent loop or research
 capability. Missing Node/build and failed children block only dependent host work;
 runtime and settings expose actual plugin/recovery and independent cleanup state.
+Explicit status refresh verifies current required-service readiness within four
+seconds; cached or failed refreshes show unknown/blocked with historical details
+and a last-verified timestamp, never cached Ready.
 Focused parser/security/resource and real start/stop/reap checks use no providers
 or operator workspace. A managed keyless Linux x64 probe with denied IPv4/IPv6
 socket creation establishes only that platform's owned-child lifecycle; native

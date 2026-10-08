@@ -50,6 +50,15 @@ profile and validated build. Missing or unsupported Node (including 22.11), a
 missing/stale build, invalid configuration or a failed child blocks dependent
 Cordis readiness while the existing Python core and settings remain usable.
 
+Each explicit `/api/runtime/status` refresh reads the current owned child's
+required-service readiness over the same bounded control pipe, with one original
+deadline of at most four seconds (below the browser's five-second budget).
+`readiness.state=verified` and its Unix-millisecond `checked_at` describe that
+successful readback only. Cached diagnostics are `unknown`; failed, expired or
+capacity-blocked refreshes retain historical details without claiming Ready.
+There is no periodic poll. A disposed required plugin fiber fails the child's
+actual readiness check, and a hung child loses readiness within the deadline.
+
 Python owns one directly spawned trusted child using a fixed absolute entrypoint
 and working directory, closed inherited descriptors, and only `LANG=C.UTF-8`
 and `TZ=UTC` in the child's environment. It inherits no `NODE_OPTIONS`,

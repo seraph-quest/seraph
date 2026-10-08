@@ -593,7 +593,7 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
-            "cordis_runtime": cordis_host.snapshot(),
+            "cordis_runtime": await cordis_host.refresh_status(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import struct
 import tempfile
 import time
@@ -120,6 +121,54 @@ class ActualHostTests(unittest.IsolatedAsyncioTestCase):
             receipt = self.host.snapshot()
             self.assertEqual(receipt["cleanup"], {"state": "clean", "process_reaped": True, "resources_remaining": 0, "cordis_disposal": "confirmed"})
             with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
+
+    async def test_current_status_verifies_readiness_but_cache_never_claims_ready(self):
+        self.assertTrue(await self.host.start())
+        cached = self.host.snapshot()
+        self.assertEqual(cached["readiness"], {"state": "unknown", "checked_at": None})
+        self.assertEqual(cached["reason"], "readiness_not_checked")
+        actual = await self.host.refresh_status()
+        self.assertEqual(actual["state"], "ready")
+        self.assertEqual(actual["readiness"]["state"], "verified")
+        self.assertIsInstance(actual["readiness"]["checked_at"], int)
+        self.assertEqual(self.host.snapshot()["state"], "blocked")
+        self.assertEqual(self.host.snapshot()["readiness"]["state"], "unknown")
+        self.assertEqual(self.host.snapshot()["readiness"]["checked_at"], actual["readiness"]["checked_at"])
+
+    async def test_refresh_capacity_and_expired_original_deadline_preserve_unknown(self):
+        self.assertTrue(await self.host.start())
+        verified = await self.host.refresh_status()
+        seq = self.host._out_seq
+        self.host._unresolved = 32
+        try:
+            blocked = await self.host.refresh_status()
+        finally:
+            self.host._unresolved = 0
+        self.assertEqual(blocked["readiness"]["state"], "unknown")
+        self.assertEqual(blocked["readiness"]["checked_at"], verified["readiness"]["checked_at"])
+        expired = await self.host.refresh_status(deadline_at=int(time.time() * 1000) - 1)
+        self.assertEqual(expired["readiness"]["state"], "unknown")
+        self.assertEqual(self.host._out_seq, seq)
+        self.assertTrue(self.host.admitting)
+
+    @unittest.skipUnless(hasattr(signal, "SIGSTOP"), "POSIX stopped-child check")
+    async def test_hung_owned_child_refresh_respects_original_deadline_and_reaps(self):
+        self.assertTrue(await self.host.start())
+        verified = await self.host.refresh_status()
+        pid = self.host.process.pid
+        os.kill(pid, signal.SIGSTOP)
+        started = time.monotonic()
+        try:
+            receipt = await self.host.refresh_status(deadline_at=int(time.time() * 1000) + 100)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(receipt["state"], "blocked")
+            self.assertNotEqual(receipt["readiness"]["state"], "verified")
+            self.assertEqual(receipt["readiness"]["checked_at"], verified["readiness"]["checked_at"])
+        finally:
+            os.kill(pid, signal.SIGCONT)
+            await self.host.stop(preserve_blocked=True)
+        self.assertTrue(self.host.snapshot()["cleanup"]["process_reaped"])
+        with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
 
     async def test_child_gets_only_minimal_environment_and_closed_descriptors(self):
         original = asyncio.create_subprocess_exec

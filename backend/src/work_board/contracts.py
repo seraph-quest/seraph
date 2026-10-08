@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -18,6 +18,207 @@ from src.db.models import WorkBoardStatus
 
 class WorkBoardContractError(ValueError):
     """Raised when an input cannot be represented by the board contract."""
+
+
+class ClosedTaskModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class TaskLimits(ClosedTaskModel):
+    max_steps: int = Field(default=16, ge=1, le=16)
+    max_inference_calls: int = Field(default=12, ge=0, le=12)
+    wall_seconds: int = Field(default=900, ge=1, le=900)
+    depth: Literal[0] = 0
+    max_outstanding_children: int = Field(default=2, ge=0, le=2)
+    max_cost_microusd: int = Field(default=0, ge=0)
+
+
+class GeneralTaskInput(ClosedTaskModel):
+    schema_version: Literal[1] = 1
+    goal_ref: str = Field(min_length=1, max_length=128)
+    intent: str = Field(min_length=1, max_length=8192)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=12)
+    requested_output: dict[str, Any]
+    limits: TaskLimits = Field(default_factory=TaskLimits)
+    tool_set_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    inference_egress_acknowledged: bool = False
+
+    @field_validator("intent")
+    @classmethod
+    def bounded_intent(cls, value):
+        if len(value.encode("utf-8")) > 8192:
+            raise ValueError("intent exceeds 8192 UTF-8 bytes")
+        return value
+
+    @field_validator("goal_ref")
+    @classmethod
+    def safe_goal(cls, value):
+        return _safe_reference(value, field_name="goal_ref")
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def safe_evidence(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate evidence references")
+        return [_safe_reference(item, field_name="evidence_refs") for item in value]
+
+
+class DependencyPointer(ClosedTaskModel):
+    """A data reference into a verified predecessor, never an expression."""
+    step_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    pointer: str = Field(max_length=512, pattern=r"^(?:/(?:[^~]|~[01])*)*$")
+
+
+class PlanStep(ClosedTaskModel):
+    step_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    tool_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    input: dict[str, Any]
+    depends_on: list[str] = Field(default_factory=list, max_length=15)
+    output_contract: dict[str, Any]
+
+
+class PlanSpec(ClosedTaskModel):
+    schema_version: Literal[1] = 1
+    revision: int = Field(ge=1)
+    steps: list[PlanStep] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def acyclic(self):
+        by_id = {step.step_id: step for step in self.steps}
+        if len(by_id) != len(self.steps):
+            raise ValueError("duplicate step identity")
+        visiting, done = set(), set()
+        def visit(identity):
+            if identity in visiting:
+                raise ValueError("plan dependency cycle")
+            if identity in done:
+                return
+            if identity not in by_id:
+                raise ValueError("unknown dependency")
+            visiting.add(identity)
+            dependencies = by_id[identity].depends_on
+            if len(set(dependencies)) != len(dependencies):
+                raise ValueError("duplicate dependency")
+            for dependency in dependencies:
+                visit(dependency)
+            visiting.remove(identity)
+            done.add(identity)
+        for identity in by_id:
+            visit(identity)
+        return self
+
+
+class ToolDescriptor(ClosedTaskModel):
+    tool_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    version: str = Field(min_length=1, max_length=128)
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    effects: list[str] = Field(min_length=1, max_length=16)
+    permissions: list[str] = Field(min_length=1, max_length=16)
+    credential_refs: list[str] = Field(default_factory=list, max_length=16)
+    deadline: int = Field(ge=1, le=900)
+    verifier: str = Field(min_length=1, max_length=128)
+    server_id: str | None = Field(default=None, max_length=128)
+    connection_revision: int | None = Field(default=None, ge=1)
+    policy_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def complete(self):
+        if any(effect in {"unknown", "", "shell"} for effect in self.effects):
+            raise ValueError("unknown or arbitrary shell effects are excluded")
+        if self.server_id and self.connection_revision is None:
+            raise ValueError("MCP descriptors require a connection revision")
+        return self
+
+
+class TaskStrategyBinding(ClosedTaskModel):
+    schema_version: Literal[1] = 1
+    status: Literal["none", "active", "blocked"]
+    method_id: str | None = None
+    version: str | None = None
+    digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    typed_data: dict[str, Any] | None = None
+    reason: str | None = Field(default=None, max_length=512)
+
+    @model_validator(mode="after")
+    def binding_complete(self):
+        if self.status == "active" and not all((self.method_id, self.version, self.digest, self.typed_data is not None)):
+            raise ValueError("active strategy requires an exact typed binding")
+        if self.status == "blocked" and not self.reason:
+            raise ValueError("blocked strategy requires a reason")
+        if self.status == "none" and any(item is not None for item in (self.method_id, self.version, self.digest, self.typed_data)):
+            raise ValueError("baseline strategy carries no method authority")
+        return self
+
+
+class StrategyResolver(Protocol):
+    def resolve(self, owner: "WorkBoardOwner", goal_ref: str, task_family: str,
+                programme_grant: Any | None = None) -> TaskStrategyBinding: ...
+
+
+class GeneralTaskCreate(ClosedTaskModel):
+    goal_revision: int = Field(ge=1)
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    input: GeneralTaskInput
+    plan: PlanSpec | None = None
+    accept: bool = False
+    expected_plan_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def exact_revision(self):
+        if self.plan is None:
+            if self.accept or self.expected_plan_revision is not None:
+                raise ValueError("generated plans require review before acceptance")
+            return self
+        if self.expected_plan_revision != self.plan.revision:
+            raise ValueError("plan revision changed")
+        if len(self.plan.steps) > self.input.limits.max_steps:
+            raise ValueError("plan exceeds task step limit")
+        return self
+
+
+class GeneralTaskEnvelope(ClosedTaskModel):
+    """Single immutable artifact holding intent and the accepted inert plan."""
+    schema_version: Literal[1] = 1
+    task_input: GeneralTaskInput
+    plan: PlanSpec | None = None
+    proposal_error: str | None = Field(default=None, max_length=128)
+    descriptors: list[ToolDescriptor] = Field(default_factory=list, max_length=16)
+    strategy: TaskStrategyBinding
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="after")
+    def immutable_snapshot(self):
+        if not self.task_input.tool_set_digest:
+            raise ValueError("persisted plans require an exact tool snapshot")
+        if self.plan is None and not self.proposal_error:
+            raise ValueError("an incomplete proposal requires a visible reason")
+        if self.plan is not None and (not self.descriptors or self.proposal_error):
+            raise ValueError("valid plans require registered descriptors without proposal errors")
+        return self
+
+
+class GeneralTaskPlanUpdate(ClosedTaskModel):
+    expected_revision: int = Field(ge=1)
+    expected_plan_revision: int = Field(ge=0)
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    plan: PlanSpec
+
+    @model_validator(mode="after")
+    def next_plan(self):
+        if self.plan.revision != self.expected_plan_revision + 1:
+            raise ValueError("edited plan must advance exactly one revision")
+        return self
+
+
+class GeneralTaskResume(ClosedTaskModel):
+    expected_revision: int = Field(ge=1)
+    expected_plan_revision: int = Field(ge=1)
+    workflow_run_id: str = Field(min_length=1, max_length=256)
+    attempt_id: str = Field(min_length=1, max_length=128)
+    fencing_token: int = Field(ge=1)
+    workflow_revision: int = Field(ge=1)
+    approval_id: str = Field(min_length=1, max_length=128)
 
 
 class WorkBoardAction(str, Enum):
@@ -178,7 +379,7 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
                     raise ValueError("input_artifact_id cannot be combined with a typed input reference or digest")
             elif not self.typed_input_ref or not self.typed_input_digest:
                 raise ValueError("todo tasks require a typed input reference and digest")
-        elif self.input_artifact_id:
+        elif self.input_artifact_id and self.capability_id != "agent.task.v1":
             raise ValueError("input_artifact_id is accepted only for executable todo tasks")
         if self.input_artifact_id and (self.typed_input_ref or self.typed_input_digest):
             raise ValueError("input_artifact_id cannot be combined with a typed input reference or digest")

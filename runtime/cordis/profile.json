@@ -1,0 +1,12 @@
+{
+  "protocol": 1,
+  "profile_id": "seraph-cordis-bootstrap-v1",
+  "plugins": [
+    {
+      "id": "seraph.host-lifecycle@1.0.0",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    }
+  ]
+}

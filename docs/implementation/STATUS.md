@@ -233,6 +233,28 @@ mechanical contracts and failure boundaries. Whole cumulative independent review
 and merge are still required; real provider/model quality, native macOS execution
 and digest delivery are not established.
 
+**Daily programme digest and follow-through: Shipped.**
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) slice implements
+the current Python scheduler's local 08:00 stable-owner/day Inbox receipt,
+bounded same-receipt pending/finalization, passive blocked recovery, persistent
+finding defer/dismiss and a same-card inert C1 task proposal. Existing native
+task acceptance/execution and verified physical checklist readback link completed
+output to the original finding. Original Goal/generation/Root/source freshness
+and canonical publication fences remain binding; recovered Goal reads grant no
+task creation authority. This adds no model calls or alternative execution/cost
+owners and leaves discovery's UTC occurrence and original clocks unchanged.
+Optional native delivery uses the existing outbox, recipient-bound opt-in,
+owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
+ambiguous display consumes the slot without automatic retry. Home distinguishes
+actual run/source/output evidence from the next digest timer and an unproven
+source run time. See the
+[operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
+Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
+file journey and two-programme cited-deadline/native-slot readbacks prove these
+mechanics with inference intercepted at its owned transport. Provider/model
+quality, actual external spending and macOS native display are not
+established by these receipts.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

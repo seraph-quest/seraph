@@ -269,6 +269,60 @@ They make no provider calls and establish neither macOS execution nor model
 quality. The native contact/adoption executor still requires its separately
 implemented and reviewed integration before activation.
 
+## Daily programme digest and follow-through
+
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) implementation
+adds a passive daily programme digest and finding dispositions to Home and the
+Guardian Inbox.
+The existing Python scheduler considers the current operator IANA local day
+after 08:00. A durable stable-owner/day receipt survives restart and Goal
+deletion. Its bounded pending phase lets an original discovery finish before
+finalizing the same digest; an expired cutoff, missing source, changed authority
+or unresolved original work produces passive recovery. Missed days do not run in
+a catch-up burst. This adds no inference, source fetch, execution queue or cost
+ledger and does not change discovery's original UTC occurrence or deadlines.
+
+Inbox delivery is the default. Native notices need a separate explicit opt-in
+and an already reviewed programme notification allowance. Across all programmes,
+one owner can reserve one digest notice and one additional cited deadline notice
+per local day. Canonical Goal quiet windows and focus/observer interruption gates
+still apply. Slot reservation and the recipient-bound native outbox insert share
+one SQLite writer. Disable/revoke before commit prevents admission; the daemon
+claim also rechecks current consent, recipient, original day/generation and quiet
+hours. Ambiguous display consumes the slot and is never automatically retried.
+Deadline notices require an explicit ISO timestamp labelled `deadline:` or `due:`
+in a physically reopened cited source span, within 48 hours, plus a matching
+operator-declared category. Model urgency and finding prose supply no authority.
+
+Use the same finding card to reopen its original brief/checklist, prepare a local
+follow-through proposal, defer until a date, or dismiss it. Preparation checks the
+original Goal revision, programme generation, artifact readback, current Root
+and source age (at most 48 hours). It creates an inert existing C1 general-task
+Triage card with a fixed local checklist plan, zero inference calls and no
+external mutation. `FollowThroughIntent.task_proposal_id` names that canonical
+Work task card; it is not a second proposal row or a new allowance. Review and
+accept the plan separately in Tasks. Completion links the verified physical
+local output back to the original finding. Corrections, missing/altered artifacts
+or expired sources block preparation; a selected recovered Goal remains
+read-only. Defer/dismiss and action-key replay/conflict survive reload. Operator
+disposition receipts are limited to 128 per owner/day and 16 KiB each, without
+evicting history to manufacture capacity.
+
+Home reports actual native run/source/output receipts and remaining finite
+allowance, including unresolved accounting reservations. **Next digest** is the
+local 08:00 schedule. A source run time is left unset when the existing native
+queue and outstanding holds do not prove it; digest timing is not presented as a
+source execution time. Pause/review uses existing programme controls. No activity
+is invented when a source or programme is blocked.
+
+Isolated Linux checks cover SQLite clock/DST/restart and cross-programme caps,
+native opt-out/quiet claim fences, actual cited-deadline delivery slots across
+two programmes, literal local HTTP discovery, a current-Root
+finding-to-C1 proposal/acceptance journey, actual checklist file/readback and
+same-card completion. Scripted inference replaces only its owned transport;
+there are no real provider contacts or spending. These receipts do not establish
+model quality or native desktop display on macOS.
+
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional

@@ -466,6 +466,8 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    from src.guardian.goal_programmes import goal_programme_service
+    await goal_programme_service.start()
     init_scheduler()
     await sync_scheduled_jobs()
     try:
@@ -482,7 +484,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await cordis_host.stop()
+        try:
+            await cordis_host.stop()
+        finally:
+            await goal_programme_service.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

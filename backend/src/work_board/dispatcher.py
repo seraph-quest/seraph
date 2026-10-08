@@ -10249,6 +10249,16 @@ class WorkBoardDispatcher:
                 await finalize_done(task_id=projected.task.task_id,attempt_id=projected.attempt.attempt_id,
                     job_id=projected.attempt.workflow_run_id)
             await self._advance_linked_pipeline(projected.task)
+        # The entire optional hook, including terminal-proof inspection, must
+        # be isolated from the already committed ordinary task projection.
+        try:
+            if projected.attempt.ended_at is not None and projected.task.status in {WorkBoardStatus.done, WorkBoardStatus.blocked}:
+                # Lesson consent is distinct from execution authority. Failure
+                # to propose cannot undo or interrupt the ordinary task.
+                from src.memory.task_lessons import maybe_propose_automatic_lesson
+                await asyncio.wait_for(maybe_propose_automatic_lesson(projected.task, projected.attempt.attempt_id), timeout=5)
+        except Exception as exc:
+            logger.info("automatic task lesson unavailable for %s: %s", projected.task.task_id, type(exc).__name__)
         return projected
 
     async def _pause_general_task(self, task, attempt, projection):

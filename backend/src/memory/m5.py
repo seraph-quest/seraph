@@ -2571,6 +2571,8 @@ async def apply_memory_proposal_action(
     # branch. Reject before the generic writer or source/redaction helpers.
     async with get_session() as schema_db:
         schema_row = await schema_db.get(MemoryProposal, proposal_id)
+        if schema_row is not None and schema_row.schema_version == "task_method_proposal.v1":
+            raise ValueError("task_method_requires_specialized_review")
         if schema_row is not None and schema_row.schema_version == "procedure_recommendation.v1":
             raise ValueError("procedure_preference_requires_specialized_review")
         if schema_row is not None and (schema_row.schema_version == "opportunity_recommendation.v1"
@@ -2600,6 +2602,8 @@ async def apply_memory_proposal_action(
         ).scalar_one_or_none()
         if proposal is None:
             raise PermissionError("proposal_owner_mismatch")
+        if proposal.schema_version == "task_method_proposal.v1":
+            raise ValueError("task_method_requires_specialized_review")
         if (proposal.schema_version == "opportunity_recommendation.v1"
             or proposal.capability_id == "memory.opportunity-preference.v1"
             or _decode_object(proposal.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):

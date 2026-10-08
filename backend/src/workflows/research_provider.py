@@ -228,3 +228,118 @@ async def _adopt_child(jobs, *, child_id, owner, fence, artifact, raw, actual_co
         result={"output_sha256": artifact["content_sha256"], "operation_id": "remote:"+child_id,
             "actual_cost_microusd": actual_cost, "no_learning": True},
         result_summary="Attributed research JSON with physical readback; no_learning")
+
+
+async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruction, supplied):
+    """One public programme request through the same serial broker and ledger.
+
+    Only the server-owned native service selects this branch. The issuer is
+    provenance, never a replacement authenticated browser Root.
+    """
+    import asyncio
+    from src.workflows.research_sources import physical_discovery_inputs
+    from src.workflows.research_guard import discovery_writer_scope
+    from src.workflows.research_native import adopt_discovery_artifact
+    from src.work_board.research_artifacts import stage_discovery_artifact
+    from src.work_board.research_parent import DISCOVERY_SERVICE
+    from src.approval.runtime import set_runtime_context, reset_runtime_context
+    from src.security.trust_contract import TrustPrincipal, PrincipalType, AuthorityGrant
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    from src.model_fabric.contracts import finalized_openai_compatible_body
+    from src.model_fabric.hooks import RouteReceiptSession
+    from src.model_fabric.remote_inference_admission import (GpuAdmissionRequest, bind_remote_inference_receipt,
+        prepare_bound_remote_inference, remote_inference_admission_broker as broker)
+    from src.llm_runtime import _governed_preflight_target_async, _governed_research_chat_completion, _token_usage_from_payload
+    witness = await physical_discovery_inputs(jobs, job_id)
+    if type(slot) is not int or not 0 <= slot < witness.plan.limits.max_inference_requests:
+        raise ValueError("programme original inference request cap exceeded")
+    if len(witness.public_brief.encode()) > 2048:
+        raise ValueError("programme_public_brief_context_unsupported")
+    setup, policy_digest, target = _target()
+    body = finalized_openai_compatible_body(model_id=target["model_id"],
+        messages=[{"role": "system", "content": instruction},
+            {"role": "user", "content": json_bytes({"public_brief": witness.public_brief,
+                "untrusted_public_data": supplied, "no_learning": True}).decode()}],
+        options=target["options"], temperature=setup.temperature,
+        max_tokens=min(1024, setup.max_output_tokens), stream=False)
+    raw_body = json_bytes(body)
+    if len(raw_body) > 8192:
+        raise ValueError("programme_serialized_prompt_context_unsupported")
+    artifact = stage_discovery_artifact(programme_id=witness.plan.programme_id.hex,
+        job_id=job_id, kind="prompt", slot=slot, content=raw_body)
+    async with discovery_writer_scope(witness=witness):
+        await adopt_discovery_artifact(jobs, job_id=job_id, owner=owner, fence=fence, artifact=artifact)
+    witness = await physical_discovery_inputs(jobs, job_id)
+    principal = TrustPrincipal(principal_id=DISCOVERY_SERVICE, principal_type=PrincipalType.SERVICE,
+        grants=(AuthorityGrant.MODEL_INFERENCE,), job_id=job_id)
+    remaining = witness.plan.deadline_at.timestamp() - time.time()
+    if remaining <= 0:
+        raise TimeoutError("programme original deadline expired")
+    operation_id = "remote:" + job_id + ":" + str(slot)
+    context = build_canonical_inference_context("readonly_research_child", payload=body,
+        output_tokens=body["max_tokens"], timeout_seconds=remaining, principal=principal,
+        job_id=job_id, request_id=operation_id)
+    context = replace(context, deadline_at=witness.plan.deadline_at.timestamp(),
+        owner_budget_microusd=witness.plan.limits.cost_limit_microusd,
+        requirements=replace(context.requirements, max_latency_ms=int(setup.timeout_seconds * 1000)))
+    decision, proofs = await _governed_preflight_target_async(target, context)
+    if decision is None or not decision.allowed:
+        raise PermissionError("programme fixed route lacks current governed capability proof")
+    request = GpuAdmissionRequest.from_inference_context(context, operation_id=operation_id, uncertain_on_error=True)
+    hooks = RouteReceiptSession(context=context)
+    tokens = set_runtime_context(None, "high_risk", trust_principal=principal)
+    started = False
+    try:
+        with bind_remote_inference_receipt(repository=jobs, job_id=job_id, owner=owner, fencing_token=fence):
+            async with discovery_writer_scope(witness=witness):
+                await prepare_bound_remote_inference(request, profile_id=setup.profile_id)
+
+            async def invoke():
+                nonlocal started
+                hooks.attempt_started(decision, capability_proof_hashes=proofs)
+                started = True
+                remaining = context.deadline_at - time.time()
+                async with asyncio.timeout(min(setup.timeout_seconds, remaining)):
+                    return await _governed_research_chat_completion(decision=decision, context=context,
+                        body=body, api_key=target["api_key"])
+
+            try:
+                response, payload = await broker.execute(request, invoke)
+            except BaseException:
+                if started:
+                    hooks.attempt_finished(outcome="failed", error_code="programme_provider_incomplete", decision=decision)
+                    await hooks.finalize(outcome="failed")
+                else:
+                    await hooks.finalize_denied(decision=decision, reason_codes=("programme_contact_denied",))
+                try:
+                    receipt = broker.receipt_for(operation_id)
+                    witness = await physical_discovery_inputs(jobs, job_id)
+                    async with discovery_writer_scope(witness=witness):
+                        await broker.persist_receipt(receipt, repository=jobs, owner=owner, fencing_token=fence)
+                except Exception:
+                    pass  # Original unknown intent and ledger remain authoritative.
+                raise
+            hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
+                usage=_token_usage_from_payload(payload))
+            route = await hooks.finalize(outcome="succeeded")
+            if not route.persisted:
+                raise RuntimeError("programme route receipt persistence failed")
+            witness = await physical_discovery_inputs(jobs, job_id)
+            async with discovery_writer_scope(witness=witness):
+                await broker.persist_receipt(broker.receipt_for(operation_id), repository=jobs,
+                    owner=owner, fencing_token=fence)
+    finally:
+        reset_runtime_context(tokens)
+    raw = response.choices[0].message.content.encode("utf-8")
+    if not 0 < len(raw) <= 16384:
+        raise ValueError("programme child output exceeds its original bound")
+    snapshot = await jobs.inference_accounting_snapshot(job_id=job_id)
+    settled = next((row for row in snapshot["operations"] if row["operation_id"] == operation_id), None)
+    if snapshot.get("accounting_continuity_verified") is not True or not settled or settled["state"] != "settled":
+        raise RuntimeError("programme output lacks actual original settlement")
+    witness = await physical_discovery_inputs(jobs, job_id)
+    artifact = stage_discovery_artifact(programme_id=witness.plan.programme_id.hex,
+        job_id=job_id, kind="child", slot=slot, content=raw)
+    async with discovery_writer_scope(witness=witness):
+        await adopt_discovery_artifact(jobs, job_id=job_id, owner=owner, fence=fence, artifact=artifact)
+    return json.loads(raw)

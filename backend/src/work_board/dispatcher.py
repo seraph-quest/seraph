@@ -1559,6 +1559,7 @@ class WorkBoardDispatcher:
         self.now = now
         self.runner_id = runner_id
         self.general_tasks = general_tasks
+        self.goal_discovery = None
         self.strategy_resolver = strategy_resolver
         self.runner_session = f"{runner_id}:session"
         # GoalSnapshot executes inline in the dispatcher.  Keep a server-side

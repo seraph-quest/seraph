@@ -471,27 +471,29 @@ async def lifespan(app: FastAPI):
     await goal_programme_service.start()
     try:
         with current_task_service():
-            init_scheduler()
-            await sync_scheduled_jobs()
-            try:
-                from src.observer.manager import context_manager
-                await context_manager.refresh()
-            except Exception:
-                logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-            from src.browser.sessions import profiled_interaction_sessions
-            try:
-                await profiled_interaction_sessions.start()
-                # Optional native owners remain inside the current Python lifecycle.
+            from src.guardian.goal_discovery import current_goal_discovery
+            async with current_goal_discovery():
+                init_scheduler()
+                await sync_scheduled_jobs()
                 try:
-                    await cordis_host.start()
+                    from src.observer.manager import context_manager
+                    await context_manager.refresh()
                 except Exception:
-                    logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
-                yield
-            finally:
+                    logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
+                from src.browser.sessions import profiled_interaction_sessions
                 try:
-                    await cordis_host.stop()
+                    await profiled_interaction_sessions.start()
+                    # Optional native owners remain inside the current Python lifecycle.
+                    try:
+                        await cordis_host.start()
+                    except Exception:
+                        logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                    yield
                 finally:
-                    await profiled_interaction_sessions.stop()
+                    try:
+                        await cordis_host.stop()
+                    finally:
+                        await profiled_interaction_sessions.stop()
     finally:
         try:
             await goal_programme_service.stop()

@@ -483,6 +483,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     actual_host_stop = host.stop
     async def stop_with_late_failure(*args, **kwargs):
         assert _dispatcher.general_tasks is not None
+        assert _dispatcher.goal_discovery is not None and _dispatcher.goal_discovery.started
         assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
         observed_stop_owners.append(_dispatcher.general_tasks)
         assert browser_service.started
@@ -495,6 +496,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     startup_resources = []
     async def start_with_late_failure(*args, **kwargs):
         assert _dispatcher.general_tasks is not None
+        assert _dispatcher.goal_discovery is not None and _dispatcher.goal_discovery.started
         assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
         started = await actual_host_start(*args, **kwargs)
         startup_resources.append((host.process, host.boot_nonce))
@@ -508,17 +510,22 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     monkeypatch.setattr(host, "start", start_with_late_failure)
     async def goal_stop_after_browser():
         assert not browser_service.started and browser_service.active == {}
+        assert _dispatcher.goal_discovery is None
+        from src.guardian.goal_discovery import goal_discovery_service
+        assert not goal_discovery_service.started
     monkeypatch.setattr("src.guardian.goal_programmes.goal_programme_service.stop",
         AsyncMock(side_effect=goal_stop_after_browser))
     previous_boot = None
     receipts = []
     for _ in range(2):
         assert _dispatcher.general_tasks is None
+        assert _dispatcher.goal_discovery is None
         import asyncio
         expected = pytest.raises(asyncio.CancelledError) if host_failure == "cancel" else pytest.raises(RuntimeError, match="late Cordis stop failure") if host_failure == "stop" else nullcontext()
         with expected:
             async with app_module.lifespan(client._transport.app):
                 assert _dispatcher.general_tasks is not None
+                assert _dispatcher.goal_discovery is not None and _dispatcher.goal_discovery.started
                 assert _dispatcher.general_tasks.started and _dispatcher.general_tasks.registry.started
                 assert host.admitting
                 assert host.boot_nonce is not None and host.boot_nonce != previous_boot
@@ -547,6 +554,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                 page = browser_service.active[job_id]["page"]
                 assert page.latest is not None and not page.page.is_closed()
         assert _dispatcher.general_tasks is None
+        assert _dispatcher.goal_discovery is None
         assert not observed_stop_owners[-1].started
         assert not observed_stop_owners[-1].registry.started
         from src.guardian.goal_programmes import goal_programme_service

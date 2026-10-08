@@ -48,6 +48,44 @@ describe("Goal programme cockpit journey", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
   afterEach(() => { vi.unstubAllGlobals(); });
+  it("shows retained Unknown independently of capacity and never reads a private brief automatically", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, runs: [{ job_id: `goal-discovery:${"a".repeat(32)}`,
+        programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-08",
+        status: "running", deadline_at: "2026-10-08T12:05:00Z", external_effect_state: "unknown", outstanding_held: true,
+        accounting_liability: true, outcome: null, no_learning: true, recovery: "Original contact unknown; no replay." }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    await screen.findByText(/External effect: unknown/);
+    expect(screen.getByText("Original accounting liability is unresolved.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+  });
+  it("reads only an explicitly selected completed cited local brief with escaped text", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    const job = `goal-discovery:${"a".repeat(32)}`;
+    fetchMock.mockImplementation(async (url, init) => {
+      if (url.endsWith("/discovery")) return response({ goal_id: goal.id, current_day_only: true, no_learning: true,
+        runs: [{ job_id: job, programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3,
+          occurrence_day: "2026-10-08", status: "succeeded", deadline_at: "2026-10-08T12:05:00Z",
+          external_effect_state: "settled", outstanding_held: false, accounting_liability: false,
+          outcome: { state: "findings", coverage: "partial", freshness: "current", no_learning: true }, no_learning: true, recovery: null }] });
+      if (url.endsWith("/brief")) return response({ job_id: job, programme_id: "b".repeat(32), physical_readback: true,
+        no_learning: true, brief: { findings: ["<script>private readback text</script>"], citations: [], uncertainties: [],
+          prepared_artifact_refs: [], proposed_next_steps: [], coverage: { status: "partial", no_learning: true } } });
+      return base(url, init);
+    });
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    const selected = await screen.findByRole("button", { name: /Read selected discovery brief/ });
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+    fireEvent.click(selected);
+    const readback = await screen.findByLabelText("Discovery brief physical readback");
+    expect(readback).toHaveTextContent("<script>private readback text</script>");
+    expect(readback.querySelector("script")).toBeNull();
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/brief"))).toHaveLength(1);
+  });
   it("configures from the actual GoalForm without private egress and accepts only three explicit acknowledgments", async () => {
     renderEditor();
     expect(screen.getByLabelText("Public brief")).toHaveValue("");

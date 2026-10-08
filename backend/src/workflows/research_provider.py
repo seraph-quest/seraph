@@ -230,6 +230,48 @@ async def _adopt_child(jobs, *, child_id, owner, fence, artifact, raw, actual_co
         result_summary="Attributed research JSON with physical readback; no_learning")
 
 
+async def validated_discovery_strategy(binding):
+    """Only exact accepted ResearchStrategy directives; never private evidence."""
+    if binding.status == "none":
+        return None
+    if binding.status != "active":
+        raise ValueError("programme_research_strategy_blocked")
+    from src.memory.task_lessons import ResearchStrategy
+    from src.memory.m5 import sanitize_m5_memory_text_async
+    try:
+        strategy = ResearchStrategy.model_validate(binding.typed_data)
+        data = strategy.model_dump(mode="json")
+        if data != binding.typed_data:
+            raise ValueError("accepted strategy cannot be normalized implicitly")
+        for field in ("query_templates", "draft_sections", "stop_conditions"):
+            for text in data[field]:
+                if await sanitize_m5_memory_text_async(text) != text:
+                    raise ValueError("accepted strategy text changed during redaction")
+    except ValueError as exc:
+        code = "redaction_unavailable" if "unavailable" in str(exc) else "unsupported"
+        raise ValueError("programme_research_strategy_" + code) from None
+    if any(len(json_bytes(_discovery_strategy_projection(data, slot))) > 8192 for slot in range(3)):
+        raise ValueError("programme_research_strategy_context_unsupported")
+    return data
+
+
+def _discovery_strategy_projection(data, slot):
+    fields = {0: ("query_templates",), 1: ("source_preferences", "required_evidence_fields"),
+        2: ("draft_sections", "required_evidence_fields", "stop_conditions")}
+    if slot not in fields:
+        raise ValueError("programme_research_strategy_stage_unsupported")
+    return {"schema_version": data["schema_version"], **{field: data[field] for field in fields[slot]}}
+
+
+async def discovery_strategy_inputs(binding, slot):
+    data = await validated_discovery_strategy(binding)
+    reference = {key: value for key, value in binding.model_dump(mode="json").items()
+        if key in {"status", "method_id", "version", "digest"}}
+    if data is None:
+        return {"strategy_ref": reference} if slot in {0, 1} else {}
+    return {"strategy_ref": reference, "research_strategy": _discovery_strategy_projection(data, slot)}
+
+
 async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruction, supplied):
     """One public programme request through the same serial broker and ledger.
 
@@ -255,6 +297,10 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
         raise ValueError("programme original inference request cap exceeded")
     if len(witness.public_brief.encode()) > 2048:
         raise ValueError("programme_public_brief_context_unsupported")
+    expected_strategy = await discovery_strategy_inputs(witness.plan.strategy_binding, slot)
+    for key in ("strategy_ref", "research_strategy"):
+        if (key in supplied) != (key in expected_strategy) or supplied.get(key) != expected_strategy.get(key):
+            raise ValueError("programme_research_strategy_original_input_changed")
     setup, policy_digest, target = _target()
     body = finalized_openai_compatible_body(model_id=target["model_id"],
         messages=[{"role": "system", "content": instruction},

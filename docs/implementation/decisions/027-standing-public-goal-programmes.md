@@ -184,8 +184,9 @@ more time. There are at most three queries, fifteen combined deduplicated search
 results, four selected sources, and four total governed inference requests.
 The existing broker remains the single remote lane. Generation spend includes
 all settled charges and reserved, contacted or Unknown liabilities across every
-accounting period. A previous outstanding occurrence for the same Goal or
-stable identity retains its hold across new generations.
+accounting period. A previous outstanding occurrence for the same canonical Goal
+and stable operator identity retains its hold across new generations. A different
+Goal for the same identity is not counted as that Goal's discovery occurrence.
 
 Public search is a pinned HTTPS POST only to
 `https://html.duckduckgo.com/html/`, with only bounded `q`, empty `b`, and fixed
@@ -222,6 +223,15 @@ writer, then their original job/input/authority/checkpoint digests and current
 programme/Goal/identity/route are checked under the existing configuration fence.
 An optional current `StrategyResolver` supplies the pinned typed method binding;
 absence remains an explicit baseline with no future-module import.
+An active binding applies only canonical `ResearchStrategy.v1` directives:
+query templates during query planning, finite source preferences and evidence
+fields during selection, and draft sections, evidence fields and stop conditions
+during brief preparation. The full accepted data stays immutable and must pass
+vault-aware safety checks before staging; each request contains only its stage's
+projection, with the original binding rechecked before contact and adoption.
+Unsafe, unrepresentable or oversized inputs fail closed within the existing
+8 KiB prompt bound; they cannot add tools, permissions, contacts or private Goal
+context. An absent strategy preserves the baseline request shapes.
 
 Authenticated operators inspect retained canonical occurrence history and
 explicitly select a completed local brief for current-authority readback. A new

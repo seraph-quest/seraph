@@ -22,6 +22,24 @@ _profile_bindings: ContextVar[dict[str, str]] = ContextVar("inference_accounting
 _current_runtime: ContextVar[str | None] = ContextVar("inference_accounting_runtime", default=None)
 _near_billing: ContextVar[dict[str, object] | None] = ContextVar("near_billing_evidence", default=None)
 _near_contact: ContextVar[object | None] = ContextVar("near_contact_authority", default=None)
+_task_group: ContextVar[object | None] = ContextVar("general_task_accounting_group", default=None)
+
+
+@contextmanager
+def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None,
+                                 task_attempt_id=None, plan_revision=0,
+                                 selected_grant_digest=None, parent_owner=None, parent_fence=None):
+    from src.work_board.contracts import TaskProposalGroupV1
+    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation"}:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    token = _task_group.set({"group": group, "role": role, "task_id": task_id,
+        "task_attempt_id": task_attempt_id, "plan_revision": plan_revision,
+        "selected_grant_digest": selected_grant_digest, "parent_owner": parent_owner,
+        "parent_fence": parent_fence})
+    try:
+        yield
+    finally:
+        _task_group.reset(token)
 
 
 @contextmanager
@@ -335,6 +353,9 @@ class DurableInferenceBrokerMixin:
             if type(bound) is not int or bound <= 0:
                 raise InferenceAccountingError("accounting_server_bound_required")
             request = replace(request, estimated_cost_microusd=bound)
+            task_binding = _task_group.get()
+            if task_binding is not None and request.runtime_path != "general_task_planner":
+                raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
             if near and ephemeral:
@@ -377,6 +398,9 @@ class DurableInferenceBrokerMixin:
                         idempotency_key=request.operation_id),
                     inputs={"payload_digest": request.data_digest, "runtime_path": request.runtime_path},
                     session_id=request.session_id or None, priority=min(100, request.priority.rank * 20),
+                    operator_session_id=request.session_id if task_binding else None,
+                    goal_id=task_binding["group"].goal_id if task_binding else None,
+                    goal_revision=task_binding["group"].goal_revision if task_binding else None,
                     declared_authority={"principal": request.owner_id, **({"service_id": request.owner_id} if owner_kind == "service" else {})},
                     service_id=request.owner_id if owner_kind == "service" else None,
                     deadline_at=datetime.fromtimestamp(request.deadline_at, timezone.utc),
@@ -402,6 +426,7 @@ class DurableInferenceBrokerMixin:
                 bound_microusd=bound, owner_ceiling_microusd=request.owner_budget_microusd,
                 priority=request.priority.rank, deadline_at=request.deadline_at,
                 owner=owner, fencing_token=fence,
+                general_task_binding=task_binding,
             )
             return _AccountingHandle(request, repository, job_id, owner, fence, policy_digest,
                 reservation["sequence"], ephemeral)

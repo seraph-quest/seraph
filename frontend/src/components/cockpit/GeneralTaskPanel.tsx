@@ -153,6 +153,15 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
       <button type="button" disabled={busy || !owned || Boolean(pendingEdit)} onClick={() => void refresh()}>Refresh current task plan</button>
       {read && <>
         <p className="text-xs">Task revision {read.task_revision} · plan revision {read.plan?.revision ?? "not yet valid"} · no_learning. Acceptance grants no new permission; the dispatcher owns admission and each effect still requires its current approval.</p>
+        {read.native_execution && <section aria-label="Native task execution" className="mt-3 rounded border border-white/10 p-2">
+          <p role="status">Native phase {read.native_execution.phase} · manifest revision {read.native_execution.manifest_revision}</p>
+          <p>Original deadline {read.native_execution.original_deadline_at} · native cutoff {read.native_execution.native_deadline_at}</p>
+          <p>Remaining work: {read.native_execution.remaining_steps.join(", ") || "none"}</p>
+          {read.native_execution.steps.map(step => <p key={step.step_id}>{step.step_id} · {step.status} · {step.contact_state}</p>)}
+          <p>Verified partial outputs: {read.native_execution.partial_output_refs.length}</p>
+          {read.native_execution.partial_output_refs.map(ref => <p key={ref.artifact_id} className="break-all text-xs">{ref.artifact_id}</p>)}
+          <p className="text-xs">Partial outputs remain separate from final task success. Unknown contact requires reconciliation before continuing.</p>
+        </section>}
         {read.approval_pause && <section aria-label="Paused task approval" className="mt-3 rounded border border-white/10 p-2">
           <p role="status">Approval {read.approval_pause.approval_status} · {read.approval_pause.step_id} · {read.approval_pause.tool_id}{read.approval_pause.reason ? ` · ${read.approval_pause.reason}` : ""}</p>
           <p>Existing run {read.approval_pause.workflow_run_id} · attempt {read.approval_pause.attempt_id} · original deadline {read.approval_pause.original_deadline_at}</p>

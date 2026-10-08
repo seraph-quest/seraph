@@ -80,7 +80,7 @@ async def test_missing_authority_denies_before_policy_and_contact(changes, reaso
     assert error.value.code == reason
 
 
-async def prepare(accounting_db, monkeypatch):
+async def prepare(accounting_db, monkeypatch, *, existing_owner=None):
     from src.auth.service import create_session
     from src.api.model_fabric_settings import _setup_configuration
     from src.model_fabric.configuration import write_model_fabric_configuration
@@ -101,14 +101,22 @@ async def prepare(accounting_db, monkeypatch):
     await jobs.configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", broker)
-    _, operator = await create_session()
+    if existing_owner is None:
+        _, operator = await create_session()
+    else:
+        from src.auth.service import authenticate_session
+        operator = await authenticate_session(existing_owner.session_id, touch=False)
+        assert operator.principal.principal_id == existing_owner.principal_id
     from src.llm_runtime import _provider_profile
     profile = _provider_profile("openrouter")
     profile = replace(profile, routing_model=profile.routing_model or profile.model)
     candidate = candidate_from_profile(profile)
-    from src.db.models import ModelRouteReceiptRecord
+    from src.db.models import ModelRouteReceiptRecord, Goal, GoalLevel, GoalStatus
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with accounting_db[2]() as db:
+        db.add(Goal(id="goal:fixture", title="Disposable planning goal", level=GoalLevel.daily,
+            status=GoalStatus.active, revision=1, owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id))
         db.add(ModelRouteReceiptRecord(receipt_id="literal-fixture", receipt_hash="b"*64,
             request_id="literal-fixture", route_decision_id="literal-fixture", runtime_path="functional_fixture",
             workload="interactive", outcome="succeeded", egress_class="cloud_allowed_full",
@@ -145,6 +153,15 @@ async def test_real_serial_broker_records_planning_contact_without_task_executio
     class Boundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
+            snapshot = await jobs.inference_accounting_snapshot()
+            assert len(snapshot["operations"]) == 1
+            entry = json.loads(snapshot["operations"][0]["evidence_json"])[1]
+            assert entry["kind"] == "general_task_group_reservation.v1"
+            assert entry["role"] == "initial_proposal" and entry["call_ordinal"] == 1
+            assert entry["group"]["owner_session_id"] == owner.session_id
+            assert entry["group"]["goal_id"] == "goal:fixture"
+            assert entry["group"]["max_inference_calls"] == 12
+            assert entry["selected_grant_digest"] is None
             calls.append(json.loads(request.content))
             return httpx.Response(200, request=request, stream=Bytes())
     original = httpx.AsyncClient
@@ -166,12 +183,21 @@ async def test_real_serial_broker_records_planning_contact_without_task_executio
         RemoteInferenceAdmissionBroker(durable_accounting=True))
     with pytest.raises(BoardError, match="Original planning operation exists"):
         await propose(accounting_db, owner)
+    with pytest.raises(BoardError, match="Original planning operation exists"):
+        await propose(accounting_db, owner, task_input(intent="Changed unpublished intent must not renew the allowance"))
     assert len(calls) == 1
     snapshot = await jobs.inference_accounting_snapshot()
     assert snapshot["committed_microusd"] == 0
     assert snapshot["unknown_microusd"] == 0
     assert snapshot["operations"][0]["state"] == "settled"
     assert snapshot["operations"][0]["runtime_path"] == "general_task_planner"
+    from src.work_board.general_task_proposal import group_entry, proposal_provenance
+    from src.work_board.contracts import TaskProposalGroupV1
+    operation = snapshot["operations"][0]
+    group = TaskProposalGroupV1.model_validate(group_entry(operation)["group"])
+    provenance = proposal_provenance(operation, group)
+    assert provenance.original_deadline_at == group.original_deadline_at
+    assert provenance.reservation_sequence == operation["sequence"]
     async with accounting_db[2]() as db:
         assert list((await db.execute(select(WorkBoardTask))).scalars()) == []
         roots = list((await db.execute(select(WorkflowRunState))).scalars())

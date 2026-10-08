@@ -456,12 +456,14 @@ def _bounded_checkpoint_receipts(
     except (TypeError, ValueError, OverflowError):
         bounded_limit = 50
     items = list(history) if isinstance(history, Iterable) else []
+    from src.workflows.general_task_guard import protected_checkpoint_ids
+    protected_ids = protected_checkpoint_ids(items)
     latest_special: dict[str, tuple[int, Any]] = {}
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
             continue
         checkpoint_id = _text(item.get("checkpoint_id"))
-        if checkpoint_id in _REPO_REPAIR_RESERVATION_CHECKPOINT_IDS:
+        if checkpoint_id in _REPO_REPAIR_RESERVATION_CHECKPOINT_IDS or checkpoint_id in protected_ids:
             latest_special[checkpoint_id] = (index, item)
     special_indexes = {index for index, _item in latest_special.values()}
     ordinary = [
@@ -470,6 +472,8 @@ def _bounded_checkpoint_receipts(
         if index not in special_indexes
     ]
     retained_special = list(latest_special.values())
+    if len(retained_special) > bounded_limit:
+        raise DurableJobTransitionError("protected checkpoint capacity reached")
     ordinary_slots = max(0, bounded_limit - len(retained_special))
     selected = ordinary[-ordinary_slots:] if ordinary_slots else []
     selected.extend(retained_special)
@@ -1309,9 +1313,16 @@ def _append_parent_fence_condition(
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
+    if getattr(run, "job_kind", None) == "agent.task.v1":
+        from src.workflows.general_task_guard import append_general_task_root_gate
+        append_general_task_root_gate(conditions, run, now=now)
     if getattr(run, "job_kind", None) == "readonly_research_child":
         from src.workflows.research_guard import append_research_parent_gate
         if append_research_parent_gate(conditions, run, now=now):
+            return
+    if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
+        from src.workflows.general_task_guard import append_general_task_parent_gate
+        if append_general_task_parent_gate(conditions, run, now=now):
             return
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
@@ -2591,6 +2602,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if identity.job_kind == "general_task_native_tool_v1":
+            from src.workflows.general_task_guard import is_fixed_child_admission
+            if not is_fixed_child_admission(admission_authority_check):
+                raise DurableJobAdmissionDenied("general_task_fixed_native_admission_required")
         if near_text_policy_scope is not None:
             from src.work_board.near_text_native import validate_native_policy_scope
             validate_native_policy_scope(near_text_policy_scope, run_or_identity=identity, phase="admit")
@@ -3081,6 +3096,26 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """Compatibility alias emphasizing that ScheduledJob is only a trigger."""
         return await self.admit_job(spec)
 
+    async def replace_general_task_manifest(self, job_id, **bindings):
+        from src.workflows.general_task_guard import replace_manifest
+        return await replace_manifest(self, job_id, **bindings)
+
+    async def admit_general_task_tool_child(self, spec, **bindings):
+        from src.workflows.general_task_guard import admit_child
+        return await admit_child(self, spec, **bindings)
+
+    async def publish_general_task_step_receipt(self, parent_id, **bindings):
+        from src.workflows.general_task_guard import publish_step_receipt
+        return await publish_step_receipt(self, parent_id, **bindings)
+
+    async def pause_general_task_native_parent(self, parent_id, **bindings):
+        from src.workflows.general_task_guard import pause_parent
+        return await pause_parent(self, parent_id, **bindings)
+
+    async def resume_general_task_native_parent(self, parent_id, **bindings):
+        from src.workflows.general_task_guard import resume_parent
+        return await resume_parent(self, parent_id, **bindings)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         async with self._session() as db:
             run = (
@@ -3397,6 +3432,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            if to_status == "queued" and preflight_run.job_kind == "agent.task.v1":
+                from src.workflows.general_task_guard import read_manifest
+                native_manifest = read_manifest(preflight_run)
+                if native_manifest is not None:
+                    raise DurableJobTransitionError("native parent phases require the paired manifest resume writer")
             general_resume_guard = (
                 to_status == "queued" and _general_task_approval_wait(preflight_run)
             )
@@ -3426,12 +3466,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
             guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
             preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            native_writer = requires_native_writer(preflight_run)
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
@@ -3439,6 +3481,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     near_writer_started = near_queue_guard
                     general_writer_started = general_resume_guard
             run = await self._fetch(db, job_id)
+            if native_writer and run.job_kind == "agent.task.v1":
+                await verify_native_writer(self, db, run)
+            elif native_writer and to_status in {"succeeded", "degraded"}:
+                from src.workflows.general_task_guard import assert_general_task_child_terminal_current
+                await assert_general_task_child_terminal_current(self, db, run)
             if to_status == "queued" and _general_task_approval_wait(run):
                 if not general_writer_started or _general_task_resume_witness is None:
                     raise DurableJobTransitionError(
@@ -4257,6 +4304,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 await recheck_native(db,run,witness=opportunity_preference_witness)
                 if run.attempt_count >= 1 or run.max_attempts != 1:
                     raise DurableJobLeaseError("the original recommendation attempt is exhausted")
+            if run.job_kind == "general_task_native_tool_v1":
+                from src.workflows.general_task_guard import assert_general_task_child_phase_current
+                if continue_existing_attempt or run.attempt_count != 0 or run.fencing_token != 0:
+                    raise DurableJobLeaseError("the original general task native claim is exhausted")
+                await assert_general_task_child_phase_current(db, run)
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
@@ -4835,6 +4887,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         opportunity_preference_witness=None,
         native_physical_reservation=None,
     ) -> dict[str, Any]:
+        if checkpoint_id == "general-task:current-manifest:v1":
+            raise DurableJobTransitionError("general task manifest requires its fixed native writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
         if not _text(checkpoint_id):
@@ -4856,6 +4910,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if run.job_kind == "memory.opportunity-preference.v1" and checkpoint_id == "opportunity-preference-source-use":
                 from src.work_board.opportunity_preference_native import recheck_native
                 await recheck_native(db,run,witness=opportunity_preference_witness)
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                await verify_native_writer(self, db, run)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
@@ -6062,6 +6119,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                await db.rollback()
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                run = await self._fetch(db, job_id)
+                await verify_native_writer(self, db, run)
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -6155,6 +6219,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobLeaseError("recovery owner identity is required")
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                raise DurableJobLeaseError("native general task recovery cannot adopt an unbound artifact")
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -6654,6 +6721,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                if readback_authority_check is None:
+                    await db.rollback()
+                    from src.work_board.repository import _begin_sqlite_immediate
+                    await _begin_sqlite_immediate(db)
+                    run = await self._fetch(db, job_id)
+                await verify_native_writer(self, db, run)
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),

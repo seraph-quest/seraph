@@ -15,6 +15,31 @@ const plan = { task_id: task.task_id, task_revision: 2, accepted: false, no_lear
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status }); }
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
 
+it("shows factual native remaining work and verified partial refs separately from final success", async () => {
+  const native = { phase: "native_wait", plan_revision: 1, manifest_revision: 4,
+    original_deadline_at: "2099-01-01T00:10:00Z", native_deadline_at: "2099-01-01T00:05:00Z",
+    admitted_invocation_ids: ["native-child-one"], remaining_steps: ["note"], no_learning: true,
+    steps: [{ step_id: "read", status: "verified", contact_state: "settled", invocation_id: "native-child-one",
+      plan_revision: 1, artifact_refs: [{ artifact_id: "local-output-one", digest: "a".repeat(64), schema_version: "GeneralTaskOutput.v1" }] }],
+    partial_output_refs: [{ artifact_id: "local-output-one", digest: "a".repeat(64), schema_version: "GeneralTaskOutput.v1" }] };
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, accepted: true, native_execution: native }));
+  render(<GeneralTaskPanel {...owner} task={{ ...task, status: "blocked" }} />);
+  expect(await screen.findByRole("region", { name: "Native task execution" })).toHaveTextContent("Native phase native_wait");
+  expect(screen.getByText("Remaining work: note")).toBeInTheDocument();
+  expect(screen.getByText("Verified partial outputs: 1")).toBeInTheDocument();
+  expect(screen.getByText("local-output-one")).toBeInTheDocument();
+  expect(screen.getByText(/Partial outputs remain separate from final task success/)).toBeInTheDocument();
+});
+
+it("rejects a native receipt cutoff that extends its original deadline", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, native_execution: { phase: "assembly", plan_revision: 1,
+    manifest_revision: 1, original_deadline_at: "2099-01-01T00:05:00Z", native_deadline_at: "2099-01-01T00:10:00Z",
+    steps: [], admitted_invocation_ids: [], remaining_steps: ["note"], partial_output_refs: [], no_learning: true } }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Native task receipts are incomplete");
+  expect(screen.queryByLabelText("Native task execution")).toBeNull();
+});
+
 it("submits ordinary intent without a forged tool plan and opens its persisted inert Work task", async () => {
   const created = vi.fn();
   vi.mocked(apiFetch).mockImplementation(async (_url, init) => {

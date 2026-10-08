@@ -649,6 +649,7 @@ def validate_capability_input(
     raw: Mapping[str, Any],
     *,
     allow_scheduler: bool = False,
+    general_task_publication=None,
 ) -> dict[str, Any]:
     """Validate and canonicalize one registered capability input.
 
@@ -666,7 +667,16 @@ def validate_capability_input(
         raise TypedInputError("typed_input_category_invalid", "the capability is not executable as a task")
     if not isinstance(raw, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must be an object")
-    _reject_authority_input_keys(raw)
+    scan = raw
+    if normalized_capability == "agent.task.v1" and general_task_publication is None and any(
+        key in raw for key in ("proposal_group", "proposal_provenance")):
+        raise TypedInputError("typed_input_authority_field", "Proposal provenance is server-owned")
+    if general_task_publication is not None:
+        if normalized_capability != "agent.task.v1":
+            raise TypedInputError("typed_input_authority_field", "Task provenance cannot bind another capability")
+        from src.work_board.general_task_proposal import publication_scan_input
+        scan = publication_scan_input(general_task_publication, raw)
+    _reject_authority_input_keys(scan)
     model_type = _typed_input_model(normalized_capability)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the capability input model is unavailable")
@@ -1480,7 +1490,11 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
     try:
-        _reject_authority_input_keys(raw_input)
+        if capability_id == "agent.task.v1" and _text(task.input_artifact_id):
+            from src.work_board.general_task_proposal import stored_scan_input
+            _reject_authority_input_keys(stored_scan_input(task, raw_input))
+        else:
+            _reject_authority_input_keys(raw_input)
     except TypedInputError as exc:
         # Preserve the legacy workspace-envelope contract.  Older callers and
         # their operator receipts intentionally expose one generic invalid
@@ -4773,7 +4787,12 @@ class WorkBoardDispatcher:
             safe_inputs["parent_handoff_digest"] = _text(attempt.parent_handoff_digest)
         deadline = self.now() + timedelta(seconds=runtime_seconds)
         if general:
-            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+            from src.work_board.contracts import GeneralTaskEnvelope
+            envelope = GeneralTaskEnvelope.model_validate(inputs)
+            if envelope.proposal_group is None:
+                raise TypedInputError("general_task_provenance_missing", "Original task deadline requires proposal provenance")
+            deadline = min(envelope.proposal_group.original_deadline_at,
+                _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds))
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
                 job_id=job_id,

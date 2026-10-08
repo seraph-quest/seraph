@@ -27,6 +27,15 @@ export interface GeneralTaskPlanRead {
   task_input: GeneralTaskInput; plan: TaskPlan | null; descriptors: GeneralToolDescriptor[]; proposal_error?: string;
   strategy: { status: string; reason: string | null }; no_learning: true;
   approval_pause?: GeneralTaskApprovalPause | null;
+  native_execution?: GeneralTaskNativeExecution;
+}
+export interface GeneralTaskNativeExecution {
+  phase: "native_ready" | "native_wait" | "assembly" | "operator_paused" | "approval_wait" | "cancelled" | "unknown_recovery" | "complete";
+  plan_revision: number; manifest_revision: number; original_deadline_at: string; native_deadline_at: string;
+  steps: { step_id: string; status: string; contact_state: string; invocation_id: string; plan_revision: number;
+    artifact_refs: { artifact_id: string; digest: string; schema_version: string }[] }[];
+  admitted_invocation_ids: string[]; remaining_steps: string[];
+  partial_output_refs: { artifact_id: string; digest: string; schema_version: string }[]; no_learning: true;
 }
 export interface GeneralTaskApprovalPause {
   approval_id: string; approval_status: "pending" | "approved" | "expired" | "denied" | "revoked" | "consumed" | "unavailable";
@@ -62,6 +71,9 @@ export async function generalTaskRequest(path: string, body?: unknown, signal?: 
   return response.json();
 }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const artifactReference = (v: unknown): boolean => record(v) && typeof v.artifact_id === "string"
+  && v.artifact_id.length > 0 && v.artifact_id.length <= 128 && typeof v.digest === "string"
+  && /^[a-f0-9]{64}$/.test(v.digest) && typeof v.schema_version === "string";
 export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): GeneralTaskPlanRead {
   if (!record(value) || value.task_id !== task.task_id || value.task_revision !== task.task_revision
     || typeof value.accepted !== "boolean" || value.no_learning !== true || !record(value.task_input)
@@ -72,6 +84,25 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     throw new Error("Plan readback did not match the current task revision. Refresh Work before reviewing.");
   }
   const descriptors = value.descriptors;
+  const native = value.native_execution;
+  if (native != null && (!record(native) || !["native_ready", "native_wait", "assembly", "operator_paused", "approval_wait", "cancelled", "unknown_recovery", "complete"].includes(String(native.phase))
+    || !Number.isSafeInteger(native.plan_revision) || Number(native.plan_revision) < 1 || Number(native.plan_revision) > 16
+    || !Number.isSafeInteger(native.manifest_revision) || Number(native.manifest_revision) < 1
+    || native.no_learning !== true || typeof native.original_deadline_at !== "string" || typeof native.native_deadline_at !== "string"
+    || !Number.isFinite(Date.parse(native.original_deadline_at)) || !Number.isFinite(Date.parse(native.native_deadline_at))
+    || Date.parse(native.native_deadline_at) > Date.parse(native.original_deadline_at)
+    || !Array.isArray(native.steps) || native.steps.length > 16
+    || native.steps.some(step => !record(step) || typeof step.step_id !== "string" || typeof step.invocation_id !== "string"
+      || !["admitted", "running", "awaiting_approval", "verified", "failed", "blocked", "cancelled", "unknown"].includes(String(step.status))
+      || !["not_contacted", "contact_started", "contact_denied", "unknown", "settled"].includes(String(step.contact_state))
+      || !Number.isSafeInteger(step.plan_revision) || Number(step.plan_revision) < 1 || Number(step.plan_revision) > 16
+      || !Array.isArray(step.artifact_refs) || step.artifact_refs.length > 16 || !step.artifact_refs.every(artifactReference))
+    || !Array.isArray(native.admitted_invocation_ids) || native.admitted_invocation_ids.length > 16
+    || !native.admitted_invocation_ids.every(id => typeof id === "string")
+    || !Array.isArray(native.remaining_steps) || native.remaining_steps.length > 16 || !native.remaining_steps.every(id => typeof id === "string")
+    || !Array.isArray(native.partial_output_refs) || native.partial_output_refs.length > 16 || !native.partial_output_refs.every(artifactReference))) {
+    throw new Error("Native task receipts are incomplete. Refresh Work before continuing.");
+  }
   const pause = value.approval_pause;
   if (pause != null && (!record(pause) || !["pending", "approved", "expired", "denied", "revoked", "consumed", "unavailable"].includes(String(pause.approval_status))
     || ["approval_id", "step_id", "tool_id", "workflow_run_id", "attempt_id"].some(k => typeof pause[k] !== "string" || !pause[k])

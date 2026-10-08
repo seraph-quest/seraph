@@ -331,12 +331,24 @@ class GeneralTaskService:
                 raise BoardError("general_task_tool_set_changed", "Refresh the current tool contract", status_code=409)
             task_input = request.input.model_copy(update={"tool_set_digest": tool_digest})
             try:
-                plan = await self.planner.propose(db, owner, task_input, descriptors,
-                    goal_revision=request.goal_revision, idempotency_key=request.idempotency_key)
-                request = GeneralTaskCreate(goal_revision=request.goal_revision,
-                    idempotency_key=request.idempotency_key, input=task_input, plan=plan,
-                    expected_plan_revision=plan.revision)
-                envelope = await self.validate(owner, request)
+                proposal = await self.planner.propose(db, owner, task_input, descriptors,
+                    goal_revision=request.goal_revision, idempotency_key=request.idempotency_key,
+                    with_provenance=True)
+                from src.work_board.general_task_planner import TaskProposalResult
+                if not isinstance(proposal, TaskProposalResult):
+                    raise BoardError("general_task_provenance_missing", "Planner must preserve its original accounting provenance", status_code=409)
+                if proposal.plan is None:
+                    envelope = GeneralTaskEnvelope(task_input=task_input,
+                        proposal_error=proposal.error, strategy=await self.strategy(owner, task_input.goal_ref),
+                        proposal_group=proposal.group, proposal_provenance=proposal.provenance)
+                else:
+                    plan = proposal.plan
+                    request = GeneralTaskCreate(goal_revision=request.goal_revision,
+                        idempotency_key=request.idempotency_key, input=task_input, plan=plan,
+                        expected_plan_revision=plan.revision)
+                    envelope = await self.validate(owner, request)
+                    envelope = envelope.model_copy(update={"proposal_group": proposal.group,
+                        "proposal_provenance": proposal.provenance})
             except BoardError as exc:
                 if exc.code != "general_task_plan_invalid":
                     raise
@@ -344,14 +356,27 @@ class GeneralTaskService:
                 # retaining no unsafe/untyped executable fields from the model.
                 envelope = GeneralTaskEnvelope(task_input=task_input,
                     proposal_error="general_task_plan_invalid",
-                    strategy=await self.strategy(owner, task_input.goal_ref))
+                    strategy=await self.strategy(owner, task_input.goal_ref),
+                    proposal_group=proposal.group, proposal_provenance=proposal.provenance)
         else:
             envelope = await self.validate(owner, request)
+            from src.auth.service import authenticate_session
+            from src.work_board.general_task_proposal import new_group
+            operator = await authenticate_session(owner.session_id, touch=False)
+            if operator.principal.principal_id != owner.principal_id:
+                raise BoardError("general_task_owner_changed", "Original operator changed", status_code=403)
+            descriptors, _ = self.snapshot()
+            group = new_group(owner, envelope.task_input, descriptors,
+                goal_revision=request.goal_revision, request_key=request.idempotency_key,
+                expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
+            envelope = envelope.model_copy(update={"proposal_group": group})
         envelope = envelope.model_copy(update={"evidence": evidence})
+        from src.work_board.general_task_proposal import seal_proposal_publication
+        publication = await seal_proposal_publication(db, owner, envelope, goal_revision=request.goal_revision)
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=CAPABILITY, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision, input=envelope.model_dump(mode="json"),
-            idempotency_key="general:" + request.idempotency_key))
+            idempotency_key="general:" + request.idempotency_key), general_task_publication=publication)
         # prepare_input_artifact reserves durably before filesystem I/O; task
         # publication binds that exact artifact under the repository writer CAS.
         return await self.repository.create_task(db, owner, WorkBoardTaskCreate(
@@ -375,10 +400,42 @@ class GeneralTaskService:
             WorkBoardEvent.owner_session_id == owner.session_id,
             WorkBoardEvent.kind.in_(("task.created", "task.promote"))))).scalars().all()
         accepted = any(json.loads(item.metadata_json).get("status") == "todo" for item in acceptance_events)
-        return {"task_id": task.task_id, "task_revision": task.task_revision,
+        payload = {"task_id": task.task_id, "task_revision": task.task_revision,
             "accepted": accepted,
             **envelope.model_dump(mode="json"), "no_learning": True,
             "approval_pause": await self.approval_pause(db, owner, task, envelope)}
+        from src.db.models import WorkBoardAttempt, WorkflowRunState
+        from src.workflows.general_task_guard import read_manifest
+        from src.work_board.general_task_runtime_artifacts import verify_readonly_native_projection, read_native_artifact_reference
+        from src.work_board.general_task_native import current_plan
+        from src.work_board.contracts import GeneralTaskArtifactRef
+        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+            .order_by(WorkBoardAttempt.started_at.desc()).limit(1))
+        parent = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt and attempt.workflow_run_id else None
+        manifest = read_manifest(parent) if parent else None
+        if manifest is not None:
+            await verify_readonly_native_projection(db, owner, parent, task, attempt, manifest)
+            plan = current_plan(manifest, envelope)
+            payload["plan"] = plan.model_dump(mode="json")
+            steps = []
+            for index, step_id in enumerate(manifest.step_ids):
+                receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
+                    artifact_id=manifest.step_receipt_artifact_ids[index],
+                    digest=manifest.step_receipt_digests[index], schema_version="StepReceipt.v1"),
+                    parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)
+                steps.append({"step_id": step_id, "status": receipt.status, "contact_state": receipt.contact_state,
+                    "invocation_id": receipt.invocation_id, "plan_revision": receipt.plan_revision,
+                    "artifact_refs": [ref.model_dump(mode="json") for ref in receipt.artifact_refs]})
+            payload["native_execution"] = {"phase": manifest.phase, "plan_revision": manifest.plan_revision,
+                "manifest_revision": manifest.manifest_revision, "original_deadline_at": manifest.original_deadline_at.isoformat(),
+                "native_deadline_at": manifest.native_deadline_at.isoformat(), "steps": steps,
+                "admitted_invocation_ids": list(manifest.admitted_invocation_ids),
+                "remaining_steps": [step.step_id for step in plan.steps if not any(
+                    item["step_id"] == step.step_id and item["status"] == "verified" for item in steps)],
+                "partial_output_refs": [ref for item in steps if item["status"] == "verified" for ref in item["artifact_refs"]],
+                "no_learning": True}
+        return payload
 
     def recovered_outputs(self, projection, envelope):
         """Adopt only physically verified completed outputs, never call intent."""
@@ -548,11 +605,14 @@ class GeneralTaskService:
             input=prior.task_input.model_copy(update={"tool_set_digest": tool_digest}),
             plan=request.plan, expected_plan_revision=request.plan.revision)
         revised = await self.validate(owner, revised_request)
-        revised = revised.model_copy(update={"evidence": await self.evidence(db, owner, prior.task_input.evidence_refs)})
+        revised = revised.model_copy(update={"evidence": await self.evidence(db, owner, prior.task_input.evidence_refs),
+            "proposal_group": prior.proposal_group, "proposal_provenance": prior.proposal_provenance})
+        from src.work_board.general_task_proposal import seal_proposal_publication
+        publication = await seal_proposal_publication(db, owner, revised, goal_revision=task.goal_revision)
         metadata = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=CAPABILITY, goal_id=task.goal_id,
             goal_revision=task.goal_revision, input=revised.model_dump(mode="json"),
-            idempotency_key="general-edit:" + request.idempotency_key))
+            idempotency_key="general-edit:" + request.idempotency_key), general_task_publication=publication)
         staged = await stage_input_artifact(db, owner, artifact_id=metadata.artifact_id,
             capability_id=CAPABILITY, goal_id=task.goal_id, goal_revision=task.goal_revision)
         await _begin_sqlite_immediate(db)

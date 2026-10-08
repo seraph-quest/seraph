@@ -141,6 +141,14 @@ bound to already-settled operation sequence/revision. Live
 provider charges and managed Docker mount operation remain unverified until
 separate operator-authorised operational receipts exist.
 
+The Constitution's standing
+[no-evals and provider-free implementation boundary](./00-project-constitution.md#no-evals-and-provider-free-implementation)
+applies to all development and acceptance, including Cordis and self-improvement.
+No eval or inference call is authorized by an unverified quality label or a
+historical receipt; ordinary isolated regression/security tests and local
+effect/readback remain required. Ordinary approved product tasks retain their
+existing inference permissions.
+
 The implementation merge gate is local provider-free validation: deterministic
 tests, intercepted transport tests, static/configuration checks, and negative
 boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call

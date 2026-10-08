@@ -36,6 +36,39 @@ every target capability is shipped. The current implementation is recorded in
 pull requests, and the Seraph Execution project.
 This constitution is Seraph's sole product and accepted-target authority.
 
+## No Evals And Provider-Free Implementation
+
+Standing operator direction: do not propose, plan, create, or run evals unless
+the operator explicitly asks for evals. No money may be spent on evals. This
+includes unpaid or local campaigns, benchmarks, harness research, hidden quality
+corpora, model judges, synthetic replacements, and canaries used to measure
+quality or improvement. Do not turn any of these into a future capability,
+migration, activation, merge, or release gate.
+Capability work comes first. Any later eval requires the implemented capability
+and a new explicit operator request; it is not a planned milestone, reminder,
+or dependency. This direction stands until the operator changes it.
+
+Implementation and acceptance make no paid, live, free-tier, alternate-provider,
+or local-model inference calls. Ambient credentials and available credits are
+not authorization; disable or intercept external inference at the transport
+boundary. Ordinary isolated regression, integration, and security tests, actual
+local effects and readback, and independent review remain required. They prove
+the checked behavior, not model quality, learned improvement, or superiority.
+
+Self-improvement remains a main product feature: implement reviewed, reversible
+adaptation from ordinary task traces, explicit corrections, and skill or
+procedure changes under the existing learning authority. It does not depend on
+an eval campaign or the cancelled harness work in
+[#771](https://github.com/seraph-quest/seraph/issues/771), which is closed as not
+planned and excluded from completed
+[#736](https://github.com/seraph-quest/seraph/issues/736).
+
+This boundary governs development and acceptance; it does not disable ordinary
+operator-approved product inference under existing consent, grants, routing,
+and budgets. Historical receipts, capability-proof endpoints, and unverified
+quality labels authorize neither an eval nor implementation-time model calls.
+Preserve historical evidence without treating it as an active work requirement.
+
 ## Product Promise
 
 Seraph should help an operator make sustained progress without becoming an
@@ -153,7 +186,7 @@ Use these terms consistently in APIs, UI copy, issues, and active docs:
 - **edge**: a paired, revocable source or interface outside the canonical core;
 - **provider**: an inference or advisory integration, never Seraph's authority;
 - **guardian cycle**: observe, assess, propose, approve when required, act,
-  evaluate, and remember.
+  read back and record the outcome, and remember.
 
 ## Capability Status Vocabulary
 
@@ -162,7 +195,7 @@ Capability inventory, APIs, and operator UI use this lifecycle vocabulary:
 - **Shipped**: present on `develop`, available to its declared audience, and
   supported by the named validation receipt.
 - **Partial**: usable behavior exists on `develop`, with named missing boundaries.
-- **Experimental**: runnable only as an opt-in canary; interfaces or persistence
+- **Experimental**: runnable only with explicit opt-in; interfaces or persistence
   may change and the UI must say so.
 - **Planned**: accepted tracked work without a shipped implementation.
 - **Deprecated**: still present for migration, with its replacement and removal
@@ -179,7 +212,7 @@ and Deprecated capabilities must remain visibly distinct from supported paths.
 Material documents and decisions may use these states:
 
 - **Target**: accepted architecture or product intent, not yet shipped.
-- **Research**: evidence or option under evaluation, not a committed product contract.
+- **Research**: evidence or an option under consideration, not a committed product contract.
 - **Archived**: historical context that may contradict the current contract.
 - **Blocked**: accepted work cannot proceed until a named condition changes.
 

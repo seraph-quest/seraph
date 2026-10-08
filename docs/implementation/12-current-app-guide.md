@@ -11,8 +11,132 @@ The application described here runs the existing Python/FastAPI backend and
 React cockpit. [ADR-026](./decisions/026-all-plugin-cordis-architecture.md) accepts
 an all-plugin Cordis agent-runtime composition target; its migration capabilities
 are **Planned**. Continue using the current managed commands, workspace and
-operator controls. The architecture documentation does not install Cordis,
-replace the runtime or migrate stored data.
+operator controls. The architecture decision by itself does not install Cordis,
+replace the runtime or migrate stored data. The separately implemented optional
+lifecycle host below does not migrate the agent loop or canonical ownership.
+
+### Reviewed optional Cordis lifecycle host
+
+This is the implementation contract for [#1006](https://github.com/seraph-quest/seraph/issues/1006)
+under [ADR-026](./decisions/026-all-plugin-cordis-architecture.md). Availability
+requires a revision containing its independently reviewed implementation merge;
+receipts before that merge establish only the implementation under review.
+
+The private `runtime/cordis/` npm package uses stock **Cordis 4.0.0-rc.10**,
+integrity `sha512-xG90nPNQxR272cC4lR/m5LHevegIJvdddQBlKdEAdGz3n+zgH5lsgkg8o9fc2P3T/f+pO5D7FN1HZvkNBiABnw==`,
+**npm 11.8.0**, and **Node 22.x from 22.12.0 or Node 24.x**. The frontend and
+docs retain their own manifests and lockfiles. Install this package's locked
+dependencies explicitly with that npm version (`npm ci --ignore-scripts
+--omit=optional --no-audit --no-fund` inside `runtime/cordis/`), then build through
+the managed command. Missing dependencies are a setup condition, never a reason
+to install packages during app startup. The installed toolchain and package are
+reviewed trusted application code, not a sandbox for arbitrary same-user code.
+The lockfile SRI verifies stock package bytes during `npm ci`; the reported
+`package_digest` binds host files/build and lock metadata, not unpacked
+`node_modules`. Runtime trust includes that reviewed installation and excludes
+malicious code changes by the same user.
+[Stock Node 22.12.0](https://nodejs.org/en/download/archive/v22.12.0) bundles npm
+10.9.0, so install **npm 11.8.0** explicitly before this package setup (for
+example, `npm install --global npm@11.8.0` in your selected operator toolchain;
+see [npm's explicit-version/global install contract](https://docs.npmjs.com/cli/v11/commands/npm-install/)).
+Put that installation's actual `bin` directory before version-manager shims on
+`PATH`, so `npm` resolves to its trusted `npm-cli.js` file, then use the
+managed build command below with the absolute reviewed Node 22 executable.
+The build checks its bundled npm first and falls back to a separately installed,
+trusted JavaScript CLI on `PATH` only when it reports exactly 11.8.0. It executes
+that CLI through the reviewed Node binary, never through a shell wrapper.
+Missing or wrong npm stays a visible setup block; the managed build installs
+nothing. Node 24's matching bundled npm remains preferred.
+Managed version checks and builds pin npm's documented
+[`--prefix`](https://docs.npmjs.com/cli/v11/using-npm/config/#prefix) to this
+package, excluding parent workspace configuration. A package `.npmrc` or a file
+at either reserved `.absent-user-npmrc`/`.absent-global-npmrc` path (including a
+symlink) blocks the build with `npm_configuration_unreviewed`; remove that
+unreviewed configuration before retrying. Operator npm configuration is not
+loaded by these managed commands.
+
+```bash
+./manage.sh -e dev cordis status
+./manage.sh -e dev cordis build
+./manage.sh -e dev cordis probe
+```
+
+These finite commands accept `--node /absolute/path/to/node` for an explicitly
+selected reviewed binary, do not persist the choice, and do not load `.env.dev`,
+provider credentials, or the operator workspace. `status` is package preflight,
+not live readiness. `build` uses already installed pins with no installation or
+network fetch. `probe` starts, checks, quiesces, shuts down and positively reaps
+the same production host without starting the API, database or provider. The
+ordinary app remains managed through `local run/up/down/status`; its lifespan
+automatically attempts this optional host only against the fixed reviewed
+profile and validated build. Missing or unsupported Node (including 22.11), a
+missing/stale build, invalid configuration or a failed child blocks dependent
+Cordis readiness while the existing Python core and settings remain usable.
+
+Each explicit `/api/runtime/status` refresh reads the current owned child's
+required-service readiness over the same bounded control pipe, with one original
+deadline of at most four seconds (below the browser's five-second budget).
+`readiness.state=verified` and its Unix-millisecond `checked_at` describe that
+successful readback only. Cached diagnostics are `unknown`; failed, expired or
+capacity-blocked refreshes retain historical details without claiming Ready.
+There is no periodic poll. A disposed required plugin fiber fails the child's
+actual readiness check, and a hung child loses readiness within the deadline.
+
+Python owns one directly spawned trusted child using a fixed absolute entrypoint
+and working directory, closed inherited descriptors, and only `LANG=C.UTF-8`
+and `TZ=UTC` in the child's environment. It inherits no `NODE_OPTIONS`,
+`NODE_PATH`, home/config paths or credentials. Two anonymous pipes carry the
+protocol; bounded stderr is separate. There is no listener, discovery, tunnel,
+dynamic import, runtime installer or hot reload. The literal profile allows only
+release-pinned reviewed plugin IDs and closed configurations/dependencies.
+Profile changes require drain/dispose/restart and cannot grant authority.
+
+Frames are four raw big-endian uint32 length bytes followed by 1..1048576 UTF-8
+JSON bytes without a delimiter. Both sides reject duplicate keys, unknown
+fields/methods, malformed or incomplete frames, nonfinite values, depth above 16
+and more than 4096 nodes. Integer fields use actual safe JSON integers. Each boot
+has a fresh 32-byte random nonce, exact package/composition digests and independent
+strictly consecutive sequences starting at 1. Request IDs bind to those sequences;
+responses require a matching unresolved request and identity/deadline. The closed
+envelope is `protocol`, `boot_nonce`, `request_id`, `seq`, `kind`, `method`,
+`invocation_ref`, `composition_epoch`, `composition_digest`, `package_digest`,
+`deadline_at`, and `payload`. Unix-millisecond deadlines bound controls to 5 seconds
+and unresolved calls to 32. Stderr is limited to 64 KiB per boot.
+
+Only `bootstrap.hello`, `runtime.ready`, `runtime.status`, `runtime.quiesce`,
+`runtime.shutdown` and `invocation.cancel` are admitted here. Lifecycle controls
+have null invocation reference and null composition epoch. Cancellation requires
+a bounded nonempty invocation reference and returns false for an unknown
+invocation. Service methods and streams are absent until their separately owned
+typed-service contract is implemented; no ownership epoch, second authority,
+job queue, inference lane or agent loop is created by the host.
+
+Admission closes before shutdown. The parent drains/cancels within 10 seconds or
+the original earlier deadline, then uses TERM, a 2-second wait, KILL and positive
+reap when required. Each owned resource is registered before acquisition.
+Application resource cleanup is recorded independently from Cordis plugin-fiber
+disposal, because upstream contains disposal errors and root-fiber disposal is
+a restart operation. Unknown cleanup remains blocked and retains ownership;
+restart cannot erase it. Current host resources are process-local, so positive
+OS reap proves their pipe/timer/listener destruction even if graceful Cordis
+disposal was unconfirmed.
+
+The authenticated `/api/runtime/status` exposes the redacted `cordis_runtime`
+snapshot as a **lifecycle_host**, including actual profile/plugin readiness,
+recovery reason and independent cleanup/disposal state. Settings shows this state
+without disabling artifact controls during host or metadata failures. It exposes
+no nonce, PID, stderr, credentials or environment values. This host does not
+change the effective `chat_agent` route or the Python owners of authority,
+canonical storage and the shared serial inference lane.
+
+Focused implementation checks cover real stock Cordis service registration and
+dependency loss, framing/parser attacks, stale boot/replay/unsolicited output,
+bounded admission/deadlines, stale builds, unknown cleanup and repeated actual
+child reaping. A keyless managed Linux x64 probe was also executed with inherited
+IPv4/IPv6 socket creation denied. This is Linux-host lifecycle/security proof,
+not a native macOS receipt or inference/provider proof. macOS remains a peer
+core-host target; unsupported optional native proofs do not block independent
+core operation.
 
 ## Finite public goal programmes
 
@@ -613,6 +737,101 @@ are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
 missing route, authority, or budget is visible as a blocked recovery state.
 
+#### Typed general tasks (#997)
+
+Available on the installed `develop` revision containing
+the independently reviewed [#997](https://github.com/seraph-quest/seraph/issues/997)
+merge. This section describes the intended post-merge contract; it does not
+establish model quality or complete the later interpreter and specialist-child
+work in [#998](https://github.com/seraph-quest/seraph/issues/998) and
+[#999](https://github.com/seraph-quest/seraph/issues/999).
+
+The Work panel accepts ordinary intent, an owned Goal, requested output and
+explicit limits. The operator does not author tool-specific forms to request a
+task. Planning requires separate model-egress acknowledgment, a positive explicit
+cost ceiling and the existing current policy, consent, capability and inference
+admission checks. The canonical `general_task_planner` consumer uses the text
+purpose, interactive workload and priority, `OPERATOR_INPUT` provenance, and
+`text` plus `structured_output` capabilities. It uses the existing durable
+inference accounting owner. Evidence content, credential references and tool
+permission declarations are excluded from its model messages; unavailable secret
+redaction blocks planning.
+
+`POST /api/work-board/general-tasks` captures the server's current typed tool
+descriptor snapshot and creates one ordinary `WorkBoardTask`. Its bounded plan
+and input share an immutable private artifact. Repeating the same owner-scoped
+request returns the same card without contacting the planner again. A valid
+proposal remains in Triage for review. Invalid model output remains an editable
+Triage card with a visible proposal error and no task execution Root. Missing
+authority, route, consent or budget returns the current blocked reason rather
+than silently selecting a fallback.
+
+`GET /api/work-board/general-tasks/tools` reports descriptors, their digest and
+excluded tools with reasons. `GET /api/work-board/tasks/{id}/plan` reads the
+owner's plan and acceptance state. `POST /api/work-board/tasks/{id}/plan` edits
+the same unattempted Triage card using exact task and plan revisions; it stages
+a new immutable artifact and revokes the previous binding. The existing promote
+action accepts only the reviewed current revision. The inspector keeps
+acceptance unavailable while edits are unsaved. Plans contain at most sixteen
+closed typed steps, literal inputs and declared dependency pointers; they carry
+no executable expressions or permission grants.
+Admission also proves that each registered output satisfies its step contract
+and that the final step satisfies the requested output contract. Even equal
+schemas require an inhabited, known safe supported contract; unsupported unique
+array cardinalities block before effects. Regex matching permits only literal
+ASCII patterns with optional start/end anchors, the exact SHA-256 pattern and
+the native HTTP(S) URL prefix pattern. Other patterns and patternProperties
+are rejected before matching, including finite enum/const candidates and input
+validation. Incompatible contracts remain editable proposal errors.
+
+Accepted work uses the existing dispatcher, `WorkflowRunState`, leases, fences,
+effect journal and verified readback. Current owner, Goal, evidence, strategy
+binding and descriptor policy/revision are checked before admission and each
+step. Native tools retain current approval, audit and secret wrappers; MCP tools
+require a complete trusted typed contract and current connection revision.
+Task MCP output requires a finite schema and a bounded owned transport: raw
+response bytes are capped before SDK/result JSON parsing, with strict depth,
+node and serialized-output bounds. Oversized contacted output retains its
+unresolved effect and cannot be adopted as an artifact or automatically retried.
+The current task adapter requires a stateless inline identity-encoded MCP
+response; sessionful, compressed or deferred responses and GET resumption are
+blocked through the existing capability/recovery surface.
+While a task guard is active, an oversized outgoing POST on that same MCP
+connection is rejected before contact because its request binding cannot be
+decoded within the bound. This can also reject a concurrent oversized
+interactive POST; ordinary bounded interactive calls and other connections
+remain usable. Without an active task guard, this outgoing restriction is inactive.
+Unavailable or changed contracts block execution. An unknown contacted effect
+is retained for reconciliation instead of automatic replay. Successful output
+is a bounded private artifact with physical hash readback, and the card enters
+Review. Completion records an explicit no-learning result; task success alone
+does not update canonical memory.
+
+A mediated tool approval pauses the same durable Root only after the existing
+approval wrapper proves it has not contacted the tool. The card shows its exact
+pending approval and original deadline. The exact unconsumed pending or already
+approved request is bound without
+changing its arguments, scope, fingerprint or expiry. One existing SQLite
+writer commits that binding, the no-contact checkpoint/readback, paused Root
+and blocked open attempt together. An interruption rolls the whole wait back;
+an approved row without the wrapper proof is insufficient to recover a wait.
+Approval alone does not queue work. The owner explicitly continues the current
+task and plan revisions, original
+attempt, approval, workflow revision and fence. Generic paused-job resume cannot
+cross this wait. The canonical writer checks the current approval, policy,
+inputs, descriptor and already verified physical outputs, then reacquires the
+same attempt with a new lease fence. The tool wrapper consumes the approval
+once immediately before contact. Expired, denied, revoked, stale or uncertain
+bindings retain a visible recovery block.
+
+Isolated API-to-dispatcher receipts exercise genuine current native file reads,
+durable accounting, acceptance, physical artifact readback and restart replay.
+Actual local MCP fixtures also exercise the current approval wrapper and
+same-attempt continuation, including consecutive approvals and rejected stale,
+revoked, uncertain or physically changed output bindings.
+The planner HTTP response is intercepted inside the test: these receipts make no
+external provider call or spend and make no usefulness or quality claim.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for
@@ -668,6 +887,78 @@ readback.
 Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
+
+### Task lesson drafts (proposal-only)
+
+The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary
+completed or failed task with a verified current attempt and recorded native
+tool steps or an exact current formatter capability contract snapshot. The
+formatter draft preserves its registered identity, version and typed contract
+digests; it never copies the task's JSON input or output. The source-discovery
+endpoint returns the authoritative task
+revision, attempt, references and Goal scope. An ordinary text correction can
+draft a closed `TaskMethod.v1`: an existence check before using the source,
+a verified-readback check, or preservation of source attribution. Unsupported
+corrections and missing method receipts return explicit `no_change`; they are
+preserved as private correction evidence and do not become executable steps.
+
+The Inspector separates the observed outcome, explicit correction and inferred
+draft, and displays the exact old and new method. `ResearchStrategy.v1` and
+`TaskMethod.v1` are closed data schemas; candidate input cannot install tools,
+change permissions, runtime limits, providers or credentials. Candidate content
+is a private artifact; the existing `MemoryProposal` owns the inert review row,
+and `EvolutionRuntime` records only content-free lesson receipts. Neither a
+successful task nor a failure creates a positive preference vote. Changes to
+the task, Goal, run, receipts or method steps block the old preview.
+
+Automatic proposals require a separate per-task opt-in bound to the original
+current operator, task intent and Goal revision. Enable and disable require the
+exact authoritative policy revision; a stale request cannot overwrite a later
+consent change. The terminal dispatcher callback
+reauthenticates that exact Root without renewing it. Automatic creation uses only
+the finite missing-source failure rule and is limited to two durable proposal starts per UTC
+day across the owner; consent renewal does not renew that cap. It performs no
+inference, source-body projection or trace egress. The callback is bounded to
+five seconds and cannot undo an ordinary task's committed result. Private
+staging runs off the event loop in a single retained worker. Timeout stops
+proposal progression, records a content-free outcome for the exact original
+attempt even after Root revocation, and retains staging capacity until the
+actual worker finishes. Thread cancellation is never treated as cleanup.
+After restart, recovery requires proof that the original process ended and
+checks the exact private artifact; it records no-change and releases the
+original slot without making a proposal. Replays and recovered starts still
+count toward the daily cap.
+Linux recovery uses the original kernel boot/process identity. macOS uses the
+fixed native boot-session UUID and exact PID start seconds/microseconds; a
+missing PID or failed native read remains unknown. A same-process retained
+worker can complete even when native witness acquisition is unavailable.
+Unknown restart witnesses retain capacity and expose `restart_witness_unknown`;
+manual lesson review remains available. Native macOS execution was not verified
+on the Linux validation host; finite ABI and recovery fixtures cover its contract.
+Automatic outcomes have content-free, original-owner task events; source
+discovery returns the latest matching outcome, including no-change, cap and
+failure states. Automatic completion uses the canonical proposal and task event
+receipt and performs no evolution-file work. Explicit inspection or manual
+request replay repairs a missing evolution receipt off-loop from the canonical
+proposal without another daily-cap charge; mirror work is capped at 1 MiB and
+4096 entries. The canonical proposal remains inspectable if this advisory mirror
+is oversized or unavailable; readback exposes a degraded mirror status and
+preserves its existing bytes for recovery through the evolution owner.
+Model reflection remains unavailable because no existing consent authorizes task-trace
+egress. No model call or spend is needed to draft a supported lesson.
+
+This section records the intended supported scope after merge; it makes no
+pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
+remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
+change task execution. Isolated local checks establish these mechanics, not
+learned quality or general usefulness.
+
+The actual authenticated formatter-to-lesson failure journey is verified on the
+implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
+permitted`, process cleanup is proven, no formatted output is adopted, and an
+explicit correction creates an inspectable private inert method. The positive
+formatter journey remains blocked by that host sandbox limitation; this receipt
+does not establish successful formatter execution or lesson quality.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
@@ -1041,6 +1332,70 @@ generic retry/unblock fenced, and preserve one inspector per selected task.
 target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
+
+### Profiled public form preparation (#1012)
+
+`browser.interact.v2` adds a separate registered HTTPBin public form preview
+under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
+is **Partial**: bounded public-form preparation and preview are available;
+authenticated exact transactions (#1013), downloads and selected local desktop
+draft actions (#1014) remain **Planned**.
+The existing public browser v1 remains navigate/extract only. From the public
+browser Work form, explicitly open the HTTPBin preparation controls, select a
+current Goal, acknowledge one public document contact/site access logging, and
+open the bounded job. Fill fields using the displayed current opaque nodes,
+check/radio controls, and request the literal private preview. Submission stays
+blocked; this public echo form does not place an order or mutate a business
+object. It imports no credentials, cookies or authenticated session.
+
+The profile pins the reviewed source bytes and exact GET `/forms/post`; any
+source drift blocks before Chromium receives the document. Preparation disables
+JavaScript, service workers, requests, WebSockets, downloads and popups. Fresh
+DOM revisions and original Root/Goal authority are checked before every action.
+At most 20 actions and 180 seconds occupy the existing shared browser lane.
+Stale or ambiguous nodes stop with a fresh-snapshot requirement. Explicit
+**Refresh current page snapshot** captures the original live page, consumes one
+bounded action and replaces every opaque node reference. Cached history
+inspection does not resolve an uncertain action. Refresh clears private input
+and action acknowledgement; continuing requires a new explicit action against
+the fresh nodes. At the action bound, only history and cleanup remain available.
+
+Reload uses the read-only owned-job list or exact request-key lookup to inspect
+completed/blocked history; it does not reopen a page or renew consent. Private
+inputs and preview artifacts are encrypted and excluded from generic journals.
+Success requires a current literal preview, private artifact readback and
+positive browser cleanup. Closing without a current preview cancels the job.
+Admission first requires the existing **Operator ownership and recovery**
+control's **Enroll this authenticated scope** action and a live stable operator
+identity. Refresh profiles after enrollment. Missing local Playwright files or
+a verified native kernel boot UUID report inactive before any child starts.
+The canonical physical reservation commits before the same-inode positive
+marker is synced and the driver starts. A crash between reservation and marker
+keeps unresolved read-only history; inspecting or replaying the request never
+launches another browser or infers no-child proof from missing metadata.
+
+Positive physical closure retains the exact lane witness until its cleanup-only
+journal receipt commits. A durable CAS conflict keeps capacity reserved.
+**Find physical browser cleanup** exposes only original job identity, proof
+state and unchanged durable status to the same stable authenticated operator,
+including after authenticating through existing ownership recovery. Explicit
+acknowledgement records exact physical cleanup; it never adopts output, grants
+success, renews old Root/Goal authority, retries an action or resolves an
+external outcome. Exact receipt replay cannot clear a later job's reservation.
+
+After lost owner-process cleanup, a changed verified native kernel boot UUID
+proves original resources are gone; the same boot stays blocked and requires an
+operator-managed reboot if no positive closure witness exists. Linux reads its
+kernel boot UUID; Darwin uses the fixed read-only `kern.bootsessionuuid`.
+Unavailable native proof or mismatched workspace/inode/job remains blocked.
+Process absence, elapsed time and an unlocked file are never cleanup proof.
+Every outcome records `no_learning`.
+
+The local Linux Chromium/TCP/SQLite receipts exercise multi-field preparation,
+select/check controls, policy denial, DOM drift, private readback and reloaded
+history with external sockets/inference denied. These receipts establish those
+mechanics; they do not establish a useful business form workflow or production
+HTTPBin availability. macOS execution is unverified.
 
 ### Bounded public browser tasks
 
@@ -1668,6 +2023,17 @@ The accepted #775 phase uses one shared bounded `remote_inference`
 admission lane: the active request finishes, then the highest-priority ready
 request runs. Interactive work outranks scheduled and background work. Queue,
 consent, cancellation, and uncertain remote outcomes remain operator-visible.
+On revisions containing the independently reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair, async,
+synchronous and streaming execution retain that same serial lease after positive
+provider callback completion until charge or liability settlement and canonical
+readback finish. A queued sibling cannot contact while an overrun is still being
+committed. Failed settlement/readback retains the existing reconciliation hold;
+an elapsed deadline or returned coroutine does not release it. Known charges stay
+known when current authority later prevents result adoption. Positive
+never-contacted denial proof retains its existing quiescence journal. Isolated
+scripted-transport receipts establish these ownership mechanics, not provider
+availability or model quality.
 The canonical job repository owns deployment accounting reservations and their
 original UTC calendar month and settings revision. The deployment owner does
 not change with login, enrollment, or root identity. Actual OpenRouter account

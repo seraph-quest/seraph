@@ -22,6 +22,40 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+**Profiled browser interaction: Partial, bounded public-form preparation.**
+[ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
+`browser.interact.v2` HTTPBin public form preparation profile to the current
+Python lifecycle. Its bounded offline fill/select/check/radio-click and private
+literal preview reuse native jobs, current Root/Goal authority and the existing
+browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
+submission, imported sessions and arbitrary-site writes remain excluded.
+Private values are encrypted; redacted action history survives reload without
+reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
+mechanics with zero inference/provider spend. Business-form usefulness, production
+HTTPBin availability and macOS execution remain unverified. The owning
+[operator flow](./12-current-app-guide.md#profiled-public-form-preparation-1012)
+records bounds, changed-native-boot cleanup after an operator-managed reboot,
+and the same-boot lost-owner recovery limit. Physical cleanup preserves the
+original unresolved job and effects; it cannot adopt output or retry old work.
+
+The separately implemented **optional Cordis lifecycle host** in
+[#1006](https://github.com/seraph-quest/seraph/issues/1006) requires its reviewed
+implementation merge before availability is claimed on `develop`. Its
+[runtime contract](./12-current-app-guide.md#reviewed-optional-cordis-lifecycle-host)
+pins stock Cordis 4.0.0-rc.10, npm 11.8.0 and Node 22.x >=22.12.0 or 24.x, with a
+fixed literal profile and restart-only anonymous-pipe process boundary. The
+Python backend remains parent and sole existing authority/state/admission owner;
+this host supplies lifecycle readiness, not a migrated agent loop or research
+capability. Missing Node/build and failed children block only dependent host work;
+runtime and settings expose actual plugin/recovery and independent cleanup state.
+Explicit status refresh verifies current required-service readiness within four
+seconds; cached or failed refreshes show unknown/blocked with historical details
+and a last-verified timestamp, never cached Ready.
+Focused parser/security/resource and real start/stop/reap checks use no providers
+or operator workspace. A managed keyless Linux x64 probe with denied IPv4/IPv6
+socket creation establishes only that platform's owned-child lifecycle; native
+macOS and later typed-service/research migration are not proven by it.
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
@@ -46,6 +80,63 @@ data-table formulas and objects without literal expression text are unsupported.
 OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
+## Typed general-task contract
+
+**Shipped** on `develop` revisions containing the independently reviewed
+[#997](https://github.com/seraph-quest/seraph/issues/997) implementation merge: an
+ordinary intent-to-reviewed-plan path in the existing Work panel and API.
+Before that merge, this describes the intended post-merge source scope. The
+[owning operator guide](./12-current-app-guide.md#typed-general-tasks-997)
+describes exact revision acceptance, editable invalid proposals, visible blocked
+reasons, current typed capabilities and owner-scoped idempotency.
+
+One `WorkBoardTask` and existing `WorkflowRunState` remain the canonical task
+and execution owners. Planning uses the governed interactive text consumer
+`general_task_planner`, explicit egress acknowledgment and cost limits; execution
+retains current tool permissions, approvals, descriptor revisions, durable
+effects and private artifact readback. Output contracts are checked before
+effects; mediated approval waits require explicit exact continuation of the
+same attempt and original deadline, with generic resume blocked.
+The approval wait commits its exact binding, no-contact proof and task/Root
+pause together; a fast approval preserves the same continuation. MCP task
+response bytes and parsed output are bounded before result adoption; oversized
+contacted responses retain visible unresolved liability.
+Oversized outgoing POSTs fail before contact while a task guard is active on
+that connection, including oversized concurrent interactive POSTs whose binding
+cannot be decoded within the bound. Bounded calls and other connections remain usable.
+Provider-free isolated integration receipts prove the current native file-read journey,
+mediated MCP approval continuation and replay boundaries, not
+model quality or improved outcomes. Tasks explicitly record no learning.
+The fuller interpreter and specialist delegation in
+[#998](https://github.com/seraph-quest/seraph/issues/998) and
+[#999](https://github.com/seraph-quest/seraph/issues/999) remain **Planned**.
+
+**Task lesson drafts (#1000): intended Shipped scope after merge — supported
+proposal-only lessons.** This capability provides private,
+owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
+tool steps or the exact registered formatter contract and explicit corrections,
+truthful failed-task provenance (including the host-blocked actual formatter),
+authoritative source discovery and separately opted-in automatic proposals
+limited to two durable starts per owner/UTC day. Unsupported corrections produce explicit
+no-change. Automatic outcomes have content-free task receipts; exact replay
+repairs a missing evolution receipt off-loop without duplicate proposals.
+Policy mutations require an exact revision. A degraded or oversized advisory
+evolution mirror preserves existing bytes and does not hide the canonical draft.
+Automatic completion avoids evolution-file writes, retains one off-loop private
+staging worker until positive completion, and exposes exact-attempt timeout and
+restart recovery outcomes without allowing a cancelled callback to progress
+into proposal commit. Native process witnesses support Linux and the fixed
+macOS ABI; unknown restart proof visibly retains capacity while same-process
+workers and manual review remain usable. macOS native execution is unverified
+on the Linux validation host. It makes no
+inference call, grants no trace-egress permission and
+does not infer a positive preference from success. Strategy adoption and
+next-task reuse (#1001) remain **Planned**. The named proof is an actual
+authenticated failed formatter journey with terminal failure, proven process
+cleanup, private inspectable candidate and no output adoption, plus isolated
+M5/evolution/dispatcher regressions. Successful formatter execution is not
+claimed: this host denies bubblewrap loopback setup. See the
+[operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
 
 **Finite public goal programme authority: Shipped** on `develop` revisions
 containing the independently reviewed
@@ -167,6 +258,12 @@ Deployment inference accounting remains **Partial**. The canonical durable job
 repository owns finite reservations, immutable UTC-month attribution, account
 usage settlement, and unknown liabilities that carry across rollover and
 restore. The existing remote broker remains the sole serial executor. Paid
+execution on revisions containing the reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair includes durable
+settlement and canonical readback before that serial lease can release; failure
+retains its existing reconciliation hold. Scripted local receipts establish the
+async/sync/stream ordering and preserve original debt, deadline and denied-contact
+proof, without external inference or provider-availability claims. Paid
 egress requires a retained lifecycle witness outside root snapshots; stale or
 missing continuity blocks inference while deterministic CPU features remain
 usable. Settings exposes exact-operation manual reconciliation, explicitly

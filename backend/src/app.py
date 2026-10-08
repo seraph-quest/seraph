@@ -29,6 +29,7 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
 from src.auth.middleware import OperatorAuthMiddleware
@@ -465,18 +466,37 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    from src.work_board.general_task import current_task_service
     from src.guardian.goal_programmes import goal_programme_service
     await goal_programme_service.start()
-    init_scheduler()
-    await sync_scheduled_jobs()
     try:
-        from src.observer.manager import context_manager
-        await context_manager.refresh()
-    except Exception:
-        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    yield
-    await goal_programme_service.stop()
-    shutdown_scheduler()
+        with current_task_service():
+            init_scheduler()
+            await sync_scheduled_jobs()
+            try:
+                from src.observer.manager import context_manager
+                await context_manager.refresh()
+            except Exception:
+                logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
+            from src.browser.sessions import profiled_interaction_sessions
+            try:
+                await profiled_interaction_sessions.start()
+                # Optional native owners remain inside the current Python lifecycle.
+                try:
+                    await cordis_host.start()
+                except Exception:
+                    logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                yield
+            finally:
+                try:
+                    await cordis_host.stop()
+                finally:
+                    await profiled_interaction_sessions.stop()
+    finally:
+        try:
+            await goal_programme_service.stop()
+        finally:
+            shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:
@@ -586,6 +606,7 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
+            "cordis_runtime": await cordis_host.refresh_status(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

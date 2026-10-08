@@ -5,6 +5,7 @@ import { apiFetch } from "../../lib/api";
 import type { OpportunityPreferenceProposal, WorkBoardTask } from "../../types";
 import { actOnOpportunityPreference, inspectOpportunityPreference } from "../../lib/opportunityPreferences";
 import { createGuardianUuid } from "../../lib/guardianInbox";
+import { TaskLessonReview } from "./TaskLessonReview";
 
 type ProposalStatus =
   | "proposed"
@@ -193,6 +194,8 @@ function WorkBoardMemoryReview({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [taskLessonId, setTaskLessonId] = useState<string | null>(null);
+  useEffect(() => { setTaskLessonId(null); }, [task.task_id, task.task_revision, ownerPrincipalId, ownerSessionId]);
 
   const ownsTask = Boolean(
     ownerPrincipalId
@@ -422,6 +425,7 @@ function WorkBoardMemoryReview({
 
   return (
     <section className="rounded border border-white/10 p-3" aria-label="Verified outcome memory review">
+      <TaskLessonReview task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} proposalId={taskLessonId} />
       <div className="flex items-center justify-between gap-2">
         <div className="font-semibold">Learning from this task</div>
         {ownsTask && task.capability_id !== "memory.opportunity-preference.v1" && (
@@ -450,6 +454,11 @@ function WorkBoardMemoryReview({
       )}
       <div className="mt-2 grid gap-2">
         {proposals.map((proposal) => {
+          if (proposal.schema_version === "task_method_proposal.v1") return <article key={proposal.proposal_id} aria-label="Inert task method proposal" className="rounded bg-black/20 p-2">
+            <strong>Private task method candidate · {proposal.status}</strong>
+            <p>Proposal {proposal.proposal_id} · revision {proposal.revision} · behavior unchanged. This candidate cannot use ordinary memory acceptance; a separate method adoption review is required.</p>
+            <button type="button" disabled={!ownsTask} onClick={() => setTaskLessonId(proposal.proposal_id)}>Inspect exact task method change</button>
+          </article>;
           if (task.capability_id === "memory.opportunity-preference.v1" || proposal.schema_version === "opportunity_recommendation.v1"
             || (proposal.scope ?? proposal.memory_scope)?.schema_version === "guardian_opportunity_preference.v1") {
             return <OpportunityPreferenceReview key={`${ownerPrincipalId}:${ownerSessionId}:${task.task_id}:${proposal.proposal_id}`}

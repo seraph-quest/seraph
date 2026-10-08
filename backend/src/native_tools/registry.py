@@ -348,3 +348,11 @@ def get_tool_metadata(tool_name: str) -> dict | None:
 def get_all_metadata() -> dict[str, dict]:
     """Return a copy of all bundled native tool metadata."""
     return TOOL_METADATA.copy()
+
+
+def __getattr__(name: str):
+    # Keep metadata imports free of runtime construction and circular imports.
+    if name == "ToolRegistry":
+        from src.native_tools.task_adapters import ToolRegistry
+        return ToolRegistry
+    raise AttributeError(name)

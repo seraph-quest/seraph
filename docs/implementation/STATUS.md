@@ -44,6 +44,33 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Task lesson drafts (#1000): intended Shipped scope after merge — supported
+proposal-only lessons.** This capability provides private,
+owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
+tool steps or the exact registered formatter contract and explicit corrections,
+truthful failed-task provenance (including the host-blocked actual formatter),
+authoritative source discovery and separately opted-in automatic proposals
+limited to two durable starts per owner/UTC day. Unsupported corrections produce explicit
+no-change. Automatic outcomes have content-free task receipts; exact replay
+repairs a missing evolution receipt off-loop without duplicate proposals.
+Policy mutations require an exact revision. A degraded or oversized advisory
+evolution mirror preserves existing bytes and does not hide the canonical draft.
+Automatic completion avoids evolution-file writes, retains one off-loop private
+staging worker until positive completion, and exposes exact-attempt timeout and
+restart recovery outcomes without allowing a cancelled callback to progress
+into proposal commit. Native process witnesses support Linux and the fixed
+macOS ABI; unknown restart proof visibly retains capacity while same-process
+workers and manual review remain usable. macOS native execution is unverified
+on the Linux validation host. It makes no
+inference call, grants no trace-egress permission and
+does not infer a positive preference from success. Strategy adoption and
+next-task reuse (#1001) remain **Planned**. The named proof is an actual
+authenticated failed formatter journey with terminal failure, proven process
+cleanup, private inspectable candidate and no output adoption, plus isolated
+M5/evolution/dispatcher regressions. Successful formatter execution is not
+claimed: this host denies bubblewrap loopback setup. See the
+[operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
 **Finite public goal programme authority: Shipped** on `develop` revisions
 containing the independently reviewed
 [#1003](https://github.com/seraph-quest/seraph/issues/1003) implementation merge.

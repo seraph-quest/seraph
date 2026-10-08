@@ -198,6 +198,7 @@ class GeneralTaskService:
         self.strategy_resolver = strategy_resolver
         self.planner = planner
         self.started = False
+        self.delegation_jobs = None
         # Ephemeral original callback handles, never execution authority. They
         # remain inspectable after waiter cancellation until the callback exits.
         self._native_invocations = {}
@@ -207,6 +208,9 @@ class GeneralTaskService:
 
     def start(self):
         self.started = True
+        bind = getattr(self.registry, "bind_delegation_service", None)
+        if callable(bind):
+            bind(self)
 
     def stop(self):
         self.started = False
@@ -348,6 +352,15 @@ class GeneralTaskService:
                 if not has_pointer(step.input):
                     validate_schema(descriptor.input_schema, step.input)
                 selected[step.tool_id] = descriptor
+                if step.tool_id == "delegate_task":
+                    from src.agent.specialists import durable_specialist_tools
+                    # Tool arguments never choose the eventual parent Task id.
+                    # The native owner binds Root/Task/step at admission.
+                    if has_pointer(step.input):
+                        raise ValueError("delegation grant requires explicit literal input")
+                    for child_descriptor in durable_specialist_tools(step.input["role"],
+                        descriptors, step.input["allowed_tool_ids"]):
+                        selected[child_descriptor.tool_id] = child_descriptor
             final = request.plan.steps[-1]
             if not schema_accepts_output(final.output_contract, request.input.requested_output):
                 raise ValueError("requested output contract is incompatible")
@@ -362,7 +375,7 @@ class GeneralTaskService:
             raise BoardError("document_local_consent_required", "Explicit source selection is required", status_code=422)
         return envelope
 
-    async def create(self, db, owner, request: GeneralTaskCreate):
+    async def create(self, db, owner, request: GeneralTaskCreate, *, _specialist_context=None):
         if request.input.document_source is not None and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
@@ -428,16 +441,31 @@ class GeneralTaskService:
                     proposal_group=proposal.group, proposal_provenance=proposal.provenance)
         else:
             envelope = await self.validate(owner, request)
-            from src.auth.service import authenticate_session
-            from src.work_board.general_task_proposal import new_group
-            operator = await authenticate_session(owner.session_id, touch=False)
-            if operator.principal.principal_id != owner.principal_id:
-                raise BoardError("general_task_owner_changed", "Original operator changed", status_code=403)
-            descriptors, _ = self.snapshot()
-            group = new_group(owner, envelope.task_input, descriptors,
-                goal_revision=request.goal_revision, request_key=request.idempotency_key,
-                expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
-            envelope = envelope.model_copy(update={"proposal_group": group})
+            if _specialist_context is not None:
+                from src.workflows.specialist_delegation import current_delegation
+                original = await current_delegation(db, _specialist_context.callback.run_identity,
+                    callback_fence=_specialist_context.callback.fencing_token)
+                if (original.request != _specialist_context.request
+                    or request.idempotency_key != original.reservation.child_publication_key
+                    or len(request.plan.steps) > original.request.limits.max_steps
+                    or any(step.tool_id not in original.request.allowed_tool_ids for step in request.plan.steps)
+                    or request.input.intent != original.request.instruction
+                    or request.input.limits != original.envelope.task_input.limits
+                    or request.input.evidence_refs != original.request.evidence_refs):
+                    raise BoardError("specialist_delegation_publication_changed", "Original reserved specialist plan required", status_code=409)
+                envelope = envelope.model_copy(update={"proposal_group": original.envelope.proposal_group,
+                    "proposal_provenance": original.envelope.proposal_provenance})
+            else:
+                from src.auth.service import authenticate_session
+                from src.work_board.general_task_proposal import new_group
+                operator = await authenticate_session(owner.session_id, touch=False)
+                if operator.principal.principal_id != owner.principal_id:
+                    raise BoardError("general_task_owner_changed", "Original operator changed", status_code=403)
+                descriptors, _ = self.snapshot()
+                group = new_group(owner, envelope.task_input, descriptors,
+                    goal_revision=request.goal_revision, request_key=request.idempotency_key,
+                    expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
+                envelope = envelope.model_copy(update={"proposal_group": group})
         envelope = envelope.model_copy(update={"evidence": evidence})
         if envelope.task_input.document_source is not None:
             from src.work_board.document_preparation import resolve
@@ -456,7 +484,8 @@ class GeneralTaskService:
             capability_id=CAPABILITY, input_artifact_id=artifact.artifact_id,
             status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
             idempotency_scope="general-task", idempotency_key=request.idempotency_key,
-            requires_review=True))
+            requires_review=_specialist_context is None,
+            origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None))
 
     async def plan(self, db, owner, task_id):
         from src.work_board.dispatcher import _parse_typed_input
@@ -887,6 +916,9 @@ class GeneralTaskService:
     async def execute(self, jobs, *, job_id, owner, fence, envelope, principal, resume_child=None):
         if not self.started:
             raise BoardError("general_task_inactive", "Task service is inactive", status_code=503)
+        if self.delegation_jobs is not None and self.delegation_jobs is not jobs:
+            raise BoardError("specialist_delegation_owner_changed", "Original native job owner required", status_code=409)
+        self.delegation_jobs = jobs
         projection = await jobs.get_job(job_id)
         if any(str(item.get("checkpoint_id", "")).startswith("general:step:")
             for item in projection.get("checkpoints", [])):

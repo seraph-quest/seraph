@@ -4783,6 +4783,7 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         *,
         runtime_seconds: int = DEFAULT_RUNTIME_SECONDS,
+        _specialist_context=None,
     ) -> tuple[DurableJobSpec, dict[str, Any], str, str, int]:
         if _text(task.capability_id) not in {GOAL_SNAPSHOT_CAPABILITY, "agent.task.v1"}:
             raise TypedInputError(
@@ -4804,6 +4805,8 @@ class WorkBoardDispatcher:
             runtime_seconds = min(runtime_seconds, inputs["task_input"]["limits"]["wall_seconds"])
         job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
         general = task.capability_id == "agent.task.v1"
+        if general and task.idempotency_key.startswith("specialist:") and _specialist_context is None:
+            raise TypedInputError("specialist_delegation_binding_required", "Use the original reserved child owner")
         owner_principal = task.owner_principal_id if general else DISPATCHER_PRINCIPAL
         owner_kind = "user" if general else "service"
         service_id = None if general else DISPATCHER_SERVICE
@@ -4868,6 +4871,20 @@ class WorkBoardDispatcher:
             run_fingerprint=_safe_digest(safe_inputs),
             budget_microusd=0,
         )
+        if _specialist_context is not None:
+            from dataclasses import replace
+            context = _specialist_context
+            if (not general or task.idempotency_key != context.reservation.child_publication_key
+                or task.origin_thread_id != context.callback.run_identity):
+                raise TypedInputError("specialist_delegation_binding_required", "Original specialist publication required")
+            declared_authority = {**declared_authority,
+                "specialist_delegation_invocation_id": context.callback.run_identity,
+                "specialist_delegation_request_digest": context.reservation.delegation_request_digest,
+                "specialist_original_parent_id": context.parent.run_identity}
+            spec = replace(spec, parent_job_id=context.callback.run_identity,
+                parent_fencing_token=context.callback.fencing_token,
+                declared_authority=declared_authority,
+                deadline_at=min(deadline, datetime.fromisoformat(context.reservation.child_deadline_at)))
         return spec, inputs, job_id, owner_principal, runtime_seconds
 
     async def _admit_execute_project(
@@ -4908,11 +4925,17 @@ class WorkBoardDispatcher:
                 await self._close_unadmitted_or_block(claim, _safe_error_code(exc))
                 result["blocked"] = True
                 return result
+        specialist_context = None
         try:
+            if task.capability_id == "agent.task.v1" and task.idempotency_key.startswith("specialist:"):
+                from src.workflows.specialist_delegation import specialist_for_task
+                async with self.session_provider() as db:
+                    specialist_context = await specialist_for_task(db, task)
             spec, inputs, expected_job_id, parent_owner, runtime_seconds = self._build_spec(
                 task,
                 attempt,
                 runtime_seconds=runtime_seconds,
+                _specialist_context=specialist_context,
             )
         except TypedInputError as exc:
             await self._close_unadmitted_or_block(
@@ -4929,7 +4952,12 @@ class WorkBoardDispatcher:
 
         linked_ok = False
         try:
-            admission = await self.jobs.admit_job(spec)
+            if specialist_context is not None:
+                from src.workflows.specialist_delegation import specialist_admission_check
+                admission = await self.jobs.admit_job(spec,
+                    admission_authority_check=specialist_admission_check(task, attempt, spec))
+            else:
+                admission = await self.jobs.admit_job(spec)
             job_id = _text(admission.get("job_id"))
             if job_id != expected_job_id:
                 raise DurableJobIdempotencyConflict("board admission returned a mismatched job identity")

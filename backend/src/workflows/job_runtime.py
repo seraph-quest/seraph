@@ -1321,6 +1321,10 @@ async def _verify_native_child_sql_scope(db, run):
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
         await assert_general_task_child_phase_current(db, run)
+    elif getattr(run, "job_kind", None) == "agent.task.v1":
+        from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
+        if is_specialist_root(run):
+            await assert_specialist_root_current(db, run)
 
 
 def _append_parent_fence_condition(
@@ -4953,6 +4957,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     ) -> dict[str, Any]:
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("general:delegation:"):
+            raise DurableJobTransitionError("specialist delegation requires its fixed reservation writer")
         if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:", "general:cancel:")):
             raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":

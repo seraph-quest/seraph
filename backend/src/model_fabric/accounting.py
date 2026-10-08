@@ -28,14 +28,31 @@ _task_group: ContextVar[object | None] = ContextVar("general_task_accounting_gro
 @contextmanager
 def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None,
                                  task_attempt_id=None, plan_revision=0,
-                                 selected_grant_digest=None, parent_owner=None, parent_fence=None):
+                                 selected_grant_digest=None, parent_owner=None, parent_fence=None,
+                                 delegation_invocation_id=None, delegation_request_digest=None):
     from src.work_board.contracts import TaskProposalGroupV1
-    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation"}:
+    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation", "specialist"}:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role == "specialist":
+        from src.workflows.general_task_accounting import GeneralTaskGroupReservationEvidenceV1
+        from src.work_board.general_task import digest
+        try:
+            GeneralTaskGroupReservationEvidenceV1(group=group, group_digest=digest(group.model_dump(mode="json")),
+                role=role, call_ordinal=1, original_operation_id=delegation_invocation_id,
+                original_job_id=delegation_invocation_id, initial_proposal_operation_id=None,
+                task_id=task_id, task_attempt_id=task_attempt_id, plan_revision=plan_revision,
+                selected_grant_digest=selected_grant_digest, parent_owner=parent_owner, parent_fence=parent_fence,
+                delegation_invocation_id=delegation_invocation_id, delegation_request_digest=delegation_request_digest)
+        except (ValueError, TypeError):
+            raise InferenceAccountingError("general_task_group_binding_invalid") from None
+    elif delegation_invocation_id is not None or delegation_request_digest is not None:
         raise InferenceAccountingError("general_task_group_binding_invalid")
     token = _task_group.set({"group": group, "role": role, "task_id": task_id,
         "task_attempt_id": task_attempt_id, "plan_revision": plan_revision,
         "selected_grant_digest": selected_grant_digest, "parent_owner": parent_owner,
-        "parent_fence": parent_fence})
+        "parent_fence": parent_fence,
+        **({"delegation_invocation_id": delegation_invocation_id,
+            "delegation_request_digest": delegation_request_digest} if role == "specialist" else {})})
     try:
         yield
     finally:

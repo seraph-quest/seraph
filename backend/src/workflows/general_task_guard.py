@@ -245,6 +245,10 @@ class _VerifiedParentJournal:
     checkpoint_json: str
     authority_json: str
     _seal: object
+    specialist_callback_id: str | None = None
+    specialist_callback_fence: int | None = None
+    specialist_parent_id: str | None = None
+    specialist_parent_checkpoints: str | None = None
 
 
 def assert_original_parent_authority(parent):
@@ -371,11 +375,19 @@ def protected_checkpoint_ids(history):
     """Protect native identities already committed by the fixed writer."""
     from types import SimpleNamespace
     from src.workflows.job_runtime import DurableJobTransitionError
+    from src.workflows.specialist_delegation import DELEGATION_KEY, read_reservation
+    delegation = [item for item in history if isinstance(item, dict)
+        and item.get("checkpoint_id") == DELEGATION_KEY]
+    delegated_ids = set()
+    if delegation:
+        identity = delegation[0].get("payload", {}).get("delegation_invocation_id")
+        read_reservation(SimpleNamespace(checkpoint_receipts_json=json.dumps(history), run_identity=identity))
+        delegated_ids.add(DELEGATION_KEY)
     manifest = read_manifest(SimpleNamespace(checkpoint_receipts_json=json.dumps(history)))
     if manifest is None:
-        return set()
+        return delegated_ids
     _check_reserved_capacity(history)
-    protected = {GENERAL_TASK_MANIFEST_KEY, *manifest.required_checkpoint_ids}
+    protected = {GENERAL_TASK_MANIFEST_KEY, *manifest.required_checkpoint_ids, *delegated_ids}
     present = {item.get("checkpoint_id") for item in history if isinstance(item, dict)}
     if not protected.issubset(present):
         raise DurableJobTransitionError("general task required checkpoint proof is missing")
@@ -409,7 +421,10 @@ def child_binding(run):
         if (authority.get("capability_id") != "agent.native-tool-step.v1"
             or run.authority_digest != _digest(authority)
             or run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND or run.capability_version != "1"
-            or run.branch_depth != 1 or run.owner_kind != "user"
+            or (run.branch_depth != 1 and not (run.branch_depth == 3
+                and authority.get("specialist_delegation_invocation_id")
+                and authority.get("specialist_original_parent_id")))
+            or run.owner_kind != "user"
             or run.parent_job_id != binding.parent_job_id
             or run.parent_run_identity != binding.parent_job_id
             or run.parent_fencing_token != binding.creation_job_fence
@@ -502,6 +517,24 @@ def append_general_task_parent_gate(conditions, run, *, now):
         or verified.child_id != run.run_identity or verified.child_fence != run.fencing_token):
         conditions.append(false())
         return True
+    delegated = run.branch_depth == 3
+    if delegated:
+        authority = json.loads(run.declared_authority_json)
+        if (verified.specialist_callback_id != authority.get("specialist_delegation_invocation_id")
+            or verified.specialist_parent_id != authority.get("specialist_original_parent_id")
+            or not verified.specialist_callback_id or not verified.specialist_parent_id):
+            conditions.append(false())
+            return True
+        callback, original = aliased(WorkflowRunState), aliased(WorkflowRunState)
+        conditions.append(select(callback.id).join(original,
+            original.run_identity == verified.specialist_parent_id).where(
+            callback.run_identity == verified.specialist_callback_id,
+            callback.parent_job_id == original.run_identity,
+            callback.status == "running", callback.lease_owner.is_not(None),
+            callback.lease_expires_at > now,
+            callback.fencing_token == verified.specialist_callback_fence,
+            original.status == "paused", original.failure_reason == "general_task_native_wait",
+            original.checkpoint_receipts_json == verified.specialist_parent_checkpoints).exists())
     checkpoints = func.json_each(parent.checkpoint_receipts_json).table_valued("key", "value").alias()
     payload = lambda field: func.json_extract(checkpoints.c.value, "$.payload." + field)
     invocations = func.json_each(payload("admitted_invocation_ids")).table_valued("key", "value").alias()
@@ -569,7 +602,8 @@ def append_general_task_parent_gate(conditions, run, *, now):
         .join(attempt, and_(attempt.attempt_id == binding.attempt_id, attempt.task_id == task.task_id))
         .where(parent.run_identity == binding.parent_job_id,
             parent.job_kind == "agent.task.v1", parent.capability_version == "1",
-            parent.branch_depth == 0, parent.parent_job_id.is_(None),
+            parent.branch_depth == (2 if delegated else 0),
+            parent.parent_job_id == verified.specialist_callback_id if delegated else parent.parent_job_id.is_(None),
             parent.root_run_identity == run.root_run_identity,
             parent.owner_kind == "user", parent.owner_principal_id == binding.owner_principal_id,
             parent.authority_digest == binding.parent_authority_digest,
@@ -601,9 +635,17 @@ async def assert_general_task_child_phase_current(db, run):
         raise DurableJobLeaseError("general task original manifest is unavailable")
     assert_original_parent_authority(parent)
     effective = await effective_child_phase(db, run, parent)
+    specialist = None
+    if run.branch_depth == 3:
+        from src.workflows.specialist_delegation import assert_specialist_root_current
+        specialist = await assert_specialist_root_current(db, parent)
     object.__setattr__(run, "_general_task_verified_parent_journal", _VerifiedParentJournal(
         run.run_identity, run.fencing_token, parent.checkpoint_receipts_json,
-        parent.declared_authority_json, _PHASE_SQL_SEAL))
+        parent.declared_authority_json, _PHASE_SQL_SEAL,
+        specialist_callback_id=specialist.callback.run_identity if specialist else None,
+        specialist_callback_fence=specialist.callback.fencing_token if specialist else None,
+        specialist_parent_id=specialist.parent.run_identity if specialist else None,
+        specialist_parent_checkpoints=specialist.parent.checkpoint_receipts_json if specialist else None))
     conditions = [WorkflowRunState.run_identity == run.run_identity]
     _append_goal_fence_condition(conditions, run)
     append_general_task_parent_gate(conditions, run, now=_utc_now())
@@ -715,8 +757,12 @@ async def _current(jobs, db, parent_id, *, manifest=None):
         raise DurableJobLeaseError("general task original manifest is required")
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == selected.task_id))
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == selected.attempt_id))
+    from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
+    specialist = is_specialist_root(parent)
+    if specialist:
+        await assert_specialist_root_current(db, parent)
     if (parent.job_kind != "agent.task.v1" or parent.capability_version != "1"
-        or parent.owner_kind != "user" or parent.branch_depth != 0 or parent.parent_job_id
+        or parent.owner_kind != "user" or (not specialist and (parent.branch_depth != 0 or parent.parent_job_id))
         or task is None or attempt is None or attempt.ended_at or attempt.cancel_requested_at
         or attempt.task_id != task.task_id or attempt.workflow_run_id != parent_id
         or parent.session_id != parent.operator_session_id

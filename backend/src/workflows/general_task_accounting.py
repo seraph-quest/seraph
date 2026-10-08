@@ -15,7 +15,7 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
     kind: Literal["general_task_group_reservation.v1"] = KIND
     group: TaskProposalGroupV1
     group_digest: TaskDigest
-    role: Literal["initial_proposal", "continuation"]
+    role: Literal["initial_proposal", "continuation", "specialist"]
     call_ordinal: int = Field(ge=1, le=12)
     original_operation_id: NativeInvocationIdentity
     original_job_id: NativeInvocationIdentity
@@ -26,6 +26,8 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
     selected_grant_digest: TaskDigest | None
     parent_owner: NativeInvocationIdentity | None
     parent_fence: int | None = Field(ge=1)
+    delegation_invocation_id: NativeInvocationIdentity | None = None
+    delegation_request_digest: TaskDigest | None = None
 
     @model_validator(mode="after")
     def exact_role(self):
@@ -40,6 +42,11 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
         elif (not self.task_id or not self.task_attempt_id or self.plan_revision < 1
             or self.selected_grant_digest is None or not self.parent_owner or self.parent_fence is None):
             raise ValueError("continuation requires its exact captured native evidence")
+        if self.role == "specialist":
+            if not self.delegation_invocation_id or self.delegation_request_digest is None:
+                raise ValueError("specialist requires its original delegation proof")
+        elif self.delegation_invocation_id is not None or self.delegation_request_digest is not None:
+            raise ValueError("delegation proof cannot authorize another planning role")
         return self
 
 
@@ -94,6 +101,25 @@ async def validate_group(db, run, group):
         raise InferenceAccountingError("general_task_group_authority_invalid")
 
 
+def _validate_specialist_limits(members, binding, limits, *, new_bound=None):
+    """Narrow request allowance inside, never instead of, the original group."""
+    own = [row for row in members if entry_for(row).get("role") == "specialist"
+        and entry_for(row).get("delegation_invocation_id") == binding["delegation_invocation_id"]
+        and entry_for(row).get("delegation_request_digest") == binding["delegation_request_digest"]]
+    if len(own) + (new_bound is not None) > limits.max_inference_calls:
+        raise InferenceAccountingError("general_task_specialist_call_limit")
+    liability = new_bound or 0
+    for row in own:
+        if row.state in {"reserved", "contact_started"}:
+            liability += row.bound_microusd
+        elif row.state == "settled" and row.actual_cost_microusd is not None:
+            liability += row.actual_cost_microusd
+        elif row.state != "released":
+            raise InferenceAccountingError("general_task_group_unknown")
+    if liability > limits.max_cost_microusd:
+        raise InferenceAccountingError("general_task_specialist_cost_limit")
+
+
 async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path):
     from src.work_board.general_task import digest
     if not isinstance(binding, dict) or not isinstance(binding.get("group"), TaskProposalGroupV1):
@@ -122,7 +148,7 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
     if sum(liability(row) for row in members) + bound > group.max_cost_microusd:
         raise InferenceAccountingError("general_task_group_cost_limit")
     role = binding.get("role")
-    if runtime_path != "general_task_planner" or role not in {"initial_proposal", "continuation"}:
+    if runtime_path != "general_task_planner" or role not in {"initial_proposal", "continuation", "specialist"}:
         raise InferenceAccountingError("general_task_group_runtime_invalid")
     initial = next((row for row in members if entry_for(row).get("role") == "initial_proposal"), None)
     if role == "initial_proposal":
@@ -131,7 +157,12 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
     else:
         if not binding.get("task_id") or not binding.get("task_attempt_id") or not binding.get("selected_grant_digest"):
             raise InferenceAccountingError("general_task_group_provenance_missing")
-        await validate_continuation(db, group, binding, initial)
+        if role == "specialist":
+            from src.workflows.specialist_delegation import validate_specialist_accounting
+            context = await validate_specialist_accounting(db, group, binding, initial)
+            _validate_specialist_limits(members, binding, context.request.limits, new_bound=bound)
+        else:
+            await validate_continuation(db, group, binding, initial)
     return {"kind": KIND, "group": group.model_dump(mode="json"),
         "group_digest": digest(group.model_dump(mode="json")), "role": role,
         "call_ordinal": len(members) + 1, "original_operation_id": operation_id,
@@ -139,7 +170,9 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         "initial_proposal_operation_id": operation_id if role == "initial_proposal" else initial.operation_id if initial else None,
         "task_id": binding.get("task_id"), "task_attempt_id": binding.get("task_attempt_id"),
         "plan_revision": binding.get("plan_revision"), "selected_grant_digest": binding.get("selected_grant_digest"),
-        "parent_owner": binding.get("parent_owner"), "parent_fence": binding.get("parent_fence")}
+        "parent_owner": binding.get("parent_owner"), "parent_fence": binding.get("parent_fence"),
+        **({"delegation_invocation_id": binding.get("delegation_invocation_id"),
+            "delegation_request_digest": binding.get("delegation_request_digest")} if role == "specialist" else {})}
 
 
 async def validate_continuation(db, group, binding, initial):
@@ -154,7 +187,8 @@ async def validate_continuation(db, group, binding, initial):
         WorkflowRunState.run_identity == attempt.workflow_run_id))) if attempt else None
     now = datetime.now(timezone.utc)
     if (task is None or attempt is None or parent is None or task.status != WorkBoardStatus.running
-        or parent.status != "running" or parent.lease_owner != binding.get("parent_owner")
+        or parent.status != "running" or parent.parent_job_id is not None
+        or parent.lease_owner != binding.get("parent_owner")
         or type(binding.get("parent_fence")) is not int or parent.fencing_token != binding["parent_fence"]
         or parent.lease_expires_at is None or _utc(parent.lease_expires_at) <= now):
         raise InferenceAccountingError("general_task_continuation_not_bound")
@@ -202,12 +236,19 @@ async def validate_contact(db, run, row, rows):
             raise InferenceAccountingError("general_task_group_unknown")
     if liability > group.max_cost_microusd:
         raise InferenceAccountingError("general_task_group_cost_limit")
-    if entry.get("role") == "continuation":
+    if entry.get("role") in {"continuation", "specialist"}:
         keys = {"task_id", "task_attempt_id", "plan_revision", "selected_grant_digest", "parent_owner", "parent_fence"}
         if not keys.issubset(entry):
             raise InferenceAccountingError("general_task_continuation_not_bound")
         binding = {key: entry[key] for key in keys}
         initial = next((member for member in members if entry_for(member).get("role") == "initial_proposal"), None)
-        await validate_continuation(db, group, binding, initial)
+        if entry["role"] == "specialist":
+            from src.workflows.specialist_delegation import validate_specialist_accounting
+            binding.update({key: entry[key] for key in ("delegation_invocation_id", "delegation_request_digest")})
+            binding["role"] = "specialist"
+            context = await validate_specialist_accounting(db, group, binding, initial)
+            _validate_specialist_limits(members, binding, context.request.limits)
+        else:
+            await validate_continuation(db, group, binding, initial)
     elif entry.get("role") != "initial_proposal":
         raise InferenceAccountingError("general_task_group_runtime_invalid")

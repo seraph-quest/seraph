@@ -251,6 +251,12 @@ class ToolRegistry:
         self.mcp_runtime = mcp_runtime
         self.extension_registry = extension_registry
         self.started = False
+        self.delegation_service = None
+
+    def bind_delegation_service(self, service):
+        if self.delegation_service is not None and self.delegation_service is not service:
+            raise RuntimeError("specialist delegation lifecycle already owned")
+        self.delegation_service = service
 
     def start(self):
         self.started = True
@@ -272,7 +278,7 @@ class ToolRegistry:
                 possible = True
                 if (getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
                     and self._invoke_document_with_closure.__func__.__code__ is _STOCK_DOCUMENT_CODE):
-                    possible = False
+                    possible = descriptor.tool_id != "document_prepare"
             else:
                 wrapper, _ = _current_approval_wrapper(entry[1], is_mcp=entry[2])
                 possible = isinstance(wrapper, ApprovalTool)
@@ -290,6 +296,7 @@ class ToolRegistry:
 
     def stop(self):
         self.started = False
+        self.delegation_service = None
 
     def _entries(self):
         if not self.started:
@@ -303,6 +310,12 @@ class ToolRegistry:
         mode = policy_snapshot["tool_mode"]
         mcp_mode = policy_snapshot["mcp_mode"]
         entries = {}
+        from config.settings import settings
+        if (settings.use_delegation and self.delegation_service is not None
+            and self.delegation_service.started and is_tool_allowed("delegate_task", mode)):
+            from src.workflows.specialist_delegation import delegation_descriptor
+            delegated = delegation_descriptor()
+            entries[delegated.tool_id] = (delegated, None, False)
         from src.work_board.document_preparation import descriptor as document_descriptor
         local_document = document_descriptor()
         if is_tool_allowed(local_document.tool_id, mode):
@@ -406,6 +419,9 @@ class ToolRegistry:
                 raise PermissionError("current capability execution permission is required")
             return TaskToolInvocation(asyncio.create_task(self._invoke_document_with_closure(
                 descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
+        if descriptor.tool_id == "delegate_task":
+            return TaskToolInvocation(asyncio.create_task(self._invoke_delegation_with_closure(
+                descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
         # ContextVars are copied by to_thread. Existing wrappers remain the
         # last authority/approval/audit/secret boundary, including MCP calls.
         # The handle belongs to the current native interpreter invocation.
@@ -413,6 +429,22 @@ class ToolRegistry:
         future = asyncio.create_task(asyncio.to_thread(self._invoke_with_closure,
             descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token))
         return TaskToolInvocation(future)
+
+    async def _invoke_delegation_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            service = self.delegation_service
+            if service is None or not service.started or service.delegation_jobs is None:
+                raise PermissionError("current specialist delegation owner unavailable")
+            from src.workflows.specialist_delegation import execute_specialist
+            output = await execute_specialist(service.delegation_jobs, service=service,
+                invocation_id=job_id, fencing_token=fencing_token, principal=principal)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
 
     async def _invoke_document_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
         binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),

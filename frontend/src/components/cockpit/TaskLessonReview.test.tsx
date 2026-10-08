@@ -60,3 +60,18 @@ it("does not expose private correction or late lesson evidence after owner chang
   resolve(response(source)); await waitFor(() => expect(screen.getByRole("button", { name: "Inspect lesson sources" })).toBeDisabled());
   expect(screen.queryByText("artifact:verified")).toBeNull();
 });
+it("shows the bound automatic no-change/error outcome without claiming adoption", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...source, automatic_outcome: { status: "blocked", result: "no_change", reason_code: "automatic_lesson_unavailable", error_type: "OSError", task_revision: 3, attempt_id: "attempt", workflow_run_id: "run", behavior_changed: false, provider_contacts: 0, outcome_binding: "a".repeat(64) } }));
+  render(<TaskLessonReview {...owner} task={task} />); await inspect();
+  const outcome = screen.getByRole("region", { name: "Automatic lesson outcome" });
+  expect(outcome).toHaveTextContent("blocked · no change · automatic_lesson_unavailable");
+  expect(outcome).toHaveTextContent("behavior unchanged · no provider contact");
+  expect(outcome).toHaveTextContent("OSError");
+  expect(screen.queryByRole("button", { name: /adopt|accept/i })).toBeNull();
+});
+it("rejects automatic outcomes from a different task revision or attempt", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...source, automatic_outcome: { status: "blocked", result: "no_change", reason_code: "automatic_lesson_unavailable", task_revision: 2, attempt_id: "foreign", behavior_changed: false, provider_contacts: 0, outcome_binding: "a".repeat(64) } }));
+  render(<TaskLessonReview {...owner} task={task} />); fireEvent.click(screen.getByRole("button", { name: "Inspect lesson sources" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("not bound");
+  expect(screen.queryByRole("region", { name: "Automatic lesson outcome" })).toBeNull();
+});

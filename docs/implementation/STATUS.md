@@ -26,16 +26,23 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
-**Task lesson drafts (#1000): Planned on `develop`, implemented on the C3.1
-feature branch pending independent review.** The branch provides private,
+**Task lesson drafts (#1000): intended Shipped scope after merge — supported
+proposal-only lessons.** This capability provides private,
 owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
-tool steps and explicit corrections, truthful failed-task provenance,
+tool steps or the exact registered formatter contract and explicit corrections,
+truthful failed-task provenance (including the host-blocked actual formatter),
 authoritative source discovery and separately opted-in automatic proposals
 limited to two per owner/UTC day. Unsupported corrections produce explicit
-no-change. It makes no inference call, grants no trace-egress permission and
+no-change. Automatic outcomes have content-free task receipts; exact replay
+repairs a missing evolution receipt without duplicate proposals. It makes no
+inference call, grants no trace-egress permission and
 does not infer a positive preference from success. Strategy adoption and
-next-task reuse are absent until the separately reviewed #1001 slice. See the
-[branch-local operator contract](./12-current-app-guide.md#task-lesson-drafts-c31-1000-branch-local).
+next-task reuse (#1001) remain **Planned**. The named proof is an actual
+authenticated failed formatter journey with terminal failure, proven process
+cleanup, private inspectable candidate and no output adoption, plus isolated
+M5/evolution/dispatcher regressions. Successful formatter execution is not
+claimed: this host denies bubblewrap loopback setup. See the
+[operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
 
 ## Bounded operator workflows (program #899)
 

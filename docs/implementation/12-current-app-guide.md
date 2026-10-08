@@ -591,11 +591,14 @@ Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
-### Task lesson drafts (C3.1 #1000, branch-local)
+### Task lesson drafts (proposal-only)
 
-The #1000 branch adds a provider-free **Learn this** path for an ordinary
+The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary
 completed or failed task with a verified current attempt and recorded native
-tool steps. The source-discovery endpoint returns the authoritative task
+tool steps or an exact current formatter capability contract snapshot. The
+formatter draft preserves its registered identity, version and typed contract
+digests; it never copies the task's JSON input or output. The source-discovery
+endpoint returns the authoritative task
 revision, attempt, references and Goal scope. An ordinary text correction can
 draft a closed `TaskMethod.v1`: an existence check before using the source,
 a verified-readback check, or preservation of source attribution. Unsupported
@@ -617,15 +620,26 @@ reauthenticates that exact Root without renewing it. Automatic creation uses onl
 the finite missing-source failure rule and is limited to two proposals per UTC
 day across the owner; consent renewal does not renew that cap. It performs no
 inference, source-body projection or trace egress. The callback is bounded to
-five seconds and cannot undo an ordinary task's committed result. Model
-reflection remains unavailable because no existing consent authorizes task-trace
+five seconds and cannot undo an ordinary task's committed result.
+Automatic outcomes have content-free, original-owner task events; source
+discovery returns the latest matching outcome, including no-change, cap and
+failure states. A missing postcommit evolution receipt is repaired on exact
+request replay from the canonical proposal without another daily-cap charge.
+Model reflection remains unavailable because no existing consent authorizes task-trace
 egress. No model call or spend is needed to draft a supported lesson.
 
-This is branch-local implementation, not Shipped `develop` behavior. Strategy
-adoption, rollback and next-task use belong to #1001 and are absent from this
-slice. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
+This section records the intended supported scope after merge; it makes no
+pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
+remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
 change task execution. Isolated local checks establish these mechanics, not
-learned quality or general usefulness. Independent review remains pending.
+learned quality or general usefulness.
+
+The actual authenticated formatter-to-lesson failure journey is verified on the
+implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
+permitted`, process cleanup is proven, no formatted output is adopted, and an
+explicit correction creates an inspectable private inert method. The positive
+formatter journey remains blocked by that host sandbox limitation; this receipt
+does not establish successful formatter execution or lesson quality.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 

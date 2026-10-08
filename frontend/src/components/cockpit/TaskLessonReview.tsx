@@ -4,9 +4,13 @@ import { apiFetch } from "../../lib/api";
 import type { WorkBoardTask } from "../../types";
 
 interface Policy { enabled: boolean; policy_revision: number | null; daily_cap: number; inference_egress: "not_permitted"; adoption: "requires_separate_review" }
+interface AutomaticOutcome { status: string; result: "candidate_inert" | "no_change"; reason_code: string;
+  task_revision: number; behavior_changed: false; provider_contacts: 0; outcome_binding: string;
+  attempt_id?: string; workflow_run_id?: string; proposal_id?: string; proposal_revision?: number;
+  source_digest?: string; candidate_digest?: string; error_type?: string }
 interface Source { task_id: string; expected_revision: number; attempt_id: string | null; source_refs: string[];
   scope: { goal_id: string; goal_revision: number; family: "general" | "research" | "software" | "knowledge" };
-  eligible: boolean; reason_code: string; automatic_policy?: Policy }
+  eligible: boolean; reason_code: string; automatic_policy?: Policy; automatic_outcome?: AutomaticOutcome | null }
 interface Method { schema_version: "TaskMethod.v1"; family: string;
   steps: ({ kind: "registered_tool"; tool_id: string } | { kind: "guard"; check: string } | {
     kind: "registered_capability"; capability_id: "work.json-format.v1"; capability_version: "1";
@@ -28,9 +32,17 @@ function sourceRead(value: unknown, task: WorkBoardTask): Source {
     || !Array.isArray(value.source_refs) || !value.source_refs.every(v => typeof v === "string") || !record(value.scope)
     || value.scope.goal_id !== task.goal_id || value.scope.goal_revision !== task.goal_revision || typeof value.reason_code !== "string"
     || (value.eligible && (typeof value.attempt_id !== "string" || !value.source_refs.length))) throw Error("Source readback does not match this exact Work card. Refresh Work before learning.");
+  if (value.automatic_outcome != null) {
+    const outcome = value.automatic_outcome;
+    if (!record(outcome) || typeof outcome.status !== "string" || typeof outcome.reason_code !== "string"
+      || !["candidate_inert", "no_change"].includes(String(outcome.result)) || outcome.task_revision !== task.task_revision
+      || outcome.behavior_changed !== false || outcome.provider_contacts !== 0 || typeof outcome.outcome_binding !== "string"
+      || !/^[a-f0-9]{64}$/.test(outcome.outcome_binding) || (outcome.attempt_id !== undefined && outcome.attempt_id !== value.attempt_id)
+      || (outcome.proposal_id !== undefined && typeof outcome.proposal_id !== "string")) throw Error("Automatic lesson outcome is not bound to this current task and attempt. Refresh Work before inspection.");
+  }
   return value as unknown as Source;
 }
-export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId }: { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null }) {
+export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposalId }: { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null; proposalId?: string | null }) {
   const [source, setSource] = useState<Source | null>(null), [lesson, setLesson] = useState<Lesson | null>(null);
   const [correction, setCorrection] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
@@ -38,6 +50,18 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId }: { t
   const generation = useRef(0);
   const owned = Boolean(ownerPrincipalId && ownerSessionId && task.owner_principal_id === ownerPrincipalId && task.owner_session_id === ownerSessionId && task.ownership_access !== "recovered_read_only");
   useEffect(() => { ++generation.current; setSource(null); setLesson(null); setCorrection(""); setBusy(false); setError(null); setAutoAck(false); return () => { ++generation.current; }; }, [task.task_id, task.task_revision, ownerPrincipalId, ownerSessionId]);
+  useEffect(() => {
+    if (!proposalId || !owned) return;
+    const version = ++generation.current; setBusy(true); setError(null); setLesson(null);
+    void request(`/${encodeURIComponent(proposalId)}`).then(result => {
+      if (!record(result) || result.schema_version !== "task_method_proposal.v1" || result.proposal_id !== proposalId || result.task_id !== task.task_id
+        || result.behavior_changed !== false || typeof result.source_current !== "boolean" || typeof result.correction !== "string"
+        || !["candidate_inert", "no_change"].includes(String(result.result)) || !record(result.scope) || result.scope.goal_id !== task.goal_id) throw Error("Private lesson readback did not match this exact Work card.");
+      if (version === generation.current) setLesson(result as unknown as Lesson);
+    }).catch(e => { if (version === generation.current) setError((e as Error).message); })
+      .finally(() => { if (version === generation.current) setBusy(false); });
+    return () => { ++generation.current; };
+  }, [proposalId, task.task_id, task.task_revision, ownerPrincipalId, ownerSessionId, owned]);
   async function inspect() {
     if (!owned || busy) return;
     const version = generation.current; setBusy(true); setError(null); setLesson(null); setSource(null); setAutoAck(false);
@@ -81,6 +105,11 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId }: { t
     {source && <>
       <p role="status">{source.eligible ? "Verified sources available" : `Blocked: ${source.reason_code}. Verify the actual task attempt and readback, then inspect again.`}</p>
       <ul>{source.source_refs.map(ref => <li key={ref} className="font-mono break-all">{ref}</li>)}</ul>
+      {source.automatic_outcome && <div role="region" aria-label="Automatic lesson outcome" className="mt-2">
+        <p role="status">Automatic lesson: {source.automatic_outcome.status} · {source.automatic_outcome.result === "no_change" ? "no change" : "inert candidate"} · {source.automatic_outcome.reason_code} · behavior unchanged · no provider contact.</p>
+        <p>Task revision {source.automatic_outcome.task_revision}{source.automatic_outcome.attempt_id ? ` · attempt ${source.automatic_outcome.attempt_id}` : ""}{source.automatic_outcome.proposal_id ? ` · proposal ${source.automatic_outcome.proposal_id} revision ${source.automatic_outcome.proposal_revision ?? "unavailable"}` : ""}</p>
+        {source.automatic_outcome.error_type && <p>Proposal preparation error: {source.automatic_outcome.error_type}. Restore the learning service and inspect the task again; execution results and method adoption are separate.</p>}
+      </div>}
       {source.eligible && <><label>Private task correction<textarea aria-label="Private task correction" className="cockpit-input w-full" rows={3} maxLength={4000} disabled={busy} value={correction} onChange={e => { setCorrection(e.target.value); setLesson(null); }} /></label>
         <p>Supported corrections: check source existence; verify readback; preserve source attribution. Other corrections are retained privately with an explicit no-change result.</p>
         <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void propose()}>Prepare private lesson candidate</button></>}

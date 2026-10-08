@@ -247,7 +247,7 @@ async def _source(db, operator, request: LessonRequest, *, automatic=False, stag
     if authority.get("source_learning_excluded") is True:
         raise BoardError("lesson_source_excluded", "This source explicitly excludes learning")
     effects = json.loads(run.effect_receipts_json)
-    if any(isinstance(effect, dict) and effect.get("status") in {"unknown", "contact_started", "pending"} for effect in effects):
+    if any(isinstance(effect, dict) and effect.get("status") in {"unknown", "contact_started", "pending", "intent", "dispatched"} for effect in effects):
         raise BoardError("lesson_outcome_unresolved", "Unresolved contacted work cannot authorize a lesson")
     if staged is not None:
         observed = staged.token["observed"]
@@ -372,6 +372,7 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             MemoryProposal.owner_session_id == task.owner_session_id,
             MemoryProposal.request_binding_digest == binding))).scalar_one_or_none()
         if previous:
+            _reconcile_lesson_receipt(previous)
             return {**proposal_projection(previous), "idempotent_replay": True}
         candidate = _correct_method(old, correction)
         reason = ("observed_failure_candidate" if _automatic else "explicit_correction") if candidate else "insufficient_method_evidence" if old is None else "no_explicit_correction" if not correction else "unsupported_correction_no_change"
@@ -406,6 +407,9 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             MemoryProposal.owner_session_id == task.owner_session_id,
             MemoryProposal.request_binding_digest == binding))).scalar_one_or_none()
         if previous:
+            # Release the SQLite writer before touching the independent mirror.
+            await db.commit()
+            _reconcile_lesson_receipt(previous)
             return {**proposal_projection(previous), "idempotent_replay": True}
         if _automatic:
             current_policy = await _automatic_policy(db, operator, task)
@@ -437,11 +441,17 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         await db.commit()
         await db.refresh(row)
         payload = proposal_projection(row)
+    _reconcile_lesson_receipt(row)
+    return payload
+
+
+def _reconcile_lesson_receipt(row):
+    """Recover the idempotent mirror exclusively from committed canonical data."""
     from src.evolution.runtime import EvolutionRuntime
     runtime = EvolutionRuntime(EvolutionRuntime.default_path(settings.workspace_dir))
-    runtime.record_task_lesson(proposal_id=payload["proposal_id"], owner_id=operator.principal.principal_id,
-        source_digest=digest(token), candidate_digest=sha, result="candidate_inert" if candidate else "no_change")
-    return payload
+    runtime.record_task_lesson(proposal_id=row.proposal_id, owner_id=row.owner_principal_id,
+        source_digest=row.source_context_digest, candidate_digest=row.artifact_digest,
+        proposal_revision=row.revision, result=proposal_projection(row)["result"])
 
 
 async def propose_automatic_task_lesson(operator, task_id):
@@ -471,7 +481,51 @@ async def maybe_propose_automatic_lesson(task):
     operator = await authenticate_session(task.owner_session_id, touch=False)
     if operator.principal.principal_id != task.owner_principal_id:
         raise BoardError("lesson_owner_mismatch", "The original task owner changed", status_code=403)
-    return await propose_automatic_task_lesson(operator, task.task_id)
+    try:
+        outcome = await propose_automatic_task_lesson(operator, task.task_id)
+    except Exception as exc:
+        outcome = {"status": "blocked", "result": "no_change", "reason_code": "automatic_lesson_unavailable",
+            "error_type": type(exc).__name__, "behavior_changed": False}
+        await _record_automatic_outcome(operator, task, outcome)
+        raise
+    await _record_automatic_outcome(operator, task, outcome)
+    return outcome
+
+
+async def _record_automatic_outcome(operator, original_task, outcome):
+    """Append safe outcome metadata under the still-current original owner."""
+    async with db_engine.get_session() as db:
+        await _begin_sqlite_immediate(db)
+        await _assert_owner(db, operator, automatic=True)
+        task = await _task(db, original_task.task_id)
+        if task is None or (task.owner_principal_id, task.owner_session_id, task.task_revision) != (
+            original_task.owner_principal_id, original_task.owner_session_id, original_task.task_revision):
+            raise BoardError("lesson_task_changed", "Automatic outcome belongs to an older task revision")
+        payload = {key: outcome[key] for key in ("status", "result", "reason_code", "proposal_id", "candidate_digest", "error_type") if key in outcome}
+        payload.update({"task_revision": task.task_revision, "behavior_changed": False, "provider_contacts": 0})
+        attempt = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none()
+        if attempt is not None:
+            payload.update({"attempt_id": attempt.attempt_id, "workflow_run_id": attempt.workflow_run_id,
+                "source_digest": digest({"attempt_id": attempt.attempt_id, "fence": attempt.fencing_token,
+                    "ended_at": str(attempt.ended_at), "outcome": attempt.outcome,
+                    "receipts": attempt.receipt_refs_json, "task_input_digest": task.typed_input_digest})})
+        if outcome.get("proposal_id"):
+            proposal = await db.get(MemoryProposal, outcome["proposal_id"])
+            if proposal is None or (proposal.owner_principal_id, proposal.owner_session_id, proposal.source_task_id) != (task.owner_principal_id, task.owner_session_id, task.task_id):
+                raise BoardError("lesson_owner_mismatch", "Automatic proposal does not bind this owner and task")
+            payload.update({"source_digest": proposal.source_context_digest, "proposal_revision": proposal.revision})
+        binding = digest(payload)
+        rows = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task.task_id,
+            WorkBoardEvent.owner_principal_id == task.owner_principal_id,
+            WorkBoardEvent.owner_session_id == task.owner_session_id,
+            WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1"))).scalars().all()
+        if any(json.loads(event.metadata_json).get("outcome_binding") == binding for event in rows):
+            return
+        db.add(WorkBoardEvent(task_id=task.task_id, owner_principal_id=task.owner_principal_id,
+            owner_session_id=task.owner_session_id, actor_principal_id=operator.principal.principal_id,
+            actor_session_id=operator.session_id, kind="task_lesson.automatic_outcome.v1",
+            metadata_json=canonical({**payload, "outcome_binding": binding})))
 
 
 async def inspect_task_lesson(operator, proposal_id):
@@ -525,6 +579,12 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
                 "family": "research" if "research" in (task.capability_id or "") else "general"},
             "eligible": False, "reason_code": "lesson_attempt_unverified", "behavior_changed": False}
         payload["automatic_policy"] = await _automatic_policy(db, operator, task)
+        latest_outcome = (await db.execute(select(WorkBoardEvent).where(
+            WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == task.owner_principal_id,
+            WorkBoardEvent.owner_session_id == task.owner_session_id,
+            WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1").order_by(WorkBoardEvent.event_id.desc()).limit(1))).scalar_one_or_none()
+        outcome = json.loads(latest_outcome.metadata_json) if latest_outcome else None
+        payload["automatic_outcome"] = outcome if outcome and outcome.get("task_revision") == task.task_revision else None
         if attempt is None:
             return payload
         run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))).scalar_one_or_none()

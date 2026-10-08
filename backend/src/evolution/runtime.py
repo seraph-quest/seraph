@@ -347,7 +347,8 @@ class EvolutionRuntime:
         return proposal
 
     def record_task_lesson(self, *, proposal_id: str, owner_id: str, source_digest: str,
-                           candidate_digest: str, result: Literal["candidate_inert", "no_change"]) -> dict[str, Any]:
+                           candidate_digest: str, result: Literal["candidate_inert", "no_change"],
+                           proposal_revision: int = 1) -> dict[str, Any]:
         """Mirror content-free ordinary lesson evidence, without campaign gates.
 
         MemoryProposal owns review/adoption; this receipt cannot execute or vote.
@@ -355,11 +356,14 @@ class EvolutionRuntime:
         """
         if result not in {"candidate_inert", "no_change"}:
             raise EvolutionRuntimeError("unsupported task lesson result")
+        if isinstance(proposal_revision, bool) or not isinstance(proposal_revision, int) or proposal_revision < 1:
+            raise EvolutionRuntimeError("invalid task lesson proposal revision")
         receipt = {"schema_version": "task_lesson_receipt.v1",
             "proposal_id": _bounded_id(proposal_id, "proposal_id"),
             "owner_id": _bounded_id(owner_id, "owner_id"),
             "source_digest": _bounded_hash(source_digest, "source_digest"),
             "candidate_digest": _bounded_hash(candidate_digest, "candidate_digest"),
+            "proposal_revision": proposal_revision,
             "result": result, "behavior_changed": False, "provider_contacts": 0,
             "spend_microusd": 0}
         with self._locked():

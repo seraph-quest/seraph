@@ -107,6 +107,94 @@ async def test_failed_task_correction_is_private_inspectable_idempotent_and_iner
 
 
 @pytest.mark.asyncio
+async def test_committed_proposal_receipt_is_repaired_once_by_exact_replay(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    from src.evolution.runtime import EvolutionRuntime
+    actual = EvolutionRuntime.record_task_lesson
+    def unavailable(*args, **kwargs):
+        raise OSError("declared postcommit receipt write failure")
+    monkeypatch.setattr(EvolutionRuntime, "record_task_lesson", unavailable)
+    with pytest.raises(OSError, match="postcommit"):
+        await create_task_lesson(operator, request, _automatic=True)
+    async with async_db() as db:
+        committed = (await db.execute(select(MemoryProposal))).scalar_one()
+        identity = (committed.proposal_id, committed.revision, committed.source_context_digest, committed.artifact_digest)
+    monkeypatch.setattr(EvolutionRuntime, "record_task_lesson", actual)
+    repaired = await create_task_lesson(operator, request, _automatic=True)
+    repeated = await create_task_lesson(operator, request, _automatic=True)
+    assert repaired["idempotent_replay"] is repeated["idempotent_replay"] is True
+    assert repaired["proposal_id"] == repeated["proposal_id"] == identity[0]
+    receipt_path = EvolutionRuntime.default_path(settings.workspace_dir)
+    receipts = json.loads(receipt_path.read_text())["task_lesson_receipts"]
+    assert len(receipts) == 1
+    assert receipts[identity[0]]["proposal_revision"] == identity[1]
+    assert receipts[identity[0]]["source_digest"] == identity[2]
+    assert receipts[identity[0]]["candidate_digest"] == identity[3]
+    async with async_db() as db:
+        assert len(list((await db.execute(select(MemoryProposal))).scalars())) == 1
+        assert not list((await db.execute(select(Memory))).scalars())
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    second = await create_task_lesson(operator, request, _automatic=True)
+    assert second["proposal_id"] != identity[0]
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    denied = await create_task_lesson(operator, request, _automatic=True)
+    assert denied["reason_code"] == "automatic_lesson_daily_cap"
+
+
+@pytest.mark.asyncio
+async def test_terminal_automatic_failure_and_replay_are_visible_without_private_content(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    await set_automatic_lesson_policy(operator, "task", LessonAutoPolicyRequest(enabled=True,
+        expected_revision=1, mutation_uuid=str(uuid4())))
+    async with async_db() as db:
+        task = await _task(db, "task")
+    from src.memory import task_lessons
+    actual = task_lessons.propose_automatic_task_lesson
+    async def unavailable(*args, **kwargs):
+        raise OSError("private diagnostic must not enter public event")
+    monkeypatch.setattr(task_lessons, "propose_automatic_task_lesson", unavailable)
+    with pytest.raises(OSError):
+        await maybe_propose_automatic_lesson(task)
+    blocked = await eligible_lesson_source(operator, "task")
+    assert blocked["automatic_outcome"]["reason_code"] == "automatic_lesson_unavailable"
+    assert blocked["automatic_outcome"]["error_type"] == "OSError"
+    monkeypatch.setattr(task_lessons, "propose_automatic_task_lesson", actual)
+    result = await maybe_propose_automatic_lesson(task)
+    replay = await maybe_propose_automatic_lesson(task)
+    assert result["proposal_id"] == replay["proposal_id"]
+    visible = await eligible_lesson_source(operator, "task")
+    assert visible["automatic_outcome"]["proposal_id"] == result["proposal_id"]
+    assert visible["automatic_outcome"]["result"] == "candidate_inert"
+    from src.db.models import WorkBoardEvent
+    async with async_db() as db:
+        events = list((await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.kind == "task_lesson.automatic_outcome.v1"))).scalars())
+        assert len(events) == 2
+        assert all(event.actor_principal_id == operator.principal.principal_id for event in events)
+        assert "private diagnostic" not in json.dumps([event.metadata_json for event in events])
+        assert "Check source existence" not in json.dumps([event.metadata_json for event in events])
+        assert len(list((await db.execute(select(MemoryProposal))).scalars())) == 1
+
+
+@pytest.mark.asyncio
+async def test_unresolved_effect_sibling_states_deny_failed_task_learning(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    for state in ("unknown", "contact_started", "pending", "intent", "dispatched"):
+        async with async_db() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == "run"))).scalar_one()
+            run.effect_receipts_json = json.dumps([{"status": state}])
+        with pytest.raises(BoardError) as denied:
+            await create_task_lesson(operator, request)
+        assert denied.value.code == "lesson_outcome_unresolved"
+        assert (await eligible_lesson_source(operator, "task"))["eligible"] is False
+    async with async_db() as db:
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+
+
+@pytest.mark.asyncio
 async def test_source_changes_block_inspection_and_generic_memory_acceptance(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     result = await create_task_lesson(operator, request)
@@ -204,6 +292,16 @@ async def test_automatic_requires_explicit_policy_and_is_idempotent_without_posi
 @pytest.mark.asyncio
 async def test_missing_redaction_revoked_root_secret_and_method_tamper_fail_closed(async_db, monkeypatch, tmp_path):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    from src.memory import m5
+    actual_sanitize = m5.sanitize_m5_memory_text_async
+    async def unavailable_redaction(*args, **kwargs):
+        raise ValueError("redaction state unavailable")
+    monkeypatch.setattr(m5, "sanitize_m5_memory_text_async", unavailable_redaction)
+    with pytest.raises(BoardError) as blocked:
+        await create_task_lesson(operator, request)
+    assert blocked.value.code == "lesson_redaction_unavailable"
+    assert blocked.value.status_code == 503
+    monkeypatch.setattr(m5, "sanitize_m5_memory_text_async", actual_sanitize)
     with pytest.raises(BoardError, match="secret or authority"):
         await create_task_lesson(operator, request.model_copy(update={"correction": "api_key=never-copy-this"}))
     result = await create_task_lesson(operator, request)

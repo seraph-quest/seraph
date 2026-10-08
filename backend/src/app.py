@@ -475,19 +475,24 @@ async def lifespan(app: FastAPI):
         await context_manager.refresh()
     except Exception:
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    # This reviewed optional lifecycle host has no policy/agent ownership yet.
-    # Missing Node/build or a failed child blocks only dependent Cordis work.
+    from src.browser.sessions import profiled_interaction_sessions
     try:
-        await cordis_host.start()
-    except Exception:
-        logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
-    try:
+        await profiled_interaction_sessions.start()
+        # This optional host has no policy/agent ownership yet. Keep startup
+        # inside owned cleanup so cancellation still tears down both owners.
+        try:
+            await cordis_host.start()
+        except Exception:
+            logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
         yield
     finally:
         try:
             await cordis_host.stop()
         finally:
-            await goal_programme_service.stop()
+            try:
+                await profiled_interaction_sessions.stop()
+            finally:
+                await goal_programme_service.stop()
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

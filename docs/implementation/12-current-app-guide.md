@@ -1188,6 +1188,70 @@ target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
 
+### Profiled public form preparation (#1012)
+
+`browser.interact.v2` adds a separate registered HTTPBin public form preview
+under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
+is **Partial**: bounded public-form preparation and preview are available;
+authenticated exact transactions (#1013), downloads and selected local desktop
+draft actions (#1014) remain **Planned**.
+The existing public browser v1 remains navigate/extract only. From the public
+browser Work form, explicitly open the HTTPBin preparation controls, select a
+current Goal, acknowledge one public document contact/site access logging, and
+open the bounded job. Fill fields using the displayed current opaque nodes,
+check/radio controls, and request the literal private preview. Submission stays
+blocked; this public echo form does not place an order or mutate a business
+object. It imports no credentials, cookies or authenticated session.
+
+The profile pins the reviewed source bytes and exact GET `/forms/post`; any
+source drift blocks before Chromium receives the document. Preparation disables
+JavaScript, service workers, requests, WebSockets, downloads and popups. Fresh
+DOM revisions and original Root/Goal authority are checked before every action.
+At most 20 actions and 180 seconds occupy the existing shared browser lane.
+Stale or ambiguous nodes stop with a fresh-snapshot requirement. Explicit
+**Refresh current page snapshot** captures the original live page, consumes one
+bounded action and replaces every opaque node reference. Cached history
+inspection does not resolve an uncertain action. Refresh clears private input
+and action acknowledgement; continuing requires a new explicit action against
+the fresh nodes. At the action bound, only history and cleanup remain available.
+
+Reload uses the read-only owned-job list or exact request-key lookup to inspect
+completed/blocked history; it does not reopen a page or renew consent. Private
+inputs and preview artifacts are encrypted and excluded from generic journals.
+Success requires a current literal preview, private artifact readback and
+positive browser cleanup. Closing without a current preview cancels the job.
+Admission first requires the existing **Operator ownership and recovery**
+control's **Enroll this authenticated scope** action and a live stable operator
+identity. Refresh profiles after enrollment. Missing local Playwright files or
+a verified native kernel boot UUID report inactive before any child starts.
+The canonical physical reservation commits before the same-inode positive
+marker is synced and the driver starts. A crash between reservation and marker
+keeps unresolved read-only history; inspecting or replaying the request never
+launches another browser or infers no-child proof from missing metadata.
+
+Positive physical closure retains the exact lane witness until its cleanup-only
+journal receipt commits. A durable CAS conflict keeps capacity reserved.
+**Find physical browser cleanup** exposes only original job identity, proof
+state and unchanged durable status to the same stable authenticated operator,
+including after authenticating through existing ownership recovery. Explicit
+acknowledgement records exact physical cleanup; it never adopts output, grants
+success, renews old Root/Goal authority, retries an action or resolves an
+external outcome. Exact receipt replay cannot clear a later job's reservation.
+
+After lost owner-process cleanup, a changed verified native kernel boot UUID
+proves original resources are gone; the same boot stays blocked and requires an
+operator-managed reboot if no positive closure witness exists. Linux reads its
+kernel boot UUID; Darwin uses the fixed read-only `kern.bootsessionuuid`.
+Unavailable native proof or mismatched workspace/inode/job remains blocked.
+Process absence, elapsed time and an unlocked file are never cleanup proof.
+Every outcome records `no_learning`.
+
+The local Linux Chromium/TCP/SQLite receipts exercise multi-field preparation,
+select/check controls, policy denial, DOM drift, private readback and reloaded
+history with external sockets/inference denied. These receipts establish those
+mechanics; they do not establish a useful business form workflow or production
+HTTPBin availability. macOS execution is unverified.
+
 ### Bounded public browser tasks
 
 The bounded capability adds `browser.public-task.v1` through the existing Work

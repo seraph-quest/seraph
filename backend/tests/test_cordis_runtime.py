@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import signal
 import struct
+import subprocess
 import tempfile
 import time
 import unittest
@@ -18,6 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from src.runtime_plugins.bridge import CordisHost, HostBlocked, Pending
 from src.runtime_plugins.composition import BUILD_FILES, CHILD_ENV, PACKAGE_FILES, PACKAGE_ROOT, CompositionBlocked, reviewed_composition, reviewed_node, validate_profile
 from src.runtime_plugins.protocol import ProtocolError, decode_json, encode_frame, read_frame, validate_frame
+from src.runtime_plugins.cli import reviewed_npm
 
 
 def hello():
@@ -102,6 +104,92 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(host.process, process)
         self.assertFalse(await host.start())
         process.terminate.assert_called_once(); process.kill.assert_called_once()
+
+
+class ActualNpmCliTests(unittest.TestCase):
+    def setUp(self):
+        selected = os.environ.get("SERAPH_CORDIS_TEST_NODE")
+        if not selected:
+            self.skipTest("explicit reviewed Node required for actual npm CLI checks")
+        self.node24, version = reviewed_node(Path(selected))
+        if not version.startswith("v24."):
+            self.skipTest("Node24 exact bundled npm receipt required")
+        self.npm11 = self.node24.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+
+    def node22(self):
+        selected = os.environ.get("SERAPH_CORDIS_TEST_NODE22")
+        if not selected:
+            self.skipTest("explicit reviewed Node22 required for fallback receipt")
+        node, version = reviewed_node(Path(selected))
+        self.assertTrue(version.startswith("v22."))
+        return node
+
+    def test_node24_valid_bundle_remains_preferred(self):
+        with patch.dict(os.environ, {"PATH":"/absent-global-npm"}):
+            self.assertEqual(reviewed_npm(self.node24), self.npm11.resolve())
+
+    def test_node22_old_bundle_uses_real_pinned_external_cli_with_minimal_env(self):
+        node = self.node22()
+        original = subprocess.run
+        calls = []
+        def inspected_run(argv, **kwargs):
+            self.assertEqual(argv[0], str(node))
+            self.assertEqual(argv[2:], ["--version"])
+            self.assertEqual(kwargs["env"], {**CHILD_ENV,
+                "PATH":str(node.parent)+os.pathsep+os.defpath,
+                "HOME":str(PACKAGE_ROOT/".build-home"),
+                "npm_config_userconfig":str(PACKAGE_ROOT/".absent-user-npmrc"),
+                "npm_config_globalconfig":str(PACKAGE_ROOT/".absent-global-npmrc"),
+                "npm_config_update_notifier":"false", "npm_config_audit":"false"})
+            self.assertEqual(kwargs["cwd"], PACKAGE_ROOT)
+            self.assertTrue(kwargs["close_fds"])
+            self.assertEqual(kwargs["timeout"], 2)
+            self.assertTrue(kwargs["capture_output"])
+            calls.append(argv)
+            return original(argv, **kwargs)
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-pin-") as directory:
+            (Path(directory)/"npm").symlink_to(self.npm11)
+            with patch.dict(os.environ, {"PATH":directory, "HOME":directory, "npm_config_userconfig":"/operator-config-forbidden", "NODE_OPTIONS":"--unreviewed-option", "OPENROUTER_API_KEY":"forbidden-fixture"}), patch("src.runtime_plugins.cli.subprocess.run", side_effect=inspected_run):
+                self.assertEqual(reviewed_npm(node), self.npm11.resolve())
+        self.assertEqual(len(calls), 2)
+
+    def test_node22_missing_or_wrong_external_pin_fails_closed(self):
+        node = self.node22()
+        bundled = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-pin-") as directory:
+            with patch.dict(os.environ, {"PATH":directory}):
+                with self.assertRaisesRegex(CompositionBlocked, "npm_unsupported"):
+                    reviewed_npm(node)
+                (Path(directory)/"npm").symlink_to(bundled)
+                with self.assertRaisesRegex(CompositionBlocked, "npm_unsupported"):
+                    reviewed_npm(node)
+
+    def test_both_clis_absent_reports_missing(self):
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-missing-") as directory:
+            node = Path(directory)/"bin/node"
+            node.parent.mkdir()
+            shutil.copy2(self.node24, node)
+            reviewed, _ = reviewed_node(node)
+            with patch.dict(os.environ, {"PATH":directory}):
+                with self.assertRaisesRegex(CompositionBlocked, "npm_missing"):
+                    reviewed_npm(reviewed)
+
+    def test_external_shell_wrapper_and_world_writable_js_never_execute(self):
+        node = self.node22()
+        with tempfile.TemporaryDirectory(prefix="seraph-npm-untrusted-") as directory:
+            npm = Path(directory)/"npm"
+            npm.write_text("#!/bin/sh\nprintf '11.8.0'\n")
+            npm.chmod(0o700)
+            with patch.dict(os.environ, {"PATH":directory}):
+                with self.assertRaisesRegex(CompositionBlocked, "unreviewed_runtime_path"):
+                    reviewed_npm(node)
+                npm.unlink()
+                script = Path(directory)/"npm-cli.js"
+                script.write_text("console.log('11.8.0');\n")
+                script.chmod(0o777)
+                npm.symlink_to(script)
+                with self.assertRaisesRegex(CompositionBlocked, "unreviewed_runtime_path"):
+                    reviewed_npm(node)
 
 
 class ActualHostTests(unittest.IsolatedAsyncioTestCase):

@@ -14,30 +14,53 @@ from .bridge import CordisHost
 from .composition import CHILD_ENV, CORDIS_VERSION, NPM_VERSION, PACKAGE_ROOT, CompositionBlocked, _trusted_file, reviewed_composition, reviewed_node
 
 
+def _npm_env(node: Path) -> dict[str, str]:
+    # npm loads configuration even for --version. Keep both commands private.
+    return {**CHILD_ENV, "PATH": str(node.parent) + os.pathsep + os.defpath,
+            "HOME": str(PACKAGE_ROOT / ".build-home"),
+            "npm_config_userconfig": str(PACKAGE_ROOT / ".absent-user-npmrc"),
+            "npm_config_globalconfig": str(PACKAGE_ROOT / ".absent-global-npmrc"),
+            "npm_config_update_notifier": "false", "npm_config_audit": "false"}
+
+
+def reviewed_npm(node: Path) -> Path:
+    """Prefer an exact bundled pin, then an independently installed trusted CLI."""
+    bundled = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+    found = shutil.which("npm")
+    candidates = [bundled, *([Path(found)] if found else [])]
+    present = False
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            npm = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if npm in seen:
+            continue
+        seen.add(npm)
+        present = True
+        _trusted_file(npm)
+        if npm.suffix != ".js":
+            raise CompositionBlocked("unreviewed_runtime_path")
+        try:
+            result = subprocess.run([str(node), str(npm), "--version"], env=_npm_env(node), cwd=PACKAGE_ROOT,
+                                    close_fds=True, capture_output=True, check=True, timeout=2)
+            if result.stdout.decode("ascii").strip() == NPM_VERSION:
+                return npm
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            continue
+    raise CompositionBlocked("npm_unsupported" if present else "npm_missing")
+
+
 def build(node_path: Path | None) -> int:
     try:
         node, _ = reviewed_node(node_path)
-        # Prefer the explicitly chosen Node distribution's bundled npm.
-        bundled = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
-        found = shutil.which("npm")
-        npm = bundled if bundled.is_file() else Path(found).resolve(strict=True) if found else None
-        if npm is None:
-            raise CompositionBlocked("npm_missing")
-        _trusted_file(npm)
-        result = subprocess.run([str(node), str(npm), "--version"], env=CHILD_ENV,
-                                close_fds=True, capture_output=True, check=True, timeout=2)
-        if result.stdout.decode("ascii").strip() != NPM_VERSION:
-            raise CompositionBlocked("npm_unsupported")
+        npm = reviewed_npm(node)
         # Build never installs dependencies or reads operator npm configuration.
         if not (PACKAGE_ROOT / "node_modules/typescript/bin/tsc").is_file():
             raise CompositionBlocked("build_dependencies_missing")
-        build_env = {**CHILD_ENV, "PATH": str(node.parent) + os.pathsep + os.defpath,
-                     "HOME": str(PACKAGE_ROOT / ".build-home"),
-                     "npm_config_userconfig": str(PACKAGE_ROOT / ".absent-user-npmrc"),
-                     "npm_config_globalconfig": str(PACKAGE_ROOT / ".absent-global-npmrc"),
-                     "npm_config_update_notifier": "false", "npm_config_audit": "false"}
         result = subprocess.run([str(node), str(npm), "run", "build"], cwd=PACKAGE_ROOT,
-                                env=build_env, close_fds=True, timeout=60)
+                                env=_npm_env(node), close_fds=True, timeout=60)
         if result.returncode:
             return result.returncode
         reviewed_composition(node_path=node)

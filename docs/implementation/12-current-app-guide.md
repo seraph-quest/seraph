@@ -35,6 +35,18 @@ The lockfile SRI verifies stock package bytes during `npm ci`; the reported
 `package_digest` binds host files/build and lock metadata, not unpacked
 `node_modules`. Runtime trust includes that reviewed installation and excludes
 malicious code changes by the same user.
+[Stock Node 22.12.0](https://nodejs.org/en/download/archive/v22.12.0) bundles npm
+10.9.0, so install **npm 11.8.0** explicitly before this package setup (for
+example, `npm install --global npm@11.8.0` in your selected operator toolchain;
+see [npm's explicit-version/global install contract](https://docs.npmjs.com/cli/v11/commands/npm-install/)).
+Put that installation's actual `bin` directory before version-manager shims on
+`PATH`, so `npm` resolves to its trusted `npm-cli.js` file, then use the
+managed build command below with the absolute reviewed Node 22 executable.
+The build checks its bundled npm first and falls back to a separately installed,
+trusted JavaScript CLI on `PATH` only when it reports exactly 11.8.0. It executes
+that CLI through the reviewed Node binary, never through a shell wrapper.
+Missing or wrong npm stays a visible setup block; the managed build installs
+nothing. Node 24's matching bundled npm remains preferred.
 
 ```bash
 ./manage.sh -e dev cordis status

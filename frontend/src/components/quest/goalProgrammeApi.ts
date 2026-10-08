@@ -52,6 +52,7 @@ export interface DiscoveryRun {
   external_effect_state: "none" | "unknown" | "settled";
   outstanding_held: boolean;
   accounting_liability: boolean;
+  denial_cause?: string | null;
   outcome: null | { state: "findings" | "quiet" | "empty"; coverage: string; freshness: "current"; no_learning: true };
   no_learning: true;
   recovery: string | null;
@@ -69,6 +70,11 @@ export function isDiscoveryRun(value: unknown): value is DiscoveryRun {
     && ["accepted", "queued", "running", "paused", "blocked", "failed", "succeeded", "degraded", "cancelled", "cost_liability", "unknown_external_effect"].includes(item.status ?? "")
     && ["none", "unknown", "settled"].includes(item.external_effect_state ?? "")
     && typeof item.outstanding_held === "boolean" && typeof item.accounting_liability === "boolean"
+    && (item.denial_cause === undefined || item.denial_cause === null || [
+      "programme_unclaimed_original_paused", "programme_unclaimed_original_revoked",
+      "programme_unclaimed_identity_revoked", "programme_unclaimed_goal_changed",
+      "programme_unclaimed_original_expired",
+    ].includes(item.denial_cause))
     && item.no_learning === true && (item.recovery === null || typeof item.recovery === "string")
     && (item.outcome === null || (Boolean(item.outcome) && ["findings", "quiet", "empty"].includes(item.outcome!.state)
       && typeof item.outcome!.coverage === "string" && item.outcome!.freshness === "current" && item.outcome!.no_learning === true));

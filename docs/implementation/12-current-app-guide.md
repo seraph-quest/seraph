@@ -157,8 +157,48 @@ Saving a preview with a changed public brief immediately pauses the old
 programme; abandoning that review does not restart it. An unchanged-brief
 renewal pauses its predecessor on acceptance. A new login
 cannot renew old authority; exact pause/revoke needs separately acknowledged
-stable-owner recovery. This authority milestone alone does not run discovery or
-produce a digest; later discovery retains native job/artifact/accounting owners.
+stable-owner recovery. The authority milestone alone does not run discovery or
+produce a digest.
+
+The public discovery executor under
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) is **Partial** until its
+whole native execution and recovery implementation is independently reviewed and
+merged. Its current Python owner accepts one occurrence for the current UTC day,
+using the original finite programme, native job queue, artifact owner and cost
+ledger. There is no catch-up after downtime. The fixed path plans at most three
+queries, searches the fixed DuckDuckGo HTML route, selects at most four manifest
+items, and prepares a cited local brief and inert checklist. Each occurrence has
+the original deadline of at most 300 seconds and at most four governed inference
+requests. The programme ceiling includes every daily occurrence and accounting
+period, including unresolved reservations and contacted Unknown work.
+
+Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
+held effects and cost liability. Selecting a completed brief performs an explicit
+local readback under current owner and original generation checks. Private Goal
+text is excluded from the public model/search path. Source quotations remain
+untrusted data; mechanical citation/span verification does not establish semantic
+truth. Full original brief and omitted source-line coverage stay visible. A brief
+that cannot fit the existing bounded request becomes unsupported before contact;
+source limits never silently truncate stored evidence. An unchanged later source
+set produces a quiet brief. Prepared checklists are local proposals requiring
+separate acceptance; discovery records `no_learning` and performs no external
+mutation or digest delivery.
+
+Explicit revoke, replacement generation, Goal correction or expiry may negatively
+close an occurrence only when it was never claimed, has exactly its two initial
+local readbacks, and has no cost row or contact evidence. The native cancellation
+writer rechecks the exact original binding and denial cause. Browser logout is
+not a cancellation cause. Claimed, malformed, Unknown or cost-bearing occurrences
+remain visibly held for inspection; new authority does not replay or forgive
+them. Unadopted staged files grant no contact authority. Missing, partial or
+altered files block adoption rather than being overwritten as successful output.
+
+Isolated Linux tests exercise Auth, explicit programme acceptance/logout,
+canonical SQLite admission/accounting, the actual scheduler callback, owned
+literal-loopback HTTP search/source responses and scripted governed inference
+transport. They prove mechanical execution/readback and failure boundaries;
+provider availability, real inference quality/spend and native macOS execution
+remain unverified.
 
 Isolated Linux SQLite/ASGI checks verify the finite configuration/control path,
 logout/restart clocks, owner recovery and fail-closed correction boundaries.

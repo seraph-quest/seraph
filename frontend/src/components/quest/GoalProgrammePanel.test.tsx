@@ -48,6 +48,20 @@ describe("Goal programme cockpit journey", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
   afterEach(() => { vi.unstubAllGlobals(); });
+  it("shows the canonical untouched cancellation cause without offering replay or private read", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, runs: [{ job_id: `goal-discovery:${"a".repeat(32)}`,
+        programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-08",
+        status: "cancelled", deadline_at: "2026-10-08T12:05:00Z", external_effect_state: "settled",
+        outstanding_held: false, accounting_liability: false, denial_cause: "programme_unclaimed_original_revoked",
+        outcome: null, no_learning: true, recovery: null }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    await screen.findByText(/Untouched occurrence cancelled: programme_unclaimed_original_revoked/);
+    expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+  });
   it("shows retained Unknown independently of capacity and never reads a private brief automatically", async () => {
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,

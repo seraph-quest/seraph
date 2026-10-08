@@ -135,6 +135,22 @@ Executor contact/adoption CAS integration is still required before executor
 activation. macOS execution, provider availability and model usefulness are not
 established by these mechanical checks.
 
+**Finite public Goal discovery: Partial.** The current Python executor for
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) extends the existing
+programme, native job/artifact/accounting and scheduler owners. Its bounded
+operator journey includes fixed search, exact manifest selection, cited local
+brief/readback, first findings and later quiet outcomes, inert checklist proposals
+and explicit `no_learning`. Original deadlines and cumulative programme ceilings
+remain binding across daily/accounting periods. Untouched invalid queued work can
+close only through the existing canonical deny-only cancellation writer; claimed
+or uncertain effects and any cost-bearing work remain held. Explicit operator
+inspection/readback is available in the Goal panel. See the
+[operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
+Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
+mechanical contracts and failure boundaries. Whole cumulative independent review
+and merge are still required; real provider/model quality, native macOS execution
+and digest delivery are not established.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

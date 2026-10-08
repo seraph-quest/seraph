@@ -3846,6 +3846,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         reason: str = "operator_cancelled",
         cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         result: Any = None,
+        result_summary: str | None = None,
     ) -> dict[str, Any]:
         return await self.transition_job(
             job_id,
@@ -3856,6 +3857,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             reason=reason,
             cancellation_authority_check=cancellation_authority_check,
             result=result,
+            result_summary=result_summary,
         )
 
     async def cancel_job_tree(

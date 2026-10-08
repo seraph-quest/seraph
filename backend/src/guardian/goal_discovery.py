@@ -464,6 +464,18 @@ class GoalDiscoveryService:
 
     async def tick(self):
         self._ready()
+        # Untouched invalid originals may close negatively before ordinary new
+        # admission. Any claimed/contacted/cost-bearing row remains held.
+        from src.guardian.discovery_recovery import close_untouched_occurrence
+        async with self.jobs._session() as db:
+            untouched = list((await db.execute(select(WorkflowRunState.run_identity).where(
+                WorkflowRunState.job_kind == DISCOVERY_KIND,
+                WorkflowRunState.status.in_(("accepted", "queued"))))).scalars())
+        for job_id in untouched:
+            try:
+                await close_untouched_occurrence(self.jobs, job_id)
+            except (ValueError, RuntimeError):
+                pass  # Safe history/current guards remain the only truth.
         # Canonical discovery only, current UTC date only. No catch-up loop.
         async with self.jobs._session() as db:
             goals = list((await db.execute(select(Goal).where(Goal.status == "active").order_by(Goal.sort_order, Goal.id))).scalars())
@@ -507,6 +519,7 @@ class GoalDiscoveryService:
                     "occurrence_day": authority.occurrence_day, "status": run.status,
                     "deadline_at": run.deadline_at.isoformat(), "external_effect_state": ledger,
                     "outstanding_held": held, "accounting_liability": liability,
+                    "denial_cause": run.result_summary if run.status == "cancelled" else None,
                     "outcome": outcome, "no_learning": True,
                     "recovery": "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden." if held else None})
         return {"goal_id": goal_id, "runs": runs, "current_day_only": True, "no_learning": True}

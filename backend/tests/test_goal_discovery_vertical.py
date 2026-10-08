@@ -73,7 +73,8 @@ def public_http_fixture():
 
 @pytest.mark.parametrize("scenario", ["completed", "goal_before_claim", "goal_after_query", "identity_before_claim", "unselected_id", "model_timeout",
     "empty_search", "captcha", "normalized_oversize", "raw_oversize", "unsupported_pdf", "unsupported_brief", "generation_ceiling",
-    "active_strategy", "strategy_blocked", "strategy_changed"])
+    "active_strategy", "strategy_blocked", "strategy_changed", "revoke_untouched", "renew_untouched", "claimed_cleanup_denied",
+    "cleanup_extra_effect", "cleanup_cost_row", "cleanup_wrong_issuer", "cleanup_cas_race", "expire_untouched"])
 @pytest.mark.asyncio
 async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, monkeypatch, scenario):
     from config.settings import settings
@@ -196,8 +197,11 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 "public_web_acknowledged": True, "local_artifacts_acknowledged": True, "inference_ceiling_acknowledged": True})
             assert accepted.status_code == 200, accepted.text
             programme = accepted.json()
-            logout = await client.post("/api/auth/logout")
-            assert logout.status_code == 204
+            recovery_case = scenario in {"revoke_untouched", "renew_untouched", "claimed_cleanup_denied",
+                "cleanup_extra_effect", "cleanup_cost_row", "cleanup_wrong_issuer", "cleanup_cas_race", "expire_untouched"}
+            if not recovery_case:
+                logout = await client.post("/api/auth/logout")
+                assert logout.status_code == 204
             if scenario == "strategy_blocked":
                 with pytest.raises(ValueError, match="programme_strategy_blocked"):
                     await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
@@ -207,6 +211,87 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             job = await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
             assert job["status"] == "queued", job
             deadline = job["deadline_at"]
+            if recovery_case:
+                from src.guardian.discovery_recovery import close_untouched_occurrence
+                from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
+                if scenario == "claimed_cleanup_denied":
+                    witness = await physical_discovery_inputs(jobs, job["job_id"])
+                    async def original_claim(db, run):
+                        await assert_discovery_authority(db, run.declared_authority_json, run=run)
+                    async with discovery_writer_scope(witness=witness):
+                        await jobs.claim_job(job["job_id"], owner="native:goal-public-discovery", lease_seconds=60,
+                            claim_authority_check=original_claim)
+                original = await jobs.get_job(job["job_id"])
+                if scenario == "expire_untouched":
+                    from src.guardian import discovery_recovery
+                    original_deadline = datetime.fromisoformat(deadline).replace(tzinfo=timezone.utc)
+                    monkeypatch.setattr(discovery_recovery, "_utc_now", lambda: original_deadline + timedelta(seconds=1))
+                elif scenario == "renew_untouched":
+                    renewed_request = {**request, "expected_grant_revision": 1,
+                        "public_brief": "Explicit new reviewed public generation"}
+                    renewed_preview = await client.post(base + "/preview", json=renewed_request)
+                    assert renewed_preview.status_code == 200, renewed_preview.text
+                    renewed = await client.post(base + "/accept", json={**renewed_request,
+                        "review_digest": renewed_preview.json()["review_digest"], "public_web_acknowledged": True,
+                        "local_artifacts_acknowledged": True, "inference_ceiling_acknowledged": True})
+                    assert renewed.status_code == 200, renewed.text
+                else:
+                    revoked = await client.post(base + f"/{programme['id']}/revoke",
+                        json={"expected_grant_revision": 1, "recover_owner_acknowledged": False})
+                    assert revoked.status_code == 200, revoked.text
+                if scenario.startswith("cleanup_"):
+                    from src.db.models import WorkflowRunState, InferenceCostReservation, OperatorSession
+                    async with factory.accounting_sessions() as db:
+                        current = await jobs._fetch(db, job["job_id"])
+                        if scenario == "cleanup_extra_effect":
+                            current.effect_receipts_json = json.dumps(json.loads(current.effect_receipts_json) + [
+                                {"effect_id": "extra-contact", "receipt_kind": "intent", "effect_type": "public_https_read",
+                                    "status": "unknown", "target_digest": "a" * 64}])
+                        elif scenario == "cleanup_cost_row":
+                            # Canonical-row negative fixture: even released,
+                            # never-contacted accounting is outside untouched.
+                            db.add(InferenceCostReservation(operation_id="retained-released-cost", deployment_id="fixture",
+                                job_id=job["job_id"], owner_id=current.owner_principal_id, payload_digest="a" * 64,
+                                policy_digest="b" * 64, runtime_path="openrouter", profile_id="fixture", period_id="2026-10",
+                                settings_revision=1, ceiling_microusd=500, bound_microusd=100, sequence=1, priority=50,
+                                deadline_at=current.deadline_at, state="released", job_fencing_token=0))
+                        elif scenario == "cleanup_wrong_issuer":
+                            issuer = await db.get(OperatorSession, programme["issuer_root_id"])
+                            issuer.operator_identity_id = None
+                    if scenario == "cleanup_cas_race":
+                        original_cancel = jobs.cancel_job
+                        async def raced_cancel(job_id, **kwargs):
+                            from sqlalchemy import update
+                            async with factory.accounting_sessions() as db:
+                                await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id)
+                                    .values(revision=WorkflowRunState.revision + 1))
+                            return await original_cancel(job_id, **kwargs)
+                        monkeypatch.setattr(jobs, "cancel_job", raced_cancel)
+                    before_rejected = await jobs.get_job(job["job_id"])
+                    with pytest.raises(Exception):
+                        await close_untouched_occurrence(jobs, job["job_id"])
+                    after_rejected = await jobs.get_job(job["job_id"])
+                    assert after_rejected["status"] == "queued" and after_rejected["effects"] == before_rejected["effects"]
+                    assert calls == [] and contacts == [] and physical_contacts == []
+                    return
+                if scenario == "claimed_cleanup_denied":
+                    with pytest.raises(ValueError, match="programme_unclaimed_cleanup_binding_denied"):
+                        await close_untouched_occurrence(jobs, job["job_id"])
+                    held = await jobs.get_job(job["job_id"])
+                    assert held == original
+                else:
+                    closed = await close_untouched_occurrence(jobs, job["job_id"])
+                    assert closed["status"] == "cancelled" and closed["lease"]["fencing_token"] == 0
+                    assert closed["receipt"]["reason"] == closed["result"]["summary"]
+                    after = await jobs.get_job(job["job_id"])
+                    for key in ("declared_authority", "inputs", "input_digest", "authority_digest", "deadline_at", "effects", "artifacts", "checkpoints"):
+                        assert after.get(key) == original.get(key)
+                    if scenario == "renew_untouched":
+                        fresh = await service.admit(goal_id=goal_id, programme_id=renewed.json()["id"], grant_revision=2)
+                        assert fresh["job_id"] != job["job_id"] and fresh["status"] == "queued"
+                assert calls == [] and contacts == [] and physical_contacts == []
+                assert (await jobs.inference_accounting_snapshot(job_id=job["job_id"]))["operations"] == []
+                return
             if scenario == "strategy_changed":
                 strategy_state["changed"] = True
                 with pytest.raises(ValueError, match="programme accepted strategy binding changed"):
@@ -273,7 +358,14 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                     still = await jobs.get_job(job["job_id"])
                     assert still["effects"] == blocked["effects"] and still["declared_authority"] == blocked["declared_authority"]
                 return
-            done = await service.run(job["job_id"])
+            if scenario == "completed":
+                from src.guardian.goal_discovery import run_goal_discovery_tick
+                # Invoke the actual registered scheduler callback through its
+                # current lifecycle pointer; it dedupes this queued occurrence.
+                await run_goal_discovery_tick()
+                done = await jobs.get_job(job["job_id"])
+            else:
+                done = await service.run(job["job_id"])
             if scenario in {"empty_search", "normalized_oversize", "unsupported_pdf", "unsupported_brief"}:
                 assert done["status"] == "degraded", done
                 witness = await physical_discovery_inputs(jobs, job["job_id"])
@@ -326,6 +418,8 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             original_clock = goal_programme_service._clock
             future = original_clock() + timedelta(days=1)
             monkeypatch.setattr(goal_programme_service, "_clock", lambda: future)
+            if scenario == "completed":
+                await run_goal_discovery_tick()  # actual next-slot native admission and quiet execution
             second = await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
             assert second["job_id"] != job["job_id"]
             if scenario == "generation_ceiling":
@@ -338,7 +432,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert len([row for row in total["operations"] if row["job_id"] == job["job_id"]]) == 3
                 assert not any(row["job_id"] == second["job_id"] for row in total["operations"])
                 return
-            second_done = await service.run(second["job_id"])
+            second_done = await jobs.get_job(second["job_id"]) if scenario == "completed" else await service.run(second["job_id"])
             assert second_done["status"] == "succeeded"
             second_witness = await physical_discovery_inputs(jobs, second["job_id"])
             quiet = next(a for a in second_witness.artifacts.values() if a["kind"] == "brief")["parsed"]

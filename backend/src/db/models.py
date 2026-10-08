@@ -2400,6 +2400,9 @@ class Goal(SQLModel, table=True):
     admission_budget_json: Optional[str] = Field(default=None)
     guardian_policy_json: Optional[str] = Field(default=None)
     guardian_policy_revision: int = Field(default=0)
+    # Reviewed finite public programmes and their retained authority generations.
+    # Separate from the closed legacy guardian policy; never a job/accounting store.
+    goal_programmes_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

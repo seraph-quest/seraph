@@ -362,6 +362,7 @@ async def _ensure_legacy_columns(conn) -> None:
     )
     await _add_missing_columns("goals", {
         "guardian_policy_json": "VARCHAR", "guardian_policy_revision": "INTEGER NOT NULL DEFAULT 0",
+        "goal_programmes_json": "VARCHAR",
     })
     await _add_missing_columns("guardian_interventions", {
         "owner_principal_id": "VARCHAR", "original_root_id": "VARCHAR", "goal_id": "VARCHAR",

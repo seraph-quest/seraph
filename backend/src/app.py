@@ -352,130 +352,132 @@ async def lifespan(app: FastAPI):
     await init_db()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
-    app.state.task_continuity = TaskContinuityService(WorkBoardRepository())
-    await app.state.task_continuity.start()
     from src.agent.session import session_manager
-    session_manager.bind_task_continuity(app.state.task_continuity)
-    # Hydrate the trusted OpenRouter vault credential before any scheduler or
-    # canonical inference path resolves a provider profile.  Failure remains
-    # visible as configuration_required through the normal status surfaces;
-    # the exception is never allowed to trigger a provider call.
-    try:
-        from src.model_fabric.configuration import hydrate_openrouter_credential
-
-        await hydrate_openrouter_credential()
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "OpenRouter credential hydration failed; inference remains fail-closed",
-            exc_info=True,
-        )
-    # Recover expired durable invocation leases before scheduler jobs can
-    # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
-    # is fail-closed and operator-visible; a failed recovery is not hidden as
-    # a healthy startup.
-    try:
-        from src.workflows.job_runtime import durable_job_repository
-
-        recovered_jobs = await durable_job_repository.recover_stale_jobs()
-        if recovered_jobs:
-            logging.getLogger(__name__).warning(
-                "Recovered %d stale durable job(s) during startup",
-                len(recovered_jobs),
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Durable job restart recovery failed; stale work remains operator-visible"
-        )
-    # Routine installs stage workflow/package bytes outside discoverable roots
-    # until their canonical selector transaction commits. Reconcile committed
-    # staging, and remove only proven uncommitted staging, before scheduler
-    # work can discover a partial procedure after a process crash.
-    try:
-        from src.workflows.routines import routine_service
-
-        recovered_installs = await routine_service.recover_pending_installs()
-        blocked_installs = sum(1 for item in recovered_installs if item.get("status") == "blocked")
-        if recovered_installs:
-            logging.getLogger(__name__).warning(
-                "Routine install restart recovery inspected %d staging tree(s); %d remain blocked",
-                len(recovered_installs),
-                blocked_installs,
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Routine install restart recovery failed; partial staging remains non-discoverable"
-        )
-    # Audio quarantine files and unconfirmed transcript state are process-local
-    # and must never resume after a crash.  Run the durable cleanup before any
-    # scheduler work can admit a stale audio job.
-    try:
-        from src.guardian.audio_worker import cleanup_audio_ingress_jobs
-
-        cleaned_audio_jobs = await cleanup_audio_ingress_jobs()
-        if cleaned_audio_jobs:
-            logging.getLogger(__name__).warning(
-                "Cleaned %d stale audio ingress job(s) during startup",
-                cleaned_audio_jobs,
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
-        )
-    ensure_soul_exists()
-    init_llm_logging()
-    # Load persisted settings before scheduler starts
-    try:
-        from src.api.profile import get_or_create_profile
-        from src.observer.manager import context_manager
-        profile = await get_or_create_profile()
-        if profile.interruption_mode:
-            context_manager.update_interruption_mode(profile.interruption_mode)
-        if profile.capture_mode:
-            context_manager.update_capture_mode(profile.capture_mode)
-        if profile.tool_policy_mode:
-            context_manager.update_tool_policy_mode(profile.tool_policy_mode)
-        if profile.mcp_policy_mode:
-            context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
-        if profile.approval_mode:
-            context_manager.update_approval_mode(profile.approval_mode)
-    except Exception:
-        logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
-    defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
-    mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
-    if not os.path.exists(mcp_config):
-        default_config = os.path.join(defaults_dir, "mcp-servers.default.json")
-        if os.path.isfile(default_config):
-            import shutil
-            os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
-            shutil.copy2(default_config, mcp_config)
-    stdio_proxy_config = os.path.join(settings.workspace_dir, "stdio-proxies.json")
-    if not os.path.exists(stdio_proxy_config):
-        default_proxy_config = os.path.join(defaults_dir, "stdio-proxies.default.json")
-        if os.path.isfile(default_proxy_config):
-            import shutil
-            os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
-            shutil.copy2(default_proxy_config, stdio_proxy_config)
-    mcp_manager.load_config(mcp_config)
-    extensions_dir = os.path.join(settings.workspace_dir, "extensions")
-    os.makedirs(extensions_dir, exist_ok=True)
-    manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
-    skills_dir = os.path.join(settings.workspace_dir, "skills")
-    os.makedirs(skills_dir, exist_ok=True)
-    skill_manager.init(skills_dir, manifest_roots=manifest_roots)
-    runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
-    os.makedirs(runbooks_dir, exist_ok=True)
-    runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
-    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
-    os.makedirs(workflows_dir, exist_ok=True)
-    workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
-    starter_pack_manager.init(
-        os.path.join(settings.workspace_dir, "starter-packs.json"),
-        manifest_roots=manifest_roots,
-    )
     from src.work_board.general_task import current_task_service
     from src.guardian.goal_programmes import goal_programme_service
-    await goal_programme_service.start()
+    continuity = None
     try:
+        continuity = TaskContinuityService(WorkBoardRepository())
+        app.state.task_continuity = continuity
+        await continuity.start()
+        session_manager.bind_task_continuity(app.state.task_continuity)
+        # Hydrate the trusted OpenRouter vault credential before any scheduler or
+        # canonical inference path resolves a provider profile.  Failure remains
+        # visible as configuration_required through the normal status surfaces;
+        # the exception is never allowed to trigger a provider call.
+        try:
+            from src.model_fabric.configuration import hydrate_openrouter_credential
+
+            await hydrate_openrouter_credential()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "OpenRouter credential hydration failed; inference remains fail-closed",
+                exc_info=True,
+            )
+        # Recover expired durable invocation leases before scheduler jobs can
+        # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
+        # is fail-closed and operator-visible; a failed recovery is not hidden as
+        # a healthy startup.
+        try:
+            from src.workflows.job_runtime import durable_job_repository
+
+            recovered_jobs = await durable_job_repository.recover_stale_jobs()
+            if recovered_jobs:
+                logging.getLogger(__name__).warning(
+                    "Recovered %d stale durable job(s) during startup",
+                    len(recovered_jobs),
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Durable job restart recovery failed; stale work remains operator-visible"
+            )
+        # Routine installs stage workflow/package bytes outside discoverable roots
+        # until their canonical selector transaction commits. Reconcile committed
+        # staging, and remove only proven uncommitted staging, before scheduler
+        # work can discover a partial procedure after a process crash.
+        try:
+            from src.workflows.routines import routine_service
+
+            recovered_installs = await routine_service.recover_pending_installs()
+            blocked_installs = sum(1 for item in recovered_installs if item.get("status") == "blocked")
+            if recovered_installs:
+                logging.getLogger(__name__).warning(
+                    "Routine install restart recovery inspected %d staging tree(s); %d remain blocked",
+                    len(recovered_installs),
+                    blocked_installs,
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Routine install restart recovery failed; partial staging remains non-discoverable"
+            )
+        # Audio quarantine files and unconfirmed transcript state are process-local
+        # and must never resume after a crash.  Run the durable cleanup before any
+        # scheduler work can admit a stale audio job.
+        try:
+            from src.guardian.audio_worker import cleanup_audio_ingress_jobs
+
+            cleaned_audio_jobs = await cleanup_audio_ingress_jobs()
+            if cleaned_audio_jobs:
+                logging.getLogger(__name__).warning(
+                    "Cleaned %d stale audio ingress job(s) during startup",
+                    cleaned_audio_jobs,
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
+            )
+        ensure_soul_exists()
+        init_llm_logging()
+        # Load persisted settings before scheduler starts
+        try:
+            from src.api.profile import get_or_create_profile
+            from src.observer.manager import context_manager
+            profile = await get_or_create_profile()
+            if profile.interruption_mode:
+                context_manager.update_interruption_mode(profile.interruption_mode)
+            if profile.capture_mode:
+                context_manager.update_capture_mode(profile.capture_mode)
+            if profile.tool_policy_mode:
+                context_manager.update_tool_policy_mode(profile.tool_policy_mode)
+            if profile.mcp_policy_mode:
+                context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
+            if profile.approval_mode:
+                context_manager.update_approval_mode(profile.approval_mode)
+        except Exception:
+            logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
+        defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
+        mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
+        if not os.path.exists(mcp_config):
+            default_config = os.path.join(defaults_dir, "mcp-servers.default.json")
+            if os.path.isfile(default_config):
+                import shutil
+                os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
+                shutil.copy2(default_config, mcp_config)
+        stdio_proxy_config = os.path.join(settings.workspace_dir, "stdio-proxies.json")
+        if not os.path.exists(stdio_proxy_config):
+            default_proxy_config = os.path.join(defaults_dir, "stdio-proxies.default.json")
+            if os.path.isfile(default_proxy_config):
+                import shutil
+                os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
+                shutil.copy2(default_proxy_config, stdio_proxy_config)
+        mcp_manager.load_config(mcp_config)
+        extensions_dir = os.path.join(settings.workspace_dir, "extensions")
+        os.makedirs(extensions_dir, exist_ok=True)
+        manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
+        skills_dir = os.path.join(settings.workspace_dir, "skills")
+        os.makedirs(skills_dir, exist_ok=True)
+        skill_manager.init(skills_dir, manifest_roots=manifest_roots)
+        runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
+        os.makedirs(runbooks_dir, exist_ok=True)
+        runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
+        workflows_dir = os.path.join(settings.workspace_dir, "workflows")
+        os.makedirs(workflows_dir, exist_ok=True)
+        workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
+        starter_pack_manager.init(
+            os.path.join(settings.workspace_dir, "starter-packs.json"),
+            manifest_roots=manifest_roots,
+        )
+        await goal_programme_service.start()
         with current_task_service():
             init_scheduler()
             await sync_scheduled_jobs()
@@ -502,7 +504,8 @@ async def lifespan(app: FastAPI):
     finally:
         session_manager.bind_task_continuity(None)
         try:
-            await app.state.task_continuity.stop()
+            if continuity is not None:
+                await continuity.stop()
         finally:
             try:
                 await goal_programme_service.stop()

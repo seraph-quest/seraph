@@ -382,15 +382,9 @@ async def test_runtime_status_awaits_current_cordis_readback_not_cached_ready(cl
     refresh.assert_awaited_once_with()
 
 
-@pytest.mark.asyncio
-async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_runs_owned_stop(client, monkeypatch, tmp_path):
-    """Execute actual lifespan wiring with unrelated startup owners isolated."""
+def _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    import src.app as app_module
-
-    host = CordisHost(node_path=tmp_path / "absent-node")
-    monkeypatch.setattr(app_module, "cordis_host", host)
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(app_module, name, AsyncMock())
@@ -408,6 +402,92 @@ async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_run
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
     monkeypatch.setattr("src.observer.manager.context_manager.refresh", AsyncMock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["continuity_factory", "continuity_start", "ensure_soul", "mcp_config", "goal_start"])
+async def test_pre_yield_startup_failure_stops_and_unbinds_owned_continuity(client, monkeypatch, tmp_path, failure_point):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    import src.app as app_module
+    import src.conversation.task_context as continuity_module
+    from src.agent.session import session_manager
+    from src.guardian.goal_programmes import goal_programme_service
+    from src.work_board.dispatcher import _dispatcher
+
+    _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path)
+    host = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    created, stopped, bound = [], [], []
+    real_type = continuity_module.TaskContinuityService
+    real_start, real_stop = real_type.start, real_type.stop
+    real_bind = session_manager.bind_task_continuity
+    real_goal_start, real_goal_stop = goal_programme_service.start, goal_programme_service.stop
+    monkeypatch.setattr(goal_programme_service, "_running", False)
+
+    class StartupFailure(RuntimeError):
+        pass
+
+    def factory(repository):
+        if failure_point == "continuity_factory":
+            raise StartupFailure(failure_point)
+        service = real_type(repository)
+        created.append(service)
+        return service
+
+    async def start(service):
+        await real_start(service)
+        if failure_point == "continuity_start":
+            raise StartupFailure(failure_point)
+
+    async def stop(service):
+        await real_stop(service)
+        stopped.append(service)
+
+    def bind(service):
+        bound.append(service)
+        real_bind(service)
+
+    async def goal_start():
+        await real_goal_start()
+        raise StartupFailure(failure_point)
+
+    monkeypatch.setattr(continuity_module, "TaskContinuityService", factory)
+    monkeypatch.setattr(real_type, "start", start)
+    monkeypatch.setattr(real_type, "stop", stop)
+    monkeypatch.setattr(session_manager, "bind_task_continuity", bind)
+    goal_stop = AsyncMock(side_effect=real_goal_stop)
+    monkeypatch.setattr(goal_programme_service, "stop", goal_stop)
+    if failure_point == "ensure_soul":
+        monkeypatch.setattr(app_module, "ensure_soul_exists", Mock(side_effect=StartupFailure(failure_point)))
+    elif failure_point == "mcp_config":
+        monkeypatch.setattr(app_module.mcp_manager, "load_config", Mock(side_effect=StartupFailure(failure_point)))
+    elif failure_point == "goal_start":
+        monkeypatch.setattr(goal_programme_service, "start", AsyncMock(side_effect=goal_start))
+
+    with pytest.raises(StartupFailure, match=failure_point):
+        async with app_module.lifespan(client._transport.app):
+            pytest.fail("Failed startup must not yield a live application")
+    assert session_manager._task_continuity is None
+    assert stopped == created
+    assert all(not service._started for service in created)
+    assert bound.count(None) == 1
+    assert sum(service is not None for service in bound) == (0 if failure_point in {"continuity_factory", "continuity_start"} else 1)
+    assert not goal_programme_service._running
+    goal_stop.assert_awaited_once()
+    app_module.shutdown_scheduler.assert_called_once()
+    host.start.assert_not_awaited()
+    host.stop.assert_not_awaited()
+    assert _dispatcher.general_tasks is None
+
+
+@pytest.mark.asyncio
+async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_runs_owned_stop(client, monkeypatch, tmp_path):
+    """Execute actual lifespan wiring with unrelated startup owners isolated."""
+    import src.app as app_module
+    host = CordisHost(node_path=tmp_path / "absent-node")
+    monkeypatch.setattr(app_module, "cordis_host", host)
+    _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path)
     async with app_module.lifespan(client._transport.app):
         assert host.snapshot()["state"] == "blocked"
         assert host.reason == "node_missing"

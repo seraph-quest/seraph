@@ -60,11 +60,12 @@ def _provider_event() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("crash_before_contact", [False, True])
+@pytest.mark.parametrize("crash_before_contact,related", [(False,False),(True,False),(False,True),(False,"terminal")])
 async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
     accounting_db,
     monkeypatch,
     crash_before_contact,
+    related,
 ):
     """An owned task reaches Done only through the canonical durable root."""
 
@@ -249,6 +250,12 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         "purpose": "Prepare the architecture review",
     }
 
+    related_runtime = None
+    if related:
+        from tests.connected_source_native_fixture import synchronized_related_source
+        related_runtime, related_provider, selections = await synchronized_related_source(async_db, monkeypatch, owner, operator, goal.id, goal.revision)
+        related_contacts = len(related_provider.calls)
+        typed_input.update(connected_sources=selections, acknowledge_connected_sources=True)
     async with async_db() as db:
         artifact = await prepare_input_artifact(
             db,
@@ -361,6 +368,17 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         jobs=DurableJobRepository(),
         session_provider=async_db,
     )
+    dispatcher.connection_sync_runtime = related_runtime
+    if related == "terminal":
+        original_transition = dispatcher.jobs.transition_job
+        async def terminal_source_race(job_id, status, **kwargs):
+            if status == "succeeded":
+                from src.db.models import MailMessageBinding
+                async with async_db() as db:
+                    source = (await db.execute(select(MailMessageBinding).where(MailMessageBinding.connection_id == "related-source-connection"))).scalar_one()
+                    source.revision += 1
+            return await original_transition(job_id, status, **kwargs)
+        monkeypatch.setattr(dispatcher.jobs, "transition_job", terminal_source_race)
     if crash_before_contact:
         class WorkerCrash(BaseException):
             pass
@@ -395,6 +413,16 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
     else:
         result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
 
+    if related == "terminal":
+        assert result["blocked"] is True and not result["completed"]
+        assert len(related_provider.calls) == related_contacts
+        async with async_db() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == "calendar_meeting_prep"))).scalar_one()
+            assert run.status == "running" and run.lease_owner and run.fencing_token > 0
+            receipt = (await db.execute(select(CalendarPrepReceipt).where(CalendarPrepReceipt.task_id == mutation.task.task_id))).scalar_one()
+            assert receipt.status == "verified"
+        await related_runtime.stop()
+        return
     assert result["completed"] is True
     assert [method for method, _url in provider_requests] == (["POST", "GET", "POST", "GET", "GET"] if crash_before_contact else ["POST", "GET", "GET"])
     assert len(model_calls) == 1
@@ -416,6 +444,16 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
             )
         ).scalar_one()
 
+    if related:
+        assert json.loads(receipt.output_json)["related_sources"]["sources"][0]["item_refs"] == selections[0]["item_refs"]
+        assert len(related_provider.calls) == related_contacts
+        assert "private-subject" not in json.dumps(model_calls)
+        assert "private-preview" not in json.dumps(model_calls)
+        assert "private-body" not in json.dumps(model_calls)
+        assert "private-body" not in receipt.output_json
+        assert all(b"private-body" not in path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
+        assert selections[0]["item_refs"][0]["opaque_id"] not in json.dumps(model_calls)
+        await related_runtime.stop()
     assert receipt.status == "succeeded"
     assert receipt.memory_status == "no_learning"
     assert receipt.readback_id

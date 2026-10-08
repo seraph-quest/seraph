@@ -20,12 +20,12 @@ from src.security.site_policy import evaluate_site_access
 from config.settings import settings
 
 
-async def collect_connected_source_items(runtime, owner, connection_id: str, item_refs: list[dict[str, Any]]) -> dict[str, Any]:
+async def collect_connected_source_items(runtime, owner, connection_id: str, item_refs: list[dict[str, Any]], *, expected_goal_ref=None, expected_connection_revision=None, include_task_binding=False) -> dict[str, Any]:
     """Read exact scoped citations through the current connected-source owner.
 
     This typed Python seam is separate from public discovery. It cannot fetch
     credentials, choose a provider URL, expand a source selection or infer
-    permission from an installed connector. A future bridge binds this callable.
+    permission from an installed connector. Current native Mail and Calendar tasks bind this callable through their lifecycle owner.
     """
     from src.integrations.connection_sync import SourceItemRef, SyncError
 
@@ -35,16 +35,19 @@ async def collect_connected_source_items(runtime, owner, connection_id: str, ite
     if len({value.opaque_id for value in refs}) != len(refs):
         raise SyncError("connected_context_selection_invalid", "Connected source citations must be unique", status_code=422)
     items = []
+    task_bindings = []
     coverage = {}
     freshness = {}
     for ref in refs:
-        readback = await runtime.read_item(owner, connection_id, ref.opaque_id)
+        readback = await runtime.read_item(owner, connection_id, ref.opaque_id, **({"expected_goal_ref": expected_goal_ref, "expected_connection_revision": expected_connection_revision, "include_task_binding": True} if include_task_binding else {}))
         if readback["item"]["ref"] != ref.model_dump():
             raise SyncError("connected_context_revision_stale", "The selected connected source citation changed", recovery_action="refresh_source_citation")
         items.append(readback["item"])
+        if include_task_binding:
+            task_bindings.append(readback["_task_binding"])
         coverage = readback["coverage"]
         freshness = readback["freshness"]
-    return {"items": items, "coverage": coverage, "freshness": freshness, "memory_status": "no_learning"}
+    return {"items": items, "coverage": coverage, "freshness": freshness, "memory_status": "no_learning", **({"_task_bindings": task_bindings} if include_task_binding else {})}
 
 
 def _utc_now() -> str:
@@ -2144,3 +2147,39 @@ def collect_source_evidence_bundle(
         ]
         response["next_best_sources"] = ready_fallbacks[:3]
     return response
+
+
+async def collect_connected_task_references(runtime, owner, *, goal_id: str, goal_revision: int, selections, before_boundary, bindings) -> dict[str, Any] | None:
+    """Resolve local citations for a current native task; discard all source bytes."""
+    from src.integrations.connection_sync import ConnectedSourceTaskInput, RevisionRef, SyncError
+    if not selections:
+        return None
+    if runtime is None or not runtime.started:
+        raise SyncError("connected_context_runtime_inactive", "The related source lifecycle owner is unavailable", recovery_action="restart_backend")
+    validated = ConnectedSourceTaskInput.model_validate({"connected_sources": selections, "acknowledge_connected_sources": True})
+    goal_ref = RevisionRef(id=goal_id, revision=goal_revision)
+    sources = []
+    bindings.clear()
+    for group in validated.connected_sources:
+        refs = []
+        coverage, freshness = {}, {}
+        for ref in group.item_refs:
+            await before_boundary()
+            if datetime.fromisoformat(ref.expires_at.replace("Z", "+00:00")).astimezone(timezone.utc) <= datetime.now(timezone.utc):
+                raise SyncError("connected_context_expired", "The related source citation expired", recovery_action="refresh_source_citation")
+            collected = await collect_connected_source_items(runtime, owner, group.connection_ref.id, [ref.model_dump()], expected_goal_ref=goal_ref, expected_connection_revision=group.connection_ref.revision, include_task_binding=True)
+            readback = {"item": collected["items"][0], "coverage": collected["coverage"], "freshness": collected["freshness"], "_task_binding": collected["_task_bindings"][0]}
+            del collected
+            if readback["item"]["ref"] != ref.model_dump() or readback["item"]["ref"]["provider"] != ref.provider:
+                raise SyncError("connected_context_revision_stale", "The selected related source citation changed", recovery_action="refresh_source_citation")
+            from src.integrations.gmail_read import digest
+            if digest(readback["item"]["content"]) != ref.content_digest:
+                raise SyncError("connected_context_digest_stale", "The selected source content digest changed")
+            bindings.append(readback.pop("_task_binding"))
+            await before_boundary()
+            refs.append(ref.model_dump())
+            coverage, freshness = readback["coverage"], readback["freshness"]
+            # Cached source content remains inside this local read boundary.
+            del readback
+        sources.append({"connection_ref": group.connection_ref.model_dump(), "item_refs": refs, "coverage": coverage, "freshness": freshness})
+    return {"classification": "local_related_context_not_model_input", "sources": sources, "memory_status": "no_learning"}

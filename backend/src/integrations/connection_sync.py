@@ -121,13 +121,7 @@ class ConnectionCursor(Strict):
     last_complete_at: str | None
 
 
-class SourceItemRef(Strict):
-    provider: Literal["gmail", "calendar"]
-    opaque_id: str
-    revision: str
-    content_digest: str
-    privacy: Literal["owner_private"] = "owner_private"
-    expires_at: str
+from src.integrations.connected_source_contracts import SourceItemRef, ConnectedSourceTaskInput
 
 
 class SyncRequest(Strict):
@@ -648,13 +642,23 @@ class ConnectionSyncService:
                     result["cooldown"] = checkpoint.get("payload", {})
         return result
 
-    async def read_item(self, owner: WorkBoardOwner, connection_id: str, opaque_id: str) -> dict[str, Any]:
+    async def read_item(self, owner: WorkBoardOwner, connection_id: str, opaque_id: str, *, expected_goal_ref: RevisionRef | None = None, expected_connection_revision: int | None = None, include_task_binding: bool = False) -> dict[str, Any]:
         self._ready()
         async with get_session() as db:
             connection = (await db.execute(select(GoogleServiceConnection).where(GoogleServiceConnection.connection_id == connection_id, GoogleServiceConnection.owner_principal_id == owner.principal_id, GoogleServiceConnection.owner_session_id == owner.session_id))).scalar_one_or_none()
             if connection is None or connection.sync_cursor_job_id is None:
                 raise SyncError("connection_sync_item_unavailable", "The selected connected source item is unavailable", status_code=404)
+            if expected_connection_revision is not None and connection.revision != expected_connection_revision:
+                raise SyncError("connected_context_connection_stale", "The related connection changed")
+            if expected_goal_ref is not None:
+                source_root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == connection.sync_cursor_job_id))).scalar_one_or_none()
+                if source_root is None or source_root.owner_principal_id != owner.principal_id or source_root.operator_session_id != owner.session_id or source_root.goal_id != expected_goal_ref.id or source_root.goal_revision != expected_goal_ref.revision:
+                    raise SyncError("connected_context_goal_mismatch", "The related source belongs to another original Goal")
+                from src.api import mail
+                await mail.repository._validate_goal(db, owner, goal_id=expected_goal_ref.id, goal_revision=expected_goal_ref.revision)
             payload = await self._current_page(connection)
+        if expected_goal_ref is not None and ConnectionSyncInput.model_validate(payload["input"]).goal_ref != expected_goal_ref:
+            raise SyncError("connected_context_goal_mismatch", "The related source page Goal differs from this task")
         await self._assert_payload_authority(owner, payload)
         item = next((item for item in payload["items"] if item["ref"]["opaque_id"] == opaque_id), None)
         if item is None:
@@ -673,7 +677,38 @@ class ConnectionSyncService:
                 raise SyncError("connection_sync_item_changed", "The current connected item binding changed", recovery_action="refresh_current_sync")
         # Recheck after decryption before private content crosses the owner API.
         await self._assert_payload_authority(owner, payload)
-        return {"item": item, "coverage": payload["coverage"], "freshness": payload["freshness"], "memory_status": "no_learning"}
+        result = {"item": item, "coverage": payload["coverage"], "freshness": payload["freshness"], "memory_status": "no_learning"}
+        if include_task_binding:
+            result["_task_binding"] = {"input": payload["input"], "authority_digest": payload["authority_digest"], "job_id": connection.sync_cursor_job_id, "page": connection.sync_cursor_page, "cursor_revision": connection.sync_cursor_revision, "ref": item["ref"]}
+        return result
+
+    async def assert_task_bindings(self, db, owner, bindings):
+        """Revalidate cached metadata in the canonical task terminal writer."""
+        self._ready()
+        for binding in bindings:
+            value = ConnectionSyncInput.model_validate(binding["input"])
+            authority = await self._authority(db, owner, value)
+            connection = authority.connection
+            if authority.snapshot_digest != binding["authority_digest"] or connection.sync_cursor_job_id != binding["job_id"] or connection.sync_cursor_page != binding["page"] or connection.sync_cursor_revision != binding["cursor_revision"] or connection.sync_scope_digest != scope_digest(value):
+                raise SyncError("connected_context_binding_stale", "The original related source binding changed")
+            source_root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding["job_id"]).execution_options(populate_existing=True))).scalar_one_or_none()
+            if source_root is None or source_root.job_kind != SYNC_KIND or source_root.owner_principal_id != owner.principal_id or source_root.operator_session_id != owner.session_id or source_root.goal_id != value.goal_ref.id or source_root.goal_revision != value.goal_ref.revision or json.loads(source_root.declared_authority_json or "{}").get("grant_digest") != binding["authority_digest"]:
+                raise SyncError("connected_context_goal_mismatch", "The original related source root binding changed")
+            ref = SourceItemRef.model_validate(binding["ref"])
+            if aware(datetime.fromisoformat(ref.expires_at.replace("Z", "+00:00"))) <= now():
+                raise SyncError("connected_context_expired", "The original related source expired")
+            model = MailMessageBinding if ref.provider == "gmail" else CalendarEventBinding
+            key = model.message_key if ref.provider == "gmail" else model.event_key
+            row = (await db.execute(select(model).where(model.owner_principal_id == owner.principal_id, model.owner_session_id == owner.session_id, model.connection_id == value.connection_ref.id, key == ref.opaque_id).execution_options(populate_existing=True))).scalar_one_or_none()
+            revision = None
+            if row is not None:
+                if ref.provider == "gmail":
+                    provider_revision = "sha256:" + digest({"message": ref.opaque_id, "status": "deleted"}) if row.status == "deleted" else row.message_revision
+                    revision = citation_revision(provider_revision, row.revision, row.source_consent_id, row.source_consent_revision, scope_digest(value))
+                else:
+                    revision = citation_revision(row.event_revision, row.revision, row.consent_id, row.consent_revision, scope_digest(value))
+            if revision != ref.revision:
+                raise SyncError("connected_context_revision_stale", "The original related item revision changed")
 
     async def reconcile(self, owner: WorkBoardOwner, connection_id: str, job_id: str, expected_revision: int, *, expected_cursor_revision: int, authenticated_token_hash: str, expected_provider: str | None = None) -> dict[str, Any]:
         """Negative physical cleanup only; never settles a provider effect."""

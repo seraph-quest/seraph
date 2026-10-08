@@ -354,6 +354,8 @@ async def lifespan(app: FastAPI):
     connection_sync_runtime = ConnectionSyncService()
     await connection_sync_runtime.start()
     app.state.connection_sync_runtime = connection_sync_runtime
+    from src.work_board.dispatcher import _dispatcher
+    _dispatcher.connection_sync_runtime = connection_sync_runtime
     # Hydrate the trusted OpenRouter vault credential before any scheduler or
     # canonical inference path resolves a provider profile.  Failure remains
     # visible as configuration_required through the normal status surfaces;
@@ -482,6 +484,8 @@ async def lifespan(app: FastAPI):
     yield
     await goal_programme_service.stop()
     await connection_sync_runtime.stop()
+    if _dispatcher.connection_sync_runtime is connection_sync_runtime:
+        _dispatcher.connection_sync_runtime = None
     shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None

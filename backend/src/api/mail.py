@@ -297,7 +297,11 @@ class MessageRead(_Strict):
     request_uuid: str = Field(min_length=1, max_length=256)
 
 
-class ReplyTaskCreate(_Strict):
+from src.integrations.connected_source_contracts import ConnectedSourceTaskInput
+
+
+class ReplyTaskCreate(ConnectedSourceTaskInput):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
     """Strict operator intent for a private, local Mail reply draft."""
 
     schema_version: Literal[1] = 1
@@ -2286,6 +2290,7 @@ def _reply_input(body: ReplyTaskCreate) -> dict[str, Any]:
         "expected_goal_revision": body.expected_goal_revision,
         "reply_intent": body.reply_intent,
         "style": body.style,
+        **({"connected_sources": [group.model_dump(mode="json") for group in body.connected_sources], "acknowledge_connected_sources": True} if body.connected_sources else {}),
     }
 
 
@@ -2828,6 +2833,7 @@ async def get_reply_draft(request: Request, task_id: str) -> dict[str, Any]:
             "memory_status": "no_learning",
             "sent": False,
             "saved_to_provider": False,
+            **({"related_sources": payload["related_sources"]} if payload.get("related_sources") else {}),
         }
 
 

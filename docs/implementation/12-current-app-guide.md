@@ -1234,7 +1234,19 @@ Private readback requires a separate acknowledged owner API read and the origina
 grant must still be current. Revocation blocks sync/readback while retaining
 audit. Explicit provider deletions become tombstones; list omission alone does
 not prove deletion. The typed `collect_connected_source_items` callable reads
-exact current citations for the connected task without granting model egress.
+exact current citations for the current native Mail reply and Calendar meeting
+preparation tasks without granting model egress. Each task can deliberately
+select at most three connections and ten unique item references, then separately
+acknowledge their use. The task Goal ID/revision must match every original sync
+page. Current grants, connection/item revisions, content digest and expiry are
+checked before the first primary provider/model contact and before final
+adoption, including a metadata-only check in the canonical terminal writer.
+The related reader adds no provider contacts; cached private source bytes and
+references never enter the primary model prompt. Only classified related
+references, coverage and freshness enter the existing result (encrypted Mail
+draft; Calendar metadata). Missing lifecycle binding or stale/revoked authority
+blocks execution without a source-provider fallback. Empty selections preserve
+legacy input and authority digests. These paths record explicit `no_learning`.
 
 Isolated regression/security checks use disposable SQLite/workspaces, a local
 paginated HTTP source fixture, separate-process reservation contention,

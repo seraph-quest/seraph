@@ -4822,9 +4822,9 @@ class WorkBoardDispatcher:
     ) -> dict[str, Any]:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
-        runtime_seconds = await self._effective_runtime(task)
         if _text(task.capability_id) == "work.research-dossier.v1":
-            return await self._admit_execute_research(claim, runtime_seconds=min(300, runtime_seconds))
+            return await self._admit_execute_research(claim)
+        runtime_seconds = await self._effective_runtime(task)
         if _text(task.capability_id) == "browser.public-task.v1":
             max_attempts, max_outstanding_jobs = await self._effective_browser_limits(task)
             return await self._admit_execute_browser(
@@ -5714,28 +5714,44 @@ class WorkBoardDispatcher:
                     raise
         return await finish_cancel(self.jobs, owner, task_id, request)
 
-    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int) -> dict[str, Any]:
+    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int | None = None) -> dict[str, Any]:
         """Admit the fixed native root before any source or model operation."""
         from src.work_board.research_parent import spec_for, expected_identity
         from src.workflows.research_coordinator import start_parent, continue_parent, freeze_quiescent
         from src.workflows.research_native import checkpoint
         from src.work_board.research_artifacts import read
         task, attempt = claim.task, claim.attempt
-        strategy = await self._research_strategy(task)
         inputs = _parse_typed_input(task)
-        # The immutable original Board attempt bounds first admission and
-        # recovery. A later pass cannot grant another execution window.
-        deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
-        spec = spec_for(task, attempt, inputs, deadline=deadline)
-        # The resolver is an optional current-owner dependency. Its absence
-        # records baseline behavior and creates no task-method import or grant.
-        spec = replace(spec, declared_authority={**spec.declared_authority,
-            "task_strategy_binding": strategy.model_dump(mode="json")})
-        projection = await self.jobs.admit_job(spec)
-        expected = expected_identity(task, attempt, spec)
+        original = await self._original_research_admission(task, attempt=attempt)
+        if original is not None:
+            projection, expected = original
+            parent_id = projection["job_id"]
+            if checkpoint(projection, "research:creation") is not None:
+                # Existing materialized work stays on its explicit operator
+                # recovery path; no new queue/claim/window/provider operation.
+                if projection["status"] == "succeeded":
+                    async with self.session_provider() as db:
+                        from src.work_board.research_readback import verified_dossier
+                        run = await self.jobs._fetch(db, parent_id)
+                        await verified_dossier(db, task, attempt, run)
+                    return {"admitted": True, "completed": True, "blocked": False}
+                return {"admitted": True, "completed": False, "blocked": True}
+        else:
+            from src.work_board.research_parent import stage_native_projection
+            strategy = await self._research_strategy(task)
+            if runtime_seconds is None:
+                runtime_seconds = min(300, await self._effective_runtime(task))
+            deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+            spec = spec_for(task, attempt, inputs, deadline=deadline, strategy=strategy)
+            async with self.session_provider() as strategy_db:
+                original_projection = await stage_native_projection(strategy_db, spec,
+                    task=task, attempt=attempt, inputs=inputs)
+            projection = await self.jobs.admit_job(spec, native_research_projection=original_projection)
+            expected = expected_identity(task, attempt, spec)
+            parent_id = spec.identity.job_id
         async with self.session_provider() as db:
             linked = await self.repository.link_attempt_workflow_run(db, task.task_id, attempt.attempt_id,
-                workflow_run_id=spec.identity.job_id, expected_revision=task.task_revision,
+                workflow_run_id=parent_id, expected_revision=task.task_revision,
                 board_fence=attempt.fencing_token, lease_owner=self.runner_id,
                 workflow_projection=projection, expected_identity=expected,
                 actor_principal_id=self.runner_id, actor_session_id=self.runner_session)
@@ -5744,13 +5760,13 @@ class WorkBoardDispatcher:
         self._active_worker_tasks[key] = asyncio.current_task()
         phase_binding = {}
         try:
-            await self.jobs.queue_job(spec.identity.job_id)
-            parent = await self.jobs.claim_job(spec.identity.job_id, owner=self.runner_id, lease_seconds=30)
-            _creation, phase_binding = await start_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+            await self.jobs.queue_job(parent_id)
+            parent = await self.jobs.claim_job(parent_id, owner=self.runner_id, lease_seconds=30)
+            _creation, phase_binding = await start_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
                 board_task=task, board_attempt=attempt, inputs=inputs)
-            completed = await continue_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+            completed = await continue_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
                 phase_binding=phase_binding)
-            await self._complete_research_projection(spec.identity.job_id, completed)
+            await self._complete_research_projection(parent_id, completed)
             return {"admitted": True, "completed": True, "blocked": False}
         except BaseException as error:
             # The awaited finite worker group has returned before this writer
@@ -5759,9 +5775,9 @@ class WorkBoardDispatcher:
             frames = [(Path(frame.filename).name, frame.lineno, frame.name)
                 for frame in traceback.extract_tb(error.__traceback__)[-8:]]
             logger.warning("research bounded execution blocked: code=%s frames=%s", _safe_error_code(error), frames)
-            parent = await self.jobs.get_job(spec.identity.job_id)
+            parent = await self.jobs.get_job(parent_id)
             if checkpoint(parent, "research:creation") is not None:
-                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=spec.identity.job_id,
+                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=parent_id,
                     owner=self.runner_id, phase_binding=phase_binding, expected_parent_revision=parent["revision"],
                     reason="research_execution_requires_recovery"))
             else:
@@ -5770,9 +5786,78 @@ class WorkBoardDispatcher:
         finally:
             self._active_worker_tasks.pop(key, None)
 
+    async def _original_research_admission(self, task, *, attempt=None):
+        """Lookup the original fixed identity before any mutable resolver/runtime."""
+        from src.work_board.research_parent import job_id, canonical_time
+        from src.work_board.research_readback import binds, original_admission_current, original_group_binds
+        from src.workflows.research_native import checkpoint
+        from src.workflows.research_guard import assert_research_operator_session
+        from src.workflows.job_runtime import _serialize, _assert_canonical_goal_fence
+        async with self.session_provider() as db:
+            latest = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+            if latest is None:
+                return None
+            canonical_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
+            if canonical_task is None or any(getattr(canonical_task, field) != getattr(task, field) for field in (
+                "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id",
+                "typed_input_digest", "typed_input_ref", "input_artifact_id")):
+                raise BoardError("research_binding_unavailable", "Original research Task/input changed", status_code=409)
+            selected = attempt or latest
+            if selected.attempt_id != latest.attempt_id:
+                raise BoardError("research_binding_unavailable", "Original research attempt changed", status_code=409)
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id(task, selected)))
+            if run is None:
+                if selected.workflow_run_id:
+                    raise BoardError("research_binding_unavailable", "Original research row is missing", status_code=409)
+                return None
+            try:
+                if (canonical_time(selected.started_at) != canonical_time(latest.started_at)
+                    or not binds(task, latest, run, typed_inputs=_parse_typed_input(task), allow_unlinked_admission=True)):
+                    raise ValueError("original research identity changed")
+                await original_admission_current(db, task, latest, run)
+                await assert_research_operator_session(db, run, now=_utc_datetime(self.now()))
+                await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                    owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
+                    session_id=run.session_id, authority=run.declared_authority_json)
+                from src.model_fabric.effective_policy import current_inference_policy
+                authority = json.loads(run.declared_authority_json)
+                if authority["model_policy_digest"] != current_inference_policy()[1]:
+                    raise ValueError("original research model policy changed")
+                projection = _serialize(run)
+                if checkpoint(projection, "research:creation") is not None:
+                    await original_group_binds(db, run, typed_inputs=_parse_typed_input(task))
+                else:
+                    if (run.status not in {"accepted", "queued"} or run.attempt_count != 0 or run.fencing_token != 0
+                        or run.lease_owner or run.lease_expires_at or latest.ended_at or latest.cancel_requested_at
+                        or json.loads(run.effect_receipts_json) != [] or json.loads(run.artifact_receipts_json) != []
+                        or await db.scalar(select(WorkflowRunState.id).where(WorkflowRunState.parent_job_id == run.run_identity).limit(1))):
+                        raise ValueError("research admitted parent is not originally unclaimed")
+                    from src.work_board.research_parent import utc_time
+                    if utc_time(run.deadline_at) <= _utc_datetime(self.now()):
+                        raise ValueError("original research cutoff expired")
+                expected = {"job_id": run.run_identity, "job_kind": run.job_kind,
+                    "owner_kind": run.owner_kind, "owner_principal_id": run.owner_principal_id,
+                    "session_id": run.session_id, "operator_session_id": run.operator_session_id,
+                    "capability_id": "work.research-dossier.v1", "capability_version": run.capability_version,
+                    "goal_id": run.goal_id, "goal_revision": run.goal_revision,
+                    "input_digest": run.input_digest, "authority_digest": run.authority_digest,
+                    "run_fingerprint": run.run_fingerprint, "idempotency_scope": run.idempotency_scope,
+                    "idempotency_key": run.idempotency_key}
+                return projection, expected
+            except (ValueError, TypeError, KeyError, OSError) as error:
+                raise BoardError("research_binding_unavailable", "The original research admission requires reconciliation", status_code=409) from error
+
     async def _research_strategy(self, task):
         from src.work_board.contracts import TaskStrategyBinding
         import inspect
+        original = await self._original_research_admission(task)
+        if original is not None:
+            binding = TaskStrategyBinding.model_validate(original[0]["declared_authority"]["task_strategy_binding"])
+            from src.work_board.research_parent import secret_safe_strategy_projection
+            async with self.session_provider() as db:
+                await secret_safe_strategy_projection(db, binding)
+            return binding
         binding = TaskStrategyBinding(status="none", reason="baseline")
         if self.strategy_resolver is not None:
             binding = self.strategy_resolver.resolve(WorkBoardOwner(
@@ -5780,9 +5865,15 @@ class WorkBoardDispatcher:
                 task.goal_id, "work.research-dossier.v1")
             if inspect.isawaitable(binding):
                 binding = await binding
+            original_binding = binding
             binding = TaskStrategyBinding.model_validate(binding)
+        else:
+            original_binding = binding
         if binding.status == "blocked":
             raise BoardError("task_strategy_blocked", binding.reason, status_code=409)
+        from src.work_board.research_parent import secret_safe_strategy_projection
+        async with self.session_provider() as db:
+            await secret_safe_strategy_projection(db, original_binding)
         return binding
 
     async def _admit_execute_direct(

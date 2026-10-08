@@ -63,6 +63,7 @@ class NativePhysicalCleanupProof:
     """Actual resource-owner callback result, not operator-asserted evidence."""
     witness_digest: str
     proof_kind: str
+    succeeded_adoption_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -336,35 +337,51 @@ def _digest(value: Any) -> str:
 
 
 def _native_physical_witness(kind: str, witness: Any, binding: NativePhysicalCleanupBinding) -> None:
-    """Closed structural provenance; actual owner checks physical truth."""
-    source = {"boot_id", "pid", "pid_start_ticks", "pid_namespace", "runtime_nonce",
-              "connection_id", "scope_digest", "original_cursor_revision"}
+    """Closed native platform provenance; fixed owner checks physical truth."""
+    source_common = {"platform", "boot_id", "pid", "runtime_nonce", "connection_id",
+                     "scope_digest", "original_cursor_revision"}
+    source_linux = source_common | {"pid_start_ticks", "pid_namespace"}
+    source_darwin = source_common | {"pid_start_sec", "pid_start_usec"}
     browser = {"schema_version", "pid", "process_nonce", "context_nonce", "job_digest",
                "root_path_digest", "root_device", "root_inode", "lock_device", "lock_inode",
-               "linux_boot_id", "positive_cleanup_required"}
-    if not isinstance(witness, dict) or set(witness) != (source if kind == "connection_source_sync" else browser):
+               "boot_platform", "boot_session_id", "positive_cleanup_required"}
+    if not isinstance(witness, dict):
+        raise DurableJobTransitionError("native physical witness schema changed")
+    platform = witness.get("platform" if kind == "connection_source_sync" else "boot_platform")
+    if not isinstance(platform, str) or platform not in {"linux", "darwin"}:
+        raise DurableJobTransitionError("native physical platform is unknown")
+    expected = (source_linux if platform == "linux" else source_darwin) if kind == "connection_source_sync" else browser
+    if set(witness) != expected:
         raise DurableJobTransitionError("native physical witness schema changed")
     import uuid
-    boot = witness["boot_id"] if kind == "connection_source_sync" else witness["linux_boot_id"]
-    if boot is not None or kind == "connection_source_sync":
-        try:
-            if not isinstance(boot, str) or str(uuid.UUID(boot)) != boot or uuid.UUID(boot).int == 0:
-                raise ValueError()
-        except (ValueError, TypeError, AttributeError):
-            raise DurableJobTransitionError("native physical boot identity is invalid") from None
-    integers = ["pid", "pid_namespace", "original_cursor_revision"] if kind == "connection_source_sync" else ["pid", "root_device", "root_inode", "lock_device", "lock_inode"]
-    if any(type(witness[key]) is not int or witness[key] < (1 if key == "pid" else 0) for key in integers):
-        raise DurableJobTransitionError("native physical integer identity is invalid")
+    boot = witness["boot_id"] if kind == "connection_source_sync" else witness["boot_session_id"]
+    try:
+        if not isinstance(boot, str) or str(uuid.UUID(boot)) != boot or uuid.UUID(boot).int == 0:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise DurableJobTransitionError("native physical boot identity is invalid") from None
+    integers = (["pid", "original_cursor_revision", "pid_namespace"] if platform == "linux" else
+                ["pid", "original_cursor_revision", "pid_start_sec", "pid_start_usec"]) if kind == "connection_source_sync" else ["pid", "root_device", "root_inode", "lock_device", "lock_inode"]
+    for key in integers:
+        minimum = 1 if key in {"pid", "pid_namespace", "pid_start_sec", "root_inode", "lock_inode"} else 0
+        if type(witness[key]) is not int or witness[key] < minimum:
+            raise DurableJobTransitionError("native physical integer identity is invalid")
+    if witness["pid"] > 2147483647:
+        raise DurableJobTransitionError("native physical PID is invalid")
     nonces = ["runtime_nonce"] if kind == "connection_source_sync" else ["process_nonce", "context_nonce"]
     if any(not isinstance(witness[key], str) or re.fullmatch(r"[0-9a-f]{32}", witness[key]) is None for key in nonces):
         raise DurableJobTransitionError("native physical owner nonce is invalid")
     if kind == "connection_source_sync":
-        if (not isinstance(witness["pid_start_ticks"], str) or not witness["pid_start_ticks"].isdigit()
-            or not isinstance(witness["connection_id"], str) or not witness["connection_id"]
+        if (not isinstance(witness["connection_id"], str) or not 0 < len(witness["connection_id"]) <= 128
             or binding.resource_claim != "connection-sync:" + witness["connection_id"]
             or not isinstance(witness["scope_digest"], str) or re.fullmatch(r"[0-9a-f]{64}", witness["scope_digest"]) is None):
             raise DurableJobTransitionError("native source scope witness is invalid")
-    elif (type(witness["schema_version"]) is not int or witness["schema_version"] != 3
+        if platform == "linux" and (not isinstance(witness["pid_start_ticks"], str)
+            or re.fullmatch(r"[0-9]{1,32}", witness["pid_start_ticks"]) is None):
+            raise DurableJobTransitionError("native Linux process witness is invalid")
+        if platform == "darwin" and witness["pid_start_usec"] >= 1000000:
+            raise DurableJobTransitionError("native Darwin process witness is invalid")
+    elif (type(witness["schema_version"]) is not int or witness["schema_version"] != 4
           or witness["positive_cleanup_required"] is not True
           or witness["job_digest"] != hashlib.sha256(binding.job_id.encode()).hexdigest()
           or not isinstance(witness["root_path_digest"], str) or re.fullmatch(r"[0-9a-f]{64}", witness["root_path_digest"]) is None):
@@ -2089,6 +2106,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, binding.job_id)
             kinds = {"connection_source_sync": "connection-sync-v1", "browser_interact_v2": "2"}
+            eligible = {"connection_source_sync": {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"},
+                        "browser_interact_v2": {"running", "unknown_external_effect", "cost_liability"}}
             expected = native_physical_cleanup_binding_payload(binding)
             actual = {
                 "job_id": run.run_identity, "original_owner_principal_id": run.owner_principal_id,
@@ -2102,7 +2121,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             authority = _json_load(run.declared_authority_json, {})
             if (run.job_kind not in kinds or run.capability_version != kinds[run.job_kind]
                 or run.owner_kind != "user" or actual != expected
-                or run.status not in {"running", "unknown_external_effect", "cost_liability"}
+                or run.status not in eligible.get(run.job_kind, set())
                 or run.operator_session_id != run.session_id
                 or _revision(run) != binding.expected_revision
                 or run.lease_owner not in {None, binding.lease_owner}
@@ -2148,14 +2167,21 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or reservations[0].get("state_digest") != _digest(reservation)):
                 raise DurableJobTransitionError("native original physical witness changed")
             _native_physical_witness(run.job_kind, reservation["witness"], binding)
-            allowed = {"owned_positive_close", "linux_boot_changed"}
+            # A well-formed empty ledger remains none, never settlement proof.
+            effect_state = native_external_effect_state(run)
+            platform = reservation["witness"]["platform" if run.job_kind == "connection_source_sync" else "boot_platform"]
+            allowed = {"owned_positive_close", platform + "_boot_changed"}
             if run.job_kind == "connection_source_sync":
                 allowed.add("positive_process_death")
                 if type(cleanup_owner) is not ConnectedSourcePhysicalCleanupOwner or not callable(cleanup_owner.release_pointer):
                     raise DurableJobTransitionError("native source cleanup owner is required")
             elif type(cleanup_owner) is not BrowserPhysicalCleanupOwner:
                 raise DurableJobTransitionError("native browser cleanup owner is required")
-            if proof_kind not in allowed or not callable(cleanup_owner.verify_cleanup):
+            else:
+                allowed.add("owned_no_child")
+            if proof_kind == "owned_no_child" and effect_state != "none":
+                raise DurableJobTransitionError("native prechild cleanup has contact evidence")
+            if not isinstance(proof_kind, str) or proof_kind not in allowed or not callable(cleanup_owner.verify_cleanup):
                 raise DurableJobTransitionError("native physical proof kind is invalid")
             receipt = {"kind": "native_physical_cleanup", "scope": "physical_cleanup_only",
                        "witness_digest": binding.witness_digest, "proof_kind": proof_kind,
@@ -2171,7 +2197,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             # awaiting and lane acquisition complete before entering this writer.
             proof = await cleanup_owner.verify_cleanup(db, run, reservation)
             if (type(proof) is not NativePhysicalCleanupProof or proof.witness_digest != binding.witness_digest
-                or proof.proof_kind != proof_kind):
+                or proof.proof_kind != proof_kind or type(proof.succeeded_adoption_verified) is not bool
+                or proof.succeeded_adoption_verified is not (run.job_kind == "connection_source_sync" and run.status == "succeeded")):
                 raise DurableJobTransitionError("native positive physical cleanup is unproven")
             checkpoint = {"checkpoint_id": "native-physical-resource-cleanup", "safe": True,
                           "fencing_token": binding.fencing_token, "recorded_at": now.isoformat(),

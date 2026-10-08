@@ -27,7 +27,7 @@ async def original_resource(async_db):
     authority = {"principal": "original-principal", "session_id": "original-session",
                  "goal_id": "cleanup-goal", "goal_revision": 1,
                  "capability_id": "mail.messages.read", "connection_id": "connection"}
-    witness = {"boot_id": "f2310181-26ae-49c2-8c11-75d161b52ab1", "runtime_nonce": "a"*32,
+    witness = {"platform":"linux", "boot_id": "f2310181-26ae-49c2-8c11-75d161b52ab1", "runtime_nonce": "a"*32,
                "pid":123, "pid_start_ticks":"456", "pid_namespace":789,
                "connection_id": "connection", "scope_digest": "b"*64, "original_cursor_revision": 1}
     binding = NativePhysicalCleanupBinding(
@@ -105,7 +105,7 @@ async def test_immutable_binding_mismatch_rejects_before_physical_callback(origi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["wrong_identity", "missing_original", "revoked_current", "wrong_token", "missing_reservation", "transferred_lease", "missing_identity", "revoked_identity", "unsafe_reservation", "bad_state_digest", "succeeded_status"])
+@pytest.mark.parametrize("change", ["wrong_identity", "missing_original", "revoked_current", "wrong_token", "missing_reservation", "transferred_lease", "missing_identity", "revoked_identity", "unsafe_reservation", "bad_state_digest", "paused_status"])
 async def test_unavailable_auth_or_reservation_fails_closed(original_resource, change):
     db_factory, binding, owner = original_resource
     async with db_factory() as db:
@@ -123,8 +123,8 @@ async def test_unavailable_auth_or_reservation_fails_closed(original_resource, c
             await db.delete(await db.get(OperatorIdentity, "stable-operator"))
         elif change == "revoked_identity":
             (await db.get(OperatorIdentity, "stable-operator")).revoked_at = datetime.now(timezone.utc)
-        elif change == "succeeded_status":
-            (await db.get(WorkflowRunState, "physical-row")).status = "succeeded"
+        elif change == "paused_status":
+            (await db.get(WorkflowRunState, "physical-row")).status = "paused"
         elif change in {"unsafe_reservation", "bad_state_digest"}:
             run = await db.get(WorkflowRunState, "physical-row")
             history = json.loads(run.checkpoint_receipts_json)
@@ -277,10 +277,10 @@ async def test_source_requires_fixed_pointer_owner_adapter(original_resource):
 @pytest.mark.asyncio
 async def test_browser_fixed_owner_requires_exact_lane_witness_and_proof_kind(original_resource):
     db_factory, binding, owner = original_resource
-    witness = {"schema_version":3, "pid":123, "process_nonce":"c"*32, "context_nonce":"d"*32,
+    witness = {"schema_version":4, "pid":123, "process_nonce":"c"*32, "context_nonce":"d"*32,
                "job_digest":hashlib.sha256(binding.job_id.encode()).hexdigest(), "root_path_digest":"e"*64,
                "root_device":1, "root_inode":2, "lock_device":1, "lock_inode":3,
-               "linux_boot_id":None, "positive_cleanup_required":True}
+               "boot_platform":"linux", "boot_session_id":"f2310181-26ae-49c2-8c11-75d161b52ab1", "positive_cleanup_required":True}
     async with db_factory() as db:
         run = await db.get(WorkflowRunState, "physical-row")
         authority = json.loads(run.declared_authority_json)
@@ -320,3 +320,166 @@ async def test_two_writer_cas_race_releases_original_pointer_once(original_resou
     assert sum(isinstance(result, dict) for result in results) == 1
     assert sum(isinstance(result, DurableJobLeaseError) for result in results) == 1
     callback.assert_awaited_once(); release.assert_awaited_once()
+
+
+async def _replace_witness(original_resource, witness, *, browser=False):
+    db_factory, binding, owner = original_resource
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        authority = json.loads(run.declared_authority_json)
+        if browser:
+            authority["capability_id"] = "browser.interact.v2"
+            run.job_kind = "browser_interact_v2"
+            run.capability_version = "2"
+            run.resource_claims_json = '["browser-task-lane"]'
+            run.declared_authority_json = _canonical(authority)
+            run.authority_digest = _digest(authority)
+        binding = replace(binding, authority_digest=run.authority_digest,
+            resource_claim="browser-task-lane" if browser else binding.resource_claim,
+            witness_digest=_digest(witness))
+        payload = {"binding": native_physical_cleanup_binding_payload(binding), "witness": witness}
+        run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "native-physical-resource-reservation",
+            "safe": True, "state_digest": _digest(payload), "payload": payload, "fencing_token": 2}])
+    return binding, owner
+
+
+def _browser_witness(binding, platform):
+    return {"schema_version": 4, "pid": 123, "process_nonce": "c"*32, "context_nonce": "d"*32,
+        "job_digest": hashlib.sha256(binding.job_id.encode()).hexdigest(), "root_path_digest": "e"*64,
+        "root_device": 1, "root_inode": 2, "lock_device": 1, "lock_inode": 3,
+        "boot_platform": platform, "boot_session_id": "f2310181-26ae-49c2-8c11-75d161b52ab1",
+        "positive_cleanup_required": True}
+
+
+@pytest.mark.parametrize("status", ["running", "unknown_external_effect", "cost_liability", "failed", "succeeded"])
+@pytest.mark.parametrize("effects", ["[]", '[{"effect_id":"remote","status":"unknown"}]', '[{"effect_id":"remote","status":"succeeded"}]'])
+async def test_source_finite_reachable_cleanup_preserves_all_canonical_execution(status, effects, original_resource):
+    db_factory, binding, owner = original_resource
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        run.status = status
+        run.effect_receipts_json = effects
+        run.artifact_receipts_json = '[{"artifact_id":"unchanged-output"}]'
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, "owned_positive_close",
+        succeeded_adoption_verified=status == "succeeded"))
+    release = AsyncMock()
+    result = await jobs.record_native_physical_cleanup(binding, current_owner=owner,
+        authenticated_token_hash="current-token", proof_kind="owned_positive_close",
+        cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        assert result["status"] == run.status == status
+        assert run.effect_receipts_json == effects and run.lease_owner is None
+        assert run.artifact_receipts_json == '[{"artifact_id":"unchanged-output"}]'
+        assert native_external_effect_state(run) == ("none" if effects == "[]" else "unknown" if "unknown" in effects else "settled")
+    callback.assert_awaited_once(); release.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status,flag", [("succeeded", False), ("succeeded", 1), ("failed", True), ("running", True)])
+async def test_source_adoption_assertion_is_strict_and_only_for_succeeded(original_resource, status, flag):
+    db_factory, binding, owner = original_resource
+    async with db_factory() as db:
+        (await db.get(WorkflowRunState, "physical-row")).status = status
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, "owned_positive_close", flag))
+    release = AsyncMock()
+    with pytest.raises(DurableJobError):
+        await jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+            proof_kind="owned_positive_close", cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+    release.assert_not_awaited()
+    async with db_factory() as db:
+        assert (await db.get(WorkflowRunState, "physical-row")).revision == 4
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("proof_kind", ["owned_positive_close", "owned_no_child", "linux_boot_changed", "darwin_boot_changed"])
+async def test_browser_native_platform_proof_union_and_prechild_receipt(original_resource, platform, proof_kind):
+    db_factory, binding, _ = original_resource
+    binding, owner = await _replace_witness(original_resource, _browser_witness(binding, platform), browser=True)
+    async with db_factory() as db:
+        (await db.get(WorkflowRunState, "physical-row")).effect_receipts_json = "[]"
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, proof_kind))
+    call = lambda: jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+        proof_kind=proof_kind, cleanup_owner=BrowserPhysicalCleanupOwner(callback))
+    if proof_kind.endswith("_boot_changed") and not proof_kind.startswith(platform):
+        with pytest.raises(DurableJobError): await call()
+        callback.assert_not_awaited()
+    else:
+        result = await call()
+        assert result["status"] == "unknown_external_effect"
+        binding = replace(binding, expected_revision=result["revision"])
+        assert (await call())["receipt"]["deduped"] is True
+        callback.assert_awaited_once()
+        async with db_factory() as db:
+            assert native_external_effect_state(await db.get(WorkflowRunState, "physical-row")) == "none"
+
+
+@pytest.mark.parametrize("denial", ["contact_unknown", "contact_settled", "missing_reservation", "wrong_callback_kind", "adoption_flag"])
+async def test_browser_no_child_cannot_be_claimed_by_caller_flag_or_contact(original_resource, denial):
+    db_factory, binding, _ = original_resource
+    binding, owner = await _replace_witness(original_resource, _browser_witness(binding, "darwin"), browser=True)
+    async with db_factory() as db:
+        run = await db.get(WorkflowRunState, "physical-row")
+        run.effect_receipts_json = ('[{"effect_id":"contact","status":"unknown"}]' if denial == "contact_unknown" else
+            '[{"effect_id":"contact","status":"succeeded"}]' if denial == "contact_settled" else "[]")
+        if denial == "missing_reservation": run.checkpoint_receipts_json = "[]"
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest,
+        "owned_positive_close" if denial == "wrong_callback_kind" else "owned_no_child", denial == "adoption_flag"))
+    with pytest.raises(DurableJobError):
+        await jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+            proof_kind="owned_no_child", cleanup_owner=BrowserPhysicalCleanupOwner(callback))
+    async with db_factory() as db:
+        assert (await db.get(WorkflowRunState, "physical-row")).revision == 4
+
+
+@pytest.mark.parametrize("invalid", [None, "namespace", "boolean_sec", "float_usec", "overflow_usec", "zero_sec", "zero_boot", "wrong_platform_boot"])
+async def test_source_darwin_closed_witness_and_matching_boot_proof(original_resource, invalid):
+    witness = {"platform": "darwin", "boot_id": "f2310181-26ae-49c2-8c11-75d161b52ab1", "pid": 123,
+        "pid_start_sec": 1700000000, "pid_start_usec": 25, "runtime_nonce": "a"*32,
+        "connection_id": "connection", "scope_digest": "b"*64, "original_cursor_revision": 1}
+    if invalid == "namespace": witness["pid_namespace"] = 789
+    elif invalid == "boolean_sec": witness["pid_start_sec"] = True
+    elif invalid == "float_usec": witness["pid_start_usec"] = 1.5
+    elif invalid == "overflow_usec": witness["pid_start_usec"] = 1000000
+    elif invalid == "zero_sec": witness["pid_start_sec"] = 0
+    elif invalid == "zero_boot": witness["boot_id"] = "00000000-0000-0000-0000-000000000000"
+    binding, owner = await _replace_witness(original_resource, witness)
+    kind = "linux_boot_changed" if invalid == "wrong_platform_boot" else "darwin_boot_changed"
+    callback = AsyncMock(return_value=NativePhysicalCleanupProof(binding.witness_digest, kind))
+    release = AsyncMock()
+    call = lambda: jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+        proof_kind=kind, cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+    if invalid is not None:
+        with pytest.raises(DurableJobError): await call()
+        callback.assert_not_awaited(); release.assert_not_awaited()
+    else:
+        assert (await call())["receipt"]["proof_kind"] == "darwin_boot_changed"
+
+
+async def test_cleanup_malformed_effect_ledger_is_denied_before_callback(original_resource):
+    db_factory, binding, owner = original_resource
+    async with db_factory() as db:
+        (await db.get(WorkflowRunState, "physical-row")).effect_receipts_json = "malformed"
+    callback, release = AsyncMock(), AsyncMock()
+    with pytest.raises(DurableJobError):
+        await jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+            proof_kind="owned_positive_close", cleanup_owner=ConnectedSourcePhysicalCleanupOwner(callback, release))
+    callback.assert_not_awaited(); release.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change", ["prototype", "unknown_boot", "zero_boot", "caller_no_child_flag", "boolean_pid", "wrong_platform", "wrong_platform_type"])
+async def test_browser_closed_schema_rejects_unknown_boot_and_caller_prechild_flag(original_resource, change):
+    _, binding, _ = original_resource
+    witness = _browser_witness(binding, "darwin")
+    if change == "prototype": witness["schema_version"] = 3
+    elif change == "unknown_boot": witness["boot_session_id"] = None
+    elif change == "zero_boot": witness["boot_session_id"] = "00000000-0000-0000-0000-000000000000"
+    elif change == "caller_no_child_flag": witness["owned_no_child"] = True
+    elif change == "boolean_pid": witness["pid"] = True
+    elif change == "wrong_platform_type": witness["boot_platform"] = []
+    else: witness["boot_platform"] = "unknown"
+    binding, owner = await _replace_witness(original_resource, witness, browser=True)
+    callback = AsyncMock()
+    with pytest.raises(DurableJobError):
+        await jobs.record_native_physical_cleanup(binding, current_owner=owner, authenticated_token_hash="current-token",
+            proof_kind="owned_no_child", cleanup_owner=BrowserPhysicalCleanupOwner(callback))
+    callback.assert_not_awaited()

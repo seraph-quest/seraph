@@ -466,6 +466,8 @@ async def lifespan(app: FastAPI):
         manifest_roots=manifest_roots,
     )
     from src.work_board.general_task import current_task_service
+    from src.guardian.goal_programmes import goal_programme_service
+    await goal_programme_service.start()
     try:
         with current_task_service():
             init_scheduler()
@@ -477,7 +479,10 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
             yield
     finally:
-        shutdown_scheduler()
+        try:
+            await goal_programme_service.stop()
+        finally:
+            shutdown_scheduler()
     mcp_manager.disconnect_all()
     shutdown_error: Exception | None = None
     try:

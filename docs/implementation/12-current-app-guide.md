@@ -146,6 +146,39 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
 
+### Bounded general document reading
+
+**Status:** Partial; availability follows the independently reviewed installed
+revision containing the milestone. [ADR-031](./decisions/031-bounded-general-documents.md) owns the
+separate `document.read.v1` target; invoice comparison above remains unchanged.
+
+The finite local profile selects one PDF, DOCX, XLSX or UTF-8 CSV against a
+current bounded Goal. Reserve its exact byte length/digest, stream the original
+to the authenticated document-source endpoint, seal its encrypted readback, then
+request one explicit bounded selection. The private response includes physical
+PDF page, DOCX paragraph/table or spreadsheet cell references and the immutable
+original digest. Spreadsheet formula literals and cached values remain separate;
+cached freshness is unknown and nothing evaluates a formula or macro. Scanned,
+protected, malformed, external-link and oversized sources show unsupported state
+and recovery instead of invented content. Private evidence never enters generic
+task events, and selection grants no source/model egress or learning authority.
+
+The source index preserves redacted owned reservations after reload. Explicit
+deletion requires the current revision, tombstones first and frees charged quota
+only after exact private cleanup. Unknown parser cleanup holds the host slot
+across new requests and restarts. Original-reader reconciliation accepts only its
+private nonce/job/digest/generation/PID-bound positive wait witness; a reap
+without recorded output does not reconstruct evidence. The same source family
+reuses current canonical input-artifact ownership, encryption and quota owners;
+there is no second store or queue. Independent original deadlines and positive
+supervision bound two lifetime attempts. Local extraction makes no provider call.
+
+Linux local format/process receipts establish only their checked mechanics.
+macOS has a named native network-denial adapter but no native execution receipt;
+unavailable resource or network confinement visibly blocks this optional profile
+while the CPU core stays usable. This profile establishes literal extraction,
+not OCR, malware certification, model understanding or general usefulness.
+
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU

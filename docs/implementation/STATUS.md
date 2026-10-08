@@ -26,6 +26,18 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+**Bounded general documents: Partial.**
+Availability follows the independently reviewed installed revision containing
+the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
+owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,
+returns exact citations and immutable original digests, and retains encrypted
+private source/evidence readback. Selected-file cockpit intake, bounded isolated
+parsing, unsupported reasons and positive original-reader cleanup share current
+canonical ownership and quota. Local extraction does not authorize model egress
+or learning. OCR, protected/macro/external-linked sources and general question
+answering are outside this profile; Linux mechanics do not establish native
+macOS execution or model quality.
+
 ## Bounded operator workflows (program #899)
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins

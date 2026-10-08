@@ -1,0 +1,143 @@
+import { useEffect, useRef, useState } from "react";
+import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
+import type { GoalInfo } from "../../types";
+
+type Format = "pdf" | "docx" | "xlsx" | "csv";
+interface Source { artifact_id: string; artifact_ref: string; revision: number; state: string; format: Format;
+  source_digest: string; goal_id: string; goal_revision: number; reason_code: string | null; cleanup: string; no_learning: true; provider_contacts: 0 }
+interface Evidence { sections: { source_ref: string; text: string; table_cells: { source_ref: string; text: string; formula: string | null; cached_value: string | null }[] }[];
+  warnings: string[]; source_digest: string; no_learning: true }
+const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
+async function request(path: string, method = "GET", body?: BodyInit, headers?: HeadersInit): Promise<unknown> {
+  const response = await apiFetch(`${API_URL}/api/documents${path}`, { method, body, headers });
+  if (!response.ok) throw Error(`Document operation blocked (${response.status}). Inspect the retained source and cleanup state before retrying.`);
+  return response.json();
+}
+function sourceRead(value: unknown): Source {
+  if (!record(value) || typeof value.artifact_id !== "string" || typeof value.artifact_ref !== "string" || !/^document-source:[0-9a-f-]{36}$/.test(value.artifact_ref)
+    || !Number.isSafeInteger(value.revision) || typeof value.state !== "string" || !["pdf", "docx", "xlsx", "csv"].includes(String(value.format))
+    || typeof value.source_digest !== "string" || !/^[a-f0-9]{64}$/.test(value.source_digest) || typeof value.goal_id !== "string"
+    || !Number.isSafeInteger(value.goal_revision) || value.no_learning !== true || value.provider_contacts !== 0 || typeof value.cleanup !== "string") throw Error("Private source readback is invalid. Inspect the original receipt before continuing.");
+  return value as unknown as Source;
+}
+export function DocumentReader({ goals, ownerPrincipalId, ownerSessionId }: { goals: GoalInfo[]; ownerPrincipalId?: string | null; ownerSessionId?: string | null }) {
+  const [file, setFile] = useState<File | null>(null), [goalId, setGoalId] = useState("");
+  const [source, setSource] = useState<Source | null>(null), [evidence, setEvidence] = useState<Evidence | null>(null);
+  const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [ack, setAck] = useState(false);
+  const [pages, setPages] = useState(""), [sheets, setSheets] = useState("");
+  const [retained, setRetained] = useState<Source[]>([]), [nextOffset, setNextOffset] = useState<number | null>(null);
+  const pending = useRef<{ request: string; file: File; digest: string; goal: GoalInfo } | null>(null), generation = useRef(0);
+  const eligible = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
+  const goal = eligible.find(g => g.id === goalId), owned = Boolean(ownerPrincipalId && ownerSessionId);
+  useEffect(() => { ++generation.current; setFile(null); setGoalId(""); setSource(null); setEvidence(null); setRetained([]); setNextOffset(null); setError(null); setBusy(false); setAck(false); pending.current = null; return () => { ++generation.current; }; }, [ownerPrincipalId, ownerSessionId]);
+  const body = (value: unknown) => JSON.stringify(value);
+  async function selectAndUpload() {
+    if (!owned || busy || (!pending.current && (!file || !goal?.revision || !ack))) return;
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    try {
+      if (!pending.current) {
+        const selected = file!, selectedGoal = goal!;
+        const format = selected.name.split(".").pop()?.toLowerCase() as Format;
+        const limit = format === "docx" ? 10 * 1024 * 1024 : 16 * 1024 * 1024;
+        if (!["pdf", "docx", "xlsx", "csv"].includes(format) || !selected.size || selected.size > limit) throw Error("Choose PDF, DOCX, XLSX or CSV within the finite source size limit (DOCX 10 MiB; other formats 16 MiB).");
+        const buffer = await selected.arrayBuffer();
+        const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", buffer)), b => b.toString(16).padStart(2, "0")).join("");
+        if (version !== generation.current) return;
+        pending.current = { file: selected, digest, goal: selectedGoal, request: body({ format, source: { size_bytes: selected.size, sha256: digest }, goal_id: selectedGoal.id, goal_revision: selectedGoal.revision, idempotency_key: crypto.randomUUID(), no_learning: true }) };
+      }
+      const exact = pending.current;
+      const receipt = sourceRead(await request("/sources", "POST", exact.request, { "Content-Type": "application/json" }));
+      if (receipt.goal_id !== exact.goal.id || receipt.goal_revision !== exact.goal.revision || receipt.source_digest !== exact.digest) throw Error("Reserved source does not match this exact file and Goal.");
+      if (version !== generation.current) return; setSource(receipt);
+      // Upload never auto retries. A lost receipt requires GET inspection.
+      const uploaded = sourceRead(await request(`/sources/${encodeURIComponent(receipt.artifact_id)}/content?expected_revision=${receipt.revision}`, "PUT", exact.file, { "Content-Type": "application/octet-stream" }));
+      if (version !== generation.current) return; setSource(uploaded);
+      const sealed = sourceRead(await request(`/sources/${encodeURIComponent(uploaded.artifact_id)}/seal?expected_revision=${uploaded.revision}`, "POST"));
+      if (version !== generation.current) return; setSource(sealed); pending.current = null; setFile(null);
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function inspect() {
+    if (!source || busy) return;
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}`)); if (result.artifact_id !== source.artifact_id || result.source_digest !== source.source_digest) throw Error("Source identity changed."); if (version === generation.current) setSource(result); }
+    catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function discover(offset = 0) {
+    if (!owned || busy) return;
+    const version = generation.current; setBusy(true); setError(null);
+    try {
+      const result = await request(`/sources?limit=50&offset=${offset}`);
+      if (!record(result) || result.no_learning !== true || !Array.isArray(result.sources) || result.sources.length > 50
+        || !(result.next_offset === null || Number.isSafeInteger(result.next_offset))) throw Error("Retained source discovery is unavailable.");
+      const values = result.sources.map(sourceRead);
+      if (version === generation.current) { setRetained(offset === 0 ? values : previous => [...previous, ...values]); setNextOffset(result.next_offset as number | null); }
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function reconcile() {
+    if (!source || busy) return;
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}/reconcile?expected_revision=${source.revision}`, "POST")); if (version === generation.current) setSource(result); }
+    catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function read() {
+    if (!source || busy || source.state !== "sealed" || source.cleanup === "unknown_writer_retained") return;
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    try {
+      const selectedPages = pages.trim() ? pages.split(",").map(p => Number(p.trim())) : [];
+      const selectedSheets = sheets.trim() ? sheets.split("\n").map(s => s.trim()).filter(Boolean) : [];
+      if (selectedPages.some(p => !Number.isInteger(p) || p < 1 || p > 100) || selectedPages.length > 100 || selectedSheets.length > 16) throw Error("Select at most 100 physical PDF pages (1–100) or 16 literal XLSX sheet names.");
+      const result = await request("/read", "POST", body({ artifact_ref: source.artifact_ref, format: source.format,
+        selection: { pages: source.format === "pdf" ? selectedPages : [], sheets: source.format === "xlsx" ? selectedSheets : [] }, page_sheet_limits: { max_pages: 100, max_sheets: 16, max_cells: 100000 } }), { "Content-Type": "application/json" });
+      if (!record(result) || result.provider_contacts !== 0) throw Error("Extraction readback is unconfirmed.");
+      if (result.status === "blocked" && result.no_learning === true) throw Error(`Document extraction blocked: ${String(result.reason)}. Inspect the source; unsupported, encrypted or malformed files need a supported replacement. Cleanup: ${String(result.cleanup)}.`);
+      if (result.status !== "succeeded" || result.cleanup !== "wait_reaped" || !record(result.evidence) || result.evidence.source_digest !== source.source_digest || result.evidence.no_learning !== true
+        || !Array.isArray(result.evidence.sections) || !Array.isArray(result.evidence.warnings)
+        || !result.evidence.warnings.every(w => typeof w === "string") || result.evidence.sections.some(s => !record(s) || typeof s.source_ref !== "string" || typeof s.text !== "string" || !Array.isArray(s.table_cells)
+          || s.table_cells.some(c => !record(c) || typeof c.source_ref !== "string" || typeof c.text !== "string" || !(c.formula === null || typeof c.formula === "string") || !(c.cached_value === null || typeof c.cached_value === "string")))) throw Error("Cited document evidence does not match the sealed source.");
+      if (version === generation.current) setEvidence(result.evidence as unknown as Evidence);
+    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  async function remove() {
+    if (!source || busy) return;
+    const version = generation.current; setBusy(true); setError(null); setEvidence(null);
+    try { const result = sourceRead(await request(`/sources/${encodeURIComponent(source.artifact_id)}?expected_revision=${source.revision}`, "DELETE")); if (version === generation.current) { setSource(result); if (result.state === "deleted") pending.current = null; } }
+    catch (e) { if (version === generation.current) setError((e as Error).message); }
+    finally { if (version === generation.current) setBusy(false); }
+  }
+  return <details className="mb-3 rounded border border-white/10 p-2 text-xs"><summary>Read a local document</summary><section aria-label="Local document reader">
+    <p>Select a private file for bounded CPU extraction into cited evidence. File content stays local; no provider contact and no learning.</p>
+    <button type="button" disabled={busy || !owned} onClick={() => void discover()}>Refresh retained document sources</button>
+    {retained.length > 0 && <ul aria-label="Retained private document sources">{retained.map(item => <li key={item.artifact_id}><button type="button" disabled={busy} onClick={() => { setSource(item); setEvidence(null); setError(null); setFile(null); setAck(false); setPages(""); setSheets(""); pending.current = null; }}>{item.format} · {item.state} · {item.artifact_ref} · Goal {item.goal_id}</button></li>)}</ul>}
+    {nextOffset !== null && <button type="button" disabled={busy} onClick={() => void discover(nextOffset)}>Load more retained document sources</button>}
+    {error && <p role="alert" className="text-amber-200">{error}</p>}
+    <fieldset disabled={busy || !owned || Boolean(source && source.state !== "deleted") || Boolean(pending.current)}>
+      <label>Document Goal<select aria-label="Document Goal" value={goalId} onChange={e => { setGoalId(e.target.value); setAck(false); }}><option value="">Choose current Goal</option>{eligible.map(g => <option key={g.id} value={g.id}>{g.title} · revision {g.revision}</option>)}</select></label>
+      <label>Selected document<input aria-label="Selected document" type="file" accept=".pdf,.docx,.xlsx,.csv" onChange={e => { setFile(e.target.files?.[0] ?? null); setAck(false); }} /></label>
+      <label><input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />Store this exact selected file privately under this Goal for local document readback.</label>
+    </fieldset>
+    {(!source || source.state === "deleted") && <button type="button" disabled={busy || !owned || (!pending.current && (!file || !goal || !ack))} onClick={() => void selectAndUpload()}>{pending.current ? "Reconcile exact source reservation" : "Store selected document"}</button>}
+    {source && <>
+      <p role="status">Source {source.state} · {source.reason_code ?? "no active block"} · cleanup {source.cleanup}</p>
+      <p className="font-mono break-all">{source.artifact_ref} · revision {source.revision} · SHA-256 {source.source_digest}</p>
+      <button type="button" disabled={busy} onClick={() => void inspect()}>Inspect document source</button>
+      {source.cleanup === "unknown_writer_retained" && <><p>Cleanup is unknown. The original parser must prove it was reaped; upload writers remain held when no positive witness exists.</p><button type="button" disabled={busy} onClick={() => void reconcile()}>Reconcile original document reader cleanup</button></>}
+      {source.format === "pdf" && <label>Physical PDF pages (comma separated)<input aria-label="Physical PDF pages" disabled={busy} value={pages} onChange={e => { setPages(e.target.value); setEvidence(null); }} /></label>}
+      {source.format === "xlsx" && <label>XLSX sheets (one per line)<textarea aria-label="XLSX sheets" disabled={busy} value={sheets} onChange={e => { setSheets(e.target.value); setEvidence(null); }} /></label>}
+      <button type="button" disabled={busy || source.state !== "sealed" || source.cleanup === "unknown_writer_retained"} onClick={() => void read()}>Read cited document evidence</button>
+      <button type="button" disabled={busy || source.state === "deleted"} onClick={() => void remove()}>Delete private source and verify cleanup</button>
+      {source.state !== "sealed" && source.state !== "deleted" && <p>Inspect an interrupted upload before taking another action. If it cannot be sealed safely, delete this retained source, verify cleanup, then explicitly select the file again.</p>}
+    </>}
+    {evidence && <div aria-label="Cited document evidence" role="region">
+      {evidence.warnings.map((warning, i) => <p key={i} role="status">{warning}</p>)}
+      {evidence.sections.map((section, i) => <section key={i}><h4 className="font-mono break-all">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>
+        {section.table_cells.length > 0 && <table><thead><tr><th>Source</th><th>Text</th><th>Formula (inert)</th><th>Cached value</th></tr></thead><tbody>{section.table_cells.map((cell, j) => <tr key={j}><td>{cell.source_ref}</td><td>{cell.text}</td><td>{cell.formula ?? "none"}</td><td>{cell.cached_value ?? "unavailable"}</td></tr>)}</tbody></table>}
+      </section>)}
+    </div>}
+  </section></details>;
+}

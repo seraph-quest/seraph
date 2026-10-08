@@ -995,9 +995,16 @@ class GoogleCalendarReadonlyAdapter:
         allowed_fields: set[str] | None = None,
         max_events: int = MAX_EVENTS,
     ) -> tuple[list[CalendarEventSnapshot], CalendarListRevision]:
+        # Validate the closed consent grammar before metadata, OAuth or HTTP.
+        # start/end are required canonical event/time binding metadata; selected
+        # optional fields are the only additional event content requested.
+        response_fields = None
+        if allowed_fields is not None:
+            _event_response_fields(allowed_fields)
+            response_fields = "nextPageToken,items(" + _event_response_fields(allowed_fields | {"start", "end"}) + ")"
         encoded_calendar = _calendar_segment(calendar_id, field="calendar id")
         max_events = max(1, min(int(max_events), MAX_EVENTS))
-        fields = allowed_fields or {"summary", "start", "end", "location"}
+        fields = allowed_fields if allowed_fields is not None else {"summary", "start", "end", "location"}
         items: list[Mapping[str, Any]] = []
         pages = 0
         truncated = False
@@ -1016,6 +1023,8 @@ class GoogleCalendarReadonlyAdapter:
                 if len(page_token.encode("utf-8")) > 2048 or _CONTROL.search(page_token):
                     raise CalendarIntegrationError("calendar_provider_schema_invalid", "Calendar pagination is invalid", status_code=502)
                 query.append(("pageToken", page_token))
+            if response_fields is not None:
+                query.append(("fields", response_fields))
             url = _fixed_url(GOOGLE_API_ORIGIN, f"{EVENTS_PATH}/{encoded_calendar}/events", query)
             payload = await self._authorized_get(url)
             pages += 1

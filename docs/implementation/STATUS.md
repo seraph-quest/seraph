@@ -336,6 +336,28 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
+Scoped connected-source synchronization is **Partial**: bounded Python source
+synchronization and related-source Mail/Calendar preparation are implemented;
+real-account operation and native macOS execution remain unverified. It requires existing operator
+ownership enrollment and uses explicit metadata grants,
+one fixed scope and canonical root reservation per connection, encrypted page
+cursors with complete-page adoption/readback, fifty metadata items/three pages,
+ten separately selected private reads, and original-grant recovery/revocation.
+Physical-only cleanup preserves OAuth-bearing effect uncertainty and exposes
+old unresolved roots separately from connection capacity. Linux and Darwin
+lifetime witnesses use a closed native ABI contract; Darwin fixtures do not
+establish native macOS execution. Fresh acknowledged scope generations can
+rebind current versioned items without renewing old jobs or citations. Existing
+native Mail reply and Calendar preparation tasks accept explicit related-source
+selection/use acknowledgment (three connections, ten unique citations), require
+the same original Goal, and revalidate source authority before primary contact
+and final adoption. Related private bytes/references stay out of model requests;
+local results contain only classified refs, coverage/freshness and `no_learning`.
+Disposable SQLite,
+local HTTP and separate-process checks establish mechanics;
+they do not establish real-account or production usefulness. See the
+[owning contract](./12-current-app-guide.md#scoped-connected-source-synchronization).
+
 - [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
   native public browser → deterministic CPU dossier → local plain-text report
   chain, exact plan review, an original finite deadline and attempt counters,

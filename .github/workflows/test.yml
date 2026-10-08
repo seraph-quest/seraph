@@ -75,35 +75,8 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Select and verify native Node test dependencies
-        timeout-minutes: 1
-        run: |
-          "${pythonLocation}/bin/python3.12" -I -S -B - <<'PY'
-          import hashlib, json, os, pathlib, shutil, stat, subprocess
-          node = pathlib.Path(shutil.which("node") or "")
-          assert node.is_absolute(), "Selected Node executable is missing"
-          def regular(path):
-              info = path.lstat()
-              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o022, "Native dependency must be a trusted regular file"
-          regular(node)
-          assert os.access(node, os.X_OK), "Selected Node is not executable"
-          before = hashlib.sha256(node.read_bytes()).hexdigest()
-          version = subprocess.run([str(node), "--version"], check=True, capture_output=True, timeout=2, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}).stdout.decode().strip()
-          assert version == "v24.21.0" and hashlib.sha256(node.read_bytes()).hexdigest() == before, "Selected Node version or bytes changed"
-          npm = node.parent.parent / "lib/node_modules/npm"
-          regular(npm / "package.json")
-          regular(npm / "bin/npm-cli.js")
-          frontend = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "frontend"
-          typescript = frontend / "node_modules/typescript"
-          assert typescript.is_dir() and not typescript.is_symlink(), "TypeScript fixture directory is missing or linked"
-          regular(typescript / "package.json")
-          actual = json.loads((typescript / "package.json").read_text())["version"]
-          expected = json.loads((frontend / "package-lock.json").read_text())["packages"]["node_modules/typescript"]["version"]
-          assert actual == expected, "TypeScript fixture differs from the checked-in lock"
-          assert all("\n" not in str(path) and "\r" not in str(path) for path in (node, typescript))
-          with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write(f"SERAPH_TEST_NODE_RUNTIME={node}\nSERAPH_TEST_TYPESCRIPT_ROOT={typescript}\n")
-          print(f"NATIVE_NODE_READINESS version={version} sha256={before} typescript={actual}")
-          PY
+        timeout-minutes: 3
+        run: '"${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_node_runtime.py'
 
       - name: Install Chromium and system dependencies
         timeout-minutes: 10

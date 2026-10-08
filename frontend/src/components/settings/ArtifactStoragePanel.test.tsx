@@ -259,6 +259,7 @@ describe("ArtifactStoragePanel", () => {
       if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({
         provider: "local",
         model: "gemma-text",
+        cordis_runtime: { state: "blocked", reason: "node_unsupported", profile_id: "core.cpu", cordis_version: "4.0.0-rc.10", node_version: "22.11.0", composition_digest: null, package_digest: null, plugins: [], cleanup: { state: "not_started", process_reaped: false, resources_remaining: null, cordis_disposal: "not_started" } },
         model_fabric: {
           status: "ready",
           configuration_status: "ready",
@@ -280,6 +281,8 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Model fabric")).toBeInTheDocument();
+    expect(await screen.findByText("blocked · node_unsupported")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Cordis host" })).toBeEnabled();
     expect(await screen.findByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
     expect(screen.getByText(/local-text\/gemma-text:routable/)).toBeInTheDocument();
     const textRoute = screen.getByText(/selected local-text · attempted local-text:succeeded · actual local-text\/gemma-text/);

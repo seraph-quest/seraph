@@ -19,6 +19,31 @@ const documentPlan = { ...plan, accepted: true, task_input: { ...plan.task_input
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status }); }
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
 
+it("shows factual native remaining work and verified partial refs separately from final success", async () => {
+  const native = { phase: "native_wait", plan_revision: 1, manifest_revision: 4,
+    original_deadline_at: "2099-01-01T00:10:00Z", native_deadline_at: "2099-01-01T00:05:00Z",
+    admitted_invocation_ids: ["native-child-one"], remaining_steps: ["note"], no_learning: true,
+    steps: [{ step_id: "read", status: "verified", contact_state: "settled", invocation_id: "native-child-one",
+      plan_revision: 1, artifact_refs: [{ artifact_id: "local-output-one", digest: "a".repeat(64), schema_version: "GeneralTaskOutput.v1" }] }],
+    partial_output_refs: [{ artifact_id: "local-output-one", digest: "a".repeat(64), schema_version: "GeneralTaskOutput.v1" }] };
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, accepted: true, native_execution: native }));
+  render(<GeneralTaskPanel {...owner} task={{ ...task, status: "blocked" }} />);
+  expect(await screen.findByRole("region", { name: "Native task execution" })).toHaveTextContent("Native phase native_wait");
+  expect(screen.getByText("Remaining work: note")).toBeInTheDocument();
+  expect(screen.getByText("Verified partial outputs: 1")).toBeInTheDocument();
+  expect(screen.getByText("local-output-one")).toBeInTheDocument();
+  expect(screen.getByText(/Partial outputs remain separate from final task success/)).toBeInTheDocument();
+});
+
+it("rejects a native receipt cutoff that extends its original deadline", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, native_execution: { phase: "assembly", plan_revision: 1,
+    manifest_revision: 1, original_deadline_at: "2099-01-01T00:05:00Z", native_deadline_at: "2099-01-01T00:10:00Z",
+    steps: [], admitted_invocation_ids: [], remaining_steps: ["note"], partial_output_refs: [], no_learning: true } }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Native task receipts are incomplete");
+  expect(screen.queryByLabelText("Native task execution")).toBeNull();
+});
+
 it("submits ordinary intent without a forged tool plan and opens its persisted inert Work task", async () => {
   const created = vi.fn();
   vi.mocked(apiFetch).mockImplementation(async (_url, init) => {
@@ -185,6 +210,102 @@ const pause = { approval_id: "approval-one", approval_status: "approved", step_i
   workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4, workflow_revision: 9,
   original_deadline_at: new Date(Date.now() + 600000).toISOString(), can_resume: true, reason: null };
 const pausedPlan = { ...plan, accepted: true, approval_pause: pause };
+const nativeExecution = { phase: "approval_wait", plan_revision: 1, manifest_revision: 7,
+  original_deadline_at: pause.original_deadline_at, native_deadline_at: pause.original_deadline_at,
+  steps: [{ step_id: "note", status: "awaiting_approval", contact_state: "not_contacted",
+    invocation_id: "native-child-one", plan_revision: 1, artifact_refs: [] }],
+  admitted_invocation_ids: ["native-child-one"], remaining_steps: ["note"], partial_output_refs: [], no_learning: true };
+it("continues the exact native child and reads monotonic same-attempt assembly fences", async () => {
+  const changed = vi.fn();
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, native_execution: nativeExecution,
+    approval_pause: { ...pause, child_job_id: "native-child-one", expected_manifest_revision: 7 } }))
+    .mockResolvedValueOnce(response({ task: { ...pausedTask, latest_attempt: { ...pausedTask.latest_attempt, fencing_token: 7 } } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} onChanged={changed} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue approved task run" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toMatchObject({
+    workflow_run_id: "run-one", attempt_id: "attempt-one", fencing_token: 4,
+    child_job_id: "native-child-one", expected_manifest_revision: 7 });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it.each([
+  { child_job_id: "foreign-child", expected_manifest_revision: 7 },
+  { child_job_id: "native-child-one", expected_manifest_revision: 8 },
+  {},
+])("disables a native approval whose original child or manifest differs %j", async fields => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, native_execution: nativeExecution,
+    approval_pause: { ...pause, ...fields } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Continue approved task run" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
+it("pauses quiescent native work using only the exact current task revision", async () => {
+  const changed = vi.fn(), running = { ...pausedTask, status: "running" } as WorkBoardTask;
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase: "assembly", steps: [{ ...nativeExecution.steps[0], status: "verified", contact_state: "settled" }] } }))
+    .mockResolvedValueOnce(response({ task: { ...pausedTask, task_revision: 3 } }));
+  render(<GeneralTaskPanel {...owner} task={running} onChanged={changed} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pause remaining task work" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ action: "pause", expected_revision: 2 });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("keeps pause and resume disabled while the original child is active or unknown", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase: "native_wait", steps: [{ ...nativeExecution.steps[0], status: "unknown", contact_state: "unknown" }] } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByRole("button", { name: "Pause remaining task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Resume paused task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel native task work" })).toBeEnabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
+it("cancels blocked native work with the current revision and never replays a conflict", async () => {
+  const changed = vi.fn();
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase: "native_wait", steps: [{ ...nativeExecution.steps[0], status: "unknown", contact_state: "unknown" }] } }))
+    .mockResolvedValueOnce(response({ detail: "Task revision changed" }, 409));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} onChanged={changed} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel native task work" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ action: "cancel", expected_revision: 2 });
+  expect(await screen.findByRole("alert")).toHaveTextContent("controls are never automatically replayed");
+  expect(screen.queryByRole("button", { name: "Cancel native task work" })).toBeNull();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});
+it("revises only unstarted steps while retaining the original paused attempt", async () => {
+  const changed = vi.fn();
+  const replacement = { ...pausedPlan.plan.steps[0], step_id: "remaining" };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...pausedPlan, approval_pause: null,
+    plan: { ...pausedPlan.plan, steps: [...pausedPlan.plan.steps, replacement] },
+    native_execution: { ...nativeExecution, phase: "operator_paused", steps: [{ ...nativeExecution.steps[0], status: "verified", contact_state: "settled" }] } }))
+    .mockResolvedValueOnce(response({ task: { ...pausedTask, task_revision: 3, block_reason: "general_task_operator_paused" } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} onChanged={changed} />);
+  const draft = await screen.findByRole("textbox", { name: "Replacement steps" });
+  expect(JSON.parse((draft as HTMLTextAreaElement).value)).toEqual([replacement]);
+  fireEvent.change(screen.getByRole("textbox", { name: "Revision reason" }), { target: { value: "Use the corrected remaining input" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save paused plan revision" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain("/plan/revise");
+  const body = JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body));
+  expect(Object.keys(body).sort()).toEqual(["expected_revision", "idempotency_key", "reason", "replacements"]);
+  expect(body).toMatchObject({ expected_revision: 2, replacements: [...pausedPlan.plan.steps, replacement], reason: "Use the corrected remaining input" });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it.each([
+  ["pending", "unknown_recovery", "original tool callback or effect remains unresolved"],
+  ["callback_closed_outcome_debt", "unknown_recovery", "effect outcome still requires reconciliation"],
+  ["fully_cancelled", "cancelled", "Cancellation completed with original tool closure"],
+])("shows canonical cancellation state %s without enabling replay", async (state, phase, text) => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...pausedPlan, approval_pause: null,
+    native_execution: { ...nativeExecution, phase, cancellation: { state, child_ids: ["native-child-one"],
+      callback_closed: state !== "pending", effect_debt: state !== "fully_cancelled", reason: "operator_cancelled" } } }));
+  render(<GeneralTaskPanel {...owner} task={pausedTask} />);
+  expect(await screen.findByText(new RegExp(text))).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Pause remaining task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Resume paused task work" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel native task work" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+});
 it("continues only by explicit action with the exact approved existing run receipt", async () => {
   const changed = vi.fn();
   vi.mocked(apiFetch).mockResolvedValueOnce(response(pausedPlan)).mockResolvedValueOnce(response({ task: { ...pausedTask, latest_attempt: { ...pausedTask.latest_attempt, fencing_token: 5 } } }));

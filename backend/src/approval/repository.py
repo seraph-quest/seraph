@@ -630,6 +630,81 @@ class ApprovalRepository:
         db.expunge(request)
         return request
 
+    async def attach_general_task_native_child_wait_binding_in_session(
+        self, db, approval_id: str, *, binding, tool_name: str,
+        approval_context: Mapping[str, Any],
+    ) -> ApprovalRequest | None:
+        """Attach the fixed child wait without changing approval authority."""
+        from src.db.models import WorkflowRunState
+        from src.work_board.contracts import GeneralTaskApprovalTransitionV1
+        from src.workflows.general_task_guard import child_binding, read_manifest, _protected_payload, approval_checkpoint_id
+        from src.workflows.job_runtime import _assert_canonical_goal_fence, _digest
+        from src.auth.service import authenticate_principal
+        from src.security.trust_contract import AuthorityGrant
+        if type(binding) is not GeneralTaskApprovalTransitionV1 or binding.phase != "approval_wait":
+            return None
+        original = binding.original_binding
+        run = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == original.invocation_id).execution_options(populate_existing=True))
+        parent = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == original.parent_job_id).execution_options(populate_existing=True))
+        request = await db.get(ApprovalRequest, approval_id)
+        if run is None or parent is None or request is None:
+            return None
+        now = datetime.now(timezone.utc)
+        try:
+            details = json.loads(request.details_json or "{}")
+            manifest = read_manifest(parent)
+            if (child_binding(run) != original or run.status != "paused"
+                or run.failure_reason != "general_task_approval_required"
+                or run.lease_owner or run.lease_expires_at or run.attempt_count != 1
+                or run.fencing_token != binding.waiting_child_fence
+                or parent.status != "paused" or parent.failure_reason != "general_task_approval_required"
+                or manifest.phase != "approval_wait" or manifest.phase_digest != binding.phase_digest
+                or manifest.task_revision != binding.task_revision
+                or _protected_payload(parent, approval_checkpoint_id(original), GeneralTaskApprovalTransitionV1) != binding
+                or request.id != binding.approval_id or request.status not in {"pending", "approved"}
+                or _pending_is_expired(request.expires_at, now=now)
+                or _pending_is_expired(run.deadline_at, now=now)
+                or request.owner_principal_id != original.owner_principal_id
+                or request.operator_session_id != original.original_root_id
+                or request.session_id != original.original_root_id
+                or request.tool_name != tool_name or request.fingerprint != binding.approval_fingerprint
+                or not isinstance(details, dict) or details.get("approval_context") != dict(approval_context)
+                or _digest(dict(approval_context)) != binding.approval_context_digest
+                or approval_context.get("workflow_run_identity") != run.run_identity):
+                return None
+            operator = await authenticate_principal(original.owner_principal_id, db=db)
+            if (operator.session_id != original.original_root_id
+                or AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants):
+                return None
+            await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
+                session_id=run.session_id, authority=run.declared_authority_json)
+        except (KeyError, TypeError, ValueError):
+            return None
+        updates = {"scope": {"workflow_run_identity": run.run_identity,
+            "goal_id": run.goal_id, "goal_revision": run.goal_revision},
+            "general_task_step_id": original.step_id,
+            "general_task_wait_binding": binding.model_dump(mode="json")}
+        if any(key in details and details[key] != value for key, value in updates.items()):
+            return None
+        prior = request.details_json
+        details.update(updates)
+        changed = await db.execute(update(ApprovalRequest).where(
+            ApprovalRequest.id == approval_id, ApprovalRequest.status == request.status,
+            ApprovalRequest.fingerprint == request.fingerprint,
+            ApprovalRequest.resolved_at == request.resolved_at,
+            ApprovalRequest.details_json == prior if prior is not None else ApprovalRequest.details_json.is_(None),
+        ).values(details_json=json.dumps(details, sort_keys=True, separators=(",", ":")))
+            .execution_options(synchronize_session=False))
+        if changed.rowcount != 1:
+            return None
+        await db.refresh(request)
+        from src.workflows.general_task_guard import verify_native_approval_transition
+        await verify_native_approval_transition(db, run, parent)
+        return request
+
     async def get_or_create_pending(
         self,
         *,

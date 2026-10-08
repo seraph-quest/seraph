@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 import re
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
@@ -110,7 +110,7 @@ class PlanStep(ClosedTaskModel):
 
 class PlanSpec(ClosedTaskModel):
     schema_version: Literal[1] = 1
-    revision: int = Field(ge=1)
+    revision: int = Field(ge=1, le=16)
     steps: list[PlanStep] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")
@@ -208,6 +208,362 @@ class GeneralTaskCreate(ClosedTaskModel):
         return self
 
 
+class TaskProposalGroupV1(ClosedTaskModel):
+    """Server-owned original allowance; no browser request accepts this type."""
+    schema_version: Literal["general_task.proposal_group.v1"] = "general_task.proposal_group.v1"
+    group_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    owner_principal_id: str = Field(min_length=1, max_length=128)
+    owner_session_id: str = Field(min_length=1, max_length=128)
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(ge=1)
+    creation_request_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    initial_input_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    planning_snapshot_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    intent_egress_ack_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    limits_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    max_inference_calls: int = Field(ge=0, le=12)
+    max_cost_microusd: int = Field(ge=0)
+    max_steps: int = Field(ge=1, le=16)
+    issued_at: datetime
+    original_deadline_at: datetime
+
+    @field_validator("issued_at", "original_deadline_at", mode="before")
+    @classmethod
+    def utc_timestamp(cls, value):
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset().total_seconds() != 0:
+            raise ValueError("original proposal timestamps require UTC")
+        return value
+
+    @model_validator(mode="after")
+    def original_clock(self):
+        if self.original_deadline_at <= self.issued_at:
+            raise ValueError("original task deadline must follow issuance")
+        import json
+        if len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode()) > 4096:
+            raise ValueError("proposal group exceeds its bounded envelope")
+        return self
+
+
+class TaskProposalProvenanceV1(ClosedTaskModel):
+    schema_version: Literal["general_task.proposal_provenance.v1"] = "general_task.proposal_provenance.v1"
+    group_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    group_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    initial_operation_id: str = Field(min_length=1, max_length=256)
+    initial_inference_job_id: str = Field(min_length=1, max_length=256)
+    initial_payload_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    initial_policy_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    deployment_id: str = Field(min_length=1, max_length=128)
+    settings_revision: int = Field(ge=1)
+    reservation_sequence: int = Field(ge=1)
+    reservation_binding_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    original_deadline_at: datetime
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+
+class PlanRevisionRequest(ClosedTaskModel):
+    expected_revision: int = Field(ge=1)
+    replacements: list[PlanStep] = Field(min_length=1, max_length=16)
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class StepReceipt(ClosedTaskModel):
+    step_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    plan_revision: int = Field(ge=1, le=16)
+    invocation_id: str = Field(min_length=1, max_length=256)
+    input_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    contact_state: Literal["not_contacted", "contact_started", "contact_denied", "unknown", "settled"]
+    artifact_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    status: Literal["admitted", "running", "awaiting_approval", "verified", "failed", "blocked", "cancelled", "unknown"]
+
+
+TaskIdentity = Annotated[str, Field(min_length=1, max_length=128)]
+TaskDigest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+NativeInvocationIdentity = Annotated[str, Field(min_length=1, max_length=256)]
+TaskManifestPhase = Literal["native_ready", "native_wait", "assembly", "operator_paused", "approval_wait", "cancelled", "unknown_recovery", "complete"]
+GENERAL_TASK_NATIVE_CHILD_KIND = "general_task_native_tool_v1"
+GENERAL_TASK_NATIVE_CHILD_CAPABILITY = "agent.native-tool-step.v1"
+GENERAL_TASK_MANIFEST_KEY = "general-task:current-manifest:v1"
+
+
+class GeneralTaskArtifactRef(ClosedTaskModel):
+    artifact_id: TaskIdentity
+    digest: TaskDigest
+    schema_version: Literal["GeneralTaskEnvelope.v1", "GeneralTaskPlanRevision.v1", "StepReceipt.v1", "GeneralTaskOutput.v1", "GeneralTaskToolInput.v1"]
+
+
+class GeneralTaskStepReceiptV1(StepReceipt):
+    schema_version: Literal["StepReceipt.v1"] = "StepReceipt.v1"
+    descriptor_digest: TaskDigest
+    selected_grant_digest: TaskDigest
+    task_id: TaskIdentity
+    attempt_id: TaskIdentity
+    child_job_id: NativeInvocationIdentity
+    child_attempt_count: int = Field(ge=1)
+    child_fence: int = Field(ge=1)
+    parent_creation_digest: TaskDigest
+    phase_digest: TaskDigest
+    artifact_refs: list[GeneralTaskArtifactRef] = Field(default_factory=list, max_length=16)
+    approval_id: TaskIdentity | None = None
+    approval_binding_digest: TaskDigest | None = None
+    effect_receipt_digest: TaskDigest | None = None
+    cleanup_receipt_digest: TaskDigest | None = None
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskCurrentManifestV1(ClosedTaskModel):
+    schema_version: Literal["general_task.current_manifest.v1"] = "general_task.current_manifest.v1"
+    task_id: TaskIdentity
+    original_root_id: TaskIdentity
+    owner_principal_id: TaskIdentity
+    attempt_id: TaskIdentity
+    run_id: NativeInvocationIdentity
+    task_revision: int = Field(ge=1)
+    manifest_revision: int = Field(ge=1)
+    board_fence: int = Field(ge=1)
+    job_fence: int = Field(ge=1)
+    original_envelope_artifact_id: TaskIdentity
+    original_envelope_digest: TaskDigest
+    original_input_digest: TaskDigest
+    selected_grant_digest: TaskDigest
+    group_id: TaskDigest
+    group_digest: TaskDigest
+    original_limits_digest: TaskDigest
+    creation_digest: TaskDigest
+    original_deadline_at: datetime
+    phase: TaskManifestPhase
+    native_deadline_at: datetime
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    plan_revision: int = Field(ge=1, le=16)
+    current_plan_artifact_id: TaskIdentity
+    current_plan_digest: TaskDigest
+    revision_numbers: list[int] = Field(min_length=1, max_length=16)
+    revision_artifact_ids: list[TaskIdentity] = Field(min_length=1, max_length=16)
+    revision_artifact_digests: list[TaskDigest] = Field(min_length=1, max_length=16)
+    revision_artifact_schemas: list[Literal["GeneralTaskEnvelope.v1", "GeneralTaskPlanRevision.v1"]] = Field(min_length=1, max_length=16)
+    step_ids: list[TaskIdentity] = Field(default_factory=list, max_length=16)
+    step_receipt_artifact_ids: list[TaskIdentity] = Field(default_factory=list, max_length=16)
+    step_receipt_digests: list[TaskDigest] = Field(default_factory=list, max_length=16)
+    step_receipt_schemas: list[Literal["StepReceipt.v1"]] = Field(default_factory=list, max_length=16)
+    admitted_invocation_ids: list[NativeInvocationIdentity] = Field(default_factory=list, max_length=16)
+    required_checkpoint_ids: list[TaskIdentity] = Field(default_factory=list, max_length=50)
+    no_learning: Literal[True] = True
+
+    _utc_timestamp = field_validator("original_deadline_at", "native_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @model_validator(mode="after")
+    def finite_aligned_references(self):
+        if self.native_deadline_at > self.original_deadline_at:
+            raise ValueError("native deadline cannot extend the original proposal cutoff")
+        if self.revision_numbers != list(range(1, self.plan_revision + 1)):
+            raise ValueError("immutable revisions must be contiguous and end at current plan")
+        if len({len(self.revision_numbers), len(self.revision_artifact_ids), len(self.revision_artifact_digests), len(self.revision_artifact_schemas)}) != 1:
+            raise ValueError("revision references must be aligned")
+        if len({len(self.step_ids), len(self.step_receipt_artifact_ids), len(self.step_receipt_digests), len(self.step_receipt_schemas)}) != 1:
+            raise ValueError("step receipt references must be aligned")
+        for values in (self.step_ids, self.admitted_invocation_ids, self.required_checkpoint_ids):
+            if len(set(values)) != len(values):
+                raise ValueError("manifest references must be unique")
+        import json
+        if len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode()) > 65536:
+            raise ValueError("current manifest exceeds 64 KiB")
+        return self
+
+
+class GeneralTaskNativeChildBindingV1(ClosedTaskModel):
+    schema_version: Literal["general_task.native_child.v1"] = "general_task.native_child.v1"
+    parent_job_id: NativeInvocationIdentity
+    task_id: TaskIdentity
+    attempt_id: TaskIdentity
+    original_root_id: TaskIdentity
+    owner_principal_id: TaskIdentity
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    original_deadline_at: datetime
+    native_deadline_at: datetime
+    original_envelope_digest: TaskDigest
+    parent_authority_digest: TaskDigest
+    creation_digest: TaskDigest
+    creation_job_fence: int = Field(ge=1)
+    creation_board_fence: int = Field(ge=1)
+    plan_revision: int = Field(ge=1, le=16)
+    plan_digest: TaskDigest
+    step_id: TaskIdentity
+    invocation_id: NativeInvocationIdentity
+    input_digest: TaskDigest
+    descriptor_digest: TaskDigest
+    selected_grant_digest: TaskDigest
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    live_root_digest: TaskDigest
+
+    _utc_timestamp = field_validator("original_deadline_at", "native_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @model_validator(mode="after")
+    def native_cutoff(self):
+        if self.native_deadline_at > self.original_deadline_at:
+            raise ValueError("native deadline cannot extend the original proposal cutoff")
+        return self
+
+
+class GeneralTaskToolClosureV1(ClosedTaskModel):
+    schema_version: Literal["general_task.tool_closure.v1"] = "general_task.tool_closure.v1"
+    original_binding_digest: TaskDigest
+    invocation_id: NativeInvocationIdentity
+    child_fence: int = Field(ge=1)
+    descriptor_digest: TaskDigest
+    input_digest: TaskDigest
+    outcome: Literal["returned", "approval_precontact", "unknown"]
+    output_digest: TaskDigest | None = None
+    approval_id: TaskIdentity | None = None
+    approval_fingerprint: TaskDigest | None = None
+    no_learning: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_outcome(self):
+        if ((self.outcome == "returned" and (self.output_digest is None or self.approval_id is not None
+                or self.approval_fingerprint is not None))
+            or (self.outcome == "approval_precontact" and (self.approval_id is None
+                or self.approval_fingerprint is None or self.output_digest is not None))
+            or (self.outcome == "unknown" and (self.output_digest is not None or self.approval_id is not None
+                or self.approval_fingerprint is not None))):
+            raise ValueError("closure outcome requires its exact callback evidence")
+        return self
+
+
+class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
+    schema_version: Literal["general_task.checkpoint_reservation.v1"] = "general_task.checkpoint_reservation.v1"
+    parent_job_id: NativeInvocationIdentity
+    attempt_id: TaskIdentity
+    creation_digest: TaskDigest
+    checkpoint_id: str = Field(min_length=1, max_length=512)
+    invocation_id: NativeInvocationIdentity | None = None
+    binding_digest: TaskDigest | None = None
+    callback_fence: int | None = Field(default=None, ge=1)
+    capacity_mode: Literal["approval_capable", "no_approval"] = "approval_capable"
+    classifier_digest: TaskDigest | None = None
+    maximum_payload_bytes: Literal[65536] = 65536
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
+    original_binding: GeneralTaskNativeChildBindingV1
+    original_binding_digest: TaskDigest
+    original_attempt_count: Literal[0, 1]
+    original_claim_fence: int = Field(ge=0)
+    original_revision: int = Field(ge=0)
+    current_child_fence: int = Field(ge=0)
+    current_child_revision: int = Field(ge=0)
+    effect_digest: TaskDigest
+    artifact_digest: TaskDigest
+    checkpoint_digest: TaskDigest
+    closure: GeneralTaskToolClosureV1 | None = None
+    effect_debt: bool
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskNativeCancelV1(ClosedTaskModel):
+    schema_version: Literal["general_task.native_cancel.v1"] = "general_task.native_cancel.v1"
+    original_manifest: GeneralTaskCurrentManifestV1
+    original_parent_authority_digest: TaskDigest
+    original_parent_input_digest: TaskDigest
+    input_artifact_id: TaskIdentity
+    typed_input_ref: str = Field(min_length=1, max_length=512)
+    typed_input_digest: TaskDigest
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    task_revision: int = Field(ge=1)
+    manifest_revision: int = Field(ge=1)
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    board_fence: int = Field(ge=1)
+    job_fence: int = Field(ge=1)
+    phase: Literal["unknown_recovery", "cancelled"]
+    state: Literal["pending", "callback_closed_outcome_debt", "fully_cancelled"]
+    children: list[GeneralTaskNativeCancelChildV1] = Field(default_factory=list, max_length=16)
+    no_learning: Literal[True] = True
+
+
+class GeneralTaskApprovalTransitionV1(ClosedTaskModel):
+    schema_version: Literal["general_task.native_approval_transition.v1"] = "general_task.native_approval_transition.v1"
+    original_binding: GeneralTaskNativeChildBindingV1
+    original_binding_digest: TaskDigest
+    original_claim_fence: int = Field(ge=1)
+    positive_attempt_count: Literal[1] = 1
+    waiting_child_fence: int = Field(ge=1)
+    current_child_fence: int = Field(ge=1)
+    approval_id: TaskIdentity
+    approval_fingerprint: TaskDigest
+    approval_context_digest: TaskDigest
+    no_contact_effect_digest: TaskDigest
+    awaiting_receipt: GeneralTaskArtifactRef
+    cleanup_receipt_digest: TaskDigest
+    phase: Literal["approval_wait", "native_wait"]
+    phase_revision: int = Field(ge=1)
+    phase_digest: TaskDigest
+    manifest_revision: int = Field(ge=1)
+    task_revision: int = Field(ge=1)
+    board_fence: int = Field(ge=1)
+    job_fence: int = Field(ge=1)
+    approved_receipt_digest: TaskDigest | None = None
+    no_learning: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_transition(self):
+        from src.work_board.general_task import digest
+        if self.original_binding_digest != digest(self.original_binding.model_dump(mode="json")):
+            raise ValueError("original native admission binding changed")
+        if (self.awaiting_receipt.schema_version != "StepReceipt.v1"
+            or self.waiting_child_fence < self.original_claim_fence
+            or (self.phase == "approval_wait" and (self.current_child_fence != self.waiting_child_fence
+                or self.approved_receipt_digest is not None))
+            or (self.phase == "native_wait" and (self.current_child_fence <= self.waiting_child_fence
+                or self.approved_receipt_digest is None))):
+            raise ValueError("exact same-attempt approval phase and fence required")
+        return self
+
+
+class GeneralTaskPlanRevisionV1(ClosedTaskModel):
+    schema_version: Literal["GeneralTaskPlanRevision.v1"] = "GeneralTaskPlanRevision.v1"
+    parent_job_id: NativeInvocationIdentity
+    creation_digest: TaskDigest
+    original_envelope_digest: TaskDigest
+    selected_grant_digest: TaskDigest
+    original_limits_digest: TaskDigest
+    original_deadline_at: datetime
+    plan: PlanSpec
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    no_learning: Literal[True] = True
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+
+class GeneralTaskToolInputV1(ClosedTaskModel):
+    schema_version: Literal["GeneralTaskToolInput.v1"] = "GeneralTaskToolInput.v1"
+    parent_job_id: NativeInvocationIdentity
+    creation_digest: TaskDigest
+    invocation_id: NativeInvocationIdentity
+    tool_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    descriptor_digest: TaskDigest
+    input_digest: TaskDigest
+    inputs: dict[str, Any]
+    no_learning: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_local_data(self):
+        from src.work_board.general_task import canonical, digest, validate_data
+        validate_data(self.inputs, dependencies=set())
+        if digest(self.inputs) != self.input_digest:
+            raise ValueError("native input digest does not match exact resolved literals")
+        canonical(self.model_dump(mode="json"))
+        return self
+
+
 class GeneralTaskEnvelope(ClosedTaskModel):
     """Single immutable artifact holding intent and the accepted inert plan."""
     schema_version: Literal[1] = 1
@@ -217,6 +573,8 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     descriptors: list[ToolDescriptor] = Field(default_factory=list, max_length=16)
     strategy: TaskStrategyBinding
     evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+    proposal_group: "TaskProposalGroupV1 | None" = None
+    proposal_provenance: "TaskProposalProvenanceV1 | None" = None
 
     @model_validator(mode="after")
     def immutable_snapshot(self):
@@ -226,6 +584,18 @@ class GeneralTaskEnvelope(ClosedTaskModel):
             raise ValueError("an incomplete proposal requires a visible reason")
         if self.plan is not None and (not self.descriptors or self.proposal_error):
             raise ValueError("valid plans require registered descriptors without proposal errors")
+        if self.proposal_provenance is not None:
+            if (self.proposal_group is None
+                or self.proposal_provenance.group_id != self.proposal_group.group_id
+                or self.proposal_provenance.original_deadline_at != self.proposal_group.original_deadline_at):
+                raise ValueError("proposal provenance requires its exact original group")
+        if self.proposal_group is not None:
+            limits = self.task_input.limits
+            if (self.proposal_group.goal_id != self.task_input.goal_ref
+                or self.proposal_group.max_inference_calls != limits.max_inference_calls
+                or self.proposal_group.max_cost_microusd != limits.max_cost_microusd
+                or self.proposal_group.max_steps != limits.max_steps):
+                raise ValueError("proposal allowance cannot change")
         return self
 
 
@@ -250,6 +620,14 @@ class GeneralTaskResume(ClosedTaskModel):
     fencing_token: int = Field(ge=1)
     workflow_revision: int = Field(ge=1)
     approval_id: str = Field(min_length=1, max_length=128)
+    child_job_id: NativeInvocationIdentity | None = None
+    expected_manifest_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def native_child_scope(self):
+        if (self.child_job_id is None) != (self.expected_manifest_revision is None):
+            raise ValueError("native child resume requires both child and current manifest revision")
+        return self
 
 
 class WorkBoardAction(str, Enum):
@@ -258,6 +636,8 @@ class WorkBoardAction(str, Enum):
     unblock = "unblock"
     retry = "retry"
     cancel = "cancel"
+    pause = "pause"
+    resume = "resume"
     archive = "archive"
     request_review = "request_review"
     request_changes = "request_changes"

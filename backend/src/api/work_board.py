@@ -36,6 +36,7 @@ from src.work_board.contracts import (
     WorkBoardLinkCreate,
     WorkBoardLinkDelete,
     WorkBoardOwner,
+    PlanRevisionRequest,
     WorkBoardTaskCreate,
     WorkBoardTaskPatch,
     WorkBoardProposalAccept,
@@ -2366,13 +2367,27 @@ async def update_general_task_plan(request: Request, task_id: str, body: General
         _raise_board_error(exc)
 
 
+@router.post("/tasks/{task_id}/plan/revise")
+async def revise_paused_general_task_plan(request: Request, task_id: str, body: PlanRevisionRequest):
+    owner = _owner(_operator(request))
+    try:
+        task, attempt = await dispatcher.revise_paused_general_task(owner, task_id, body)
+        return {"task": await _safe_task_payload(task, latest_attempt=attempt)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail={"code": "general_task_revision_blocked",
+            "recovery": "Refresh the original safely paused plan; admitted steps and uncertain tool work cannot be revised."}) from exc
+
+
 @router.post("/tasks/{task_id}/plan/resume")
 async def resume_general_task_plan(request: Request, task_id: str, body: GeneralTaskResume):
     owner = _owner(_operator(request))
     try:
         task = await dispatcher.resume_general_task(owner, task_id, body)
         async with get_session() as db:
-            return {"task": await _safe_task_payload(task, db=db)}
+            attempt = await db.get(WorkBoardAttempt, body.attempt_id)
+            return {"task": await _safe_task_payload(task, db=db, latest_attempt=attempt)}
     except BoardError as exc:
         _raise_board_error(exc)
     except Exception as exc:
@@ -2683,7 +2698,23 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
     operator = _operator(request)
     try:
         owner = _owner(operator)
+        if body.action.value in {"pause", "resume"}:
+            if body.model_fields_set - {"action", "expected_revision"}:
+                raise BoardError("unsupported_action_fields", "Native controls accept the current task revision only", status_code=422)
+            try:
+                task, attempt = await dispatcher.control_general_task(owner, task_id,
+                    expected_revision=body.expected_revision, action=body.action.value)
+            except BoardError:
+                raise
+            except Exception as exc:
+                raise BoardError("general_task_control_blocked", "Refresh the original task; active or unknown tool work must close before safe pause or resume", status_code=409) from exc
+            return {"task": await _safe_task_payload(task, latest_attempt=attempt),
+                "attempt": _attempt_payload(attempt)}
         if body.action.value == "cancel":
+            async with get_session() as db:
+                selected_task = await repository.get_task(db, owner, task_id)
+                if selected_task.capability_id == "agent.task.v1" and body.model_fields_set - {"action", "expected_revision"}:
+                    raise BoardError("unsupported_action_fields", "Native cancellation accepts the current task revision only", status_code=422)
             projection = await dispatcher.cancel_task(
                 owner,
                 task_id,

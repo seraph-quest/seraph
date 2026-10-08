@@ -135,9 +135,39 @@ cannot be decoded within the bound. Bounded calls and other connections remain u
 Provider-free isolated integration receipts prove the current native file-read journey,
 mediated MCP approval continuation and replay boundaries, not
 model quality or improved outcomes. Tasks explicitly record no learning.
-The fuller interpreter and specialist delegation in
-[#998](https://github.com/seraph-quest/seraph/issues/998) and
-[#999](https://github.com/seraph-quest/seraph/issues/999) remain **Planned**.
+**Bounded native interpreter (#998): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#998](https://github.com/seraph-quest/seraph/issues/998)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-native-task-interpreter-998)
+extends accepted plans into actual native tool children, dependency readback and
+private final artifacts under the same Root, Goal, original attempt, deadline
+and accepted inference group. Bounded acknowledged continuation shares the
+original call/cost limits; manual zero-cost plans make no model contact.
+Safe pause and same-attempt resume preserve original authority. Paused edits
+replace the full Plan while freezing admitted, started and completed rows,
+without granting a lease or renewing execution. MCP typed discovery binds the
+stock client's exact advertised input schema and bounded output contract to
+current policy and connection identity.
+
+Cancellation fences late adoption immediately, but unresolved original callbacks
+remain `pending`; actual closure with uncertain effects becomes
+`callback_closed_outcome_debt`. Only positive closure without debt establishes
+`fully_cancelled`. After the original Future physically returned and output was
+verified, cleanup can settle debt from the same source-retained original root,
+exact original intent, canonical call and artifact readbacks, and literal private
+output bytes, without parent output adoption or new execution. Workspace settings
+may have moved; that read still requires the original source witness and root
+identity. Missing, foreign or tampered evidence, a changed original-root inode,
+or uncertain callback closure retains debt and cannot authorize replay.
+Fixed protected-history capacity is reserved before contact;
+capacity exhaustion rejects admission early. Isolated Linux API/file/stock-MCP
+and UI receipts cover private physical readback, approval of the same child,
+restart boundaries, full-capacity cancellation and `no_learning`; macOS execution
+and live external/provider usefulness remain unverified. The current Python
+managed lifecycle remains the execution owner before the separately owned
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
+Specialist delegation in
+[#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
 
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,

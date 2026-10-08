@@ -1,4 +1,8 @@
-"""Generic durable lifecycle cannot waive an exact task approval precontact wait."""
+"""Retained legacy and current native waits reject generic approval bypasses.
+
+The minimal legacy rows below protect compatibility refusal; they are not
+product execution proof. Current native cases use the public API/MCP journey.
+"""
 import socket
 import json
 from datetime import datetime, timedelta, timezone
@@ -9,7 +13,7 @@ from sqlalchemy import select
 
 from config.settings import settings
 from src.db.models import WorkflowRunState
-from src.workflows.job_runtime import DurableJobTransitionError, durable_job_repository
+from src.workflows.job_runtime import DurableJobLeaseError, DurableJobTransitionError, durable_job_repository
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
@@ -128,3 +132,53 @@ def test_no_contact_readback_cannot_prove_task_output():
     assert _verified_readback_exists([receipt]) is False
     assert WorkBoardDispatcher._workflow_readback({"run_identity": "guard-root",
         "effects": [receipt]}, "guard-root") is None
+
+
+# Independent current topology coverage; shared fixture belongs to this test lane.
+from tests.test_general_task_approval import approval_journey, create_and_pause
+from tests.test_general_task_planner import accounting_db, forbid_external_inference
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["resume_job", "queue_job", "transition_job"])
+async def test_generic_paths_cannot_resume_original_native_approval_child(approval_journey, method):
+    journey = approval_journey
+    _task_id, plan, root = await create_and_pause(journey)
+    child_id = plan["approval_pause"]["child_job_id"]
+    child = await journey.jobs.get_job(child_id)
+    call = getattr(journey.jobs, method)
+    args = (child_id, "queued") if method == "transition_job" else (child_id,)
+    with pytest.raises(DurableJobLeaseError, match="native approval wait cannot authorize execution"):
+        await call(*args, expected_revision=child["revision"])
+    assert await journey.jobs.get_job(child_id) == child
+    assert (await journey.jobs.get_job(root["job_id"]))["revision"] == root["revision"]
+    assert journey.tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_contacted_legacy_root_intent_blocks_public_native_resume(approval_journey):
+    from src.approval.repository import approval_repository
+    from tests.test_general_task_approval import get_plan, resume, resume_body
+    journey = approval_journey
+    task_id, plan, root = await create_and_pause(journey)
+    approval_id = plan["approval_pause"]["approval_id"]
+    assert await approval_repository.resolve(approval_id, "approved")
+    async with journey.sessions() as db:
+        parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == root["job_id"]))
+        checkpoints = json.loads(parent.checkpoint_receipts_json)
+        checkpoints.append({"checkpoint_id": "general:step:historical-contact", "payload": {
+            "step_id": "historical-contact", "phase": "intent", "input_digest": "a" * 64}})
+        parent.checkpoint_receipts_json = json.dumps(checkpoints)
+        parent.effect_receipts_json = json.dumps([{"effect_id": "general:historical-contact:1",
+            "receipt_kind": "effect", "effect_type": "general_tool_call", "status": "unknown",
+            "details": {"step_id": "historical-contact"}}])
+    before_parent = await journey.jobs.get_job(root["job_id"])
+    before_child = await journey.jobs.get_job(plan["approval_pause"]["child_job_id"])
+    denied = await resume(journey, task_id, resume_body(plan))
+    assert denied.status_code == 409, denied.text
+    assert journey.tool.calls == 0
+    assert await journey.jobs.get_job(root["job_id"]) == before_parent
+    assert await journey.jobs.get_job(before_child["job_id"]) == before_child
+    assert (await approval_repository.get(approval_id)).status == "approved"
+    await journey.dispatcher.run_pass()
+    assert journey.tool.calls == 0

@@ -164,6 +164,7 @@ The following architecture decisions are normative:
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
 
+
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR
 HTTPS text capability with explicit provider plaintext access. These accepted

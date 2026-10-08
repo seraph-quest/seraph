@@ -37,10 +37,51 @@ from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
 from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
+from src.memory.task_lessons import LessonRequest, LessonAutoPolicyRequest, create_task_lesson, inspect_task_lesson, eligible_lesson_source, set_automatic_lesson_policy
 from src.guardian.opportunity_preferences import OpportunityPreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
+
+
+@router.post("/memory/task-lessons", status_code=201)
+async def post_task_lesson(http_request: Request, request: LessonRequest):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await create_task_lesson(http_request.state.operator, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.get("/memory/task-lessons/{proposal_id}")
+async def get_task_lesson(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_task_lesson(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.get("/memory/task-lessons/sources/{task_id}")
+async def get_task_lesson_source(http_request: Request, task_id: str):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await eligible_lesson_source(http_request.state.operator, task_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/task-lessons/automatic-policy/{task_id}")
+async def post_automatic_lesson_policy(http_request: Request, task_id: str, request: LessonAutoPolicyRequest):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await set_automatic_lesson_policy(http_request.state.operator, task_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 class MemoryCorrectionRequest(BaseModel):

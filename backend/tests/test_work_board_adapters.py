@@ -407,10 +407,12 @@ async def test_direct_admission_identity_uses_adapter_projection(monkeypatch, ca
 
 
 @pytest.mark.asyncio
-async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readback(monkeypatch, tmp_path):
+@pytest.mark.parametrize("lesson_hook", ["incomplete_projection", "callback_failure", "callback_no_change"])
+async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readback(monkeypatch, tmp_path, caplog, lesson_hook):
     """Exercise the actual bounded capability behind the board adapter seam."""
 
     from src.work_board import dispatcher as dispatcher_module
+    caplog.set_level("INFO", logger="src.work_board.dispatcher")
 
     reference, digest = _write_input(
         tmp_path,
@@ -484,6 +486,17 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
     monkeypatch.setattr(dispatcher_module, "GoalSnapshotToFileService", service_factory)
     linked = False
     projected: list[dict] = []
+    lesson_calls: list[tuple[str, str]] = []
+
+    async def optional_lesson(projected_task, attempt_id):
+        assert projected_task.status is WorkBoardStatus.done
+        assert attempt.ended_at is not None
+        lesson_calls.append((projected_task.task_id, attempt_id))
+        if lesson_hook == "callback_failure":
+            raise OSError("optional private lesson preparation unavailable")
+        return {"status": "blocked", "result": "no_change", "reason_code": "automatic_lessons_not_opted_in"}
+
+    monkeypatch.setattr("src.memory.task_lessons.maybe_propose_automatic_lesson", optional_lesson)
 
     class _BoardSession:
         async def __aenter__(self):
@@ -503,6 +516,8 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
             assert linked is True
             projected.append(dict(kwargs))
             task.status = kwargs["status"]
+            if lesson_hook != "incomplete_projection":
+                attempt.ended_at = datetime.now(timezone.utc) if task.status in {WorkBoardStatus.done, WorkBoardStatus.blocked} else None
             return SimpleNamespace(task=task, attempt=attempt, event=SimpleNamespace(event_id=len(projected)))
 
     task = SimpleNamespace(
@@ -556,6 +571,11 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
     assert jobs.artifacts and jobs.readbacks
     parent = await jobs.get_job(parent_job_id)
     assert parent["status"] == "succeeded", parent
+    assert lesson_calls == ([] if lesson_hook == "incomplete_projection" else [("task-real", "attempt-real")])
+    assert all(item["status"] is not WorkBoardStatus.blocked for item in projected)
+    if lesson_hook != "callback_no_change":
+        error_type = "AttributeError" if lesson_hook == "incomplete_projection" else "OSError"
+        assert f"automatic task lesson unavailable for task-real: {error_type}" in caplog.text
 
 
 async def _run_real_board_goal_snapshot(

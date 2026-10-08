@@ -16,6 +16,7 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed optional Cordis host.
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
@@ -74,6 +75,7 @@ function display_help() {
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
+    echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
@@ -880,6 +882,12 @@ if [ "$ENV" != "dev" ] && [ "$ENV" != "prod" ]; then
 fi
 
 ENV_FILE="$SCRIPT_DIR/.env.$ENV"
+if [ "$COMMAND" = "cordis" ]; then
+    # This finite keyless path never reads operator env, credentials or workspace.
+    # Build uses already installed pins; probe launches/reaps the production host.
+    exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
+        python3 -m src.runtime_plugins.cli "$@"
+fi
 COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"
 )

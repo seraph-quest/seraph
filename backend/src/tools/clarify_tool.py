@@ -24,8 +24,12 @@ def clarify(question: str, reason: str = "", options: str = "") -> str:
     Returns:
         This tool never returns normally; it raises a clarification interrupt.
     """
-    raise ClarificationRequired(
+    from src.agent.controlled_origin import issue_controlled_origin
+    producer = clarify
+    issued_exception = ClarificationRequired(
         question=question,
         reason=reason,
         options=_parse_options(options),
     )
+    origin = issue_controlled_origin(issued_exception, producer=producer)
+    raise issued_exception

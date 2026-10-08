@@ -260,6 +260,14 @@ class SessionManager:
                 session_id,
                 owner_principal_id=owner_principal_id,
             )
+        async with get_session() as db:
+            if db.info.get("composition_read_guard") is not None:
+                await _begin_retained_session_write(db)
+                session = await db.get(Session, session_id)
+                if session is not None:
+                    await self._claim_session_owner(db, session, owner_principal_id)
+                from src.runtime_plugins.ownership import assert_session_physical_cleanup_allowed
+                assert_session_physical_cleanup_allowed(db, session_id)
         cleanup_fence_acquired = process_runtime_manager.begin_session_cleanup(session_id)
         if not cleanup_fence_acquired:
             return False
@@ -290,6 +298,8 @@ class SessionManager:
                 and session.owner_principal_id != owner_principal_id
             ):
                 raise SessionOwnerMismatchError(session_id)
+            from src.runtime_plugins.ownership import assert_session_physical_cleanup_allowed
+            assert_session_physical_cleanup_allowed(db, session_id)
             # Audio bytes live outside the database, so quarantine cleanup is a
             # deletion precondition.  Keep the session and its durable job rows
             # when cleanup cannot be proven; the worker's retention pass can

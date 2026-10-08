@@ -4237,12 +4237,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                                                 completed_exception, authority_check, message=None):
         """Only the completed original callback can produce a controlled hold."""
         from src.agent.turn_execution import NativeTurnExecution
+        from src.agent.controlled_origin import validate_controlled_origin
         from src.agent.exceptions import ClarificationRequired
         from src.approval.exceptions import ApprovalRequired
         from src.db.models import ApprovalRequest, Message
         if type(native_execution) is not NativeTurnExecution:
             raise DurableJobLeaseError("original native controlled execution required")
         native_execution.validate_completed_exception(completed_exception)
+        try:
+            origin = validate_controlled_origin(completed_exception, native_execution=native_execution)
+        except (ValueError, PermissionError) as exc:
+            raise DurableJobLeaseError("original canonical controlled producer required") from exc
         original_claim = native_execution.claim
         with db.no_autoflush:
             host, claim, history, input_message, now = await self._validate_turn_completion_in_session(
@@ -4250,7 +4255,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if native_execution.admission.job_id != run.run_identity:
                 raise DurableJobLeaseError("original controlled invocation changed")
             value = {"schema_version": 1, "input_message_ref": input_message.id, "no_learning": True}
-            if isinstance(completed_exception, ClarificationRequired):
+            if type(completed_exception) is ClarificationRequired and origin.kind == "clarification":
                 if (not isinstance(message, Message) or message not in db.new or message.role != "assistant"
                     or message.id != uuid5(NAMESPACE_URL,
                         f"seraph-chat:{run.owner_principal_id}:{run.conversation_id}:{input_message.id}:clarification").hex
@@ -4261,8 +4266,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     raise DurableJobLeaseError("original clarification Message binding changed")
                 value.update(outcome="clarification_required", message_ref=message.id)
                 status = "paused"
-            elif isinstance(completed_exception, ApprovalRequired):
-                approval = await db.get(ApprovalRequest, completed_exception.approval_id)
+            elif type(completed_exception) is ApprovalRequired and origin.kind == "approval":
+                snapshot = origin.approval_snapshot
+                if (snapshot is None or completed_exception.approval_id != snapshot.approval_id
+                    or completed_exception.tool_name != snapshot.tool_name):
+                    raise DurableJobLeaseError("original approval producer snapshot changed")
+                approval = await db.get(ApprovalRequest, snapshot.approval_id, populate_existing=True)
                 if (message is not None or approval is None or approval.status != "pending"
                     or approval.resolved_at is not None or approval.expires_at is None
                     or _as_utc(approval.expires_at) <= now
@@ -4270,7 +4279,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     or approval.operator_session_id != run.operator_session_id
                     or approval.conversation_id != run.conversation_id
                     or approval.tool_name != completed_exception.tool_name
-                    or not _text(approval.tool_name) or not _text(approval.fingerprint)):
+                    or not _text(approval.tool_name) or not _text(approval.fingerprint)
+                    or (approval.id, approval.tool_name, approval.fingerprint,
+                        approval.owner_principal_id, approval.operator_session_id, approval.conversation_id,
+                        _as_utc(approval.expires_at), _as_utc(approval.created_at)) !=
+                       (snapshot.approval_id, snapshot.tool_name, snapshot.fingerprint,
+                        snapshot.owner_principal_id, snapshot.operator_session_id, snapshot.conversation_id,
+                        _as_utc(snapshot.expires_at), _as_utc(snapshot.created_at))):
                     raise DurableJobLeaseError("original pending approval reservation changed")
                 value.update(outcome="approval_required", approval_ref=approval.id)
                 status = "awaiting_approval"
@@ -4301,6 +4316,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if not _rowcount_is_one(result):
                 raise DurableJobLeaseError("original native turn changed before controlled settlement")
             native_execution.validate_completed_exception(completed_exception)
+            try:
+                if validate_controlled_origin(completed_exception, native_execution=native_execution) is not origin:
+                    raise DurableJobLeaseError("original canonical controlled producer changed")
+            except (ValueError, PermissionError) as exc:
+                raise DurableJobLeaseError("original canonical controlled producer changed") from exc
             if not host.admitting or host.boot_nonce != original_claim.host_boot_nonce:
                 raise DurableJobLeaseError("original native turn host boot changed")
             await db.flush()

@@ -30,7 +30,7 @@ from src.agent.direct_chat import (
     should_use_direct_local_chat,
 )
 from src.agent.factory import build_agent
-from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn
+from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn, native_turn_binding_available
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
     MessageIngressConflictError,
@@ -522,10 +522,25 @@ async def persist_turn_output(native_turn, session_id, role, content, *, metadat
         raise NativeTurnBlocked("native_turn_completion_unproven")
     if len(content.encode()) > 65536:
         raise NativeTurnBlocked("native_turn_output_limit_exceeded")
-    message = await session_manager.add_native_turn_result(session_id, content,
-        metadata_json=metadata_json, message_id=message_id, execution=native_turn)
+    from src.workflows.job_runtime import DurableJobError
+    from src.runtime_plugins.ownership import CompositionBindingError
+    from src.workspace.production import ProductionWorkspaceReconciliationError
+    try:
+        message = await session_manager.add_native_turn_result(session_id, content,
+            metadata_json=metadata_json, message_id=message_id, execution=native_turn)
+    except (DurableJobError, CompositionBindingError, ProductionWorkspaceReconciliationError) as exc:
+        raise NativeTurnBlocked("native_turn_output_authority_changed") from exc
+    except asyncio.TimeoutError as exc:
+        raise NativeTurnBlocked("native_turn_original_deadline_expired") from exc
     await native_turn.forward("conversation.append", {"message_ref": message.id})
     return message
+
+
+async def persist_rest_turn_output(*args, **kwargs):
+    try:
+        return await persist_turn_output(*args, **kwargs)
+    except NativeTurnBlocked as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.reason_code}) from exc
 
 
 async def persist_controlled_turn(native_turn, exception, session_id, *, content=None,
@@ -631,6 +646,9 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 runtime_path=runtime_path, is_onboarding=is_onboarding) else "generic_turn"
             admission = NativeTurnAdmission.capture(ingress, principal=chat_principal,
                 reviewed_composition=host.reviewed, native_route=route)
+            if not await native_turn_binding_available(admission):
+                host = None
+        if host is not None:
             _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
                 session.id, request.message, message_id=ingress.message_id,
                 metadata_json=chat_ingress_metadata(ingress), admission=admission)
@@ -814,7 +832,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
 
         await _ensure_rest_authorized(http_request, revocation_scope)
         assistant_message_id = assistant_message_id_for_ingress(ingress)
-        await persist_turn_output(native_turn,
+        await persist_rest_turn_output(native_turn,
             session.id,
             "assistant",
             response_text,
@@ -895,7 +913,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
         reset_current_llm_request_id(llm_request_token)
-        agent_execution = asyncio.to_thread(run_ctx.run, agent.run, request.message)
+        if native_turn is not None:
+            native_turn.prepare_agent(agent)
+            agent_execution = asyncio.to_thread(run_ctx.run, native_turn.run_callback, agent.run, request.message)
+        else:
+            agent_execution = asyncio.to_thread(run_ctx.run, agent.run, request.message)
         result = await asyncio.wait_for(
             native_turn.execute(agent_execution) if native_turn else agent_execution,
             timeout=settings.agent_chat_timeout,
@@ -1036,6 +1058,8 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             },
         )
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
+    except NativeTurnBlocked as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.reason_code}) from exc
     except Exception as e:
         logger.exception("Agent execution failed")
         safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
@@ -1062,7 +1086,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
 
     await _ensure_rest_authorized(http_request, revocation_scope)
     assistant_message_id = assistant_message_id_for_ingress(ingress)
-    await persist_turn_output(native_turn,
+    await persist_rest_turn_output(native_turn,
         session.id,
         "assistant",
         response_text,

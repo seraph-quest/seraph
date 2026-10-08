@@ -280,6 +280,72 @@ async def bind_invocation(db, *, method, native_branch="base", goal_bound=False,
         host_package_digest, host_composition_digest)
 
 
+@dataclass(frozen=True)
+class InvocationAvailability:
+    available: bool
+    reason_code: str | None
+
+    def __post_init__(self):
+        if type(self.available) is not bool or (self.available, self.reason_code) not in {
+            (True, None), (False, "composition_inventory_absent")
+        }:
+            raise CompositionBindingError("composition_availability_invalid")
+
+
+async def inspect_invocation_availability(db, *, method, native_branch="base", reviewed_composition):
+    """Deny-only pre-ingress availability; never a binding or authority proof."""
+    from pathlib import Path
+    from sqlalchemy import text
+    from config.settings import settings
+    from src.runtime_plugins.composition import ReviewedComposition
+    from src.workspace.production import (ProductionWorkspace, ProductionWorkspaceError,
+        read_lifecycle_receipt, read_accounting_checkpoint)
+    methods = method_closure(method, native_branch)
+    selected = set(method_dependencies(method, native_branch=native_branch))
+    for child in methods:
+        selected.update(method_dependencies(child))
+    if (not isinstance(reviewed_composition, ReviewedComposition)
+        or any(type(value) is not str or _SHA.fullmatch(value) is None
+            for value in (reviewed_composition.package_digest, reviewed_composition.composition_digest))):
+        raise CompositionBindingError("composition_reviewed_host_required")
+    if db.get_bind().dialect.name != "sqlite":
+        raise CompositionBindingError("composition_availability_storage_unsupported")
+    present = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'"))
+    rows = list((await db.execute(select(RuntimeCompositionState))).scalars()) if present else []
+    try:
+        workspace = ProductionWorkspace(host_root=Path(settings.workspace_dir).resolve())
+        receipt = read_lifecycle_receipt(workspace) or {}
+        checkpoint = read_accounting_checkpoint(workspace) or {}
+    except ProductionWorkspaceError as exc:
+        raise CompositionBindingError("composition_availability_metadata_unavailable") from exc
+    retained = receipt.get("runtime_composition")
+    retained_checkpoint = any(checkpoint.get(key) is not None for key in ("composition_base", "composition_target"))
+    if not rows:
+        jobs = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_run_states'"))
+        bound = False
+        if jobs:
+            columns = (await db.execute(text("PRAGMA table_info(workflow_run_states)"))).all()
+            if any(row[1] == "composition_binding_json" for row in columns):
+                bound = await db.scalar(text("SELECT 1 FROM workflow_run_states WHERE composition_binding_json IS NOT NULL LIMIT 1")) is not None
+        if retained is not None or retained_checkpoint or bound:
+            raise CompositionBindingError("composition_retained_inventory_missing")
+        return InvocationAvailability(False, "composition_inventory_absent")
+    # Inspect all fourteen identities/schema, but only selected dependencies
+    # gate availability. This produces no dependency vector or cached binding.
+    current = await inventory(db)
+    values = [{"runtime_domain": row.runtime_domain, "owner_kind": row.owner_kind,
+        "epoch": row.epoch, "composition_digest": row.composition_digest,
+        "state": row.state, "recovery_receipt_ref": row.recovery_receipt_ref}
+        for row in sorted(rows, key=lambda item: item.runtime_domain)]
+    if (type(retained) is not dict or retained.get("inventory") != values
+        or retained.get("inventory_digest") != hashlib.sha256(_canonical(values).encode()).hexdigest()
+        or (checkpoint.get("schema_version") == 2 and checkpoint.get("composition_target") != retained)):
+        raise CompositionBindingError("composition_inventory_stale")
+    if any(current[domain].state != "ready" for domain in selected):
+        raise CompositionBindingError("composition_dependency_unavailable")
+    return InvocationAvailability(True, None)
+
+
 async def validate_invocation(db, binding):
     if not isinstance(binding, RuntimeCompositionBinding):
         raise CompositionBindingError("composition_binding_required")
@@ -428,3 +494,19 @@ async def begin_native_writer(db, *, owner, fresh=False):
     db.info["native_writer_started"] = True
     db.info["composition_writer_owner"] = owner
     return guard
+
+
+def assert_session_physical_cleanup_allowed(db, session_id):
+    """Closed retained membership must be checked before deleting private bytes."""
+    if type(session_id) is not str or not session_id or len(session_id.encode()) > 512:
+        raise CompositionBindingError("composition_session_cleanup_reference_invalid")
+    guard = db.info.get("composition_guard")
+    if guard is None:
+        if db.info.get("composition_read_guard") is not None:
+            raise CompositionBindingError("composition_native_writer_required")
+        return  # Existing no-inventory lifecycle remains its current owner.
+    if (not db.in_transaction() or not db.info.get("native_writer_started")
+        or db.info.get("composition_writer_owner") != "native_ingress"):
+        raise CompositionBindingError("composition_native_writer_required")
+    if ("sessions", session_id) in guard.members:
+        raise CompositionBindingError("composition_retained_session_cleanup_denied")

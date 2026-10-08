@@ -546,8 +546,51 @@ async def test_original_turn_claim_without_completed_output_remains_unknown_and_
         assert (run.attempt_count, run.fencing_token, run.deadline_at, run.checkpoint_receipts_json) == original
 
 
+async def original_sdk_controlled_exception(execution, *, approval):
+    """Actual canonical producer and stock SDK callback, with zero model calls."""
+    import asyncio
+    from smolagents import ToolCallingAgent
+    from smolagents.memory import ActionStep, Timing
+    from smolagents.utils import AgentToolExecutionError
+    from src.approval.runtime import set_runtime_context, reset_runtime_context
+    from src.tools.approval import ApprovalTool
+    from src.tools.clarify_tool import clarify
+    from tests.test_approval_tools import DummyExecuteCodeTool
+    from tests.test_native_turn_transport import ScriptedModel
+    model = ScriptedModel()
+    leaf = DummyExecuteCodeTool() if approval else clarify
+    tool = ApprovalTool(leaf, force_approval=True) if approval else leaf
+    agent = ToolCallingAgent(tools=[tool], model=model, max_steps=1, verbosity_level=0)
+    execution.prepare_agent(agent)
+    def callback():
+        tokens = set_runtime_context(execution.admission.ingress.session_id, "high_risk",
+            trust_principal=execution.admission.principal)
+        try:
+            try:
+                agent.execute_tool_call(tool.name,
+                    {"code": "never execute before approval"} if approval else {"question": "Private clarification question"})
+            except AgentToolExecutionError as error:
+                agent.step_callbacks.callback(ActionStep(step_number=1,
+                    timing=Timing(start_time=0, end_time=1), error=error), agent=agent)
+        finally:
+            reset_runtime_context(tokens)
+    from src.agent.exceptions import ClarificationRequired
+    from src.approval.exceptions import ApprovalRequired
+    expected = ApprovalRequired if approval else ClarificationRequired
+    with pytest.raises(expected) as observed:
+        await execution.execute(asyncio.to_thread(execution.run_callback, callback))
+    assert execution.worker.done() and model.calls == 0
+    if approval:
+        assert leaf.calls == []
+    return observed.value
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["clarification", "approval"])
+@pytest.mark.parametrize("outcome", ["clarification", "approval", "approval_resolved", "approval_wrong_tool",
+    "clarification_rollback", "approval_cost", "approval_expiry", "approval_forged", "approval_expired",
+    "approval_root_revoked", "clarification_deadline_expired",
+    *[f"approval_stale:{field}" for field in ("approval_id", "tool_name", "fingerprint", "owner_principal_id",
+        "operator_session_id", "conversation_id", "expires_at", "created_at")]])
 async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_restore(composition_db, monkeypatch, tmp_path, outcome):
     import asyncio
     from uuid import uuid5, NAMESPACE_URL
@@ -573,30 +616,95 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
     claim = await repo.claim_service_job(admission.job_id, host=host, owner="original-controlled",
         expected_revision=queued["revision"], claim_authority_check=check)
     execution = NativeTurnExecution(admission, host, claim, None)
-    if outcome == "approval":
-        request = await approval_repository.get_or_create_pending(session_id=ingress.session_id,
-            tool_name="owned_tool", risk_level="high", summary="Private approval summary",
-            fingerprint="a" * 64, details={"owner_principal_id": ingress.principal_id,
-                "operator_session_id": ingress.operator_session_id, "conversation_id": ingress.conversation_id})
-        exception = ApprovalRequired(approval_id=request.id, session_id=ingress.session_id,
-            tool_name=request.tool_name, risk_level="high", summary=request.summary)
+    is_approval = outcome.startswith("approval")
+    if outcome == "approval_forged":
+        exception = ApprovalRequired(approval_id="f" * 32, session_id=ingress.session_id,
+            tool_name="execute_code", risk_level="high", summary="Fabricated public exception")
+        async def forged_callback():
+            raise exception
+        with pytest.raises(ApprovalRequired) as observed:
+            await execution.execute(forged_callback())
+        assert observed.value is exception and execution.worker.done()
     else:
-        exception = ClarificationRequired(question="Private clarification question")
-    async def original_callback():
-        raise exception
-    with pytest.raises(type(exception)) as observed:
-        await execution.execute(original_callback())
-    assert observed.value is exception and execution.worker.done()
+        exception = await original_sdk_controlled_exception(execution, approval=is_approval)
+    if is_approval:
+        request = await approval_repository.get(exception.approval_id)
+        assert request is not None or outcome == "approval_forged"
+        if outcome == "approval_wrong_tool":
+            exception.tool_name = "wrong_tool"
+        if outcome == "approval_resolved":
+            assert (await approval_repository.resolve(request.id, "denied")).status == "denied"
+        if outcome.startswith("approval_stale:"):
+            from src.approval.repository import _approval_writer_session
+            field = outcome.split(":", 1)[1]
+            replacements = {"approval_id": "e" * 32, "tool_name": "changed_tool", "fingerprint": "e" * 64,
+                "owner_principal_id": "operator:other", "operator_session_id": "changed-root",
+                "conversation_id": "changed-conversation", "expires_at": request.expires_at + timedelta(seconds=60),
+                "created_at": request.created_at + timedelta(seconds=1)}
+            async with _approval_writer_session() as db:
+                changed = await db.get(ApprovalRequest, request.id)
+                setattr(changed, "id" if field == "approval_id" else field, replacements[field])
+        if outcome == "approval_expired":
+            from src.approval.repository import _approval_writer_session
+            async with _approval_writer_session() as db:
+                changed = await db.get(ApprovalRequest, request.id)
+                changed.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        if outcome == "approval_root_revoked":
+            from src.auth.service import revoke_session
+            await revoke_session(ingress.operator_session_id)
     identifier = uuid5(NAMESPACE_URL,
         f"seraph-chat:{ingress.principal_id}:{ingress.conversation_id}:{ingress.message_id}:clarification").hex
     from src.api.chat import chat_ingress_metadata
-    await manager.record_native_turn_controlled(ingress.session_id, exception, execution=execution,
-        content=exception.render_message() if outcome == "clarification" else None,
-        message_id=identifier if outcome == "clarification" else None,
-        metadata_json=chat_ingress_metadata(ingress) if outcome == "clarification" else None)
+    original_effects = []
+    if outcome == "approval_cost":
+        await repo.record_effect(admission.job_id, effect_type="governed_inference", effect_id="owned-unknown-cost",
+            status="unknown", details={"unknown_cost_outstanding": True}, owner="original-controlled",
+            fencing_token=claim.checkpoint["payload"]["fencing_token"])
+        async with canonical_session() as db:
+            original_effects = json.loads((await db.scalar(select(WorkflowRunState))).effect_receipts_json)
+    before_failure = read_lifecycle_receipt(workspace)
+    if outcome == "clarification_rollback":
+        def fail_publication(*args, **kwargs):
+            raise OSError("controlled fsync rollback")
+        monkeypatch.setattr("src.workspace.production.write_lifecycle_receipt", fail_publication)
+    async def settle():
+        return await manager.record_native_turn_controlled(ingress.session_id, exception, execution=execution,
+            content=exception.render_message() if not is_approval else None,
+            message_id=identifier if not is_approval else None,
+            metadata_json=chat_ingress_metadata(ingress) if not is_approval else None)
+    if outcome == "clarification_deadline_expired":
+        class ExpiredClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(minutes=2)
+        monkeypatch.setattr("src.agent.turn_execution.datetime", ExpiredClock)
+    if outcome in {"approval_resolved", "approval_wrong_tool", "approval_forged", "clarification_rollback",
+            "approval_expired", "approval_root_revoked", "clarification_deadline_expired"} or outcome.startswith("approval_stale:"):
+        expected = OSError if outcome == "clarification_rollback" else DurableJobLeaseError
+        match = "canonical controlled producer required" if outcome in {"approval_wrong_tool", "approval_forged"} else "rollback|reservation changed"
+        if outcome == "approval_root_revoked":
+            from src.agent.turn_execution import NativeTurnBlocked
+            expected, match = NativeTurnBlocked, "original_root_inactive"
+        if outcome == "clarification_deadline_expired":
+            expected, match = asyncio.TimeoutError, "deadline expired"
+        with pytest.raises(expected, match=match):
+            await settle()
+        assert read_lifecycle_receipt(workspace) == before_failure
+        async with canonical_session() as db:
+            run = await db.scalar(select(WorkflowRunState))
+            assert run.status == "running" and run.lease_owner == "original-controlled"
+            assert _native_turn_pending(run)
+            assert not any(item["checkpoint_id"] == "conversation:controlled-outcome" for item in json.loads(run.checkpoint_receipts_json))
+            assert len((await db.execute(select(Message))).scalars().all()) == 1
+        if outcome == "clarification_rollback":
+            assert read_accounting_checkpoint(workspace)["composition_target"] != before_failure["runtime_composition"]
+        return
+    await settle()
+    expected_status = "cost_liability" if outcome == "approval_cost" else "awaiting_approval" if is_approval else "paused"
     async with canonical_session() as db:
         run = await db.scalar(select(WorkflowRunState))
-        assert run.status == ("paused" if outcome == "clarification" else "awaiting_approval")
+        assert run.status == expected_status
+        assert json.loads(run.effect_receipts_json) == original_effects
         assert run.attempt_count == 1 and run.fencing_token == claim.checkpoint["payload"]["fencing_token"]
         assert run.lease_owner is None and run.goal_id is None and not _native_turn_pending(run)
         receipts = json.loads(run.checkpoint_receipts_json)
@@ -605,16 +713,27 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
         assert receipt["payload"]["no_learning"] is True
         assert "Private" not in json.dumps(receipt)
         messages = (await db.execute(select(Message))).scalars().all()
-        assert len(messages) == (2 if outcome == "clarification" else 1)
+        assert len(messages) == (1 if is_approval else 2)
     before = read_lifecycle_receipt(workspace)["runtime_composition"]
-    if outcome == "approval":
-        decided = await approval_repository.resolve(request.id, "denied")
-        assert decided.status == "denied"
+    if is_approval:
+        decision = "denied"
+        if outcome == "approval_expiry":
+            class ExpiredClock(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return datetime.now(tz) + timedelta(minutes=6)
+            with monkeypatch.context() as clock:
+                clock.setattr("src.approval.repository.datetime", ExpiredClock)
+                assert await approval_repository.list_pending(approval_id=request.id) == []
+            decision = "expired"
+        else:
+            decided = await approval_repository.resolve(request.id, "denied")
+            assert decided.status == "denied"
         after = read_lifecycle_receipt(workspace)["runtime_composition"]
         assert after != before and after["table_counts"]["approval_requests"] == 1
         async with canonical_session() as db:
-            assert (await db.scalar(select(WorkflowRunState))).status == "awaiting_approval"
-            assert (await db.get(ApprovalRequest, request.id)).status == "denied"
+            assert (await db.scalar(select(WorkflowRunState))).status == expected_status
+            assert (await db.get(ApprovalRequest, request.id)).status == decision
     else:
         assert before["table_counts"]["messages"] == 2
     target = tmp_path / "controlled-retained"
@@ -626,11 +745,182 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
         assert retain_inference_accounting(active=root, target=target, database_path="seraph.db") == result
     with sqlite3.connect(target / "seraph.db") as db:
         assert db.execute("SELECT status FROM workflow_run_states").fetchone()[0] == "blocked"
+        assert json.loads(db.execute("SELECT effect_receipts_json FROM workflow_run_states").fetchone()[0]) == original_effects
         assert db.execute("SELECT COUNT(*) FROM runtime_composition_states WHERE state='ready'").fetchone()[0] == 0
-        if outcome == "approval":
-            assert db.execute("SELECT status FROM approval_requests WHERE id=?", (request.id,)).fetchone()[0] == "denied"
+        if is_approval:
+            assert db.execute("SELECT status FROM approval_requests WHERE id=?", (request.id,)).fetchone()[0] == decision
         else:
             assert db.execute("SELECT id FROM messages WHERE role='assistant'").fetchone()[0] == identifier
+
+
+@pytest.mark.asyncio
+async def test_large_complete_historical_restore_blocks_without_trimming_or_partial_sql(composition_db, tmp_path):
+    from src.workspace.accounting_continuity import retain_inference_accounting
+    root, _, _, workspace = composition_db
+    repo = DurableJobRepository()
+    original = await bound_spec(job_id="historical-template")
+    for start in (0, 64, 128):
+        async with canonical_session() as db:
+            await begin_native_writer(db, owner="durable_jobs")
+            for index in range(start, min(start + 64, 129)):
+                identity = f"history-{index:03d}"
+                spec = replace(original, identity=replace(original.identity, job_id=identity,
+                    idempotency_key=identity))
+                await repo._admit_in_session(db, spec)
+    before_receipt = read_lifecycle_receipt(workspace)
+    before_checkpoint = read_accounting_checkpoint(workspace)
+    assert before_receipt["runtime_composition"]["table_counts"]["workflow_run_states"] == 129
+    target = tmp_path / "large-retained"
+    target.mkdir()
+    with sqlite3.connect(root / "seraph.db") as source, sqlite3.connect(target / "seraph.db") as destination:
+        source.backup(destination)
+    with sqlite3.connect(target / "seraph.db") as db:
+        before_rows = db.execute("SELECT run_identity,status,revision,fencing_token,checkpoint_receipts_json FROM workflow_run_states ORDER BY run_identity").fetchall()
+    with maintenance_fence(workspace), pytest.raises(ProductionWorkspaceReconciliationError, match="delta|128|limit|bound"):
+        retain_inference_accounting(active=root, target=target, database_path="seraph.db")
+    with sqlite3.connect(target / "seraph.db") as db:
+        assert db.execute("SELECT run_identity,status,revision,fencing_token,checkpoint_receipts_json FROM workflow_run_states ORDER BY run_identity").fetchall() == before_rows
+        assert db.execute("SELECT COUNT(*) FROM workflow_run_states").fetchone()[0] == 129
+        assert db.execute("SELECT COUNT(*) FROM runtime_composition_states WHERE state='ready'").fetchone()[0] == 14
+    assert read_lifecycle_receipt(workspace) == before_receipt
+    assert read_accounting_checkpoint(workspace) == before_checkpoint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", [None, "missing_audit", "broken_predecessor", "missing_fk"])
+async def test_stopped_restore_keeps_exact_native_audit_chain_and_fk_or_blocks(composition_db, tmp_path, damage):
+    from src.db.models import AuditEvent
+    from src.runtime_plugins.ownership import CompositionDependency, transition_owner, restore_audit_reference, restored_recovery_reference
+    from src.workspace.accounting_continuity import retain_inference_accounting
+    root, _, _, workspace = composition_db
+    spec = await bound_spec(job_id="audit-parent-job")
+    await DurableJobRepository().admit_job(spec)
+    before = CompositionDependency("seraph.tasks.v1", "legacy", 1, "a" * 64)
+    after = CompositionDependency("seraph.tasks.v1", "cordis", 2, "b" * 64)
+    # Pure canonical SQL recovery-proof mechanics; no host boot/quiescence claim.
+    with maintenance_fence(workspace):
+        async with canonical_session() as db:
+            await begin_native_writer(db, owner="composition_maintenance")
+            event = AuditEvent(session_id=spec.session_id, event_type="runtime_composition_recovery",
+                details_json=json.dumps({"schema_version": 1, "runtime_domain": before.runtime_domain,
+                    "prior": before.payload(), "target": after.payload(), "state": "blocked",
+                    "phase": "awaiting_boot", "prior_recovery_receipt_ref": None}))
+            db.add(event)
+            await db.flush()
+            first_id = event.id
+            await transition_owner(db, runtime_domain=before.runtime_domain, expected=before,
+                owner_kind=after.owner_kind, epoch=after.epoch, composition_digest=after.composition_digest,
+                state="blocked", recovery_receipt_ref=first_id)
+        async with canonical_session() as db:
+            await begin_native_writer(db, owner="composition_maintenance")
+            event = AuditEvent(session_id=spec.session_id, event_type="runtime_composition_recovery",
+                details_json=json.dumps({"schema_version": 1, "runtime_domain": after.runtime_domain,
+                    "prior": after.payload(), "target": after.payload(), "state": "ready",
+                    "phase": "boot_verified", "prior_recovery_receipt_ref": first_id}))
+            db.add(event)
+            await db.flush()
+            second_id = event.id
+            await transition_owner(db, runtime_domain=after.runtime_domain, expected=after,
+                owner_kind=after.owner_kind, epoch=after.epoch, composition_digest=after.composition_digest,
+                state="ready", recovery_receipt_ref=second_id)
+    receipt_before = read_lifecycle_receipt(workspace)
+    checkpoint_before = read_accounting_checkpoint(workspace)
+    assert receipt_before["runtime_composition"]["table_counts"]["audit_events"] == 2
+    target = tmp_path / "audit-chain-retained"
+    target.mkdir()
+    with sqlite3.connect(root / "seraph.db") as source, sqlite3.connect(target / "seraph.db") as destination:
+        source.backup(destination)
+    if damage is not None:
+        # Deliberate stopped canonical corruption, never a production FK bypass.
+        with sqlite3.connect(root / "seraph.db") as db:
+            if damage == "missing_audit":
+                db.execute("DELETE FROM audit_events WHERE id=?", (first_id,))
+            elif damage == "missing_fk":
+                db.execute("DELETE FROM sessions WHERE id=?", (spec.session_id,))
+            else:
+                raw = json.loads(db.execute("SELECT details_json FROM audit_events WHERE id=?", (second_id,)).fetchone()[0])
+                raw["prior_recovery_receipt_ref"] = "e" * 32
+                db.execute("UPDATE audit_events SET details_json=? WHERE id=?", (json.dumps(raw), second_id))
+        with maintenance_fence(workspace), pytest.raises((ProductionWorkspaceReconciliationError, CompositionBindingError)):
+            retain_inference_accounting(active=root, target=target, database_path="seraph.db")
+        with sqlite3.connect(target / "seraph.db") as db:
+            assert db.execute("SELECT recovery_receipt_ref FROM runtime_composition_states WHERE runtime_domain=?", (after.runtime_domain,)).fetchone()[0] == second_id
+            assert db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 2
+        assert read_lifecycle_receipt(workspace) == receipt_before
+        assert read_accounting_checkpoint(workspace) == checkpoint_before
+        return
+    with maintenance_fence(workspace):
+        result = retain_inference_accounting(active=root, target=target, database_path="seraph.db")
+        assert retain_inference_accounting(active=root, target=target, database_path="seraph.db") == result
+    with sqlite3.connect(target / "seraph.db") as db:
+        marker = db.execute("SELECT recovery_receipt_ref FROM runtime_composition_states WHERE runtime_domain=?", (after.runtime_domain,)).fetchone()[0]
+        assert len(marker) == 105 and restore_audit_reference(marker) == second_id
+        assert restore_audit_reference(restored_recovery_reference("c" * 64, marker)) == second_id
+        assert db.execute("SELECT COUNT(*) FROM audit_events WHERE id IN (?,?)", (first_id, second_id)).fetchone()[0] == 2
+        assert db.execute("SELECT session_id FROM audit_events WHERE id=?", (first_id,)).fetchone()[0] == spec.session_id
+        assert db.execute("SELECT id FROM sessions WHERE id=?", (spec.session_id,)).fetchone()[0] == spec.session_id
+        assert db.execute("SELECT state FROM runtime_composition_states WHERE runtime_domain=?", (after.runtime_domain,)).fetchone()[0] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_readonly_availability_absent_fresh_inventory_returns_only_legacy_signal(tmp_path, monkeypatch):
+    from src.runtime_plugins.composition import ReviewedComposition
+    from src.runtime_plugins.ownership import inspect_invocation_availability
+    root = tmp_path / "fresh-cpu"
+    root.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "fresh-deployment"))
+    engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}")
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    reviewed = ReviewedComposition(Path("/owned-fixture"), Path("/owned-fixture/node"), "v24.13.1", {}, "b" * 64, "c" * 64)
+    try:
+        with override_session_factory(factory):
+            async with canonical_session() as db:
+                result = await inspect_invocation_availability(db, method="conversation.accept",
+                    native_branch="direct_turn", reviewed_composition=reviewed)
+                assert result.available is False and result.reason_code == "composition_inventory_absent"
+                assert set(result.__dict__) == {"available", "reason_code"}
+                assert (await db.execute(select(RuntimeCompositionState))).scalars().all() == []
+                assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+                assert not db.new and not db.dirty and db.info.get("composition_guard") is None
+            assert not ProductionWorkspace(host_root=root).lifecycle_directory.exists()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", [None, "partial", "stale", "empty_retained"])
+async def test_readonly_availability_exact_inventory_or_denied_never_retained_fallback(composition_db, damage):
+    from src.runtime_plugins.composition import ReviewedComposition
+    from src.runtime_plugins.ownership import inspect_invocation_availability
+    _, engine, _, workspace = composition_db
+    reviewed = ReviewedComposition(Path("/owned-fixture"), Path("/owned-fixture/node"), "v24.13.1", {}, "b" * 64, "c" * 64)
+    before = read_lifecycle_receipt(workspace)
+    checkpoint = read_accounting_checkpoint(workspace)
+    if damage is not None:
+        async with engine.begin() as connection:
+            if damage == "partial":
+                await connection.execute(text("DELETE FROM runtime_composition_states WHERE runtime_domain='seraph.memory.v1'"))
+            elif damage == "stale":
+                await connection.execute(update(RuntimeCompositionState).values(epoch=2))
+            else:
+                await connection.execute(text("DELETE FROM runtime_composition_states"))
+    async with canonical_session() as db:
+        if damage is None:
+            result = await inspect_invocation_availability(db, method="conversation.accept",
+                native_branch="direct_turn", reviewed_composition=reviewed)
+            assert result.available is True and result.reason_code is None
+            assert set(result.__dict__) == {"available", "reason_code"}
+        else:
+            expected = {"partial": "inventory_incomplete", "stale": "inventory_stale", "empty_retained": "retained_inventory_missing"}[damage]
+            with pytest.raises(CompositionBindingError, match=expected):
+                await inspect_invocation_availability(db, method="conversation.accept",
+                    native_branch="direct_turn", reviewed_composition=reviewed)
+        assert not db.new and not db.dirty and db.info.get("composition_guard") is None
+    assert read_lifecycle_receipt(workspace) == before
+    assert read_accounting_checkpoint(workspace) == checkpoint
 
 
 @pytest.mark.asyncio

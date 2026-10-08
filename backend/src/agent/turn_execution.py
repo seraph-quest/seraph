@@ -169,6 +169,21 @@ def available_turn_host(ingress, content):
     return cordis_host
 
 
+async def native_turn_binding_available(admission):
+    from src.db.engine import get_session
+    from src.runtime_plugins.ownership import CompositionBindingError, inspect_invocation_availability
+    try:
+        async with get_session() as db:
+            status = await inspect_invocation_availability(db, method="conversation.accept",
+                native_branch=admission.native_route,
+                reviewed_composition=admission.reviewed_composition)
+    except CompositionBindingError as exc:
+        raise NativeTurnBlocked(exc.reason_code) from exc
+    if not status.available and status.reason_code != "composition_inventory_absent":
+        raise NativeTurnBlocked("native_turn_binding_unavailable")
+    return status.available
+
+
 async def validate_native_turn_claim(db, run, admission):
     from src.db.models import Message
     from src.runtime_plugins.ownership import RuntimeCompositionBinding
@@ -217,6 +232,15 @@ class NativeTurnExecution:
     worker: object = None
     stop: Event = field(default_factory=Event)
 
+    def prepare_agent(self, agent):
+        from src.agent.controlled_origin import install_controlled_callback
+        install_controlled_callback(self, agent)
+
+    def run_callback(self, callback, *args):
+        from src.agent.controlled_origin import original_execution_context
+        with original_execution_context(self):
+            return callback(*args)
+
     def guard(self, root=None):
         return _TurnGuard(self.stop, root)
 
@@ -248,8 +272,15 @@ class NativeTurnExecution:
             raise NativeTurnBlocked("native_turn_controlled_exception_changed")
 
     async def forward(self, method, payload):
-        self.remaining()
-        result = await self.host.request_service(method, payload, original_scope=self.scope)
+        from src.runtime_plugins.bridge import HostBlocked
+        try:
+            self.remaining()
+        except asyncio.TimeoutError as exc:
+            raise NativeTurnBlocked("native_turn_original_deadline_expired") from exc
+        try:
+            result = await self.host.request_service(method, payload, original_scope=self.scope)
+        except HostBlocked as exc:
+            raise NativeTurnBlocked("native_turn_host_unavailable") from exc
         if result.get("status") != "succeeded":
             raise NativeTurnBlocked(result.get("reason_code", "native_turn_forward_blocked"))
         return result

@@ -256,3 +256,39 @@ async def test_invalid_native_timeout_fails_before_message(composition_db, monke
     with pytest.raises(NativeTurnBlocked, match="timeout_invalid"):
         NativeTurnAdmission.capture(ingress, principal=original.principal,
             reviewed_composition=original.reviewed_composition, native_route="direct_turn")
+
+
+@pytest.mark.asyncio
+async def test_retained_native_conversation_delete_denies_before_private_cleanup(composition_db, monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock, Mock
+    from src.db.models import AudioIngressJob, Session
+    from src.runtime_plugins.ownership import CompositionBindingError
+    manager, ingress, admission, content = await prepare_turn(monkeypatch)
+    await reserve(manager, ingress, admission, content)
+    raw = tmp_path / "owned-quarantine.wav"
+    raw.write_bytes(b"private retained fixture audio")
+    now = datetime.now(timezone.utc)
+    async with get_session() as db:
+        db.add(AudioIngressJob(request_id="owned-retained-audio", request_digest="a" * 64,
+            owner_principal_id=ingress.principal_id, operator_session_id=ingress.operator_session_id,
+            session_id=ingress.session_id, message_id="legacy-audio-message",
+            attachment_id="legacy-audio-attachment", raw_path=str(raw), captured_at=now,
+            audio_payload_digest="b" * 64, raw_audio_retention_deadline=now + timedelta(minutes=1)))
+    flush = AsyncMock()
+    fence = Mock(return_value=True)
+    stop = Mock()
+    cleanup = Mock(side_effect=lambda *args: raw.unlink())
+    monkeypatch.setattr("src.agent.session.flush_session_memory", flush)
+    monkeypatch.setattr("src.agent.session.process_runtime_manager.begin_session_cleanup", fence)
+    monkeypatch.setattr("src.agent.session.process_runtime_manager.stop_processes_for_session", stop)
+    monkeypatch.setattr("src.guardian.audio_worker.cleanup_audio_job_paths", cleanup)
+    with pytest.raises(CompositionBindingError, match="composition_retained_session_cleanup_denied"):
+        await manager.delete(ingress.session_id, owner_principal_id=ingress.principal_id)
+    flush.assert_not_awaited()
+    fence.assert_not_called()
+    stop.assert_not_called()
+    cleanup.assert_not_called()
+    assert raw.read_bytes() == b"private retained fixture audio"
+    async with get_session() as db:
+        assert await db.get(Session, ingress.session_id) is not None
+        assert await db.get(Message, ingress.message_id) is not None

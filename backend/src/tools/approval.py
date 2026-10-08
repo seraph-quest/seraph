@@ -455,7 +455,9 @@ class ApprovalTool(Tool):
                 "expires_at": approval_expires_at,
             }
         )
-        raise ApprovalRequired(
+        from src.agent.controlled_origin import issue_controlled_origin
+        producer = self
+        issued_exception = ApprovalRequired(
             approval_id=request.id,
             session_id=session_id,
             tool_name=self.name,
@@ -463,6 +465,8 @@ class ApprovalTool(Tool):
             summary=summary,
             **wire_metadata,
         )
+        origin = issue_controlled_origin(issued_exception, producer=producer, approval_row=request)
+        raise issued_exception
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):

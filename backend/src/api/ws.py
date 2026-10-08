@@ -22,7 +22,7 @@ from src.agent.direct_chat import (
     stream_direct_local_chat,
 )
 from src.agent.factory import build_agent
-from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn
+from src.agent.turn_execution import NativeTurnAdmission, NativeTurnBlocked, available_turn_host, claim_native_turn, native_turn_binding_available
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
     MessageIngressConflictError,
@@ -771,6 +771,9 @@ async def websocket_chat(websocket: WebSocket):
                             runtime_path=runtime_path, is_onboarding=onboarding) else "generic_turn"
                         admission = NativeTurnAdmission.capture(ingress, principal=chat_principal,
                             reviewed_composition=host.reviewed, native_route=route)
+                        if not await native_turn_binding_available(admission):
+                            host = None
+                    if host is not None:
                         _ingress_message, duplicate, native_job = await session_manager.reserve_native_turn_message(
                             session.id, ws_msg.message, message_id=ingress.message_id,
                             metadata_json=chat_ingress_metadata(ingress), admission=admission)
@@ -1213,7 +1216,11 @@ async def websocket_chat(websocket: WebSocket):
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
                 reset_current_llm_request_id(llm_request_token)
-                worker_future = loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                if native_turn is not None:
+                    native_turn.prepare_agent(agent)
+                    worker_future = loop.run_in_executor(None, run_ctx.run, native_turn.run_callback, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                else:
+                    worker_future = loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
                 if native_turn is not None:
                     native_turn.worker = worker_future
 
@@ -1561,6 +1568,13 @@ async def websocket_chat(websocket: WebSocket):
     except _OperatorSessionRevoked:
         ws_manager.disconnect(websocket)
         logger.info("WebSocket closed because the operator session was revoked or expired")
+    except NativeTurnBlocked as exc:
+        if active_native_turn is not None:
+            active_native_turn.close_transport()
+        await websocket.send_text(WSResponse(type="error", content="Native turn is blocked.",
+            reason=exc.reason_code, session_id=active_turn_session_id,
+            seq=_next_seq()).model_dump_json())
+        ws_manager.disconnect(websocket)
     except WebSocketDisconnect:
         if not auth_revoked.is_set():
             await _record_interrupted_turn()

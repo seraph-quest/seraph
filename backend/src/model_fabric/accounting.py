@@ -117,8 +117,100 @@ class _AccountingHandle:
     committed_denial: object | None = None
 
 
+@dataclass
+class _SettlementContext:
+    handle: _AccountingHandle
+    usage: dict[str, object]
+    settlement: dict[str, object] | None = None
+    failed: bool = False
+
+
+_current_settlement: ContextVar[_SettlementContext | None] = ContextVar("inference_settlement_owner", default=None)
+
+
 class DurableInferenceBrokerMixin:
     """No independent executor: delegates scheduling to the existing broker."""
+
+    async def _before_release(self, lease):
+        context = _current_settlement.get()
+        if not self.durable_accounting or context is None:
+            return await super()._before_release(lease)
+        handle = context.handle
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (operation is None or self._active_operation_id != lease.operation_id
+                or operation.request is not handle.request or not operation.callback_completed
+                or operation.request.job_id != lease.job_id or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token):
+                from .gpu_admission import GpuAdmissionLeaseError
+                raise GpuAdmissionLeaseError("Accounting release identity is stale",
+                    receipt=self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token"))
+        if context.failed:
+            return False
+        if context.settlement is not None:
+            return True
+
+        async def settle():
+            row = await self._finish_accounting(handle, payload=context.usage)
+            snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
+            matches = [item for item in snapshot.get("operations", ())
+                if item.get("operation_id") == handle.request.operation_id]
+            if snapshot.get("accounting_continuity_verified") is not True or len(matches) != 1:
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            persisted = matches[0]
+            fields = ("operation_id", "job_id", "owner_id", "policy_digest", "payload_digest",
+                      "bound_microusd", "job_fencing_token", "revision", "state",
+                      "actual_cost_microusd", "contact_started_at")
+            if (persisted.get("job_id") != handle.job_id
+                or persisted.get("owner_id") != handle.request.owner_id
+                or persisted.get("policy_digest") != handle.policy_digest
+                or any(persisted.get(key) != row.get(key) for key in fields)):
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            known = persisted.get("state") == "settled" and type(persisted.get("actual_cost_microusd")) is int
+            unknown = persisted.get("state") == "unknown" and persisted.get("contact_started_at") is not None
+            no_contact = persisted.get("contact_started_at") is None and (
+                persisted.get("state") == "released" or (handle.committed_denial is not None
+                    and persisted.get("state") == "reserved" and persisted.get("recovery_reason") == "provider_contact_denied"))
+            if not (known or unknown or no_contact):
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            context.settlement = row
+
+        # This exact owned task is always awaited to completion, including repeated
+        # caller cancellation. No detached writer may outlive a released lease.
+        task = asyncio.create_task(settle())
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            task.result()
+        except BaseException:
+            context.failed = True
+            return False
+        if cancelled:
+            raise asyncio.CancelledError
+        return True
+
+    def _before_release_sync(self, lease):
+        if not self.durable_accounting or _current_settlement.get() is None:
+            return super()._before_release_sync(lease)
+        from .execution import _run_awaitable_sync
+        return _run_awaitable_sync(self._before_release(lease))
+
+    async def _settlement_after_release(self, context):
+        # Denial quiescence authority requires the actual failed/inactive broker
+        # operation. Its original proof is recorded only after that real release.
+        if context.failed:
+            return None
+        if context.settlement is None:
+            return await self._finish_accounting(context.handle, payload=context.usage)
+        if context.handle.committed_denial is not None:
+            await self._record_denial_quiescence(context.handle)
+        return context.settlement
 
     async def reconcile_settled_near_operation(
         self, *, operation_id: str, job_id: str, expected_revision: int, operator,
@@ -337,12 +429,15 @@ class DurableInferenceBrokerMixin:
         # callback. Individual HTTP adapters check again at their final post.
         assert_current_inference_policy()
 
-    async def _finish_accounting(self, handle, *, payload=None, reason=None):
+    async def _record_denial_quiescence(self, handle):
         if handle.committed_denial is not None:
             from src.workflows.inference_accounting import _completed_denial_quiescence
             proof = _completed_denial_quiescence(handle.committed_denial, handle.request, self)
             if proof is not None:
                 await handle.repository.record_provider_denial_quiescence(proof)
+
+    async def _finish_accounting(self, handle, *, payload=None, reason=None):
+        await self._record_denial_quiescence(handle)
         near = handle.request.runtime_path == "near_text_native"
         billing = (_near_billing.get() or {}).get("evidence") if near else None
         billing_kwargs = {"near_billing_evidence": billing} if near else {}
@@ -404,6 +499,8 @@ class DurableInferenceBrokerMixin:
         runtime_token = _current_runtime.set(handle.request.runtime_path)
         billing_token = _near_billing.set({"operation_id": handle.request.operation_id} if handle.request.runtime_path == "near_text_native" else None)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
@@ -417,7 +514,7 @@ class DurableInferenceBrokerMixin:
         try:
             self._restore_order(handle)
             result = await super().execute(handle.request, callback, **kwargs)
-            settlement = await self._finish_accounting(handle, payload=usage)
+            settlement = await self._settlement_after_release(settlement_context)
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -426,8 +523,9 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    await asyncio.shield(self._finish_accounting(handle, payload=usage))
+                    await asyncio.shield(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
                 _current_runtime.reset(runtime_token)
@@ -445,6 +543,8 @@ class DurableInferenceBrokerMixin:
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         def callback():
             _run_awaitable_sync(self._contact_accounting(handle))
@@ -458,7 +558,7 @@ class DurableInferenceBrokerMixin:
         try:
             self._restore_order(handle)
             result = super().execute_sync(handle.request, callback, **kwargs)
-            settlement = _run_awaitable_sync(self._finish_accounting(handle, payload=usage))
+            settlement = _run_awaitable_sync(self._settlement_after_release(settlement_context))
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -467,8 +567,9 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    _run_awaitable_sync(self._finish_accounting(handle, payload=usage))
+                    _run_awaitable_sync(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
 
@@ -484,6 +585,8 @@ class DurableInferenceBrokerMixin:
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
@@ -496,7 +599,7 @@ class DurableInferenceBrokerMixin:
             self._restore_order(handle)
             async for item in super().stream(handle.request, callback, **kwargs):
                 yield item
-            settlement = await self._finish_accounting(handle, payload=usage)
+            settlement = await self._settlement_after_release(settlement_context)
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -504,7 +607,8 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    await asyncio.shield(self._finish_accounting(handle, payload=usage))
+                    await asyncio.shield(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)

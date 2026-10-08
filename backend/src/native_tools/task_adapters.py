@@ -413,10 +413,11 @@ class ToolRegistry:
         validate_schema(descriptor.input_schema, inputs)
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
-        if descriptor.tool_id == "document_prepare":
+        if descriptor.tool_id in {"document_prepare", "delegate_task"}:
             from src.security.trust_contract import AuthorityGrant
             if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants:
                 raise PermissionError("current capability execution permission is required")
+        if descriptor.tool_id == "document_prepare":
             return TaskToolInvocation(asyncio.create_task(self._invoke_document_with_closure(
                 descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
         if descriptor.tool_id == "delegate_task":

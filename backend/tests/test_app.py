@@ -417,11 +417,14 @@ async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_run
 
 
 @pytest.mark.asyncio
-async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_cleanup(client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("stop_failure", [False, True], ids=["normal_stop", "stop_failure_after_positive_cleanup"])
+async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_cleanup(client, monkeypatch, tmp_path, stop_failure):
     """One real stock host crosses actual app startup, authenticated RPC and reap."""
     import os
     import json
     import time
+    from contextlib import nullcontext
+    from src.work_board.dispatcher import _dispatcher
     from pathlib import Path
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -462,28 +465,47 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     login = await client.post("/api/auth/login", json={"password":"isolated-cordis-auth-fixture"},
                               headers={"origin":"http://localhost:3001"})
     assert login.status_code == 200
+    original_stop = host.stop
+    observed_stop_owners = []
+    async def stop_with_task_owner():
+        assert _dispatcher.general_tasks is not None
+        observed_stop_owners.append(_dispatcher.general_tasks)
+        await original_stop()
+        if stop_failure:
+            raise RuntimeError("isolated host stop failure after positive cleanup")
+    monkeypatch.setattr(host, "stop", stop_with_task_owner)
     previous_boot = None
     receipts = []
     for _ in range(2):
-        async with app_module.lifespan(client._transport.app):
-            assert host.admitting
-            assert host.boot_nonce is not None and host.boot_nonce != previous_boot
-            previous_boot = host.boot_nonce
-            process = host.process
-            pid = process.pid
-            assert host.snapshot()["readiness"]["state"] == "unknown"
-            started = int(time.time()*1000)
-            response = await client.get("/api/runtime/status")
-            assert response.status_code == 200
-            actual = response.json()["cordis_runtime"]
-            assert actual["state"] == "ready" and actual["reason"] is None
-            assert actual["runtime_role"] == "lifecycle_host"
-            assert actual["readiness"]["state"] == "verified"
-            assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
-            assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
-            assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
-            assert host.boot_nonce not in response.text
-            assert (await client.get("/health")).json() == {"status":"ok"}
+        assert _dispatcher.general_tasks is None
+        expected_exit = pytest.raises(RuntimeError, match="isolated host stop failure") if stop_failure else nullcontext()
+        with expected_exit:
+            async with app_module.lifespan(client._transport.app):
+                assert _dispatcher.general_tasks is not None
+                assert host.admitting
+                assert host.boot_nonce is not None and host.boot_nonce != previous_boot
+                previous_boot = host.boot_nonce
+                process = host.process
+                pid = process.pid
+                assert host.snapshot()["readiness"]["state"] == "unknown"
+                started = int(time.time()*1000)
+                response = await client.get("/api/runtime/status")
+                assert response.status_code == 200
+                actual = response.json()["cordis_runtime"]
+                assert actual["state"] == "ready" and actual["reason"] is None
+                assert actual["runtime_role"] == "lifecycle_host"
+                assert actual["readiness"]["state"] == "verified"
+                assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
+                assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
+                assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
+                assert host.boot_nonce not in response.text
+                assert (await client.get("/health")).json() == {"status":"ok"}
+        assert _dispatcher.general_tasks is None
+        assert not observed_stop_owners[-1].started
+        assert not observed_stop_owners[-1].registry.started
+        from src.guardian.goal_programmes import goal_programme_service
+        assert goal_programme_service.stop.await_count == len(observed_stop_owners)
+        assert app_module.shutdown_scheduler.call_count == len(observed_stop_owners)
         cleanup = host.snapshot()["cleanup"]
         assert cleanup == {"state":"clean", "process_reaped":True,
                            "resources_remaining":0, "cordis_disposal":"confirmed"}
@@ -491,5 +513,6 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         with pytest.raises(ProcessLookupError): os.kill(pid, 0)
         receipts.append({"runtime_status":actual, "cleanup":cleanup,
                          "fresh_boot":True, "process_exit_code":process.returncode,
-                         "owned_pid_absent":True})
+                         "owned_pid_absent":True, "task_owner_released":True,
+                         "goal_and_scheduler_stopped":True, "injected_stop_failure":stop_failure})
     (tmp_path / "cordis-app-lifecycle-proof.json").write_text(json.dumps({"authenticated":True, "cycles":receipts}, indent=2))

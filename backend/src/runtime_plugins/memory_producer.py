@@ -251,6 +251,14 @@ async def _validate_memory_dispatch_source(db, run, scope):
             or _utc(run.deadline_at) <= datetime.now(timezone.utc)
             or run.composition_binding_json != claim.binding.to_json()):
         raise NativeServiceBlocked("native_memory_actual_source_claim_changed")
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, OPERATOR_SESSION
+    budget = source.admission.header_budget
+    if type(budget) is not HeaderReadBudget:
+        raise NativeServiceBlocked("native_memory_source_budget_unavailable")
+    try:
+        await budget.certify(db, OPERATOR_SESSION, (source.operator.session_id,))
+    except HeaderBoundsError as error:
+        raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
     await _current_root(db, source.operator)
     await validate_invocation(db, claim.binding)
     return source
@@ -470,7 +478,8 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
     await context.authority_check(db)
     current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
         session_id=value["operator_session_id"], task_id=old["task_id"],
-        revision=old["expected_task_revision"], attempt_id=old["attempt_id"])
+        revision=old["expected_task_revision"], attempt_id=old["attempt_id"],
+        header_budget=context.admission.header_budget)
     if (current != old or await _memory_report_rows(db, proof) != source.row_tokens
         or _canonical(proof.readback) != source.proof_json
         or datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"])):
@@ -910,8 +919,10 @@ async def dispatch_memory_mutation(dispatcher, db, run, witness, method, payload
     from .contracts import succeeded, blocked
     from dataclasses import asdict
     context = memory_context(run)
-    admission = NativeMemoryMutationAdmission.from_candidate(context["candidate"])
-    admission = replace(admission, report_source=original_scope.native_memory_report_source)
+    source = await _validate_memory_dispatch_source(db, run, original_scope)
+    # The original admission carries the operation's cumulative read budget
+    # and staged producer. Candidate JSON cannot reconstruct either object.
+    admission = source.admission
     if (context["result"] is not None or method != context["candidate"]["method"]
         or payload != admission.wire_inputs()):
         raise NativeServiceBlocked("native_memory_original_inputs_changed")

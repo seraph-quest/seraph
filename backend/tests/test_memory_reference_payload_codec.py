@@ -8,6 +8,7 @@ from src.workspace.accounting_witness import (
     _native_memory_unknown_replacement_upper_bytes,
     MEMORY_ORIGINAL_CHECKPOINT, MEMORY_CURRENT_CHECKPOINT,
     preflight_native_memory_reference_journal,
+    _splice_native_memory_current_checkpoint,
 )
 
 
@@ -119,3 +120,79 @@ def test_journal_rejects_duplicate_json_keys_and_unchecked_oversized_column():
         preflight_native_memory_reference_journal('[{"checkpoint_id":"one","checkpoint_id":"two"}]')
     with pytest.raises(HeaderBoundsError, match="header_json_bound"):
         preflight_native_memory_reference_journal(" " * 1_048_577)
+
+
+def current_record():
+    from src.workflows.job_runtime import _digest
+    payload = unknown()
+    return {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "state_digest": _digest(payload),
+            "safe": True, "payload": payload}
+
+
+def test_current_splice_preserves_other_records_exact_lexical_bytes():
+    import json
+    from src.workflows.job_runtime import _canonical, _digest
+    immutable = {"checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT, "state_digest": _digest(original()),
+                 "safe": True, "payload": original()}
+    before = ' \n[\t' + json.dumps(immutable, indent=2) + ',\r\n'
+    after = ',\t{"checkpoint_id":"protected","payload":{"text":"\\u00e9","n":1e0}}\n] \t'
+    raw = before + json.dumps(current_record(), indent=4) + after
+    replacement = current_record()
+    replacement["payload"]["projection_revision"] = 2
+    replacement["state_digest"] = _digest(replacement["payload"])
+    result = _splice_native_memory_current_checkpoint(raw, replacement)
+    assert result == before + _canonical(replacement) + after
+    assert preflight_native_memory_reference_journal(result)[0] == immutable
+
+
+@pytest.mark.parametrize("raw", [' [ \n ]\t', '[{"checkpoint_id":"protected","v":"\\u00e9"}\t]\n'])
+def test_current_splice_append_preserves_all_existing_characters(raw):
+    from src.workflows.job_runtime import _canonical
+    result = _splice_native_memory_current_checkpoint(raw, current_record())
+    encoded = _canonical(current_record())
+    insertion = "," + encoded if "protected" in raw else encoded
+    assert result.replace(insertion, "", 1) == raw
+    assert preflight_native_memory_reference_journal(result)[1] == current_record()
+
+
+@pytest.mark.parametrize("raw", ['[{"checkpoint_id":"x","checkpoint_id":"y"}]',
+    '[{"checkpoint_id":"memory:current-reference.v2"},{"checkpoint_id":"memory:current-reference.v2"}]',
+    '[{"checkpoint_id":"memory:original-reference.v2"},{"checkpoint_id":"memory:original-reference.v2"}]',
+    '[1]', '{}'])
+def test_current_splice_rejects_ambiguous_or_invalid_journals(raw):
+    with pytest.raises(HeaderBoundsError):
+        _splice_native_memory_current_checkpoint(raw, current_record())
+
+
+def test_current_splice_bounds_result_and_cannot_accept_original_replacement():
+    record = current_record()
+    record["checkpoint_id"] = MEMORY_ORIGINAL_CHECKPOINT
+    with pytest.raises(HeaderBoundsError, match="memory_reference_journal_invalid"):
+        _splice_native_memory_current_checkpoint("[]", record)
+    raw = '[{"checkpoint_id":"protected","v":"' + ('x' * 1_048_400) + '"}]'
+    with pytest.raises(HeaderBoundsError, match="header_json_bound"):
+        _splice_native_memory_current_checkpoint(raw, current_record())
+    with pytest.raises(HeaderBoundsError, match="header_json_bound"):
+        _splice_native_memory_current_checkpoint(" " * 1_048_577, current_record())
+
+
+def test_unknown_reserve_uses_actual_ascii_checkpoint_codec_for_unicode_keys():
+    from src.workflows.job_runtime import _canonical
+    payload = unknown()
+    payload["refs"][0]["key"] = "é😀"
+    assert preflight_native_memory_reference_payload(payload, current=True) == len(_canonical(payload).encode())
+    assert _native_memory_unknown_replacement_upper_bytes(payload["refs"],
+        original_checkpoint_digest="a" * 64, owner_operation_kind="memory.forget", owner_events=[]) > len(_canonical(payload))
+
+
+@pytest.mark.parametrize("payload", ['{"invalid":"\\u00e9"}', '{}', 'null'])
+def test_current_splice_preserves_invalid_original_without_attesting_it(payload):
+    from src.workflows.job_runtime import _canonical
+    immutable = '{"checkpoint_id":"memory:original-reference.v2", "payload":' + payload + '}'
+    old_current = '{"checkpoint_id":"memory:current-reference.v2", "payload":null}'
+    raw = ' [ ' + immutable + ',\n' + old_current + ' ] '
+    result = _splice_native_memory_current_checkpoint(raw, current_record())
+    assert result == ' [ ' + immutable + ',\n' + _canonical(current_record()) + ' ] '
+    # Lexical preservation supplies no semantic validation of old Original.
+    with pytest.raises(HeaderBoundsError, match="memory_reference_journal_invalid"):
+        preflight_native_memory_reference_journal(result)

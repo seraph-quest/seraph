@@ -198,7 +198,7 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
         except (TypeError, ValueError):
             denied()
     try:
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True,
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (UnicodeError, ValueError, TypeError):
         denied()
@@ -241,7 +241,7 @@ def _native_memory_unknown_replacement_upper_bytes(refs, *, original_checkpoint_
         raise ProductionWorkspaceReconciliationError("memory_unknown_reserve_unavailable")
     checkpoint = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "state_digest": "f" * 64,
                   "safe": True, "payload": payload}
-    return len(json.dumps(checkpoint, ensure_ascii=False, sort_keys=True,
+    return len(json.dumps(checkpoint, ensure_ascii=True, sort_keys=True,
                           separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
@@ -272,6 +272,72 @@ def preflight_native_memory_reference_journal(raw):
             raise HeaderBoundsError("memory_reference_journal_invalid")
         found[identifier] = record
     return found.get(MEMORY_ORIGINAL_CHECKPOINT), found.get(MEMORY_CURRENT_CHECKPOINT)
+
+
+def _splice_native_memory_current_checkpoint(raw, replacement):
+    """Bounded lexical replacement only; never publication or owner authority.
+
+    Preserve every character outside the old Current record, including other
+    checkpoint escapes and whitespace. The actual owner must separately bind
+    the original journal, transaction and protected revision in its SQL CAS.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, strict_json_loads
+    from src.workflows.job_runtime import _canonical, _digest
+    # Old Original/Current can be invalid precisely when the real reduction
+    # owner must publish Unknown. Parsing their lexical containers here does
+    # not attest their payloads; preserve Original without adopting it.
+    records = strict_json_loads(raw)
+    if type(records) is not list or any(type(record) is not dict for record in records):
+        raise HeaderBoundsError("memory_reference_journal_invalid")
+    for identifier in (MEMORY_ORIGINAL_CHECKPOINT, MEMORY_CURRENT_CHECKPOINT):
+        if sum(record.get("checkpoint_id") == identifier for record in records) > 1:
+            raise HeaderBoundsError("memory_reference_journal_invalid")
+    if (type(replacement) is not dict
+            or set(replacement) != {"checkpoint_id", "state_digest", "safe", "payload"}
+            or replacement.get("checkpoint_id") != MEMORY_CURRENT_CHECKPOINT
+            or replacement["safe"] is not True
+            or type(replacement["state_digest"]) is not str):
+        raise HeaderBoundsError("memory_reference_journal_invalid")
+    preflight_native_memory_reference_payload(replacement["payload"], current=True)
+    if replacement["state_digest"] != _digest(replacement["payload"]):
+        raise HeaderBoundsError("memory_reference_journal_invalid")
+    # The exact wrapper parser checks shape, safe=True and the existing runtime
+    # digest codec. This does not authorize the Current represented by it.
+    try:
+        encoded = _canonical(replacement)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        raise HeaderBoundsError("memory_reference_journal_invalid") from None
+    preflight_native_memory_reference_journal("[" + encoded + "]")
+    decoder = json.JSONDecoder()
+    position = 0
+    whitespace = " \t\r\n"
+    while raw[position] in whitespace:
+        position += 1
+    position += 1  # Strict parsing already established the opening array.
+    spans = []
+    for _record in records:
+        while raw[position] in whitespace:
+            position += 1
+        start = position
+        _, position = decoder.raw_decode(raw, position)
+        spans.append((start, position))
+        while raw[position] in whitespace:
+            position += 1
+        if raw[position] == ",":
+            position += 1
+    matches = [index for index, record in enumerate(records)
+               if record.get("checkpoint_id") == MEMORY_CURRENT_CHECKPOINT]
+    if matches:
+        start, end = spans[matches[0]]
+        result = raw[:start] + encoded + raw[end:]
+    else:
+        # Insert after the last record, preserving its trailing whitespace, or
+        # directly after '[' for an empty array. Only one delimiter is added.
+        insert_at = spans[-1][1] if spans else position
+        result = raw[:insert_at] + ("," if spans else "") + encoded + raw[insert_at:]
+    if len(result.encode("utf-8")) > MAX_BYTES:
+        raise HeaderBoundsError("header_json_bound")
+    return result
 
 
 def _native_memory_transient_sql_row(instance):

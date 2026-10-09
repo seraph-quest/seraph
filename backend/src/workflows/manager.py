@@ -120,6 +120,10 @@ def _run_async(coro):
     # request thread forever or silently leave a second event loop behind.
     thread.join(timeout=30.0)
     if thread.is_alive():
+        from src.workflows.durable_state import _CURRENT_LEGACY_RECOVERY
+        source = _CURRENT_LEGACY_RECOVERY.get()
+        if source is not None:
+            source.close()
         raise RuntimeError("durable workflow async bridge timed out after 30 seconds")
     if "error" in result:
         raise result["error"]
@@ -1258,13 +1262,14 @@ class _CanonicalWorkflowStateWriter:
             },
         )
 
-    async def assert_active_lease(self) -> dict[str, Any]:
+    async def assert_active_lease(self, *, step_id=None) -> dict[str, Any]:
         """Revalidate the durable lease immediately before step dispatch."""
         self._assert_runtime_owner()
         current = await self.repository.assert_active_lease(
             self.job_id,
             owner=self.owner,
             fencing_token=self.fencing_token,
+            workflow_step_id=step_id,
         )
         return self._sync(current)
 
@@ -1555,6 +1560,7 @@ def _admit_canonical_workflow_job(
     owner_fields: dict[str, str],
     parent_job_id: str | None = None,
     parent_fencing_token: int | None = None,
+    legacy_recovery_source=None,
 ) -> _CanonicalWorkflowStateWriter:
     owner_kind = str(owner_fields["owner_kind"])
     owner_principal_id = str(owner_fields["owner_principal_id"])
@@ -1603,7 +1609,7 @@ def _admit_canonical_workflow_job(
         idempotency_scope=f"workflow:{workflow.name}",
         idempotency_key=run_identity,
     )
-    admitted = _run_async(repository.admit_job(DurableJobSpec(
+    spec = DurableJobSpec(
         identity=identity,
         inputs=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
         session_id=session_id,
@@ -1624,7 +1630,9 @@ def _admit_canonical_workflow_job(
         resource_claims=("cpu",),
         max_attempts=int(contract["max_attempts"] or 1),
         service_id=service_id,
-    )))
+    )
+    admitted = _run_async(repository.admit_workflow_recovery_job(spec, source=legacy_recovery_source)
+        if legacy_recovery_source is not None else repository.admit_job(spec))
     if admitted.get("status") == "accepted":
         admitted = _run_async(repository.queue_job(run_identity))
     if admitted.get("status") != "queued":
@@ -1852,6 +1860,40 @@ class WorkflowTool(Tool):
         return self.__call__(*args, **kwargs)
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        from src.workflows.durable_state import (_CURRENT_LEGACY_RECOVERY,
+            _new_legacy_source, _legacy_parent_is_goal_bound, _legacy_parent_projection)
+        source = None
+        token = None
+        _inputs, controls = self._normalize_inputs(args, kwargs)
+        parent_id = controls.get("_seraph_parent_run_identity")
+        if parent_id and isinstance(workflow_state_repository, WorkflowStateRepository):
+            async def prepare():
+                from sqlalchemy import text
+                async with get_session() as db:
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    if not await _legacy_parent_is_goal_bound(db, str(parent_id)):
+                        return None, None
+                    original = _new_legacy_source(self, get_current_trust_principal(), str(parent_id),
+                        revision=controls.get("_seraph_parent_revision"),
+                        lease_id=controls.get("_seraph_parent_lease_id"))
+                    details = await _legacy_parent_projection(db, original, workflow_state_repository, require_lease=True)
+                    _assert_workflow_parent_recovery_authority(parent_run_identity=str(parent_id),
+                        details=details, control_inputs=controls)
+                    if details.get("workflow_name") != self.workflow.name:
+                        raise DurableWorkflowStateUnavailable("workflow original parent kind changed")
+                    return original, details
+            source, self._legacy_parent_payload = _run_async(prepare())
+            if source is not None:
+                token = _CURRENT_LEGACY_RECOVERY.set(source)
+        try:
+            return self._call_with_original_recovery(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
+        finally:
+            if source is not None:
+                source.close()
+                _CURRENT_LEGACY_RECOVERY.reset(token)
+                self._legacy_parent_payload = None
+
+    def _call_with_original_recovery(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         self._last_audit_payload = None
         self._last_audit_failure_payload = None
         workflow_inputs, control_inputs = self._normalize_inputs(args, kwargs)
@@ -1888,6 +1930,10 @@ class WorkflowTool(Tool):
         start_index = 0
         durable_owner_fields = _workflow_durable_owner_fields()
         state_repository: Any = workflow_state_repository
+        from src.workflows.durable_state import _CURRENT_LEGACY_RECOVERY
+        legacy_source = _CURRENT_LEGACY_RECOVERY.get()
+        if legacy_source is not None and not durable_owner_fields:
+            raise DurableWorkflowStateUnavailable("workflow recovery canonical owner unavailable")
         if durable_owner_fields and isinstance(workflow_state_repository, WorkflowStateRepository):
             state_repository = _admit_canonical_workflow_job(
                 repository=durable_job_repository,
@@ -1900,6 +1946,7 @@ class WorkflowTool(Tool):
                 approval_context=approval_context,
                 checkpoint_context_allowed=checkpoint_context_allowed,
                 owner_fields=durable_owner_fields,
+                legacy_recovery_source=legacy_source,
                 parent_job_id=(str(parent_run_identity).strip() if parent_run_identity else None),
                 parent_fencing_token=(
                     int(parent_fencing_token)
@@ -2009,7 +2056,7 @@ class WorkflowTool(Tool):
                 if isinstance(state_repository, _CanonicalWorkflowStateWriter):
                     _run_workflow_state_write(
                         state_repository,
-                        state_repository.assert_active_lease(),
+                        state_repository.assert_active_lease(step_id=step.id),
                         phase=f"step_dispatch:{step.id}",
                     )
                 step_fence = (
@@ -2382,7 +2429,7 @@ class WorkflowTool(Tool):
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' requires a parent run identity to resume from step '{requested_step_id}'"
             )
-        details = _run_async(
+        details = getattr(self, "_legacy_parent_payload", None) or _run_async(
             _load_workflow_checkpoint_payload(
                 parent_run_identity,
                 state_repository=state_repository,

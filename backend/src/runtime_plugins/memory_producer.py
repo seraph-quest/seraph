@@ -795,6 +795,39 @@ class NativeMemoryOwnerReference:
     row_ref: str
 
 
+async def _memory_locator_rows(db, model, fields, *predicates, limit=129):
+    """Closed owner locators only; never full proposal, alias or private bodies."""
+    from sqlalchemy import case, func
+    allowed = {
+        "goals": {"id", "parent_id", "owner_principal_id", "owner_session_id"},
+        "memory_proposals": {"proposal_id", "owner_principal_id", "owner_session_id",
+                             "recovered_from_proposal_id", "proposal_job_id", "corrects_memory_id"},
+        "work_board_proposals": {"proposal_id", "owner_principal_id", "owner_session_id"},
+        "work_board_decision_receipts": {"receipt_id"},
+        "memories": {"id", "source_session_id", "subject_entity_id", "project_entity_id"},
+        "memory_entities": {"id"}, "memory_sources": {"id"}, "memory_tombstones": {"id"},
+        "memory_edges": {"id", "from_memory_id", "to_memory_id"},
+    }
+    if (type(fields) is not tuple or not fields or not set(fields) <= allowed.get(model.__tablename__, set())
+            or type(limit) is not int or not 1 <= limit <= 129):
+        raise NativeServiceBlocked("native_memory_retention_locator_unavailable")
+    columns = []
+    for name in fields:
+        column = getattr(model, name)
+        bounded = case((func.typeof(column) == "text",
+                        case((func.octet_length(column) <= 512, column))), else_=None)
+        valid = case((column.is_(None), 1), (func.typeof(column) == "text",
+                     case((func.octet_length(column) <= 512, 1), else_=0)), else_=0)
+        columns.extend((bounded, valid))
+    rows = list(await db.execute(select(*columns).where(*predicates).limit(limit)))
+    result = []
+    for row in rows:
+        if any(row[index + 1] != 1 for index in range(0, len(row), 2)):
+            raise NativeServiceBlocked("native_memory_retention_locator_bound")
+        result.append(dict(zip(fields, row[::2])))
+    return result
+
+
 async def memory_owner_references(db, admission, effect):
     """Select causal existing owners only; never consume caller row locators."""
     from src.db.models import (Goal, Memory, MemoryEntity, MemoryProposal, MemorySource,
@@ -807,7 +840,8 @@ async def memory_owner_references(db, admission, effect):
         raise NativeServiceBlocked("native_memory_retention_original_effect_changed")
     references = set()
     def add(table, key):
-        if not isinstance(key, str) or not key or ((table, key) not in references and len(references) >= 128):
+        if (type(key) is not str or not key or len(key.encode("utf-8")) > 512
+                or ((table, key) not in references and len(references) >= 128)):
             raise NativeServiceBlocked("native_memory_retention_bound_exceeded")
         references.add((table, key))
     if "source" in value:
@@ -817,61 +851,69 @@ async def memory_owner_references(db, admission, effect):
             if goal_id in seen:
                 raise NativeServiceBlocked("native_memory_goal_ancestry_changed")
             seen.add(goal_id)
-            goal = await db.get(Goal, goal_id)
-            if (goal is None or goal.owner_principal_id != value["operator_principal_id"]
-                or goal.owner_session_id != value["operator_session_id"]):
+            matches = await _memory_locator_rows(db, Goal,
+                ("id", "parent_id", "owner_principal_id", "owner_session_id"), Goal.id == goal_id, limit=2)
+            goal = matches[0] if len(matches) == 1 else None
+            if (goal is None or goal["owner_principal_id"] != value["operator_principal_id"]
+                or goal["owner_session_id"] != value["operator_session_id"]):
                 raise NativeServiceBlocked("native_memory_goal_ancestry_changed")
-            add("goals", goal.id)
-            goal_id = goal.parent_id
+            add("goals", goal["id"])
+            goal_id = goal["parent_id"]
     memory_ids = set()
     if effect.proposal_id is not None:
-        proposal = await db.get(MemoryProposal, effect.proposal_id)
-        if (proposal is None or proposal.owner_principal_id != value["operator_principal_id"]
-            or proposal.owner_session_id != value["operator_session_id"]):
+        matches = await _memory_locator_rows(db, MemoryProposal,
+            ("proposal_id", "owner_principal_id", "owner_session_id", "recovered_from_proposal_id",
+             "proposal_job_id", "corrects_memory_id"), MemoryProposal.proposal_id == effect.proposal_id, limit=2)
+        proposal = matches[0] if len(matches) == 1 else None
+        if (proposal is None or proposal["owner_principal_id"] != value["operator_principal_id"]
+            or proposal["owner_session_id"] != value["operator_session_id"]):
             raise NativeServiceBlocked("native_memory_retention_proposal_changed")
-        add("memory_proposals", proposal.proposal_id)
-        if proposal.recovered_from_proposal_id is not None:
+        add("memory_proposals", proposal["proposal_id"])
+        if proposal["recovered_from_proposal_id"] is not None:
             raise NativeServiceBlocked("native_memory_recovery_profile_unsupported")
-        if proposal.proposal_job_id is not None:
-            board = list((await db.execute(select(WorkBoardProposal).where(
-                WorkBoardProposal.admission_job_id == proposal.proposal_job_id).limit(2))).scalars())
-            if (len(board) != 1 or board[0].owner_principal_id != value["operator_principal_id"]
-                or board[0].owner_session_id != value["operator_session_id"]):
+        if proposal["proposal_job_id"] is not None:
+            board = await _memory_locator_rows(db, WorkBoardProposal,
+                ("proposal_id", "owner_principal_id", "owner_session_id"),
+                WorkBoardProposal.admission_job_id == proposal["proposal_job_id"], limit=2)
+            if (len(board) != 1 or board[0]["owner_principal_id"] != value["operator_principal_id"]
+                or board[0]["owner_session_id"] != value["operator_session_id"]):
                 raise NativeServiceBlocked("native_memory_retention_board_proposal_changed")
-            add("work_board_proposals", board[0].proposal_id)
-        baselines = list((await db.execute(select(WorkBoardDecisionReceipt).where(
-            WorkBoardDecisionReceipt.source_proposal_id == proposal.proposal_id,
-            WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline).limit(2))).scalars())
+            add("work_board_proposals", board[0]["proposal_id"])
+        baselines = await _memory_locator_rows(db, WorkBoardDecisionReceipt, ("receipt_id",),
+            WorkBoardDecisionReceipt.source_proposal_id == proposal["proposal_id"],
+            WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline, limit=2)
         if effect.status == "succeeded" and len(baselines) != 1:
             raise NativeServiceBlocked("native_memory_retention_baseline_changed")
         if len(baselines) > 1:
             raise NativeServiceBlocked("native_memory_retention_baseline_changed")
         for row in baselines:
-            add("work_board_decision_receipts", row.receipt_id)
-        if proposal.corrects_memory_id:
-            memory_ids.add(proposal.corrects_memory_id)
+            add("work_board_decision_receipts", row["receipt_id"])
+        if proposal["corrects_memory_id"]:
+            memory_ids.add(proposal["corrects_memory_id"])
     if effect.record_id is not None:
         memory_ids.add(effect.record_id)
     for key in sorted(memory_ids):
-        record = await db.get(Memory, key)
-        if record is None or record.source_session_id != value["operator_session_id"]:
+        matches = await _memory_locator_rows(db, Memory,
+            ("id", "source_session_id", "subject_entity_id", "project_entity_id"), Memory.id == key, limit=2)
+        record = matches[0] if len(matches) == 1 else None
+        if record is None or record["source_session_id"] != value["operator_session_id"]:
             raise NativeServiceBlocked("native_memory_retention_record_changed")
-        add("memories", record.id)
-        for entity_id in (record.subject_entity_id, record.project_entity_id):
+        add("memories", record["id"])
+        for entity_id in (record["subject_entity_id"], record["project_entity_id"]):
             if entity_id is not None:
-                entity = await db.get(MemoryEntity, entity_id)
-                if entity is None:
+                entities = await _memory_locator_rows(db, MemoryEntity, ("id",), MemoryEntity.id == entity_id, limit=2)
+                if len(entities) != 1:
                     raise NativeServiceBlocked("native_memory_retention_entity_changed")
-                add("memory_entities", entity.id)
+                add("memory_entities", entities[0]["id"])
         for cls, table in ((MemorySource, "memory_sources"), (MemoryTombstone, "memory_tombstones")):
-            rows = list((await db.execute(select(cls).where(cls.memory_id == key).limit(129))).scalars())
+            rows = await _memory_locator_rows(db, cls, ("id",), cls.memory_id == key)
             for row in rows:
-                add(table, row.id)
+                add(table, row["id"])
     if value["method"] == "memory.applyReviewed" and effect.record_id is not None:
-        edges = list((await db.execute(select(MemoryEdge).where(or_(
-            MemoryEdge.from_memory_id == effect.record_id, MemoryEdge.to_memory_id == effect.record_id)).limit(129))).scalars())
+        edges = await _memory_locator_rows(db, MemoryEdge, ("id", "from_memory_id", "to_memory_id"), or_(
+            MemoryEdge.from_memory_id == effect.record_id, MemoryEdge.to_memory_id == effect.record_id))
         for row in edges:
-            if row.from_memory_id not in memory_ids or row.to_memory_id not in memory_ids:
+            if row["from_memory_id"] not in memory_ids or row["to_memory_id"] not in memory_ids:
                 raise NativeServiceBlocked("native_memory_retention_edge_changed")
-            add("memory_edges", row.id)
+            add("memory_edges", row["id"])
     return tuple(NativeMemoryOwnerReference(table, key) for table, key in sorted(references))

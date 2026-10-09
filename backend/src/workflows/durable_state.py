@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text, false
+from sqlalchemy.orm import aliased
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -128,6 +132,343 @@ def _assert_legacy_mutable(run: WorkflowRunState) -> None:
         raise RuntimeError(
             "typed durable jobs must be mutated through DurableJobRepository"
         )
+
+
+_LEGACY_SOURCE_SEAL = object()
+_LEGACY_PARENT_SEAL = object()
+_CURRENT_LEGACY_RECOVERY = ContextVar("workflow_original_legacy_recovery", default=None)
+_LEGACY_COMMITMENT = "legacy_recovery_parent"
+_LEGACY_COMMITMENT_FIELDS = frozenset(("parent_row_id", "parent_run_identity", "parent_schema_version",
+    "parent_owner_kind", "parent_owner_principal_id", "parent_session_id", "parent_operator_session_id",
+    "parent_workflow_name", "parent_tool_name", "goal_id", "goal_revision", "criterion_id", "plan_revision",
+    "candidate_id", "metadata_revision", "metadata_lease_id", "metadata_lease_owner",
+    "metadata_lease_expires_at", "child_run_identity"))
+
+
+@dataclass(eq=False)
+class _LegacyRecoverySource:
+    """The actual inline producer; persisted commitments are never grants."""
+    producer: object
+    principal: object
+    parent_identity: str
+    requested_revision: int | None = None
+    requested_lease_id: str | None = None
+    operator: object | None = None
+    child_identity: str | None = None
+    commitment: dict | None = None
+    checkpoint_binding: tuple | None = None
+    _seal: object = field(default=None, repr=False)
+    _live: threading.Event = field(default_factory=threading.Event, repr=False)
+    _budgets: dict = field(default_factory=dict, repr=False)
+    _issued_id: int = field(default=0, repr=False)
+
+    def close(self):
+        self._live.clear()
+
+
+def _legacy_writer_budget(db, source):
+    transaction = db.sync_session.get_transaction()
+    key = (id(db), transaction)
+    if key not in source._budgets:
+        source._budgets[key] = _LegacyHeaderBudget()
+    return source._budgets[key]
+
+
+async def _begin_legacy_aware_writer(db):
+    if _CURRENT_LEGACY_RECOVERY.get() is not None and db.in_transaction():
+        connection = await db.connection()
+        raw = await connection.get_raw_connection()
+        if raw.driver_connection.in_transaction:
+            return
+    await db.execute(text("BEGIN IMMEDIATE"))
+
+
+@dataclass(frozen=True)
+class _VerifiedLegacyParent:
+    db: object
+    transaction: object
+    source: _LegacyRecoverySource
+    parent: WorkflowRunState
+    metadata_json: str | None
+    authority_json: str | None
+    root: object
+    contract: dict
+    commitment: dict
+    _seal: object
+    _issued_id: int = field(default=0, repr=False)
+
+
+class _LegacyHeaderBudget:
+    def __init__(self):
+        self.remaining = 1_048_576
+        self.references = set()
+
+    async def certify(self, db, descriptor, ids):
+        from src.memory.header_bounds import preflight_exact_rows, validate_certificate
+        refs = {(descriptor.table, descriptor.key, identity) for identity in ids}
+        if len(self.references | refs) > 128:
+            raise RuntimeError("workflow_legacy_header_bound")
+        certificate = await preflight_exact_rows(db, descriptor, tuple(ids), self.remaining)
+        self.references |= refs
+        self.remaining -= certificate.upper_bytes
+        await validate_certificate(db, certificate)
+        return certificate
+
+
+def _new_legacy_source(producer, principal, parent_identity, *, revision=None,
+                       lease_id=None, operator=None):
+    # Called only from the two actual owners. It transports their object,
+    # never certifies a caller-provided mapping or a persisted source name.
+    source = _LegacyRecoverySource(producer, principal, parent_identity,
+        revision, lease_id, operator, _seal=_LEGACY_SOURCE_SEAL)
+    source._live.set()
+    source._issued_id = id(source)
+    return source
+
+
+async def _legacy_parent_is_goal_bound(db, identity):
+    # Address-only lookup: never materialize arbitrary Goal or metadata text.
+    row = (await db.execute(text(
+        "SELECT CASE WHEN typeof(record_schema_version)='integer' THEN record_schema_version ELSE NULL END, "
+        "typeof(goal_id), length(CAST(goal_id AS BLOB)), "
+        "CASE WHEN typeof(goal_id)='text' AND length(CAST(goal_id AS BLOB))<=512 "
+        "THEN goal_id ELSE NULL END, typeof(idempotency_binding), "
+        "length(CAST(idempotency_binding AS BLOB)) FROM workflow_run_states "
+        "WHERE run_identity COLLATE BINARY=:identity LIMIT 2"),
+        {"identity": identity})).all()
+    if len(row) != 1:
+        return False
+    schema, goal_type, goal_size, goal_id, binding_type, binding_size = row[0]
+    if binding_type != "null" and binding_size:
+        return False  # Actual durable owner keeps idempotency-bound rows.
+    if type(schema) is not int:
+        if goal_type != "null" and goal_size != 0:
+            raise RuntimeError("workflow_legacy_schema_uncertified")
+        return False
+    if schema >= 2:
+        return False
+    if goal_type == "null" or goal_size == 0:
+        return False
+    if goal_type != "text" or goal_id is None:
+        raise RuntimeError("workflow_legacy_identity_unavailable")
+    return True
+
+
+async def _read_legacy_parent_in_session(db, *, source, budget=None, require_lease=True):
+    from src.memory.header_bounds import WRS_BY_RUN, GOAL, OPERATOR_SESSION, strict_json_loads
+    from src.db.models import Goal, OperatorSession, AuditEvent
+    from src.workflows.job_runtime import _assert_canonical_goal_fence
+    from src.approval.runtime import get_current_trust_principal
+    from src.goals.repository import deserialize_success_criterion
+    budget = budget or _legacy_writer_budget(db, source)
+    if (type(source) is not _LegacyRecoverySource or source._seal is not _LEGACY_SOURCE_SEAL
+        or source._issued_id != id(source)
+        or not source._live.is_set() or source.principal is not get_current_trust_principal()
+        or not source.principal.authenticated or source.principal.revoked):
+        raise RuntimeError("workflow_legacy_original_producer_unavailable")
+    await budget.certify(db, WRS_BY_RUN, (source.parent_identity,))
+    parent = (await db.execute(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == source.parent_identity)
+        .execution_options(populate_existing=True))).scalar_one()
+    if source.checkpoint_binding is not None and source.checkpoint_binding != (parent.checkpoint_context_json,):
+        raise RuntimeError("workflow_legacy_original_checkpoint_changed")
+    _assert_legacy_mutable(parent)
+    if type(parent.record_schema_version) is not int or parent.record_schema_version >= 2 or parent.job_kind != "workflow":
+        raise RuntimeError("workflow_legacy_parent_family_invalid")
+    principal = source.principal
+    root_id = parent.operator_session_id
+    if (parent.owner_kind != "user" or parent.owner_principal_id != principal.principal_id
+        or not root_id or root_id != principal.operator_session_id
+        or not parent.session_id or not parent.goal_id
+        or (source.operator is None and parent.session_id != principal.session_id)):
+        raise RuntimeError("workflow_legacy_original_identity_missing")
+    await budget.certify(db, OPERATOR_SESSION, (root_id,))
+    root = await db.get(OperatorSession, root_id, populate_existing=True)
+    now = _utc_now()
+    if (root is None or root.principal_id != principal.principal_id or root.revoked_at is not None
+        or root.replaced_by_id is not None or root.is_bearer_tombstone
+        or _parse_iso(root.idle_expires_at) is None or _parse_iso(root.idle_expires_at) <= now
+        or _parse_iso(root.absolute_expires_at) is None or _parse_iso(root.absolute_expires_at) <= now
+        or (source.operator is not None and (source.operator.session_id != root_id
+            or not source.operator._token_hash or source.operator._token_hash != root.token_hash))):
+        raise RuntimeError("workflow_legacy_original_root_inactive")
+    await budget.certify(db, GOAL, (parent.goal_id,))
+    goal = await _assert_canonical_goal_fence(db, goal_id=parent.goal_id,
+        goal_revision=parent.goal_revision, owner_kind=parent.owner_kind,
+        owner_principal_id=parent.owner_principal_id, session_id=parent.session_id)
+    authority = strict_json_loads(parent.declared_authority_json or "{}")
+    if type(authority) is not dict:
+        raise RuntimeError("workflow_legacy_original_identity_missing")
+    criterion = deserialize_success_criterion(goal)
+    criterion_id = authority.get("criterion_id")
+    if (type(criterion_id) is not str or not criterion_id
+        or criterion is None or criterion.criterion_id != criterion_id
+        or type(parent.plan_revision) is not int or parent.plan_revision != goal.revision
+        or any(authority.get(key) != getattr(parent, key) for key in
+            ("goal_id", "goal_revision", "plan_revision", "candidate_id"))):
+        raise RuntimeError("workflow_legacy_original_goal_contract_stale")
+    if parent.candidate_id is not None:
+        # Preserve original bounded latest-500 semantics only when the entire
+        # candidate evidence fits the canonical operation's reference budget.
+        from src.memory.header_bounds import AUDIT_EVENT
+        ids = list((await db.execute(select(AuditEvent.id).order_by(AuditEvent.created_at.desc()).limit(500))).scalars())
+        await budget.certify(db, AUDIT_EVENT, ids)
+        events = (await db.execute(select(AuditEvent).where(AuditEvent.id.in_(ids)))).scalars().all()
+        matches = []
+        for event in events:
+            if event.event_type == "goal_loop_candidate":
+                value = strict_json_loads(event.details_json or "{}")
+                if type(value) is dict and all(value.get(key) == expected for key, expected in
+                    (("goal_id", parent.goal_id), ("goal_revision", parent.goal_revision),
+                     ("criterion_id", criterion_id), ("candidate_id", parent.candidate_id))):
+                    matches.append(value)
+        if len(matches) != 1:
+            raise RuntimeError("workflow_candidate_unavailable")
+    metadata = strict_json_loads(parent.metadata_json or "{}")
+    v2 = metadata.get("orchestration_v2", {}) if type(metadata) is dict else None
+    lease = v2.get("lease") if type(v2) is dict else None
+    revision = v2.get("revision") if type(v2) is dict else None
+    if type(v2) is not dict or (lease is not None and type(lease) is not dict):
+        raise RuntimeError("workflow_legacy_metadata_invalid")
+    if require_lease:
+        if (type(revision) is not int or type(lease) is not dict
+            or not lease.get("lease_id") or lease.get("owner") !=
+                "operator:" + hashlib.sha256(principal.principal_id.encode()).hexdigest()[:16]
+                + ":" + hashlib.sha256(parent.session_id.encode()).hexdigest()[:16]
+            or lease.get("revision") != revision or not _lease_active(lease)
+            or type(source.requested_revision) is not int or source.requested_revision != revision
+            or source.requested_lease_id != lease.get("lease_id")):
+            raise RuntimeError("workflow_legacy_parent_lease_stale")
+    contract = {key: getattr(parent, key) for key in ("goal_id", "goal_revision", "plan_revision", "candidate_id")}
+    contract["criterion_id"] = criterion_id
+    commitment = {
+        "parent_row_id": parent.id, "parent_run_identity": parent.run_identity,
+        "parent_schema_version": parent.record_schema_version,
+        "parent_owner_kind": parent.owner_kind, "parent_owner_principal_id": parent.owner_principal_id,
+        "parent_session_id": parent.session_id, "parent_operator_session_id": root_id,
+        "parent_workflow_name": parent.workflow_name, "parent_tool_name": parent.tool_name,
+        **contract, "metadata_revision": revision,
+        "metadata_lease_id": lease.get("lease_id") if type(lease) is dict else None,
+        "metadata_lease_owner": lease.get("owner") if type(lease) is dict else None,
+        "metadata_lease_expires_at": lease.get("expires_at") if type(lease) is dict else None,
+        "child_run_identity": source.child_identity,
+    }
+    if source.commitment is not None and commitment != source.commitment:
+        raise RuntimeError("workflow_legacy_original_parent_changed")
+    if not source._live.is_set():
+        raise RuntimeError("workflow_legacy_original_producer_unavailable")
+    verified = _VerifiedLegacyParent(db, db.sync_session.get_transaction(), source, parent,
+        parent.metadata_json, parent.declared_authority_json, root, contract, commitment, _LEGACY_PARENT_SEAL)
+    object.__setattr__(verified, "_issued_id", id(verified))
+    return verified
+
+
+async def _verify_legacy_child_in_session(db, child):
+    from src.memory.header_bounds import strict_json_loads
+    preview = _loads(child.declared_authority_json, {})
+    if type(preview) is not dict or _LEGACY_COMMITMENT not in preview:
+        return None
+    authority = strict_json_loads(child.declared_authority_json or "{}")
+    commitment = authority.get(_LEGACY_COMMITMENT) if type(authority) is dict else None
+    if commitment is None:
+        return None
+    source = _CURRENT_LEGACY_RECOVERY.get()
+    if (type(source) is not _LegacyRecoverySource or source.child_identity != child.run_identity
+        or source.commitment != commitment or child.parent_fencing_token is not None
+        or child.parent_job_id != source.parent_identity
+        or child.owner_principal_id != source.principal.principal_id):
+        raise RuntimeError("workflow_legacy_original_producer_unavailable")
+    snapshot = await _read_legacy_parent_in_session(db, source=source)
+    if any(getattr(child, key) != snapshot.contract[key] for key in ("goal_id", "goal_revision", "plan_revision", "candidate_id")):
+        raise RuntimeError("workflow_legacy_child_goal_changed")
+    object.__setattr__(child, "_legacy_recovery_verified_parent", snapshot)
+    return snapshot
+
+
+def _append_legacy_parent_condition(conditions, child, *, writer_db, now):
+    from src.db.models import OperatorSession
+    # Branch is provenance only; absence of the transaction-issued snapshot
+    # deliberately compiles SQL false, rather than numeric parent fallback.
+    authority = _loads(child.declared_authority_json, {})
+    if type(authority) is not dict or _LEGACY_COMMITMENT not in authority:
+        return False
+    snapshot = getattr(child, "_legacy_recovery_verified_parent", None)
+    if (type(snapshot) is not _VerifiedLegacyParent or snapshot._seal is not _LEGACY_PARENT_SEAL
+        or snapshot._issued_id != id(snapshot)
+        or snapshot.db is not writer_db or writer_db is None or not writer_db.in_transaction()
+        or snapshot.transaction is not writer_db.sync_session.get_transaction()
+        or not snapshot.transaction.is_active or not snapshot.source._live.is_set()
+        or snapshot.source is not _CURRENT_LEGACY_RECOVERY.get()):
+        conditions.append(false())
+        return True
+    parent, root = aliased(WorkflowRunState), aliased(OperatorSession)
+    p = snapshot.parent
+    conditions.append(select(parent.id).where(parent.id == p.id, parent.run_identity == p.run_identity,
+        parent.record_schema_version == p.record_schema_version, parent.idempotency_binding.is_(None),
+        parent.owner_kind == p.owner_kind, parent.owner_principal_id == p.owner_principal_id,
+        parent.session_id == p.session_id, parent.operator_session_id == p.operator_session_id,
+        parent.workflow_name == p.workflow_name, parent.tool_name == p.tool_name,
+        parent.root_run_identity == p.root_run_identity,
+        parent.goal_id == p.goal_id, parent.goal_revision == p.goal_revision,
+        parent.plan_revision == p.plan_revision, parent.candidate_id == p.candidate_id,
+        parent.metadata_json == snapshot.metadata_json,
+        parent.declared_authority_json == snapshot.authority_json).exists())
+    conditions.append(select(root.id).where(root.id == p.operator_session_id,
+        root.principal_id == p.owner_principal_id, root.revoked_at.is_(None),
+        root.replaced_by_id.is_(None), root.is_bearer_tombstone == False,
+        root.idle_expires_at > now, root.absolute_expires_at > now).exists())
+    conditions.extend((WorkflowRunState.declared_authority_json == child.declared_authority_json,
+        WorkflowRunState.authority_digest == child.authority_digest,
+        WorkflowRunState.parent_job_id == child.parent_job_id,
+        WorkflowRunState.parent_fencing_token.is_(None)))
+    return True
+
+
+async def _legacy_control_parent(db, identity, source):
+    await db.execute(text("BEGIN IMMEDIATE"))
+    typed = await db.scalar(text("SELECT CASE WHEN typeof(record_schema_version)='integer' "
+        "THEN record_schema_version>=2 ELSE 0 END OR "
+        "(idempotency_binding IS NOT NULL AND length(CAST(idempotency_binding AS BLOB))>0) "
+        "FROM workflow_run_states WHERE run_identity COLLATE BINARY=:identity"), {"identity": identity})
+    if typed:
+        raise RuntimeError("typed durable jobs must be mutated through DurableJobRepository")
+    if await _legacy_parent_is_goal_bound(db, identity):
+        if source is None or source.parent_identity != identity:
+            raise RuntimeError("workflow_legacy_original_producer_unavailable")
+        return (await _read_legacy_parent_in_session(db, source=source, require_lease=False)).parent
+    return (await db.execute(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == identity))).scalars().first()
+
+
+async def _legacy_parent_projection(db, source, repository, *, require_lease=False):
+    from src.memory.header_bounds import WORKFLOW_STEP, WORKFLOW_ARTIFACT_REVIEW
+    budget = _LegacyHeaderBudget()
+    verified = await _read_legacy_parent_in_session(db, source=source, budget=budget, require_lease=require_lease)
+    parent = verified.parent
+    step_ids = tuple((await db.execute(select(WorkflowStepState.id).where(
+        WorkflowStepState.run_identity == parent.run_identity).limit(129))).scalars())
+    await budget.certify(db, WORKFLOW_STEP, step_ids)
+    steps = list((await db.execute(select(WorkflowStepState).where(WorkflowStepState.id.in_(step_ids)))).scalars())
+    review_ids = tuple((await db.execute(select(WorkflowArtifactReview.id).where(
+        WorkflowArtifactReview.run_identity == parent.run_identity).limit(129))).scalars())
+    await budget.certify(db, WORKFLOW_ARTIFACT_REVIEW, review_ids)
+    reviews = list((await db.execute(select(WorkflowArtifactReview).where(WorkflowArtifactReview.id.in_(review_ids)))).scalars())
+    payload = repository._serialize_run(parent, steps)
+    source.checkpoint_binding = (parent.checkpoint_context_json,)
+    payload["artifact_reviews"] = [repository._serialize_review(row) for row in reviews]
+    payload["criterion_id"] = verified.contract["criterion_id"]
+    payload["orchestration_v2"] = strict_legacy_metadata(parent).get("orchestration_v2", {})
+    payload["durable_run_identity"] = parent.run_identity
+    payload["state_source"] = "durable_workflow_state"
+    payload["lease"] = payload["orchestration_v2"].get("lease", {})
+    payload["revision"] = payload["orchestration_v2"].get("revision")
+    payload["step_records"] = payload.get("step_records", [])
+    return payload
+
+
+def strict_legacy_metadata(parent):
+    from src.memory.header_bounds import strict_json_loads
+    return strict_json_loads(parent.metadata_json or "{}")
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -771,14 +1112,13 @@ class WorkflowStateRepository:
         owner: str,
         lease_id: str | None = None,
         ttl_seconds: int = 300,
+        legacy_recovery_source=None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         owner = _text(owner, "workflow-worker")
         lease_id = _text(lease_id) or _stable_id("workflow_lease", run_identity, owner)
         async with get_session() as db:
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
+            run = await _legacy_control_parent(db, run_identity, legacy_recovery_source)
             if run is None:
                 return None
             _assert_legacy_mutable(run)
@@ -845,13 +1185,12 @@ class WorkflowStateRepository:
         owner: str,
         step_id: str | None = None,
         expected_revision: int | None = None,
+        legacy_recovery_source=None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         transition_key = _text(transition_key) or _stable_id("workflow_transition", run_identity, transition_type, step_id or "run")
         async with get_session() as db:
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
+            run = await _legacy_control_parent(db, run_identity, legacy_recovery_source)
             if run is None:
                 return None
             _assert_legacy_mutable(run)
@@ -1002,12 +1341,11 @@ class WorkflowStateRepository:
         run_identity: str,
         owner: str,
         approval_context: dict[str, Any] | None = None,
+        legacy_recovery_source=None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         async with get_session() as db:
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
+            run = await _legacy_control_parent(db, run_identity, legacy_recovery_source)
             if run is None:
                 return None
             _assert_legacy_mutable(run)
@@ -1348,12 +1686,11 @@ class WorkflowStateRepository:
         expected_revision: int | None = None,
         lease_id: str | None = None,
         transition_key: str | None = None,
+        legacy_recovery_source=None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         async with get_session() as db:
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
-            ).scalars().first()
+            run = await _legacy_control_parent(db, run_identity, legacy_recovery_source)
             if run is None:
                 return None
             _assert_legacy_mutable(run)

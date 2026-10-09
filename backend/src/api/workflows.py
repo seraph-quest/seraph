@@ -3748,7 +3748,13 @@ def _workflow_resume_plan(
     }
 
 
-async def _find_workflow_run_for_control(run_identity: str) -> dict[str, Any] | None:
+async def _find_workflow_run_for_control(run_identity: str, *, legacy_source=None) -> dict[str, Any] | None:
+    if legacy_source is not None:
+        from src.workflows.durable_state import _legacy_parent_projection
+        from sqlalchemy import text
+        async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            return await _legacy_parent_projection(db, legacy_source, workflow_state_repository)
     # Scope the projection and pending-approval lookup to the run's
     # server-generated conversation session before inspecting any durable state.
     session_id, _tool_name, _run_fingerprint, _run_discriminator = _parse_run_identity(run_identity)
@@ -10413,6 +10419,7 @@ async def control_workflow_run(
         context_manager.get_context().approval_mode,
         trust_principal=bind_operator_principal(operator, active_session_id),
     )
+    legacy_source = None
     revocation_scope = None
     action = ""
     run: dict[str, Any] | None = None
@@ -10433,8 +10440,16 @@ async def control_workflow_run(
             await _workflow_session_fence(request, revocation_scope)
             raise HTTPException(status_code=422, detail=detail)
 
+        from src.workflows.durable_state import _legacy_parent_is_goal_bound, _new_legacy_source
+        from sqlalchemy import text
+        async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            if await _legacy_parent_is_goal_bound(db, run_identity):
+                from src.approval.runtime import get_current_trust_principal
+                legacy_source = _new_legacy_source(request, get_current_trust_principal(),
+                    run_identity, operator=operator)
         try:
-            run = await _find_workflow_run_for_control(run_identity)
+            run = (await _find_workflow_run_for_control(run_identity, legacy_source=legacy_source) if legacy_source is not None else await _find_workflow_run_for_control(run_identity))
         except HTTPException as exc:
             safe_detail = "workflow_run_not_found" if exc.status_code == 404 else _safe_workflow_http_detail(exc.status_code)
             await _record_workflow_route_receipt(
@@ -10568,7 +10583,7 @@ async def control_workflow_run(
             if identity_detail is not None:
                 await log_refusal(status_code=409, detail=identity_detail)
                 raise HTTPException(status_code=409, detail=identity_detail)
-            if not _is_typed_workflow_run(run):
+            if not _is_typed_workflow_run(run) and legacy_source is None:
                 goal_detail = await _workflow_current_goal_binding_detail(run)
                 if goal_detail is not None:
                     await log_refusal(status_code=409, detail=goal_detail)
@@ -10673,6 +10688,7 @@ async def control_workflow_run(
 
             await _workflow_session_fence(request, revocation_scope)
             lease_result = await workflow_state_repository.acquire_or_renew_v2_lease(
+                legacy_recovery_source=legacy_source,
                 run_identity=run_identity,
                 owner=owner,
             )
@@ -10722,6 +10738,7 @@ async def control_workflow_run(
 
             await _workflow_session_fence(request, revocation_scope)
             recovery_result = await workflow_state_repository.build_v2_recovery_plan(
+                legacy_recovery_source=legacy_source,
                 run_identity=run_identity,
                 owner=owner,
                 approval_context=run.get("current_approval_context") or run.get("approval_context"),
@@ -10753,6 +10770,7 @@ async def control_workflow_run(
                 if isinstance(orchestration, dict) and orchestration.get("revision") is not None:
                     expected_revision = int(orchestration["revision"])
             transition_result = await workflow_state_repository.record_v2_transition(
+                legacy_recovery_source=legacy_source,
                 run_identity=run_identity,
                 transition_key=f"operator:{action}:{safe_step_id or 'run'}",
                 transition_type=action,
@@ -10793,6 +10811,7 @@ async def control_workflow_run(
         # durable control receipt behind.
         await _workflow_session_fence(request, revocation_scope)
         control_result = await workflow_state_repository.record_v2_operator_recovery_control(
+                legacy_recovery_source=legacy_source,
             run_identity=run_identity,
             action=action,
             target=target,
@@ -10911,7 +10930,7 @@ async def control_workflow_run(
         )
 
         await _workflow_session_fence(request, revocation_scope)
-        refreshed_run = await _find_workflow_run_for_control(run_identity)
+        refreshed_run = (await _find_workflow_run_for_control(run_identity, legacy_source=legacy_source) if legacy_source is not None else await _find_workflow_run_for_control(run_identity))
         await _workflow_session_fence(request, revocation_scope)
         return {
             "run_identity": _safe_workflow_identity(run_identity),
@@ -10939,7 +10958,11 @@ async def control_workflow_run(
         ) from exc
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
+        if legacy_source is not None:
+            raise HTTPException(status_code=409, detail={
+                "code": "workflow_legacy_recovery_blocked", "operator_visible": True,
+                "recovery_action": "refresh_original_workflow_authority"}) from exc
         try:
             assert_runtime_not_revoked()
             await _record_workflow_route_receipt(
@@ -10956,5 +10979,7 @@ async def control_workflow_run(
             pass
         raise
     finally:
+        if legacy_source is not None:
+            legacy_source.close()
         await _end_rest_revocation_watch(revocation_scope)
         reset_runtime_context(tokens)

@@ -9,6 +9,8 @@ store sensitive values in their existing governed stores.
 
 from __future__ import annotations
 
+from src.workflows.durable_state import _begin_legacy_aware_writer
+
 import hashlib
 import json
 import math
@@ -1115,6 +1117,15 @@ def _safe_durable_authority(
     safe = _safe_structure(value)
     if not isinstance(safe, dict) or not isinstance(value, Mapping):
         return safe if isinstance(safe, dict) else {}
+    if "legacy_recovery_parent" in value:
+        from src.workflows.durable_state import _LEGACY_COMMITMENT_FIELDS
+        commitment = value["legacy_recovery_parent"]
+        if (type(commitment) is not dict or set(commitment) != _LEGACY_COMMITMENT_FIELDS
+            or any(type(item) not in (str, int, type(None))
+                or (type(item) is str and len(item.encode("utf-8")) > 512)
+                for item in commitment.values())):
+            raise ValueError("workflow legacy protected commitment malformed")
+        safe["legacy_recovery_parent"] = dict(commitment)
     if native_research_projection is not None:
         from src.work_board.research_parent import NativeResearchProjection, strategy_projection
         if (type(native_research_projection) is not NativeResearchProjection
@@ -1337,6 +1348,11 @@ async def _assert_canonical_goal_fence(
             raise DurableJobTransitionError("goal_revision requires a canonical goal")
         return None
     revision = _goal_revision(goal_revision)
+    from src.workflows.durable_state import _CURRENT_LEGACY_RECOVERY, _legacy_writer_budget
+    legacy_source = _CURRENT_LEGACY_RECOVERY.get()
+    if legacy_source is not None:
+        from src.memory.header_bounds import GOAL
+        await _legacy_writer_budget(db, legacy_source).certify(db, GOAL, (str(goal_id),))
     result = await db.execute(select(Goal).where(Goal.id == str(goal_id)))
     goal = result.scalars().first()
     if goal is None:
@@ -1552,6 +1568,8 @@ async def _verify_native_child_sql_scope(db, run):
     """Compile a private canonical journal witness before every child CAS."""
     from src.work_board.communication_preparation import assert_preparation_run_current
     await assert_preparation_run_current(db, run)
+    from src.workflows.durable_state import _verify_legacy_child_in_session
+    await _verify_legacy_child_in_session(db, run)
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
         await assert_general_task_child_phase_current(db, run)
@@ -1562,10 +1580,13 @@ async def _verify_native_child_sql_scope(db, run):
 
 
 def _append_parent_fence_condition(
-    conditions: list[Any], run: WorkflowRunState, *, now: datetime
+    conditions: list[Any], run: WorkflowRunState, *, now: datetime, writer_db=None
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
+    from src.workflows.durable_state import _append_legacy_parent_condition
+    if _append_legacy_parent_condition(conditions, run, writer_db=writer_db, now=now):
+        return
     if getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.general_task_guard import append_general_task_root_gate
         append_general_task_root_gate(conditions, run, now=now)
@@ -2409,7 +2430,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("native physical cleanup binding is invalid")
         async with self._writer_session() as db:
             if db.get_bind().dialect.name == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, binding.job_id)
             kinds = {"connection_source_sync": "connection-sync-v1", "browser_interact_v2": "2"}
             eligible = {"connection_source_sync": {"running", "unknown_external_effect", "cost_liability", "failed", "succeeded"},
@@ -2877,12 +2898,54 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def admit_job(self, spec: DurableJobSpec, **kwargs) -> dict[str, Any]:
         return await self._admit_in_session(None, spec, **kwargs)
 
+    async def admit_workflow_recovery_job(self, spec, *, source):
+        from dataclasses import replace
+        from src.workflows.durable_state import (_read_legacy_parent_in_session,
+            _LEGACY_COMMITMENT, _CURRENT_LEGACY_RECOVERY)
+        if source is not _CURRENT_LEGACY_RECOVERY.get():
+            raise DurableJobAdmissionDenied("workflow_legacy_original_producer_unavailable")
+        async with self._writer_session() as db:
+            await _begin_legacy_aware_writer(db)
+            source.child_identity = spec.identity.job_id
+            verified = await _read_legacy_parent_in_session(db, source=source)
+            parent = verified.parent
+            if spec.identity.job_kind != parent.workflow_name or spec.declared_authority.get("capability") != parent.tool_name:
+                raise DurableJobAdmissionDenied("workflow_legacy_original_workflow_changed")
+            authority = {**spec.declared_authority, **verified.contract,
+                _LEGACY_COMMITMENT: verified.commitment}
+            original_authority = _json_load(parent.declared_authority_json, {})
+            for key in ("budget_microusd", "max_budget_microusd", "owner_cost_budget_microusd", "budget"):
+                authority.pop(key, None)
+                if key in original_authority:
+                    authority[key] = original_authority[key]
+            parent_cutoff = _as_utc(verified.commitment["metadata_lease_expires_at"])
+            if parent.deadline_at is not None:
+                parent_cutoff = min(parent_cutoff, _as_utc(parent.deadline_at))
+            authority["deadline_at"] = parent_cutoff.isoformat()
+            authority["dependencies"] = _string_list(_json_load(parent.dependencies_json, []))
+            source.commitment = verified.commitment
+            spec = replace(spec, **{key: verified.contract[key] for key in
+                ("goal_id", "goal_revision", "plan_revision", "candidate_id")},
+                declared_authority=authority, parent_job_id=parent.run_identity,
+                parent_fencing_token=None, session_id=parent.session_id,
+                conversation_id=parent.conversation_id or parent.session_id,
+                operator_session_id=parent.operator_session_id,
+                deadline_at=parent_cutoff,
+                dependencies=tuple(authority["dependencies"]),
+                budget_microusd=_authority_budget_microusd(_json_load(parent.declared_authority_json, {})),
+                priority=parent.priority, max_attempts=parent.max_attempts)
+            return await self._admit_in_session(db, spec, legacy_recovery_source=source)
+
     @asynccontextmanager
-    async def _admission_session(self, db):
+    async def _admission_session(self, db, *, legacy_source=None):
         if db is not None:
             # The caller owns this ONE transaction and its rollback. No
             # intermediate commit/rollback may detach Message from its job.
-            if not db.in_transaction() or not db.info.get("native_writer_started"):
+            from src.workflows.durable_state import _CURRENT_LEGACY_RECOVERY
+            fixed_legacy_writer = (legacy_source is not None
+                and legacy_source is _CURRENT_LEGACY_RECOVERY.get()
+                and legacy_source._live.is_set())
+            if not db.in_transaction() or (not db.info.get("native_writer_started") and not fixed_legacy_writer):
                 raise DurableJobTransitionError("native admission writer required")
             yield db
         else:
@@ -2901,6 +2964,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         native_read_admission=None,
         native_read_host=None,
         native_read_host_boot_nonce=None,
+        legacy_recovery_source=None,
         native_memory_admission=None,
         native_memory_host=None,
         native_memory_host_boot_nonce=None,
@@ -2913,6 +2977,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        from src.workflows.durable_state import _LEGACY_COMMITMENT, _LegacyRecoverySource
+        if _LEGACY_COMMITMENT in spec.declared_authority and type(legacy_recovery_source) is not _LegacyRecoverySource:
+            raise DurableJobAdmissionDenied("workflow_legacy_original_producer_unavailable")
         if identity.job_kind == "work.local-evidence-report.v1" and spec.composition_binding is not None:
             from src.runtime_plugins.task_capability import ReportAdmissionCandidate
             from src.runtime_plugins.bridge import CordisHost
@@ -3055,7 +3122,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         branch_depth = 0
         native_procedure_leaf = False
         canonical_goal: Goal | None = None
-        async with self._admission_session(admission_db) as db:
+        async with self._admission_session(admission_db, legacy_source=legacy_recovery_source) as db:
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
@@ -3085,7 +3152,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # Task fields. Its exact primary lookup must precede ordinary
                 # Goal-derived dedupe, within this same admission transaction.
                 if dialect_name == "sqlite" and not transaction_started:
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 from src.workflows.selected_context_runtime import guard_admission
                 original = await guard_admission(db, spec, selected_context_admission)
@@ -3100,7 +3167,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # goal update/delete cannot race admission. A row-locking
                 # backend serializes on the canonical goal row instead.
                 if dialect_name == "sqlite" and not transaction_started:
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 else:
                     await db.execute(
@@ -3119,7 +3186,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             if spec.composition_binding is not None:
                 if dialect_name == "sqlite" and not transaction_started:
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 if dialect_name == "sqlite" and transaction_started and db.info.get("composition_guard") is not None:
                     db.info["native_writer_started"] = True
@@ -3147,7 +3214,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     or original_message.session_id != spec.conversation_id
                     or hashlib.sha256(original_message.content.encode()).hexdigest() != spec.inputs["content_digest"]):
                     raise DurableJobAdmissionDenied("native_turn_original_message_changed")
-            if spec.parent_job_id is not None:
+            if legacy_recovery_source is not None:
+                from src.workflows.durable_state import _read_legacy_parent_in_session
+                original = await _read_legacy_parent_in_session(db, source=legacy_recovery_source)
+                if spec.declared_authority.get("legacy_recovery_parent") != original.commitment:
+                    raise DurableJobAdmissionDenied("workflow_legacy_original_parent_changed")
+                root_run_identity = original.parent.root_run_identity or original.parent.run_identity
+                branch_depth = int(original.parent.branch_depth) + 1
+            if spec.parent_job_id is not None and legacy_recovery_source is None:
                 if spec.parent_fencing_token is None:
                     raise DurableJobLeaseError("parent fencing token is required for child admission")
                 try:
@@ -3301,7 +3375,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     # Start the same immediate transaction before reading the
                     # parent/child so the final insert cannot follow a stale
                     # cancellation preflight.
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 await self._assert_routine_publication_admission_guard(
                     db,
@@ -3311,11 +3385,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     dialect_name=dialect_name,
                 )
             if (admission_authority_check is not None or identity.job_kind == "memory.opportunity-preference.v1") and dialect_name == "sqlite" and not transaction_started:
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
                 transaction_started = True
             if dialect_name == "sqlite" and db.info.get("composition_guard") is not None:
                 if not transaction_started:
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 db.info["native_writer_started"] = True
             await ensure_sessions_exist(db, [spec.session_id], retained_native=(spec.composition_binding is not None
@@ -3712,6 +3786,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         *,
         owner: str,
         fencing_token: int,
+        workflow_step_id: str | None = None,
     ) -> dict[str, Any]:
         """Re-read a running job and reject a stale or expired lease."""
         async with self._session() as db:
@@ -3719,6 +3794,34 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if run.status != "running":
                 raise DurableJobLeaseError("durable job is not running")
             self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            authority = _json_load(getattr(run, "declared_authority_json", None), {})
+            if not isinstance(authority, dict) or "legacy_recovery_parent" not in authority:
+                db.expunge(run)
+                return _serialize(run)
+            await _begin_legacy_aware_writer(db)
+            if isinstance(authority, dict) and "legacy_recovery_parent" in authority:
+                from src.memory.header_bounds import strict_json_loads
+                effects = strict_json_loads(run.effect_receipts_json)
+                checkpoints = strict_json_loads(run.checkpoint_receipts_json)
+                intents = [item for item in effects if isinstance(item, dict)
+                    and item.get("effect_id") == f"workflow-step:{workflow_step_id}"
+                    and item.get("effect_type") == "workflow_step" and item.get("status") == "intent"]
+                starts = [item for item in checkpoints if isinstance(item, dict)
+                    and item.get("checkpoint_id") == f"step:{workflow_step_id}"]
+                if not workflow_step_id or len(intents) != 1 or len(starts) != 1:
+                    raise DurableJobLeaseError("workflow original positive step intent required")
+            await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+                goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+                owner_principal_id=run.owner_principal_id, session_id=run.session_id,
+                authority=run.declared_authority_json)
+            await _verify_native_child_sql_scope(db, run)
+            conditions = [WorkflowRunState.run_identity == run.run_identity,
+                WorkflowRunState.revision == run.revision, WorkflowRunState.status == "running",
+                WorkflowRunState.lease_owner == owner, WorkflowRunState.fencing_token == fencing_token,
+                WorkflowRunState.lease_expires_at > _utc_now()]
+            _append_parent_fence_condition(conditions, run, now=_utc_now(), writer_db=db)
+            if await db.scalar(select(WorkflowRunState.id).where(*conditions)) is None:
+                raise DurableJobLeaseError("workflow current Goal/parent dispatch refused")
             db.expunge(run)
             return _serialize(run)
 
@@ -3903,7 +4006,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at > now,
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             updated = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -4056,7 +4159,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
-                    await db.execute(text("BEGIN IMMEDIATE"))
+                    await _begin_legacy_aware_writer(db)
                     near_writer_started = near_queue_guard
                     general_writer_started = general_resume_guard
             run = await self._fetch(db, job_id)
@@ -4456,7 +4559,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             if to_status not in {"failed", "cancelled"}:
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(conditions, run, now=now)
+                _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -4958,7 +5061,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if db.info.get("composition_guard") is None:
             raise DurableJobLeaseError("original native turn family writer unavailable")
         if not db.in_transaction():
-            await db.execute(text("BEGIN IMMEDIATE"))
+            await _begin_legacy_aware_writer(db)
             db.info["native_writer_started"] = True
         with db.no_autoflush:
             run = await self._fetch(db, native_execution.admission.job_id)
@@ -5086,7 +5189,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             WorkflowRunState.lease_owner == payload["lease_owner"], WorkflowRunState.fencing_token == payload["fencing_token"],
             WorkflowRunState.attempt_count == payload["attempt_count"], WorkflowRunState.deadline_at > now,
             WorkflowRunState.lease_expires_at > now]
-        _append_parent_fence_condition(conditions, run, now=now)
+        _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
         result = await db.execute(update(WorkflowRunState).where(*conditions)
             .execution_options(synchronize_session=False).values(status="succeeded",
                 checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts([*history, result_receipt])),
@@ -5174,7 +5277,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner == claim["lease_owner"], WorkflowRunState.fencing_token == claim["fencing_token"],
                 WorkflowRunState.attempt_count == claim["attempt_count"], WorkflowRunState.deadline_at > now,
                 WorkflowRunState.lease_expires_at > now]
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             result = await db.execute(update(WorkflowRunState).where(*conditions)
                 .execution_options(synchronize_session=False).values(status=status,
                     checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts([*history, receipt])),
@@ -5204,7 +5307,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._writer_session() as db:
             if db.info.get("composition_guard") is None or db.in_transaction():
                 raise DurableJobLeaseError("original native read completion writer unavailable")
-            await db.execute(text("BEGIN IMMEDIATE"))
+            await _begin_legacy_aware_writer(db)
             db.info["native_writer_started"] = True
             run = await self._fetch(db, original_claim.job["job_id"])
             context = read_context(run)
@@ -5338,7 +5441,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.runtime_plugins.ownership import begin_native_writer
                 await begin_native_writer(db, owner="durable_jobs")
             elif claim_authority_check is not None or dependency_guard or preference_guard:
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
                 if (_runtime_service_claim is None or continue_existing_attempt or run.attempt_count != 0):
@@ -5413,7 +5516,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     ),
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(deadline_conditions, run, now=now)
+                _append_parent_fence_condition(deadline_conditions, run, now=now, writer_db=db)
                 expired = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5457,7 +5560,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(malformed_conditions, run, now=now)
+                _append_parent_fence_condition(malformed_conditions, run, now=now, writer_db=db)
                 malformed = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5503,7 +5606,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     or_(WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at <= now),
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(recovery_conditions, run, now=now)
+                _append_parent_fence_condition(recovery_conditions, run, now=now, writer_db=db)
                 recovered = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5548,7 +5651,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     ),
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(dependency_failure_conditions, run, now=now)
+                _append_parent_fence_condition(dependency_failure_conditions, run, now=now, writer_db=db)
                 failed = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5590,7 +5693,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     ),
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(dependency_block_conditions, run, now=now)
+                _append_parent_fence_condition(dependency_block_conditions, run, now=now, writer_db=db)
                 blocked = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5661,7 +5764,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             claim_values: dict[str, Any] = {
                 "status": "running",
                 "lease_owner": owner,
@@ -5787,7 +5890,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.lease_expires_at > now,
                 ]
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(deadline_conditions, run, now=now)
+                _append_parent_fence_condition(deadline_conditions, run, now=now, writer_db=db)
                 expired = await db.execute(
                     update(WorkflowRunState)
                     .execution_options(synchronize_session=False)
@@ -5839,7 +5942,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at > now,
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(heartbeat_conditions, run, now=now)
+            _append_parent_fence_condition(heartbeat_conditions, run, now=now, writer_db=db)
             updated = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -5938,7 +6041,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(transfer_conditions, run, now=now)
+            _append_parent_fence_condition(transfer_conditions, run, now=now, writer_db=db)
             updated = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -6010,7 +6113,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             # the existing fenced CAS below without masking a real conflict.
             bind = db.get_bind()
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             if run.job_kind == "memory.opportunity-preference.v1" and checkpoint_id == "opportunity-preference-source-use":
                 from src.work_board.opportunity_preference_native import recheck_native
@@ -6118,7 +6221,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at > now,
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(checkpoint_conditions, run, now=now)
+            _append_parent_fence_condition(checkpoint_conditions, run, now=now, writer_db=db)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -6265,7 +6368,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
             if dialect_name == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             if run.status != "running":
                 raise DurableJobAdmissionDenied(
@@ -6447,7 +6550,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._writer_session() as db:
             bind = db.get_bind()
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             if run.status not in {"succeeded", "degraded", "failed", "cancelled"}:
                 raise DurableJobTransitionError("repository repair job is not terminally published")
@@ -6602,7 +6705,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("Node cleanup settlement request is invalid")
         async with self._writer_session() as db:
             if db.get_bind().dialect.name == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, request.job_id)
             declared = _json_load(run.declared_authority_json, {})
             if (run.status != "unknown_external_effect" or run.job_kind != "engineering.repo-repair.v1"
@@ -6772,7 +6875,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
             if dialect_name == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             now = _utc_now()
             parent = await self._fetch(db, parent_job_id)
             child = await self._fetch(db, child_job_id)
@@ -7146,7 +7249,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             # SQLite before the fail-closed reservation validator runs.
             bind = db.get_bind()
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             await _assert_canonical_goal_fence(
                 db,
@@ -7202,7 +7305,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             updated = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -7406,7 +7509,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -7500,7 +7603,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             updated = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -7664,7 +7767,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobLeaseError("GitHub closure canonical proof set bounds invalid")
         async with self._writer_session() as db:
             if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id, allow_closed=True)
             if run.github_capacity_closure_json:
                 existing = _json_load(run.github_capacity_closure_json, {})
@@ -7765,7 +7868,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             session_id=binding["job"]["session_id"], content=artifact_content)
         async with self._writer_session() as db:
             if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id, allow_closed=closed_read)
             if closed_read:
                 await check_closed_binding(db, run, read_authority, binding=binding)
@@ -8241,7 +8344,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -8499,7 +8602,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at > now,
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             effects.append(receipt)
             updated = await db.execute(
                 update(WorkflowRunState)
@@ -8700,7 +8803,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await live_operator(owner_principal_id, preliminary["operator_session_id"])
         async with self._writer_session() as db:
             if github_recovery and getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
-                await db.execute(text("BEGIN IMMEDIATE"))
+                await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
             await _assert_canonical_goal_fence(
                 db,
@@ -8749,7 +8852,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_expires_at.is_(None),
             ]
             await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
             values: dict[str, Any] = {
                 "status": "succeeded",
                 "failure_reason": None,
@@ -9231,6 +9334,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobLeaseError("job lease has expired")
 
     async def _fetch(self, db: Any, job_id: str, *, allow_closed=False) -> WorkflowRunState:
+        from src.workflows.durable_state import (_CURRENT_LEGACY_RECOVERY,
+            _begin_legacy_aware_writer, _legacy_writer_budget)
+        source = _CURRENT_LEGACY_RECOVERY.get()
+        if source is not None:
+            if not source._live.is_set():
+                raise DurableJobLeaseError("workflow_legacy_original_producer_unavailable")
+            await _begin_legacy_aware_writer(db)
+            from src.memory.header_bounds import WRS_BY_RUN
+            await _legacy_writer_budget(db, source).certify(db, WRS_BY_RUN, (job_id,))
         # Bulk CAS updates deliberately disable ORM session synchronization so
         # timezone-aware predicates are evaluated by the database. Refresh the
         # identity-map row on every read before serializing the receipt.

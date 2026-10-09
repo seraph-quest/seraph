@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { makeMailIdempotencyKey } from "../../lib/mailApi";
 import { actReply, listReplyProfiles, previewReply, readReply, recoverReplyOperation, listReplyRecoveryGoals } from "../../lib/mailReplyApi";
+import type { ExactCommunicationApproval } from "../../lib/communications";
 import type { ReplyJob, ReplyProfile } from "../../lib/mailReplyApi";
 
-interface Props { taskId:string;messageRevision:string;ownerPrincipalId?:string|null;ownerSessionId?:string|null;goalId?:string|null;goalRevision?:number|null; }
+interface Props { taskId:string;messageRevision:string;ownerPrincipalId?:string|null;ownerSessionId?:string|null;goalId?:string|null;goalRevision?:number|null; onExactApproved?: (value: ExactCommunicationApproval | null) => void; onReadback?: (value: ReplyJob) => void; }
 type Action="preview"|"decision"|"execute"|"cancel"|"observe";
 interface Pending {version:1;action:Action;jobId:string|null;body:Record<string,unknown>;}
 interface Stored {version:1;jobId:string|null;pending:Pending|null;}
@@ -13,7 +14,7 @@ function decode(raw:string):Stored {if(raw.length>16384)throw Error();const s=JS
     const allowed=new Set(["task_id","expected_message_revision","read_connection_id","expected_read_revision","send_connection_id","expected_send_revision","acknowledge_identity_source_read","acknowledge_exact_reply_send","request_uuid","decision","expected_digest","expected_revision","expected_original_revision","goal_id","goal_revision","acknowledge_readonly_recovery"]);
     if(Object.entries(p.body).some(([k,v])=>!allowed.has(k)||!(typeof v==="boolean"||Number.isSafeInteger(v)||opaque(v))))throw Error();}
   return s;}
-export function MailReplySendPanel({taskId,messageRevision,ownerPrincipalId,ownerSessionId,goalId}:Props){
+export function MailReplySendPanel({taskId,messageRevision,ownerPrincipalId,ownerSessionId,goalId,onExactApproved,onReadback}:Props){
   const storageKey=ownerPrincipalId&&ownerSessionId?`seraph:mail-exact-reply:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}:${encodeURIComponent(taskId)}`:null;
   const [saved,setSaved]=useState<Stored>({version:1,jobId:null,pending:null});const [job,setJob]=useState<ReplyJob|null>(null);const [aux,setAux]=useState<ReplyJob|null>(null);
   const [profiles,setProfiles]=useState<ReplyProfile[]>([]);const [readId,setReadId]=useState("");const [sendId,setSendId]=useState("");const [ack,setAck]=useState(false);const [recoverAck,setRecoverAck]=useState(false);
@@ -24,8 +25,10 @@ export function MailReplySendPanel({taskId,messageRevision,ownerPrincipalId,owne
     if(storageKey)try{const raw=sessionStorage.getItem(storageKey);if(raw)setSaved(decode(raw));}catch{setStorageError(true);}
     return()=>{generation.current++;controller.current?.abort();};},[storageKey]);
   function retain(value:Stored){if(!storageKey)throw Error();const raw=JSON.stringify(value);decode(raw);sessionStorage.setItem(storageKey,raw);if(sessionStorage.getItem(storageKey)!==raw)throw Error();setSaved(value);}
-  async function run(action:(signal:AbortSignal,g:number)=>Promise<void>){if(!storageKey||busy||storageError)return;const g=generation.current;const c=new AbortController();controller.current=c;setBusy(true);setError(null);try{await action(c.signal,g);}catch{if(g===generation.current)setError("The original action has an unconfirmed outcome. Inspect its canonical readback; no resend or replacement is authorized.");}finally{if(g===generation.current){setBusy(false);controller.current=null;}}}
-  function accept(result:ReplyJob,pending:Pending|null,g:number){if(g!==generation.current)return;if(result.kind==="mail_reply_send_v1"&&(result.source_task_id!==taskId||(saved.jobId&&result.job_id!==saved.jobId)))throw Error();if(result.kind==="mail_reply_observation_v1"&&result.original_job_id!==saved.jobId)throw Error();if(pending?.body.request_uuid&&result.request_uuid!==pending.body.request_uuid)throw Error();if(pending?.action==="observe")setAux(result);else {if(pending?.jobId&&result.job_id!==pending.jobId)throw Error();setJob(result);}const original=saved.jobId||(pending?.action==="preview"?result.job_id:null);retain({version:1,jobId:original,pending:null});}
+  async function run(action:(signal:AbortSignal,g:number)=>Promise<void>){if(!storageKey||busy||storageError)return;const g=generation.current;const c=new AbortController();controller.current=c;setBusy(true);setError(null);onExactApproved?.(null);if(onExactApproved)setJob(value=>value?{...value,preview:undefined}:value);try{await action(c.signal,g);}catch{if(g===generation.current)setError("The original action has an unconfirmed outcome. Inspect its canonical readback; no resend or replacement is authorized.");}finally{if(g===generation.current){setBusy(false);controller.current=null;}}}
+  function accept(result:ReplyJob,pending:Pending|null,g:number){if(g!==generation.current)return;if(result.kind==="mail_reply_send_v1"&&(result.source_task_id!==taskId||(saved.jobId&&result.job_id!==saved.jobId)))throw Error();if(result.kind==="mail_reply_observation_v1"&&result.original_job_id!==saved.jobId)throw Error();if(pending?.body.request_uuid&&result.request_uuid!==pending.body.request_uuid)throw Error();if(pending?.action==="observe")setAux(result);else {if(pending?.jobId&&result.job_id!==pending.jobId)throw Error();setJob(result);}const original=saved.jobId||(pending?.action==="preview"?result.job_id:null);retain({version:1,jobId:original,pending:null});
+    if(result.kind==="mail_reply_send_v1"){onReadback?.(result);const preview=result.preview;onExactApproved?.(result.status==="paused"&&preview?.approval_status==="approved"&&preview.expires_at*1000>Date.now()?{operation_id:result.job_id,exact_preview_digest:preview.decision_digest,approval_id:preview.approval_id,expires_at:preview.expires_at}:null);}
+  }
   async function submit(pending:Pending,signal:AbortSignal,g:number){retain({version:1,jobId:saved.jobId,pending});const result=pending.action==="preview"?await previewReply(pending.body,signal):await actReply(pending.jobId!,pending.action,pending.body,signal);accept(result,pending,g);}
   async function inspect(signal:AbortSignal,g:number){let result:ReplyJob|null=null;
     if(saved.pending?.action==="preview"||saved.pending?.action==="observe")result=await recoverReplyOperation(saved.pending.action==="preview"?"mail_reply_send_v1":"mail_reply_observation_v1",String(saved.pending.body.request_uuid),signal);

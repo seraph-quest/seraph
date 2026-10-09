@@ -254,6 +254,14 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
                 await method_authority(db, run)
                 await document_invocation(db, replace(principal, job_id=binding.invocation_id),
                     binding.invocation_id, fence)
+        elif descriptor.tool_id == "communication_prepare":
+            from src.work_board.communication_preparation import stage_plan_authority
+            async with jobs._session() as db:
+                communication_authority = await stage_plan_authority(db,
+                    replace(principal, job_id=binding.invocation_id), binding.invocation_id, fence, output)
+            async def document_authority(db, run):
+                await method_authority(db, run)
+                await communication_authority(db, run)
         elif descriptor.tool_id == "document_build":
             from src.work_board.document_build_native import settled_output_authority
             async def document_authority(db, run):

@@ -1353,6 +1353,8 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
 
 async def _verify_native_child_sql_scope(db, run):
     """Compile a private canonical journal witness before every child CAS."""
+    from src.work_board.communication_preparation import assert_preparation_run_current
+    await assert_preparation_run_current(db, run)
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
         await assert_general_task_child_phase_current(db, run)
@@ -2986,10 +2988,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 db.expunge(existing)
                 return _deduped_admission(existing, binding=binding)
 
+            native_communication_leaf = False
+            if "communication_preparation" in spec.declared_authority:
+                from src.work_board.communication_preparation import verify_admission_spec
+                native_communication_leaf = await verify_admission_spec(db, admission_authority_check, spec)
             if (
                 spec.goal_id is not None
                 and spec.max_outstanding_jobs is not None
                 and not native_procedure_leaf
+                and not native_communication_leaf
             ):
                 # This count and the child insert share the same durable
                 # transaction.  Unlike the scheduler's advisory listing,

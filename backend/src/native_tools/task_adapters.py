@@ -250,6 +250,7 @@ class ToolRegistry:
     def __init__(self, *, mcp_runtime=None, extension_registry=None):
         self.mcp_runtime = mcp_runtime
         self.extension_registry = extension_registry
+        self.communication_dispatcher = None
         self.started = False
         self.delegation_service = None
 
@@ -276,9 +277,14 @@ class ToolRegistry:
             and closure is _STOCK_CLOSURE_PRODUCER and closure.__code__ is _STOCK_CLOSURE_CODE):
             if entry[1] is None:
                 possible = True
-                if (getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
+                if (descriptor.tool_id in {"document_prepare", "document_build"}
+                    and getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
                     and self._invoke_document_with_closure.__func__.__code__ is _STOCK_DOCUMENT_CODE):
-                    possible = descriptor.tool_id not in {"document_prepare", "document_build"}
+                    possible = False
+                if (descriptor.tool_id == "communication_prepare"
+                    and getattr(self._invoke_communication_with_closure, "__func__", None) is _STOCK_COMMUNICATION_PRODUCER
+                    and self._invoke_communication_with_closure.__func__.__code__ is _STOCK_COMMUNICATION_CODE):
+                    possible = False
             else:
                 wrapper, _ = _current_approval_wrapper(entry[1], is_mcp=entry[2])
                 possible = isinstance(wrapper, ApprovalTool)
@@ -290,6 +296,8 @@ class ToolRegistry:
             "begin": _producer_digest(begin), "closure": _producer_digest(closure),
             "document": _producer_digest(getattr(self._invoke_document_with_closure, "__func__", None))
                 if entry[1] is None else None,
+            "communication": _producer_digest(getattr(self._invoke_communication_with_closure, "__func__", None))
+                if descriptor.tool_id == "communication_prepare" else None,
             "wrapper_selector": _producer_digest(_current_approval_wrapper)})
         return TaskToolCapacityWitness(self, descriptor.model_copy(deep=True),
             _digest(descriptor.model_dump(mode="json")), possible, producer, classifier_digest, _CAPACITY_SEAL)
@@ -320,6 +328,11 @@ class ToolRegistry:
         local_document = document_descriptor()
         if is_tool_allowed(local_document.tool_id, mode):
             entries[local_document.tool_id] = (local_document, None, False)
+        if self.communication_dispatcher is not None:
+            from src.work_board.communication_preparation import descriptor as communication_descriptor
+            communication = communication_descriptor()
+            if is_tool_allowed(communication.tool_id, mode):
+                entries[communication.tool_id] = (communication, None, False)
         from src.work_board.document_build_native import descriptor as build_descriptor
         local_build = build_descriptor()
         if is_tool_allowed(local_build.tool_id, mode):
@@ -427,6 +440,12 @@ class ToolRegistry:
         if descriptor.tool_id == "delegate_task":
             return TaskToolInvocation(asyncio.create_task(self._invoke_delegation_with_closure(
                 descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
+        if descriptor.tool_id == "communication_prepare":
+            from src.security.trust_contract import AuthorityGrant
+            if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants or self.communication_dispatcher is None:
+                raise PermissionError("current communications execution owner required")
+            return TaskToolInvocation(asyncio.create_task(self._invoke_communication_with_closure(
+                descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
         # ContextVars are copied by to_thread. Existing wrappers remain the
         # last authority/approval/audit/secret boundary, including MCP calls.
         # The handle belongs to the current native interpreter invocation.
@@ -462,6 +481,20 @@ class ToolRegistry:
             witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
             return _InvocationCompletion(output, None, witness)
         except BaseException as error:
+            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
+
+    async def _invoke_communication_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        from src.work_board.communication_preparation import invoke
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            output = await invoke(principal, job_id, fencing_token, inputs,
+                dispatcher=self.communication_dispatcher)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            # invoke retains/awaits every original producer before returning.
             witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
             return _InvocationCompletion(None, error, witness)
 
@@ -600,10 +633,12 @@ class ToolRegistry:
 
 _STOCK_SYNC_PRODUCER = ToolRegistry._invoke_sync
 _STOCK_DOCUMENT_PRODUCER = ToolRegistry._invoke_document_with_closure
+_STOCK_COMMUNICATION_PRODUCER = ToolRegistry._invoke_communication_with_closure
 _STOCK_BEGIN_PRODUCER = ToolRegistry.begin_invocation
 _STOCK_CLOSURE_PRODUCER = ToolRegistry._invoke_with_closure
 _STOCK_SYNC_CODE = _STOCK_SYNC_PRODUCER.__code__
 _STOCK_DOCUMENT_CODE = _STOCK_DOCUMENT_PRODUCER.__code__
+_STOCK_COMMUNICATION_CODE = _STOCK_COMMUNICATION_PRODUCER.__code__
 _STOCK_BEGIN_CODE = _STOCK_BEGIN_PRODUCER.__code__
 _STOCK_CLOSURE_CODE = _STOCK_CLOSURE_PRODUCER.__code__
 _CAPACITY_COMPILER = ToolRegistry.compile_capacity

@@ -1,3 +1,5 @@
+import { CommunicationPlanPanel } from "./CommunicationPlanPanel";
+import type { CommunicationSelection, CommunicationReplyInput, CommunicationRescheduleInput } from "../../lib/communications";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
 import { createPortal } from "react-dom";
@@ -1097,6 +1099,23 @@ function WorkBoardPanel({
   }, [routineInvocationStorageKeyValue]);
 
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
+  const [communicationOpen, setCommunicationOpen] = useState(false);
+  const [communicationSelection, setCommunicationSelection] = useState<Omit<CommunicationSelection, "acknowledge_private_review">>({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] });
+  const communicationGoalRevisions = allGoals.map(g => `${g.id}:${g.revision}:${g.status}`).join("|");
+  useEffect(() => { setCommunicationSelection({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] }); setCommunicationOpen(false); }, [ownerPrincipalId, ownerSessionId, communicationGoalRevisions]);
+  function collectCommunication(kind: "reply" | "meeting" | "reschedule", input: CommunicationReplyInput | CommunicationSelection["meeting_inputs"][number] | CommunicationRescheduleInput) {
+    const revision = "expected_goal_revision" in input ? input.expected_goal_revision : input.goal_revision;
+    if (!ownerPrincipalId || !ownerSessionId || !allGoals.some(g => g.id === input.goal_id && g.revision === revision && g.status === "active" && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only")) return;
+    if ((kind === "reply" && communicationSelection.reply_inputs.length >= 5 && !communicationSelection.reply_inputs.some(v => v.message_binding_id === (input as CommunicationReplyInput).message_binding_id))
+      || (kind === "meeting" && communicationSelection.meeting_inputs.length >= 5 && !communicationSelection.meeting_inputs.some(v => v.event_binding_id === (input as CommunicationSelection["meeting_inputs"][number]).event_binding_id))
+      || (kind === "reschedule" && communicationSelection.reschedule_inputs.length >= 3 && !communicationSelection.reschedule_inputs.some(v => v.event_binding_id === (input as CommunicationRescheduleInput).event_binding_id))) throw Error("Communication source limit reached. Review the selected subset before adding another source.");
+    setCommunicationSelection(current => {
+      if (kind === "reply") { const value = input as CommunicationReplyInput; return { ...current, reply_inputs: [...current.reply_inputs.filter(v => v.message_binding_id !== value.message_binding_id), value] }; }
+      if (kind === "meeting") { const value = input as CommunicationSelection["meeting_inputs"][number]; return { ...current, meeting_inputs: [...current.meeting_inputs.filter(v => v.event_binding_id !== value.event_binding_id), value] }; }
+      const value = input as CommunicationRescheduleInput; return { ...current, reschedule_inputs: [...current.reschedule_inputs.filter(v => v.event_binding_id !== value.event_binding_id), value] };
+    });
+    setAnnouncement("Reviewed source selected in memory for communication preparation. Open Prepare communications to review the bounded task.");
+  }
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
@@ -3291,6 +3310,7 @@ function WorkBoardPanel({
         </div>
         <div className="cockpit-operator-actions flex-wrap">
           <button type="button" className="cockpit-feedback-button" onClick={() => setGeneralTaskOpen(true)}>Describe a task</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setCommunicationOpen(true)}>Prepare communications</button>
           <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
           </button>
@@ -3607,6 +3627,7 @@ function WorkBoardPanel({
                   taskId={selectedTask.task_id}
                   ownerPrincipalId={ownerPrincipalId}
                   ownerSessionId={ownerSessionId}
+                  onPrepareCommunication={input => collectCommunication("reply", input)}
                   mailOrigin={selectedInboxOrigin.mail}
                   goalId={selectedInboxOrigin.goal_id}
                   goalRevision={selectedInboxOrigin.goal_revision}
@@ -4284,7 +4305,7 @@ function WorkBoardPanel({
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
               {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && <GeneralTaskPanel
                 key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
-                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                task={selectedTask} goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onInspectArtifact={onInspectArtifact} onInspectPartialArtifact={onInspectPartialArtifact}
                 onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
@@ -4358,6 +4379,10 @@ function WorkBoardPanel({
       )}
 
       {createPortal(<div className="relative z-[200]">
+      {communicationOpen && <div className="fixed inset-0 z-[200] overflow-auto bg-black/65 p-4" role="dialog" aria-modal="true" aria-label="Prepare communications"><div className="mx-auto max-w-2xl">
+        <CommunicationPlanPanel ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals} selection={communicationSelection}
+          onClose={() => setCommunicationOpen(false)} onCreated={async task => { setCommunicationOpen(false); setCommunicationSelection({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] }); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id); }} />
+      </div></div>}
       {generalTaskOpen && <div className="fixed inset-0 z-[200] overflow-auto bg-black/65 p-4" role="dialog" aria-modal="true" aria-label="Describe a task"><div className="mx-auto max-w-2xl">
         <GeneralTaskPanel key={`general-create:${ownerPrincipalId}:${ownerSessionId}`} goals={allGoals}
           ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
@@ -4451,6 +4476,8 @@ function WorkBoardPanel({
           ownerSessionId={ownerSessionId}
           goals={allGoals}
           initialPending={pendingCalendarAtMount}
+          onPrepareCommunication={input => collectCommunication("meeting", input)}
+          onPrepareReschedule={input => collectCommunication("reschedule", input)}
           onPendingChange={setCalendarPending}
           onClose={closeCalendarPrep}
           onOpenSettings={() => setAnnouncement("Open Settings → Calendar to configure an active read-only connection.")}

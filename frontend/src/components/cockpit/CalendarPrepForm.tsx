@@ -1,3 +1,4 @@
+import type { CommunicationRescheduleInput } from "../../lib/communications";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectionSyncPanel } from "./ConnectionSyncPanel";
 import { connectedTaskInput } from "../../lib/connectionSync";
@@ -143,6 +144,8 @@ export interface PendingCalendarSubmission {
 }
 
 export interface CalendarPrepFormProps {
+  onPrepareCommunication?: (input: CreateCalendarPrepRequest["input"]) => void;
+  onPrepareReschedule?: (input: CommunicationRescheduleInput) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
   goals: GoalInfo[];
@@ -153,7 +156,7 @@ export interface CalendarPrepFormProps {
   onPendingChange?: (pending: PendingCalendarSubmission | null) => void;
 }
 
-export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, initialPending, onPendingChange, ownerPrincipalId, ownerSessionId }: CalendarPrepFormProps) {
+export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, initialPending, onPendingChange, ownerPrincipalId, ownerSessionId, onPrepareCommunication, onPrepareReschedule }: CalendarPrepFormProps) {
   const mountedRef = useRef(true);
   const [connections, setConnections] = useState<CalendarConnectionMetadata[]>([]);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -593,13 +596,16 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
           <label className="sm:col-span-2">Preparation title<input className="cockpit-input mt-1 w-full" maxLength={MAX_TITLE} value={title} onChange={(event) => setTitle(event.currentTarget.value)} disabled={Boolean(pending)} /></label>
           <fieldset className="sm:col-span-2 rounded border border-white/10 p-2" disabled={Boolean(pending) || Boolean(confirmedPrep)}><legend className="px-1 text-xs font-semibold">Optional governed observation</legend><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.currentTarget.checked)} />Observe this calendar on a finite schedule after preparation</label>{scheduleEnabled && <div className="mt-2 grid gap-2 sm:grid-cols-2"><label>Cadence<select className="cockpit-input mt-1 w-full" value={cadenceKind} onChange={(event) => setCadenceKind(event.currentTarget.value as typeof cadenceKind)}><option value="5min">Every 5 minutes</option><option value="hourly">Hourly</option><option value="6h">Every 6 hours</option><option value="daily">Daily</option></select></label><label>Timezone<input className="cockpit-input mt-1 w-full" maxLength={128} value={timezone} onChange={(event) => setTimezone(event.currentTarget.value)} /></label>{cadenceKind === "daily" && <><label>Daily hour<input className="cockpit-input mt-1 w-full" type="number" min={0} max={23} value={dailyHour} onChange={(event) => setDailyHour(event.currentTarget.value)} /></label><label>Daily minute<input className="cockpit-input mt-1 w-full" type="number" min={0} max={59} value={dailyMinute} onChange={(event) => setDailyMinute(event.currentTarget.value)} /></label></>}<label>Schedule expires at<input className="cockpit-input mt-1 w-full" type="datetime-local" max={scheduleExpiryMax} aria-describedby="calendar-schedule-expiry-limit" value={scheduleExpiresAt} onChange={(event) => setScheduleExpiresAt(event.currentTarget.value)} /><span id="calendar-schedule-expiry-limit" className="mt-1 block text-[10px] opacity-70">Schedule limit: up to 24 hours, and no later than the current consent or preparation artifact expiry ({new Date(scheduleExpiryLimit).toLocaleString()}).</span></label></div>}</fieldset>
         </div>
-        {selectedEvent && selectedGoal && goalRevision(selectedGoal) && <CalendarReschedulePanel
+        {selectedEvent && selectedGoal && goalRevision(selectedGoal) && <CalendarReschedulePanel onPrepareCommunication={onPrepareReschedule}
           ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
           eventBindingId={selectedEvent.event_binding_id} eventBindingRevision={selectedEvent.event_binding_revision}
           goalId={selectedGoal.id} goalRevision={goalRevision(selectedGoal)!} goals={goals}
         />}
         {confirmedPrep && <div className="mt-3 rounded border border-emerald-500/30 p-2 text-xs" role="status">Preparation created: task {confirmedPrep.task.task_id} · artifact {confirmedPrep.input_artifact.artifact_id} · digest {confirmedPrep.input_artifact.typed_input_digest}{confirmedPrep.idempotent_replay ? " · exact replay" : ""}{schedule ? ` · schedule ${schedule.binding_id} ${schedule.state}` : scheduleEnabled ? " · schedule not confirmed" : ""}<div className="mt-2 flex gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => void continueWithPrep(confirmedPrep)} disabled={Boolean(pending)}>Open task without schedule</button>{pending?.intent.kind === "schedule" && <button type="button" className="cockpit-feedback-button" onClick={() => void retryPending()} disabled={Boolean(busy)}>Retry schedule</button>}</div></div>}
-        <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={Boolean(busy) || Boolean(pending)}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedCalendarIsCurrent || !selectedEventId || !allowRemoteModel || !hasRequiredAllowedFields}>{busy === "prep" ? "Preparing…" : "Prepare meeting"}</button></div>
+        <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={Boolean(busy) || Boolean(pending)}>Cancel</button>{onPrepareCommunication && <button type="button" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedEvent || !selectedCalendarIsCurrent || !allowRemoteModel || !hasRequiredAllowedFields} onClick={() => {
+          try { const request = buildPrepRequest(); if (!request || !consent || Date.parse(consent.expires_at) <= Date.now()) throw Error("Review current meeting source and Goal before adding it."); onPrepareCommunication(request.input); }
+          catch (reason) { setError((reason as Error).message); }
+        }}>Add this reviewed meeting source to communication preparation</button>}<button type="submit" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedCalendarIsCurrent || !selectedEventId || !allowRemoteModel || !hasRequiredAllowedFields}>{busy === "prep" ? "Preparing…" : "Prepare meeting"}</button></div>
       </form>
     </div>
   );

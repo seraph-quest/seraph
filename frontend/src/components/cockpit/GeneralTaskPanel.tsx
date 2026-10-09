@@ -1,3 +1,4 @@
+import { CommunicationPlanPanel } from "./CommunicationPlanPanel";
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
@@ -441,6 +442,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
             {preparationView.sections.map((section) => <article key={section.source_ref} className="mt-2"><h4 className="break-all font-mono">{section.source_ref}</h4><pre className="whitespace-pre-wrap break-all">{section.text}</pre>{(section.formula !== null || section.cached_value !== null) && <dl><dt>Formula (inert)</dt><dd className="whitespace-pre-wrap break-all">{section.formula ?? "none"}</dd><dt>Cached value (freshness unknown)</dt><dd className="whitespace-pre-wrap break-all">{section.cached_value ?? "unavailable"}</dd></dl>}{section.cached_value === null && <p role="status">Cached value unavailable; freshness unknown. Formula remains inert.</p>}</article>)}
           </section>}
         </section>}
+        {read.plan?.steps.some(step => step.tool_id === "communication_prepare") && <CommunicationPlanPanel deadlineAt={read.native_execution?.native_deadline_at} task={task} goals={goals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />}
         {read.native_execution?.phase === "operator_paused" && <details className="mt-3">
           <summary>Revise unstarted task steps</summary>
           <p className="text-xs">Admitted and completed steps stay fixed. Edit the current unstarted step IDs below. Saving keeps this original run safely paused; review its current plan before resuming.</p>

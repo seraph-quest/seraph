@@ -1451,6 +1451,126 @@ async def bind_input_artifact(
         await db.commit()
 
 
+async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_id,
+                                attempt_id, expected_task_revision, expected_fencing_token,
+                                expected_lease_owner, expected_workflow_run_id):
+    """Stage this original consume call, then certify its fresh native writer.
+
+    Expected scalars are fences, never authority. Source and physical evidence
+    come only from original owners and stay local to this invocation.
+    """
+    guard = db.info.get("composition_read_guard")
+    if guard is None or (db.info.get("composition_guard") is not None
+                        and db.info.get("native_writer_started") and db.in_transaction()):
+        return  # Preserve original uncomposed and already-writer siblings.
+    from src.workspace.accounting_witness import CompositionReadGuard
+    from src.db.models import OperatorSession, WorkBoardAttempt, WorkflowRunState
+    from src.guardian.opportunity_plans import stage_accepted_plan_task, recheck_accepted_plan_task
+    from src.work_board.review import _workflow_run_binds_board_attempt
+    from src.work_board.pipeline_cpu import read_output
+    from src.work_board.dispatcher import _browser_cleanup_receipt_proven, _browser_verified_artifact_reference
+    if type(guard) is not CompositionReadGuard or guard.db is not db or guard.closed:
+        raise BoardError("composition_provider_invalid", "The original consume session changed")
+    if db.new or db.dirty or db.deleted:
+        raise BoardError("dependency_write_requires_transaction_boundary", "Consumption requires a clean original session")
+    if (type(expected_task_revision) is not int or expected_task_revision < 1
+        or type(expected_fencing_token) is not int or expected_fencing_token < 1
+        or any(type(value) is not str or not value for value in
+               (attempt_id, expected_lease_owner, expected_workflow_run_id))):
+        raise BoardError("input_artifact_consume_conflict", "The original execution fence is required", status_code=409)
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+    attempt = await db.get(WorkBoardAttempt, attempt_id)
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == expected_workflow_run_id))
+
+    def check_execution(current_task, current_attempt, current_run):
+        if (current_task is None or current_attempt is None or current_run is None
+            or current_task.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}
+            or (current_task.owner_principal_id, current_task.owner_session_id) != (owner.principal_id, owner.session_id)
+            or current_task.status != WorkBoardStatus.running or current_task.task_revision != expected_task_revision
+            or current_task.input_artifact_id != artifact_id or current_attempt.task_id != task_id
+            or current_attempt.fencing_token != expected_fencing_token
+            or current_attempt.lease_owner != expected_lease_owner
+            or current_attempt.lease_expires_at is None or _utc(current_attempt.lease_expires_at) <= _utc(_now())
+            or current_attempt.ended_at is not None or current_attempt.cancel_requested_at is not None
+            or current_attempt.workflow_run_id != expected_workflow_run_id
+            or current_run.status != "succeeded" or current_run.finished_at is None
+            or int(current_run.fencing_token) < 1
+            or not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run)):
+            raise BoardError("input_artifact_consume_conflict", "The original execution changed", status_code=409)
+
+    check_execution(task, attempt, run)
+    resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=artifact_id,
+        goal_id=task.goal_id, goal_revision=task.goal_revision,
+        capability_id=task.capability_id, expected_task_id=task_id)
+    artifact = resolved.row
+    if (artifact.state != "bound" or artifact.bound_task_id != task_id
+        or artifact.bound_task_revision != task_revision
+        or artifact.typed_input_ref != task.typed_input_ref or artifact.payload_sha256 != task.typed_input_digest):
+        raise BoardError("input_artifact_consume_conflict", "The original input binding changed", status_code=409)
+    source = await stage_accepted_plan_task(db, task, attempt=attempt)
+    if source is None:
+        raise BoardError("pipeline_source_changed", "Original accepted Source required", status_code=409)
+    artifacts, effects = json.loads(run.artifact_receipts_json), json.loads(run.effect_receipts_json)
+    if (not isinstance(artifacts, list) or not isinstance(effects, list)
+        or len(artifacts) > 100 or len(effects) > 100):
+        raise BoardError("pipeline_output_unverified", "The original receipts are unavailable", status_code=409)
+    pairs = []
+    for output in artifacts:
+        if not isinstance(output, dict) or output.get("exists") is not True:
+            continue
+        for effect in effects:
+            if (not isinstance(effect, dict) or effect.get("receipt_kind") != "readback"
+                or effect.get("status") != "succeeded" or not effect.get("readback_id")
+                or not effect.get("verified_at") or effect.get("target_path") != output.get("file_path")
+                or effect.get("content_sha256") != output.get("content_sha256")):
+                continue
+            if task.capability_id == "browser.public-task.v1":
+                if _browser_verified_artifact_reference({"artifacts": [output], "effects": [effect]},
+                    job_id=run.run_identity, file_path=output.get("file_path", ""),
+                    content_sha256=output.get("content_sha256", ""), readback_id=effect["readback_id"]) is None:
+                    continue
+            pairs.append((output["file_path"], output["content_sha256"]))
+    if (len(pairs) != 1 or (task.capability_id == "browser.public-task.v1"
+                          and not _browser_cleanup_receipt_proven({"effects": effects}))):
+        raise BoardError("pipeline_output_unverified", "One exact settled original readback is required", status_code=409)
+    read_output(*pairs[0])  # Private bounded literal read before native BEGIN.
+    token = lambda row: row.model_dump(mode="json")
+    tokens = tuple(token(row) for row in (task, attempt, run, artifact))
+    await db.rollback()
+    from src.runtime_plugins.ownership import begin_native_writer
+    try:
+        await begin_native_writer(db, owner="native_ingress")
+        current_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
+            .execution_options(populate_existing=True))
+        current_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+        current_run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == expected_workflow_run_id)
+            .execution_options(populate_existing=True))
+        current_input = await db.get(WorkBoardInputArtifact, artifact_id, populate_existing=True)
+        rows = (current_task, current_attempt, current_run, current_input)
+        if any(row is None for row in rows) or tuple(token(row) for row in rows) != tokens:
+            raise BoardError("input_artifact_consume_conflict", "The exact original consumption rows changed", status_code=409)
+        check_execution(current_task, current_attempt, current_run)
+        root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+        observed = _utc(_now())
+        if (root is None or root.principal_id != owner.principal_id or root.revoked_at is not None
+            or root.replaced_by_id is not None or root.is_bearer_tombstone
+            or _utc(root.idle_expires_at) <= observed or _utc(root.absolute_expires_at) <= observed):
+            raise BoardError("evidence_owner_not_current", "The original authenticated Root is no longer current", status_code=403)
+        await WorkBoardRepository().validate_task_goal(db, owner, current_task)
+        await recheck_accepted_plan_task(db, current_task, attempt=current_attempt, source_witness=source)
+        if current_task.pipeline_operation_id:
+            from src.work_board.pipelines import task_guard
+            await task_guard(db, current_task, attempt=current_attempt,
+                workspace_identity=source.workspace_identity, source_witness=source)
+        if _metadata_digest(current_input) != current_input.metadata_digest or _utc(current_input.expires_at) <= observed:
+            raise BoardError("input_artifact_consume_conflict", "The original input metadata changed", status_code=409)
+    except BaseException:
+        # A consume denial never publishes task_guard's partial freeze. The
+        # original dispatcher owns its separate bounded blocked transition.
+        await db.rollback()
+        raise
+
+
 async def consume_input_artifact(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -1459,8 +1579,17 @@ async def consume_input_artifact(
     task_revision: int,
     artifact_id: str,
     now: datetime | None = None,
+    attempt_id: str | None = None,
+    expected_task_revision: int | None = None,
+    expected_fencing_token: int | None = None,
+    expected_lease_owner: str | None = None,
+    expected_workflow_run_id: str | None = None,
 ) -> None:
     observed_at = _utc(now or _now())
+    await _begin_consume_writer(db, owner, task_id=task_id, task_revision=task_revision,
+        artifact_id=artifact_id, attempt_id=attempt_id, expected_task_revision=expected_task_revision,
+        expected_fencing_token=expected_fencing_token, expected_lease_owner=expected_lease_owner,
+        expected_workflow_run_id=expected_workflow_run_id)
     # The metadata digest covers lifecycle state and revision.  Keep it in the
     # same CAS update as consumption so a replay cannot mistake a bound row
     # for the current authoritative metadata.

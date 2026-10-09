@@ -33,6 +33,7 @@ from src.db.models import (
     WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkBoardInputArtifact,
     WorkflowRunState,
 )
 from src.vault import redaction as vault_redaction
@@ -757,6 +758,38 @@ class BoardError(Exception):
         super().__init__(message)
 
 
+class _DispatchWriterDenial:
+    """Local original-entry bookkeeping, never permission or caller input."""
+
+    def __init__(self, error: BoardError):
+        self.error = error
+
+
+def _dispatch_admission_denial(exc):
+    from src.guardian.opportunity_contracts import OpportunityError
+    source_codes = {
+        "source_stale", "proposal_stale", "proposal_binding_conflict", "original_root_unavailable",
+        "goal_owner_mismatch", "goal_review_required", "pipeline_source_permission", "source_not_selected",
+        "source_private_input_excluded", "opportunity_expired", "goal_owner_binding_missing",
+        "goal_budget_missing_reviewed_grant", "goal_budget_period_expired", "goal_budget_period_not_started",
+        "goal_budget_timezone_invalid", "goal_quiet_hours", "goal_proactive_disabled",
+        "standing_owner_identity_unproved", "standing_identity_revoked", "watch_read_authority_revoked",
+        "watch_source_classification_invalid", "private_source_requires_live_browser", "goal_binding_stale",
+        "standing_grant_expiry_required", "standing_grant_stale",
+    }
+    board_codes = {
+        "evidence_owner_not_current", "goal_not_found", "goal_owner_mismatch", "goal_owner_unbound",
+        "stale_goal_revision", "goal_not_active", "pipeline_source_changed", "pipeline_review_required",
+        "pipeline_source_permission", "pipeline_expired", "pipeline_goal_budget_required",
+        "pipeline_goal_budget_expired", "pipeline_attempts_exhausted",
+    }
+    if isinstance(exc, OpportunityError) and exc.code in source_codes:
+        return BoardError(exc.code, "The original Source admission is no longer current", status_code=exc.status_code)
+    if isinstance(exc, BoardError) and exc.code in board_codes:
+        return exc
+    raise exc
+
+
 class BoardNotFound(BoardError):
     def __init__(self, task_id: str):
         super().__init__("task_not_found", "The requested board task does not exist", status_code=404, task_id=task_id)
@@ -911,6 +944,161 @@ class WorkBoardRepository:
         ):
             raise BoardOwnerMismatch(task_id)
         return task
+
+    async def _begin_dispatch_writer(self, db, task_id, *, action, attempt_id=None,
+                                     workflow_run_id=None, positive=False, proof=None):
+        """Selected original dispatch entries only; ownership is not permission.
+
+        Physical Source/input/output staging precedes native BEGIN. Every staged
+        row is reread on this same session before the existing mutation body.
+        Negative closure retains its own predicates without execution renewal.
+        """
+        guard = db.info.get("composition_read_guard")
+        if guard is None:
+            return None
+        from src.workspace.accounting_witness import CompositionReadGuard
+        if type(guard) is not CompositionReadGuard or guard.db is not db or guard.closed:
+            raise BoardError("composition_provider_invalid", "The original dispatch session changed")
+        if action not in {"promote", "block", "claim", "link", "project", "absent", "cancel"}:
+            raise BoardError("composition_native_writer_required", "Original dispatch entry required")
+        if db.new or db.dirty or db.deleted:
+            raise BoardError("dependency_write_requires_transaction_boundary", "Dispatch requires a clean original session")
+        task = await self._find_task(db, task_id)
+        if task is None:
+            raise BoardNotFound(task_id)
+        if task.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            raise BoardError("composition_native_writer_required", "This capability retains its original writer")
+        owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        token = lambda row: row.model_dump(mode="json") if row is not None else None
+        task_token = token(task)
+        attempt = await db.get(WorkBoardAttempt, attempt_id) if attempt_id else None
+        if attempt_id and (attempt is None or attempt.task_id != task_id):
+            raise BoardError("attempt_not_found", "The original attempt is unavailable")
+        attempt_token = token(attempt)
+        run_id = workflow_run_id or (attempt.workflow_run_id if attempt else None)
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id)) if run_id else None
+        if positive and action in {"link", "project"} and run is None:
+            raise BoardError("pipeline_task_changed", "The actual original workflow is unavailable")
+        run_token = token(run)
+        source = None
+        input_token = None
+        handoffs = None
+        denial = None
+        denial_entry = action in {"promote", "claim", "project"}
+        if positive:
+            from src.guardian.opportunity_plans import stage_accepted_plan_task
+            from src.guardian.opportunity_contracts import OpportunityError
+            try:
+                source = await stage_accepted_plan_task(db, task, attempt=attempt)
+                if source is None:
+                    raise BoardError("pipeline_source_changed", "Original accepted Source required")
+            except (OpportunityError, BoardError) as exc:
+                if not denial_entry:
+                    raise
+                denial = _dispatch_admission_denial(exc)
+        if positive and denial is None:
+            from src.work_board.input_artifacts import resolve_input_artifact_for_task, resolve_input_artifact_for_copy
+            physical_input = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+            if action == "project" and physical_input is not None and physical_input.state == "consumed":
+                if (physical_input.consumed_at is None or physical_input.bound_task_id != task_id
+                    or type(physical_input.bound_task_revision) is not int or physical_input.bound_task_revision < 1):
+                    raise BoardError("pipeline_input_changed", "The original consumed input binding changed")
+                resolved = await resolve_input_artifact_for_copy(db, owner,
+                    typed_input_ref=task.typed_input_ref, typed_input_digest=task.typed_input_digest,
+                    goal_id=task.goal_id, goal_revision=task.goal_revision,
+                    capability_id=task.capability_id, allow_goal_change=False)
+                if resolved.row is not physical_input or resolved.row.state != "consumed":
+                    raise BoardError("pipeline_input_changed", "The exact consumed input is unavailable")
+            else:
+                resolved = await resolve_input_artifact_for_task(db, owner,
+                    artifact_id=task.input_artifact_id, goal_id=task.goal_id,
+                    goal_revision=task.goal_revision, capability_id=task.capability_id,
+                    expected_task_id=task_id)
+            if (resolved.row.typed_input_ref != task.typed_input_ref
+                or resolved.row.payload_sha256 != task.typed_input_digest
+                or resolved.row.bound_task_id != task_id):
+                raise BoardError("pipeline_input_changed", "Original task input changed")
+            input_token = token(resolved.row)
+            if action in {"promote", "claim"}:
+                from src.work_board.review import _stage_dispatch_handoffs
+                handoffs = await _stage_dispatch_handoffs(db, owner, task)
+            if action == "project":
+                from src.work_board.review import _stage_dispatch_projection
+                handoffs = await _stage_dispatch_projection(db, owner, task, attempt, run, proof)
+        await db.rollback()
+        from src.runtime_plugins.ownership import begin_native_writer
+        await begin_native_writer(db, owner="native_ingress")
+        current_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
+            .execution_options(populate_existing=True))
+        current_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True) if attempt_id else None
+        current_run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id)
+            .execution_options(populate_existing=True)) if run_id else None
+        if token(current_task) != task_token or token(current_attempt) != attempt_token or token(current_run) != run_token:
+            raise BoardError("pipeline_task_changed", "The exact original dispatch rows changed")
+        if positive and denial is None:
+            try:
+                current_session = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+                observed = _now()
+                if (current_session is None or current_session.principal_id != owner.principal_id
+                    or current_session.revoked_at is not None or current_session.replaced_by_id is not None
+                    or current_session.is_bearer_tombstone
+                    or _utc_datetime(current_session.idle_expires_at) <= observed
+                    or _utc_datetime(current_session.absolute_expires_at) <= observed):
+                    raise BoardError("evidence_owner_not_current", "The original authenticated Root is no longer current")
+                artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+                if token(artifact) != input_token:
+                    raise BoardError("pipeline_input_changed", "The exact original input changed")
+                from src.guardian.opportunity_plans import recheck_accepted_plan_task
+                await recheck_accepted_plan_task(db, current_task, attempt=current_attempt, source_witness=source)
+                if current_task.pipeline_operation_id:
+                    from src.work_board.pipelines import task_guard
+                    await task_guard(db, current_task, attempt=current_attempt,
+                        workspace_identity=source.workspace_identity, source_witness=source)
+                else:
+                    await self.validate_task_goal(db, owner, current_task)
+            except (OpportunityError, BoardError) as exc:
+                if not denial_entry:
+                    raise
+                denial = _dispatch_admission_denial(exc)
+        if positive and denial is None:
+            if current_run is not None:
+                if action == "link":
+                    # A new immutable link has no attempt.workflow_run_id yet.
+                    # Recompute its native identity from the actual rows/input,
+                    # rather than manufacturing an already-linked Attempt DTO.
+                    from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
+                    from src.workflows.job_runtime import _serialize
+                    inputs = _parse_typed_input(current_task)
+                    actual = _serialize(current_run)
+                    if current_task.capability_id == "browser.public-task.v1":
+                        limits = json.loads(current_run.declared_authority_json).get("limits", {})
+                        expected = WorkBoardDispatcher._browser_expected_identity(current_task, current_attempt, inputs,
+                            actual, limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
+                        _validate_linked_workflow_projection(current_task, current_attempt, run_id, actual, expected)
+                    else:
+                        from src.work_board.pipeline_cpu import spec_for
+                        spec = spec_for(current_task, current_attempt, inputs, deadline=current_run.deadline_at)
+                        if (current_run.run_identity != spec.identity.job_id
+                            or current_run.input_digest != _safe_digest(spec.inputs)
+                            or current_run.run_fingerprint != spec.run_fingerprint
+                            or json.loads(current_run.declared_authority_json) != spec.declared_authority
+                            or current_run.owner_kind != "user" or current_run.owner_principal_id != owner.principal_id
+                            or current_run.session_id != owner.session_id or current_run.operator_session_id != owner.session_id
+                            or current_run.goal_id != current_task.goal_id or current_run.goal_revision != current_task.goal_revision
+                            or current_run.job_kind != current_task.capability_id or current_run.capability_version != "1"
+                            or current_run.idempotency_scope != "work-board-attempt"
+                            or current_run.idempotency_key != f"{task_id}:{attempt_id}"):
+                            raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
+                else:
+                    from src.work_board.review import _workflow_run_binds_board_attempt
+                    if not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run):
+                        raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
+            if action == "project":
+                from src.work_board.review import _recheck_dispatch_projection
+                await _recheck_dispatch_projection(db, current_task, current_attempt, current_run, proof, handoffs)
+        if denial is not None:
+            return _DispatchWriterDenial(denial)
+        return handoffs if handoffs is not None else True
 
     @staticmethod
     async def _safe_text(value: str, *, db: AsyncSession | None = None) -> str:
@@ -1637,7 +1825,9 @@ class WorkBoardRepository:
         """Block a pre-dispatch Ready row after a fresh capability preflight."""
 
         observed_at = now or _now()
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="block")
+        if native is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -2052,7 +2242,9 @@ class WorkBoardRepository:
         """
 
         observed_at = now or _now()
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="cancel", attempt_id=attempt_id)
+        if native is None:
+            await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
         expected = int(expected_revision)
         if task.task_revision != expected:
@@ -2643,7 +2835,13 @@ class WorkBoardRepository:
         if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import stage_task_authority
             preference_stage = await stage_task_authority(db,preference_task)
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="promote", positive=readiness_error is None)
+        if type(native) is _DispatchWriterDenial:
+            readiness_error = native.error.code
+            readiness_reason = native.error.message
+            native = True
+        if native is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority
@@ -2814,7 +3012,8 @@ class WorkBoardRepository:
                 if (
                     parent is None
                     or link is None
-                    or not await current_handoff_is_verified(db, owner, parent, task, link)
+                    or not await current_handoff_is_verified(db, owner, parent, task, link,
+                        _dispatch_readbacks=native if native is not True else None)
                 ):
                     readiness_error = "handoff_materialization_required"
                     readiness_reason = _HANDOFF_RECONCILIATION_REASON
@@ -2921,7 +3120,17 @@ class WorkBoardRepository:
             from src.work_board.opportunity_preference_native import stage_task_authority
             preference_stage = await stage_task_authority(db,preference_task)
         if _communication_publication is None:
-            await _begin_sqlite_immediate(db)
+            native = await self._begin_dispatch_writer(db, task_id, action="claim", positive=dependency_error is None)
+            if type(native) is _DispatchWriterDenial:
+                dispatch_denial = native.error
+                native = True
+            else:
+                dispatch_denial = None
+            if native is None:
+                await _begin_sqlite_immediate(db)
+        else:
+            native = None
+            dispatch_denial = None
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority
@@ -2952,6 +3161,8 @@ class WorkBoardRepository:
         # that creates the board claim.  The preflight pass is advisory; a
         # concurrent revision/owner/status change must not launch stale work.
         try:
+            if dispatch_denial is not None:
+                raise dispatch_denial
             if dependency_error is not None:
                 raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
             await recheck_dependencies(db, task, staged_dependencies)
@@ -3069,7 +3280,8 @@ class WorkBoardRepository:
             # downstream durable input then share one immutable binding.
             from src.work_board.review import parent_handoffs
 
-            parent_handoff_context = await parent_handoffs(db, owner, task)
+            parent_handoff_context = await parent_handoffs(db, owner, task,
+                _dispatch_readbacks=native if native is not True else None)
             if (
                 len(parent_handoff_context) != len(parent_statuses)
                 or any(
@@ -3233,7 +3445,10 @@ class WorkBoardRepository:
         """Link a pending attempt to exactly one immutable durable run."""
 
         _validate_safe_identifier(workflow_run_id, field="workflow_run_id", max_length=256)
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="link", attempt_id=attempt_id,
+            workflow_run_id=workflow_run_id, positive=True)
+        if native is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -3647,6 +3862,12 @@ class WorkBoardRepository:
     async def project_attempt(self,db,task_id,attempt_id,**kwargs):
         status=kwargs.get("status")
         task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id == "work.research-dossier.v1" and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            from src.work_board.research_readback import _stage_dossier_projection
+            attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
+            staged = await _stage_dossier_projection(db, task, attempt, run)
+            return await self._project_attempt(db, task_id, attempt_id, _research_stage=staged, **kwargs)
         if task is not None and task.capability_id == "memory.opportunity-preference.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
             from src.work_board.opportunity_preference_native import stage_output_source
             attempt = await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
@@ -3696,6 +3917,7 @@ class WorkBoardRepository:
         _tool_stage=None,
         _document_stage=None,
         _preference_stage=None,
+        _research_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3753,7 +3975,13 @@ class WorkBoardRepository:
                 reconciliation_owner_live = operator.principal.principal_id == reconciled_github_root.get("owner", {}).get("principal_id")
             except AuthFailure:
                 pass
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="project", attempt_id=attempt_id,
+            positive=status in {WorkBoardStatus.review, WorkBoardStatus.done}, proof=verified_readback)
+        dispatch_denial = native.error if type(native) is _DispatchWriterDenial else None
+        if dispatch_denial is not None:
+            native = True
+        if native is None:
+            await _begin_sqlite_immediate(db)
         if status in {WorkBoardStatus.review,WorkBoardStatus.done} and _preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_projection_source
             await recheck_projection_source(db,witness=_preference_stage)
@@ -3780,6 +4008,8 @@ class WorkBoardRepository:
                 from src.work_board.communication_preparation import verify_preparation_binding
                 await verify_preparation_binding(db, communication_binding, source_run=source_run, allow_succeeded=True)
             try:
+                if dispatch_denial is not None:
+                    raise dispatch_denial
                 if dependency_error is not None:
                     raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
                 await recheck_dependencies(db, task, staged_dependencies)
@@ -3975,8 +4205,8 @@ class WorkBoardRepository:
                 await current(db,task,attempt,run,staged=_tool_stage[0] if _tool_stage else None)
                 artifact,_raw=verified_output(task,attempt,run,staged=_tool_stage[1] if _tool_stage else None)
             else:
-                from src.work_board.research_readback import verified_dossier
-                artifact, _raw = await verified_dossier(db, task, attempt, run)
+                from src.work_board.research_readback import _recheck_dossier_projection
+                artifact, _raw = await _recheck_dossier_projection(db, task, attempt, run, _research_stage)
             if artifact["content_sha256"] != proof_digest:
                 raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
             if is_tool_package(task.capability_id):
@@ -4240,7 +4470,9 @@ class WorkBoardRepository:
                 "A pending claim may be discarded only after the durable binding is proven absent",
             )
         observed_at = now or _now()
-        await _begin_sqlite_immediate(db)
+        native = await self._begin_dispatch_writer(db, task_id, action="absent", attempt_id=attempt_id)
+        if native is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)

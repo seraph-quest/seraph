@@ -7,7 +7,7 @@ is a continuity fence, not host-administrator tamper resistance.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import fcntl
@@ -227,8 +227,8 @@ class InferenceAccountingRepositoryMixin:
             db.info["composition_writer_owner"] = "durable_jobs"
         await db.execute(text("BEGIN IMMEDIATE"))
         if header_budget is not None:
-            from src.memory.composition_headers import certify_composition_superset
-            await certify_composition_superset(db, header_budget)
+            from src.memory.composition_headers import _certify_current_memory_snapshot
+            await _certify_current_memory_snapshot(db, header_budget)
         if getattr(db, "info", {}).get("composition_guard") is not None:
             db.info["native_writer_started"] = True
 
@@ -271,7 +271,7 @@ class InferenceAccountingRepositoryMixin:
         """Classify stale provider work without replaying ephemeral callbacks."""
         observed = _utc(now or datetime.now(timezone.utc))
         recovered = []
-        async with self._session() as db:
+        async with AsyncExitStack() as snapshot_scope, self._session() as db:
             # This is a separate original recovery operation, never a restored
             # native Memory allowance. Every upcoming snapshot sees all retained
             # Memory, including when this caller targets an unrelated job.
@@ -292,6 +292,9 @@ class InferenceAccountingRepositoryMixin:
             elif memory_present:
                 from src.memory.header_bounds import HeaderReadBudget
                 budget = HeaderReadBudget()
+            if budget is not None:
+                from src.memory.composition_headers import _memory_current_snapshot_scope
+                snapshot_scope.enter_context(_memory_current_snapshot_scope(budget))
             await self._accounting_begin(db, header_budget=budget)
             if job_id is not None and await self._accounting_recovery_job_shape(db, job_id) != target_shape:
                 raise InferenceAccountingError("accounting_recovery_target_changed")
@@ -327,8 +330,8 @@ class InferenceAccountingRepositoryMixin:
                         protected.append((row, row.model_dump(mode="json")))
                         continue
                     if budget is not None:
-                        from src.memory.composition_headers import certify_composition_superset
-                        await certify_composition_superset(db, budget)
+                        from src.memory.composition_headers import _certify_current_memory_snapshot
+                        await _certify_current_memory_snapshot(db, budget)
                     run = await self._fetch(db, row.job_id)
                     if run.status != "running" or (run.lease_expires_at is not None and _utc(run.lease_expires_at) > observed):
                         continue

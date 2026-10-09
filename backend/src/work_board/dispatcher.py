@@ -5695,6 +5695,11 @@ class WorkBoardDispatcher:
                         task_id=linked_task.task_id,
                         task_revision=int(resolved.row.bound_task_revision),
                         artifact_id=resolved.row.artifact_id,
+                        attempt_id=linked_attempt.attempt_id,
+                        expected_task_revision=linked_task.task_revision,
+                        expected_fencing_token=linked_attempt.fencing_token,
+                        expected_lease_owner=linked_attempt.lease_owner,
+                        expected_workflow_run_id=linked_attempt.workflow_run_id,
                     )
                 artifact_ref = _text(execution.get("artifact_ref"))
                 artifact_sha256 = _text(execution.get("artifact_sha256")).lower()

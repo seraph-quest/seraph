@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import asyncio
+from weakref import WeakKeyDictionary
 from sqlalchemy import select
 
 from config.settings import settings
@@ -205,6 +207,42 @@ async def verified_dossier(db, task, attempt, run):
         raise ValueError("research completed root binding changed")
     await original_admission_current(db, task, attempt, run)
     return await _materialized_dossier(db, task, attempt, run)
+
+
+class _DossierProjection:
+    """Invocation-local physical readback; no execution authority."""
+
+
+_DOSSIER_PROJECTIONS = WeakKeyDictionary()
+
+
+async def _dossier_projection_rows(db, task, attempt, run):
+    from src.db.models import WorkBoardInputArtifact, Goal, InferenceCostReservation
+    artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+    goal = await db.get(Goal, task.goal_id, populate_existing=True)
+    children = list((await db.scalars(select(WorkflowRunState).where(
+        WorkflowRunState.parent_job_id == run.run_identity).order_by(WorkflowRunState.run_identity))).all())
+    costs = list((await db.scalars(select(InferenceCostReservation).where(
+        InferenceCostReservation.job_id.in_([row.run_identity for row in children]))
+        .order_by(InferenceCostReservation.operation_id))).all())
+    return [row.model_dump(mode="json") if row else None for row in (task, attempt, run, artifact, goal, *children, *costs)]
+
+
+async def _stage_dossier_projection(db, task, attempt, run):
+    dossier, raw = await verified_dossier(db, task, attempt, run)
+    held = _DossierProjection()
+    _DOSSIER_PROJECTIONS[held] = (db, task.task_id, asyncio.current_task(), await _dossier_projection_rows(db, task, attempt, run), dict(dossier), raw)
+    return held
+
+
+async def _recheck_dossier_projection(db, task, attempt, run, held):
+    staged = _DOSSIER_PROJECTIONS.get(held) if type(held) is _DossierProjection else None
+    if (staged is None or staged[0] is not db or staged[1] != task.task_id
+        or staged[2] is not asyncio.current_task()
+        or staged[3] != await _dossier_projection_rows(db, task, attempt, run)):
+        raise ValueError("research original staged readback changed")
+    await original_admission_current(db, task, attempt, run)
+    return dict(staged[4]), staged[5]
 
 
 async def _materialized_dossier(db, task, attempt, run):

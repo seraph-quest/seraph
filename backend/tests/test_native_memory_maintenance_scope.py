@@ -3,7 +3,7 @@ import asyncio
 import copy
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, event
 
 from src.db.models import WorkflowRunState
 from src.memory.header_bounds import HeaderReadBudget
@@ -77,8 +77,25 @@ async def test_memory_scope_keeps_one_frame_and_charges_repeated_snapshots(async
         await repo.get_job("scope-memory")
         assert scope.header_budget.remaining < first
         return scope
-    scope = await original_entry(repository)
+    statements = []
+    # Session factory retains the actual async SQLite engine; trace its driver.
+    async with async_db() as db:
+        engine = db.get_bind()
+    def trace(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    event.listen(engine, "before_cursor_execute", trace)
+    try:
+        scope = await original_entry(repository)
+    finally:
+        event.remove(engine, "before_cursor_execute", trace)
     assert frames == [scope.header_budget]
+    assert "BEGIN IMMEDIATE" in statements
+    writer_begin = statements.index("BEGIN IMMEDIATE")
+    full_headers = next(i for i in range(writer_begin + 1, len(statements))
+        if "FROM sqlite_schema" in statements[i])
+    body = next(i for i in range(full_headers + 1, len(statements))
+        if statements[i].startswith("SELECT workflow_run_states."))
+    assert writer_begin < full_headers < body
 
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
@@ -98,3 +115,40 @@ async def test_no_memory_scope_route_race_denies_before_body(async_db, monkeypat
     async with async_db() as db:
         assert (await db.execute(select(WorkflowRunState).where(
             WorkflowRunState.run_identity == "racing-memory"))).scalar_one().status == "queued"
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,kwargs", [
+    ("transfer_lease", {"from_owner": "old", "fencing_token": 1, "to_owner": "new"}),
+    ("retry_job", {"owner_kind": "user", "owner_principal_id": "owner", "reconciliation_receipt": {}}),
+    ("record_checkpoint", {"checkpoint_id": "plain", "state": {}, "owner": None, "fencing_token": None}),
+    ("record_artifact", {"artifact_type": "file", "file_path": "fixture.txt"}),
+    ("record_effect", {"effect_type": "plain", "target_path": "fixture"}),
+    ("record_recovery_checkpoint", {"owner_kind": "user", "owner_principal_id": "owner",
+        "checkpoint_id": "plain", "state": {}}),
+    ("record_recovery_artifact", {"owner_kind": "user", "owner_principal_id": "owner",
+        "file_path": "fixture.txt"}),
+    ("record_readback", {"target_path": "fixture", "status": "verified"}),
+    ("record_remote_inference_intent", {"operation_id": "denied-operation", "owner_id": "owner"}),
+    ("record_remote_inference_receipt", {"operation_id": "denied-operation", "owner_id": "owner",
+        "status": "queued"}),
+])
+async def test_generic_memory_entry_scalar_denies_before_any_body(async_db, monkeypatch, method, kwargs):
+    async with async_db() as db:
+        db.add(WorkflowRunState(run_identity="denied-memory", root_run_identity="denied-memory",
+            workflow_name="numeric", job_kind="runtime_service_memory_v1", status="queued"))
+    repository = DurableJobRepository()
+    monkeypatch.setattr(repository, "_session", async_db)
+    async def body_forbidden(*args, **kwargs):
+        raise AssertionError("generic Memory entry reached original body")
+    monkeypatch.setattr(repository, "_fetch", body_forbidden)
+    monkeypatch.setattr(repository, "_writer_session", body_forbidden)
+    monkeypatch.setattr(repository, "get_job", body_forbidden)
+    with pytest.raises(DurableJobLeaseError, match="generic_mutation_unavailable"):
+        if method == "record_remote_inference_intent":
+            await repository.record_remote_inference_intent(job_id="denied-memory", **kwargs)
+        elif method == "record_remote_inference_receipt":
+            await repository.record_remote_inference_receipt({"job_id": "denied-memory", **kwargs})
+        else:
+            await getattr(repository, method)("denied-memory", **kwargs)

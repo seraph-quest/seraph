@@ -214,6 +214,88 @@ def _trace_memory_numeric_charges(budget):
         _MEMORY_CHARGE_TRACE.reset(token)
 
 
+def _native_memory_projected_header_upper(descriptor, identity, row):
+    """The original full-header formula over resolved numeric-only binds."""
+    from src.workspace.accounting_witness import _native_memory_row_bytes
+    if not any(descriptor is item for item in COMPOSITION_DESCRIPTORS.values()):
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    _native_memory_row_bytes(descriptor, identity, row)
+    skeleton = ["native-composition-memory.v1", descriptor.table, identity,
+        [[name, None] for name in descriptor.columns]]
+    amount = len(json.dumps(skeleton, ensure_ascii=True, separators=(",", ":")).encode()) + 128
+    for name, kind, nullable in zip(descriptor.columns, descriptor.kinds, descriptor.nullable):
+        value = row[name]
+        if value is None:
+            if not nullable:
+                raise HeaderBoundsError("header_scalar_unavailable")
+        elif kind == "text":
+            amount += 6 * len(value.encode("utf-8")) + 2 - 4
+        elif kind == "integer":
+            amount += 20 - 4
+        elif kind == "real":
+            amount += 64 - 4
+        else:
+            raise HeaderBoundsError("header_scalar_type_unsupported")
+    if amount > MAX_BYTES:
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return amount
+
+
+def _native_memory_projected_superset_charges(certificate, trace, new_rows, updated_rows):
+    """Forecast original complete-header appearances, never a certificate.
+
+    This view does no SQL and grants no body read. Actual post-effect reads
+    still require their fresh original full33 certificate. Constructor ids
+    here must already have been assigned by the original sealed M5 plan;
+    an unassigned numeric slot is never promoted to a reference address.
+    """
+    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_cost
+    if type(certificate) is not CompositionHeaderCertificate:
+        raise HeaderBoundsError("header_certificate_unavailable")
+    _validate(certificate.connection, certificate)
+    headers = dict(certificate.rows)
+    old_ids = {table: tuple(key for name, key in headers if name == table)
+        for table in COMPOSITION_DESCRIPTORS}
+    new_ids = {table: [] for table in COMPOSITION_DESCRIPTORS}
+    selected = set()
+    for creating, values in ((True, new_rows), (False, updated_rows)):
+        for descriptor, identity, row in values:
+            ref = (descriptor.table, identity)
+            if ref in selected or (creating == (ref in headers)):
+                raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+            selected.add(ref)
+            headers[ref] = (None, _native_memory_projected_header_upper(descriptor, identity, row))
+            if creating:
+                new_ids[descriptor.table].append(identity)
+    if len(headers) > MAX_ROWS:
+        raise HeaderBoundsError("header_reference_bound")
+    result = []
+    for appearance, amount in trace:
+        if type(appearance) is not tuple or type(amount) is not int or not 0 <= amount <= MAX_BYTES:
+            raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+        if appearance[0] == "locator-metadata":
+            _, table, key, tombstone, identities = appearance
+            if key is not None or tombstone or identities != old_ids[table]:
+                raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+            identities = (*identities, *new_ids[table])
+            # Actual rowid aliases are unknown until the original flush. Only
+            # their finite int64 byte bound participates in this resource view.
+            for identity in new_ids[table]:
+                if type(identity) is not str:
+                    raise HeaderBoundsError("memory_numeric_projection_identity_unassigned")
+                amount += _metadata_cost([[2**63 - 1, "text", len(identity.encode("utf-8")), identity, None]])
+            appearance = ("locator-metadata", table, None, False, tuple(identities))
+        elif appearance[0] == "complete-headers":
+            _, table, identities = appearance
+            if identities != old_ids[table]:
+                raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+            identities = (*identities, *new_ids[table])
+            amount = sum(headers[(table, identity)][1] for identity in identities)
+            appearance = ("complete-headers", table, tuple(identities))
+        result.append((appearance, amount))
+    return tuple(result), headers
+
+
 @dataclass(eq=False)
 class _NativeMemoryNumericLedger:
     budget: HeaderReadBudget

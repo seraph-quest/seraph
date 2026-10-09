@@ -66,6 +66,83 @@ async def test_absence_and_tombstone_locator_are_metadata_only(model_db):
 
 
 @pytest.mark.asyncio
+async def test_current_snapshot_reuses_metadata_but_charges_each_body(model_db):
+    from src.memory.composition_headers import (_memory_current_snapshot_scope,
+        _certify_current_memory_snapshot)
+    from src.workspace.accounting_witness import _native_memory_reference_row_on_connection
+    goal = Goal(title="repeated actual body")
+    model_db.add(goal)
+    await model_db.flush()
+    budget = HeaderReadBudget()
+    connection = await model_db.connection()
+    statements = []
+    def observe(_c, _cursor, statement, _params, _context, _many):
+        statements.append(statement)
+    event.listen(connection.sync_connection, "before_cursor_execute", observe)
+    try:
+        with _memory_current_snapshot_scope(budget):
+            first = await _certify_current_memory_snapshot(model_db, budget)
+            boundary = len(statements)
+            second = await _certify_current_memory_snapshot(model_db, budget)
+            assert second is first
+            assert not any("sqlite_master" in sql or "pragma_table_xinfo" in sql
+                           for sql in statements[boundary:])
+            assert any("schema_version" in sql for sql in statements[boundary:])
+            def body(c):
+                with snapshot_reads(first):
+                    return _native_memory_reference_row_on_connection(c, "goals", goal.id)[1]
+            before = budget.remaining
+            actual = await connection.run_sync(body)
+            after_first = budget.remaining
+            assert await connection.run_sync(body) == actual
+            assert before - after_first == after_first - budget.remaining > 0
+    finally:
+        event.remove(connection.sync_connection, "before_cursor_execute", observe)
+
+
+@pytest.mark.asyncio
+async def test_current_snapshot_write_and_fresh_begin_require_new_certificates(model_db):
+    from src.memory.composition_headers import (_memory_current_snapshot_scope,
+        _certify_current_memory_snapshot)
+    budget = HeaderReadBudget()
+    with _memory_current_snapshot_scope(budget):
+        first = await _certify_current_memory_snapshot(model_db, budget)
+        model_db.add(Goal(title="invalidate actual changes"))
+        await model_db.flush()
+        second = await _certify_current_memory_snapshot(model_db, budget)
+        assert second is not first
+        with pytest.raises(HeaderBoundsError, match="header_certificate_stale"):
+            await validate_composition_certificate(model_db, first)
+        await model_db.rollback()
+        await model_db.execute(text("BEGIN IMMEDIATE"))
+        third = await _certify_current_memory_snapshot(model_db, budget)
+        assert third is not second
+        assert budget.remaining < 1_048_576
+
+
+@pytest.mark.asyncio
+async def test_current_snapshot_ddl_and_inherited_task_cannot_reuse(model_db):
+    import asyncio
+    from src.memory.composition_headers import (_memory_current_snapshot_scope,
+        _certify_current_memory_snapshot)
+    budget = HeaderReadBudget()
+    with _memory_current_snapshot_scope(budget):
+        first = await _certify_current_memory_snapshot(model_db, budget)
+        with pytest.raises(HeaderBoundsError, match="memory_snapshot_scope_unavailable"):
+            await asyncio.create_task(_certify_current_memory_snapshot(model_db, budget))
+        await model_db.execute(text("CREATE VIEW unreviewed_snapshot_view AS SELECT id FROM goals"))
+        with pytest.raises(HeaderBoundsError):
+            await _certify_current_memory_snapshot(model_db, budget)
+        await model_db.execute(text("DROP VIEW unreviewed_snapshot_view"))
+        second = await _certify_current_memory_snapshot(model_db, budget)
+        assert second is not first
+        with pytest.raises(HeaderBoundsError, match="memory_snapshot_scope_unavailable"):
+            await _certify_current_memory_snapshot(model_db, HeaderReadBudget())
+    with _memory_current_snapshot_scope(budget):
+        assert await _certify_current_memory_snapshot(model_db, budget) is not second
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change",("generated","unknown-index","unknown-object","objects-overflow"))
 async def test_schema_drift_denies_before_private_body(model_db,change):
     db=model_db
@@ -357,3 +434,34 @@ async def test_inert_preoriginal_negative_rows_require_exact_original_input_bind
                   {"effect_receipts_json": '[{"effect":"unowned"}]'}):
         with pytest.raises(ProductionWorkspaceReconciliationError, match="composition_native_memory_preoriginal_invalid"):
             _checked_preoriginal_memory_row(dict(actual, **patch))
+    # This checksum-valid cold envelope is explicitly unverified and cannot
+    # become a publication plan or a live Source, including when copied.
+    from src.workspace.accounting_witness import (MEMORY_REFERENCE_PROFILE, MEMORY_CURRENT_CHECKPOINT,
+        _checked_memory_candidate_row, _checked_memory_unknown_unverified_row,
+        preflight_native_memory_reference_journal, prepare_native_memory_unknown,
+        apply_native_memory_unknown)
+    from src.workflows.job_runtime import DurableJobLeaseError
+    payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+        "original_checkpoint_digest": None, "projection_revision": 19,
+        "state": "unknown", "reason_code": "original_projection_unavailable",
+        "refs": [{"table": "workflow_run_states", "key": run.run_identity}],
+        "absences": [], "rows": [], "rows_digest": None, "encoded_bytes": 0,
+        "owner_operation_kind": method, "owner_events": [], "selected_delta_digest": "e" * 64}
+    replacement = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "safe": True,
+        "state_digest": _digest(payload), "payload": payload}
+    unknown = dict(actual, checkpoint_receipts_json=_canonical([replacement]))
+    normalized, context, checked_binding = _checked_memory_candidate_row(unknown)
+    _, checked_current = preflight_native_memory_reference_journal(unknown["checkpoint_receipts_json"])
+    assert _checked_memory_unknown_unverified_row(unknown, normalized, context, checked_binding,
+        checked_current) == (candidate, None)
+    for patch in ({"status": "succeeded"}, {"status": "running"},
+                  {"effect_receipts_json": '[{"effect":"unowned"}]'}):
+        with pytest.raises(ValueError, match="memory_unknown_unverified_shape_changed"):
+            _checked_memory_unknown_unverified_row(dict(unknown, **patch), normalized, context,
+                checked_binding, checked_current)
+    with pytest.raises(DurableJobLeaseError, match="original_memory_negative_owner_unavailable"):
+        await prepare_native_memory_unknown(model_db, run, original_owner=SimpleNamespace(
+            pending_changes={"status": "cancelled"}, header_budget=HeaderReadBudget()))
+    with pytest.raises(ProductionWorkspaceReconciliationError, match="memory_publication_plan_unavailable"):
+        await apply_native_memory_unknown(model_db, run, SimpleNamespace(
+            db=model_db, run=run, statement="unowned", after=unknown))

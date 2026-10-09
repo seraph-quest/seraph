@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import asyncio
+from weakref import WeakKeyDictionary
 from typing import Any, Mapping
 
 from sqlalchemy import and_, func, or_, select
@@ -84,6 +86,98 @@ class PipelineProducerWitness:
     output_bytes: bytes
     output_reference: str
     content_sha256: str
+
+
+class _DispatchReadbacks:
+    """Identity-only handle for this original repository call's physical stage."""
+
+
+_DISPATCH_READBACKS = WeakKeyDictionary()
+
+
+async def _stage_dispatch_handoffs(db, owner, task):
+    """Actual parent files before the selected repository writer, never a grant."""
+    from src.work_board.pipelines import row_token
+    links = list((await db.scalars(select(WorkBoardLink).where(
+        WorkBoardLink.child_task_id == task.task_id,
+        WorkBoardLink.owner_principal_id == owner.principal_id,
+        WorkBoardLink.owner_session_id == owner.session_id))).all())
+    staged = {}
+    for link in links:
+        parent = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == link.parent_task_id))
+        if parent is None or parent.status != WorkBoardStatus.done:
+            continue
+        if parent.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            raise BoardError("pipeline_producer_changed", "This parent retains its original readback owner")
+        witness = await stage_pipeline_producer_readback(db, owner, parent)
+        handoff = await db.get(WorkBoardHandoff, link.current_handoff_id) if link.current_handoff_id else None
+        staged[parent.task_id] = (witness, row_token(link), row_token(handoff) if handoff else None)
+    handle = _DispatchReadbacks()
+    _DISPATCH_READBACKS[handle] = (db, task.task_id, asyncio.current_task(), staged)
+    return handle
+
+
+async def _dispatch_handoff_proof(db, owner, parent, child, link, handle):
+    from src.work_board.pipelines import row_token, canonical_bytes
+    registration = _DISPATCH_READBACKS.get(handle) if type(handle) is _DispatchReadbacks else None
+    if (registration is None or registration[0] is not db or registration[1] != child.task_id
+        or registration[2] is not asyncio.current_task()):
+        raise BoardError("pipeline_producer_changed", "Original dispatch readback stage required")
+    held = registration[3].get(parent.task_id)
+    if held is None:
+        return None
+    witness, link_token, handoff_token = held
+    handoff = await db.get(WorkBoardHandoff, link.current_handoff_id, populate_existing=True) if link.current_handoff_id else None
+    if row_token(link) != link_token or (row_token(handoff) if handoff else None) != handoff_token:
+        raise BoardError("pipeline_producer_changed", "The exact original handoff changed")
+    await recheck_pipeline_producer_readback(db, owner, witness=witness)
+    proof = json.loads(witness.proof_bytes)
+    if canonical_bytes(proof) != witness.proof_bytes or proof.get("content_sha256") != witness.content_sha256:
+        raise BoardError("pipeline_producer_changed", "The staged original proof changed")
+    return proof
+
+
+async def _stage_dispatch_projection(db, owner, task, attempt, run, proof):
+    """Verify actual completed output before the original projection writer."""
+    from src.work_board.pipelines import row_token
+    from src.work_board.pipeline_cpu import read_output
+    from src.db.models import WorkBoardInputArtifact
+    if (attempt is None or run is None or run.status != "succeeded"
+        or not isinstance(proof, Mapping) or proof.get("workflow_run_id") != run.run_identity
+        or attempt.workflow_run_id != run.run_identity):
+        raise BoardError("pipeline_output_unverified", "Actual original terminal run required")
+    digest = proof.get("content_sha256")
+    artifacts = [item for item in _decode_list(run.artifact_receipts_json)
+        if isinstance(item, dict) and item.get("exists") is True and item.get("content_sha256") == digest]
+    if len(artifacts) != 1 or not any(isinstance(item, dict)
+        and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
+        and item.get("target_path") == artifacts[0].get("file_path") and item.get("content_sha256") == digest
+        and item.get("readback_id") == proof.get("readback_id")
+        and item.get("verified_at") == proof.get("verified_at")
+        for item in _decode_list(run.effect_receipts_json)):
+        raise BoardError("pipeline_output_unverified", "Exact settled original readback required")
+    raw = read_output(artifacts[0]["file_path"], digest)
+    artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+    handle = _DispatchReadbacks()
+    _DISPATCH_READBACKS[handle] = (db, task.task_id, asyncio.current_task(), {
+        "projection": (row_token(task), row_token(attempt), row_token(run),
+            row_token(artifact) if artifact else None, hashlib.sha256(raw).hexdigest(), dict(proof))})
+    return handle
+
+
+async def _recheck_dispatch_projection(db, task, attempt, run, proof, handle):
+    from src.work_board.pipelines import row_token
+    from src.db.models import WorkBoardInputArtifact
+    registration = _DISPATCH_READBACKS.get(handle) if type(handle) is _DispatchReadbacks else None
+    if (registration is None or registration[0] is not db or registration[1] != task.task_id
+        or registration[2] is not asyncio.current_task()):
+        raise BoardError("pipeline_output_unverified", "Original projection stage required")
+    held = registration[3].get("projection")
+    artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+    current = (row_token(task), row_token(attempt), row_token(run), row_token(artifact) if artifact else None,
+        proof.get("content_sha256"), dict(proof))
+    if held != current:
+        raise BoardError("pipeline_output_unverified", "The actual original projection binding changed")
 
 
 async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProducerWitness:
@@ -1710,6 +1804,23 @@ async def expire_review(
     repository: WorkBoardRepository | None = None,
 ) -> BoardMutation | None:
     repository = repository or WorkBoardRepository()
+    guard = db.info.get("composition_read_guard")
+    if guard is not None:
+        from src.workspace.accounting_witness import CompositionReadGuard
+        if type(guard) is not CompositionReadGuard or guard.db is not db or guard.closed:
+            raise BoardError("composition_provider_invalid", "The original review session changed")
+        if db.new or db.dirty or db.deleted:
+            raise BoardError("dependency_write_requires_transaction_boundary", "Review expiry requires a clean original session")
+        staged = await repository._owned_task(db, owner, task_id)
+        if staged.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            raise BoardError("composition_native_writer_required", "This review retains its original writer")
+        staged_revision = staged.task_revision
+        await db.rollback()
+        from src.runtime_plugins.ownership import begin_native_writer
+        await begin_native_writer(db, owner="native_ingress")
+        current = await repository._owned_task(db, owner, task_id)
+        if current.task_revision != staged_revision:
+            raise BoardRevisionConflict(task_id, staged_revision, current.task_revision)
     task = await repository._owned_task(db, owner, task_id)
     expiry = _aware(task.review_expires_at)
     if task.status is not WorkBoardStatus.review or expiry is None or expiry > _now():
@@ -1802,6 +1913,7 @@ async def current_handoff_is_verified(
     parent: WorkBoardTask,
     child: WorkBoardTask,
     link: WorkBoardLink,
+    *, _dispatch_readbacks=None,
 ) -> bool:
     """Check the link pointer against the parent's current verified attempt.
 
@@ -1841,7 +1953,8 @@ async def current_handoff_is_verified(
             )
         )
     ).scalar_one_or_none()
-    proof = await _verified_workflow_readback(db, parent, attempt) if attempt is not None else None
+    proof = (await _dispatch_handoff_proof(db, owner, parent, child, link, _dispatch_readbacks)
+        if _dispatch_readbacks is not None else await _verified_workflow_readback(db, parent, attempt)) if attempt is not None else None
     if proof is None:
         return False
     latest_attempt = (
@@ -1926,6 +2039,7 @@ async def parent_handoffs(
     db: AsyncSession,
     owner: WorkBoardOwner,
     task: WorkBoardTask,
+    *, _dispatch_readbacks=None,
 ) -> list[dict[str, Any]]:
     """Return safe structured handoffs from completed parents only."""
     links = (
@@ -1960,7 +2074,8 @@ async def parent_handoffs(
                 .limit(1)
             )
         ).scalar_one_or_none()
-        proof = await _verified_workflow_readback(db, parent, selected_attempt) if selected_attempt else None
+        proof = (await _dispatch_handoff_proof(db, owner, parent, task, link, _dispatch_readbacks)
+            if _dispatch_readbacks is not None else await _verified_workflow_readback(db, parent, selected_attempt)) if selected_attempt else None
         if selected_attempt is None or proof is None:
             handoffs.append(
                 _blocked_handoff_payload(
@@ -2002,7 +2117,7 @@ async def parent_handoffs(
                 )
             )
             continue
-        if not await current_handoff_is_verified(db, owner, parent, task, link):
+        if not await current_handoff_is_verified(db, owner, parent, task, link, _dispatch_readbacks=_dispatch_readbacks):
             handoffs.append(
                 _blocked_handoff_payload(
                     parent,

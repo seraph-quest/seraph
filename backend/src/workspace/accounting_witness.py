@@ -679,6 +679,194 @@ async def reserve_native_memory_pending_run(db, run, pending_changes, header_bud
     return amount
 
 
+def _native_memory_statement_signature(statement):
+    """Bind the original WHERE and the actual SQLite processed parameters."""
+    from sqlalchemy.dialects.sqlite import dialect
+    from src.workflows.job_runtime import _canonical
+    compiled = statement.compile(dialect=dialect())
+    parameters = compiled.construct_params()
+    processed = {}
+    for name, value in parameters.items():
+        processor = compiled._bind_processors.get(name)
+        value = processor(value) if processor is not None else value
+        if value is not None and type(value) not in {str, int, float}:
+            raise ProductionWorkspaceReconciliationError("memory_publication_bind_unsupported")
+        if type(value) is float and not math.isfinite(value):
+            raise ProductionWorkspaceReconciliationError("memory_publication_bind_unsupported")
+        processed[name] = value
+    return str(compiled), _canonical(processed)
+
+
+@dataclass(eq=False)
+class _NativeMemoryPublication:
+    db: object
+    run: object
+    original_owner: object
+    statement: object
+    original_signature: tuple
+    statement_signature: tuple
+    before: dict
+    after: dict
+    certificate: object
+    seal: object = field(default=_MEMORY_PUBLICATION_SEAL, repr=False)
+    consumed: bool = False
+    applied: bool = False
+
+
+def _consume_native_memory_publication(db, statement, run_id, before, after, previous, current):
+    """The journal hook can consume only the armed, exact original execute."""
+    from src.memory.composition_headers import current_budget, _validate, _certify_current_memory_snapshot_on_connection
+    from src.workflows.job_runtime import _MEMORY_NEGATIVE_OWNERS, _original_memory_maintenance_scope
+    plan = _ARMED_MEMORY_PUBLICATION.get()
+    if (type(plan) is not _NativeMemoryPublication or plan.seal is not _MEMORY_PUBLICATION_SEAL
+            or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan or plan.consumed or plan.applied
+            or plan.db is not db or statement is not plan.statement
+            or run_id != plan.before["run_identity"]
+            or before != plan.before["checkpoint_receipts_json"]
+            or after != plan.after["checkpoint_receipts_json"]
+            or db.sync_session.get_transaction() is not plan.original_owner.tx
+            or _MEMORY_NEGATIVE_OWNERS.get(id(plan.original_owner)) is not plan.original_owner
+            or _original_memory_maintenance_scope(plan.original_owner._repository) is not plan.original_owner._scope
+            or current_budget() is not plan.original_owner.header_budget
+            or _native_memory_statement_signature(statement) != plan.statement_signature
+            or _native_memory_statement_signature(plan.original_owner.statement) != plan.original_signature):
+        raise ProductionWorkspaceReconciliationError("composition_memory_retention_unavailable")
+    connection = db.sync_session.connection()
+    _validate(connection, plan.certificate)
+    current_certificate = _certify_current_memory_snapshot_on_connection(connection, plan.original_owner.header_budget)
+    if current_certificate is not plan.certificate:
+        raise ProductionWorkspaceReconciliationError("memory_publication_snapshot_changed")
+    if (connection.connection.driver_connection is not plan.original_owner.driver
+            or _sql(connection, "SELECT total_changes()").scalar_one() != plan.original_owner.total_changes):
+        raise ProductionWorkspaceReconciliationError("memory_publication_writer_changed")
+    _, raw, _ = _native_memory_reference_row_on_connection(connection, "workflow_run_states", run_id)
+    if raw != plan.before or previous.get(MEMORY_ORIGINAL_CHECKPOINT) != current.get(MEMORY_ORIGINAL_CHECKPOINT):
+        raise ProductionWorkspaceReconciliationError("memory_publication_original_changed")
+    # A cold read never grants this permission: registration came exclusively
+    # from the actual lexical repository owner, revalidated immediately before
+    # arming. Unknown is the only allowed publication in this owner family.
+    replacement = current.get(MEMORY_CURRENT_CHECKPOINT)
+    if replacement is None or replacement["payload"]["state"] != "unknown":
+        raise ProductionWorkspaceReconciliationError("memory_publication_unknown_required")
+    plan.consumed = True
+    return (replacement,)
+
+
+async def prepare_native_memory_unknown(db, run, *, original_owner):
+    """Stage an original negative owner's Current only; never mint Original."""
+    from src.workflows.job_runtime import _validate_original_memory_negative_owner, _canonical, _digest
+    from src.memory.header_bounds import HeaderReadBudget, WRS_BY_RUN
+    from src.memory.universe import native_memory_universe
+    from src.memory.composition_headers import _certify_current_memory_snapshot, snapshot_reads
+    owner = await _validate_original_memory_negative_owner(db, run, original_owner)
+    if type(owner.header_budget) is not HeaderReadBudget:
+        raise ProductionWorkspaceReconciliationError("memory_negative_budget_unavailable")
+    await native_memory_universe(db)
+    certificate = await _certify_current_memory_snapshot(db, owner.header_budget)
+    def inspect_original(connection):
+        with snapshot_reads(certificate):
+            _, before, _ = _native_memory_reference_row_on_connection(connection, "workflow_run_states", run.run_identity)
+            _checked_memory_reference_row(connection, before)
+            return before
+    before = await (await db.connection()).run_sync(inspect_original)
+    if before != dict(owner.before_values):
+        raise ProductionWorkspaceReconciliationError("memory_negative_original_changed")
+    original, current = preflight_native_memory_reference_journal(before["checkpoint_receipts_json"])
+    pending = dict(owner.pending_changes)
+    row = _native_memory_planned_sql_row(run, pending)
+    if (row["status"] not in {"cancelled", "failed", "blocked", "unknown_external_effect", "cost_liability"}
+            or row["revision"] != before["revision"] + 1
+            or row["fencing_token"] not in {before["fencing_token"], before["fencing_token"] + 1}
+            or row["checkpoint_context_json"] != before["checkpoint_context_json"]
+            or row["effect_receipts_json"] != before["effect_receipts_json"]):
+        raise ProductionWorkspaceReconciliationError("memory_negative_patch_invalid")
+    candidate = _checked_memory_candidate_row(before)[1]["candidate"]
+    refs = ([{"table": "workflow_run_states", "key": run.run_identity}] if current is None
+            else current["payload"]["refs"])
+    revision = 1 if current is None else current["payload"]["projection_revision"] + 1
+    delta = _native_memory_selected_delta_preimage([], [(WRS_BY_RUN, run.run_identity,
+        {name: row[name] for name in pending})], [])
+    owner.header_budget.debit(len(_canonical(delta).encode("utf-8")))
+    payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+        "original_checkpoint_digest": None if original is None else _digest(original),
+        "projection_revision": revision,
+        "state": "unknown", "reason_code": ("original_projection_unavailable" if original is None
+                                               else "current_source_unavailable"),
+        "refs": refs, "absences": [], "rows": [], "rows_digest": None,
+        "encoded_bytes": 0, "owner_operation_kind": candidate["method"],
+        "owner_events": [], "selected_delta_digest": _digest(delta)}
+    for _ in range(32):
+        size = preflight_native_memory_reference_payload(payload, current=True)
+        owner.header_budget.debit(size)
+        if payload["encoded_bytes"] == size:
+            break
+        payload["encoded_bytes"] = size
+    else:
+        raise ProductionWorkspaceReconciliationError("memory_unknown_count_not_convergent")
+    replacement = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "safe": True,
+        "state_digest": _digest(payload), "payload": payload}
+    journal = _splice_native_memory_current_checkpoint(before["checkpoint_receipts_json"], replacement)
+    pending["checkpoint_receipts_json"] = journal
+    after = _native_memory_planned_sql_row(run, pending)
+    normalized_run, context, binding = _checked_memory_candidate_row(after)
+    if original is None:
+        _checked_memory_unknown_unverified_row(after, normalized_run, context, binding, replacement)
+    else:
+        # The real original owner supplied concrete pending binds. Validate
+        # their prospective immutable shape without treating a numeric view
+        # as a current SQL snapshot or authenticating historical M5 evidence.
+        _checked_memory_original_bindings(after, normalized_run, context, binding, original, replacement)
+    await reserve_native_memory_pending_run(db, run, pending, owner.header_budget, outputs=owner.outputs)
+    statement = owner.statement.values(checkpoint_receipts_json=journal)
+    plan = _NativeMemoryPublication(db, run, owner, statement,
+        _native_memory_statement_signature(owner.statement), _native_memory_statement_signature(statement),
+        before, after, certificate)
+    await _validate_original_memory_negative_owner(db, run, owner)
+    _MEMORY_PUBLICATIONS[id(plan)] = plan
+    return plan
+
+
+async def apply_native_memory_unknown(db, run, plan):
+    """One armed original CAS; return its actual CursorResult unchanged."""
+    from src.workflows.job_runtime import _validate_original_memory_negative_owner
+    from src.memory.composition_headers import snapshot_reads, snapshot_reads_async, validate_composition_certificate, _certify_current_memory_snapshot
+    from src.memory.universe import native_memory_universe
+    if (type(plan) is not _NativeMemoryPublication or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan
+            or plan.seal is not _MEMORY_PUBLICATION_SEAL or plan.db is not db or plan.run is not run
+            or plan.applied or plan.consumed):
+        raise ProductionWorkspaceReconciliationError("memory_publication_plan_unavailable")
+    guard = db.info.get("composition_guard")
+    if type(guard) is not CompositionSessionGuard or guard.db is not db:
+        raise ProductionWorkspaceReconciliationError("memory_publication_guard_missing")
+    await _validate_original_memory_negative_owner(db, run, plan.original_owner)
+    await validate_composition_certificate(db, plan.certificate)
+    token = _ARMED_MEMORY_PUBLICATION.set(plan)
+    try:
+        async with snapshot_reads_async(db, plan.certificate):
+            result = await db.execute(plan.statement)
+        # Zero matches preserve the original caller's CAS failure behavior.
+        if result.rowcount == 1 and not plan.consumed:
+            raise ProductionWorkspaceReconciliationError("memory_publication_guard_missing")
+        if result.rowcount not in {0, 1}:
+            raise ProductionWorkspaceReconciliationError("memory_publication_cas_ambiguous")
+        if result.rowcount == 1:
+            await native_memory_universe(db)
+            certificate = await _certify_current_memory_snapshot(db, plan.original_owner.header_budget)
+            def read_back(connection):
+                with snapshot_reads(certificate):
+                    _, actual, _ = _native_memory_reference_row_on_connection(
+                        connection, "workflow_run_states", plan.before["run_identity"])
+                    if actual != plan.after:
+                        raise ProductionWorkspaceReconciliationError("memory_publication_readback_changed")
+                    _checked_memory_reference_row(connection, actual)
+            await (await db.connection()).run_sync(read_back)
+        plan.applied = True
+        return result
+    finally:
+        _ARMED_MEMORY_PUBLICATION.reset(token)
+        _MEMORY_PUBLICATIONS.pop(id(plan), None)
+
+
 async def _preflight_native_memory_journal_headers(db, *, existing_references=(),
                                                   reserved_bytes=0, incoming_identity=None):
     """Bound the complete retained Memory job set before private journal reads.
@@ -1023,14 +1211,55 @@ def _native_memory_reference_row_on_connection(connection, table, key):
     return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
 
 
+def _checked_memory_original_bindings(row, run, context, binding, original, current):
+    """Immutable cold evidence shape only; no SQL, M5 MAC or owner authority."""
+    from dataclasses import asdict
+    from src.runtime_plugins.memory_producer import MemoryOwnerEffect
+    from src.workflows.job_runtime import _digest
+    candidate, payload = context["candidate"], current["payload"]
+    original_payload = original["payload"]
+    result = context["result"]
+    if result is None or type(result["effect"]) is not dict:
+        raise ValueError("memory_original_effect_missing")
+    effect = MemoryOwnerEffect(**result["effect"])
+    if (set(result["effect"]) != set(asdict(effect)) or effect.status not in {"succeeded", "blocked"}
+            or effect.method != candidate["method"]
+            or effect.candidate_digest != context["candidate_digest"]
+            or effect.audit_event_id is None
+            or original_payload["invocation_ref"] != row["run_identity"]
+            or original_payload["claim_ref"] != result["claim_ref"]
+            or original_payload["candidate_digest"] != context["candidate_digest"]
+            or original_payload["composition_binding_digest"] != binding.binding_digest
+            or original_payload["method"] != candidate["method"]
+            or original_payload["owner_principal_id"] != candidate["operator_principal_id"]
+            or original_payload["operator_session_id"] != candidate["operator_session_id"]
+            or original_payload["original_deadline"] != candidate["original_deadline"]
+            or original_payload["source_binding_digest"] != _digest(candidate.get("source"))
+            or original_payload["original_effect_digest"] != _digest(asdict(effect))
+            or payload["original_checkpoint_digest"] != _digest(original)
+            or result["retention"]["original_checkpoint_digest"] != _digest(original)
+            or payload["refs"] != original_payload["refs"]):
+        raise ValueError("memory_original_binding_changed")
+    claim = _checked_memory_claim_row(row, run, context, binding,
+                                      unverified_unknown=payload["state"] == "unknown")
+    if claim is None or claim["claim_ref"] != result["claim_ref"]:
+        raise ValueError("memory_original_claim_changed")
+    if (claim["input_digest"] != context["candidate_digest"]
+            or claim["authority_digest"] != row["authority_digest"]
+            or claim["run_fingerprint"] != row["run_fingerprint"]
+            or claim["composition_binding_digest"] != binding.binding_digest
+            or claim["host_boot_nonce"] != candidate["host_boot_nonce"]):
+        raise ValueError("memory_original_claim_changed")
+    audit_ref = original_payload["original_audit"]["ref"]
+    if audit_ref != {"table": "audit_events", "key": effect.audit_event_id}:
+        raise ValueError("memory_original_audit_changed")
+    return effect, audit_ref
+
+
 def _checked_memory_reference_row(connection, row):
     """Source-independent current evidence inspection; never publication permission."""
-    from dataclasses import asdict
     from src.memory.header_bounds import HeaderBoundsError, WRS_BY_RUN, strict_json_loads
     from src.memory.composition_headers import charge_row, current_budget
-    from src.runtime_plugins.memory_producer import MemoryOwnerEffect
-    from src.runtime_plugins.dispatch import _receipt_witness
-    from src.workflows.job_runtime import _digest
     try:
         budget = current_budget()
         if budget is None:
@@ -1043,46 +1272,22 @@ def _checked_memory_reference_row(connection, row):
         if current is None:
             raise ValueError("memory_current_projection_missing")
         candidate, payload = context["candidate"], current["payload"]
-        if payload["owner_operation_kind"] != candidate["method"]:
+        if ((original is None or payload["state"] != "unknown")
+                and payload["owner_operation_kind"] != candidate["method"]):
             raise ValueError("memory_current_operation_changed")
         own_ref = {"table": "workflow_run_states", "key": row["run_identity"]}
         if own_ref not in payload["refs"]:
             raise ValueError("memory_current_own_reference_missing")
         if original is None:
             return _checked_memory_unknown_unverified_row(row, run, context, binding, current)
-        original_payload = original["payload"]
-        result = context["result"]
-        if result is None or type(result["effect"]) is not dict:
-            raise ValueError("memory_original_effect_missing")
-        effect = MemoryOwnerEffect(**result["effect"])
-        if (set(result["effect"]) != set(asdict(effect)) or effect.status not in {"succeeded", "blocked"}
-                or effect.audit_event_id is None
-                or original_payload["invocation_ref"] != row["run_identity"]
-                or original_payload["claim_ref"] != result["claim_ref"]
-                or original_payload["candidate_digest"] != context["candidate_digest"]
-                or original_payload["composition_binding_digest"] != binding.binding_digest
-                or original_payload["method"] != candidate["method"]
-                or original_payload["owner_principal_id"] != candidate["operator_principal_id"]
-                or original_payload["operator_session_id"] != candidate["operator_session_id"]
-                or original_payload["original_deadline"] != candidate["original_deadline"]
-                or original_payload["source_binding_digest"] != _digest(candidate.get("source"))
-                or original_payload["original_effect_digest"] != _digest(asdict(effect))
-                or payload["original_checkpoint_digest"] != _digest(original)
-                or result["retention"]["original_checkpoint_digest"] != _digest(original)
-                or payload["refs"] != original_payload["refs"]):
-            raise ValueError("memory_original_binding_changed")
-        claim = _checked_memory_claim_row(row, run, context, binding)
-        if claim is None or claim["claim_ref"] != result["claim_ref"]:
-            raise ValueError("memory_original_claim_changed")
-        if (claim["input_digest"] != context["candidate_digest"]
-                or claim["authority_digest"] != row["authority_digest"]
-                or claim["run_fingerprint"] != row["run_fingerprint"]
-                or claim["composition_binding_digest"] != binding.binding_digest
-                or claim["host_boot_nonce"] != candidate["host_boot_nonce"]):
-            raise ValueError("memory_original_claim_changed")
-        audit_ref = original_payload["original_audit"]["ref"]
-        if audit_ref != {"table": "audit_events", "key": effect.audit_event_id}:
-            raise ValueError("memory_original_audit_changed")
+        effect, audit_ref = _checked_memory_original_bindings(row, run, context, binding, original, current)
+        if payload["state"] == "unknown":
+            # The fixed parser and immutable native bindings permit retaining
+            # opaque uncertainty. They do not authenticate the old M5 effect,
+            # an intervening owner, or a historical CAS. In particular, the
+            # closed operation value can describe a different later M5 owner.
+            # Only the validated branch below reports verified audit evidence.
+            return candidate, None
         _, audit, audit_bytes = _native_memory_reference_row_on_connection(connection, "audit_events", effect.audit_event_id)
         audit_digest = hashlib.sha256(audit_bytes).hexdigest()
         details = strict_json_loads(audit["details_json"])
@@ -1090,7 +1295,7 @@ def _checked_memory_reference_row(connection, row):
             {"memory_forgotten"} if candidate["method"] == "memory.forget" else
             {"memory_learning_accepted", "memory_corrected", "memory_learning_rejected", "memory_learning_expired",
              "memory_learning_rolled_back"})
-        if (audit_digest != original_payload["original_audit"]["tuple_digest"]
+        if (audit_digest != original["payload"]["original_audit"]["tuple_digest"]
                 or audit["actor"] != candidate["operator_principal_id"]
                 or audit["session_id"] != candidate["operator_session_id"]
                 or audit["tool_name"] != "memory_control" or audit["policy_mode"] != "operator_controlled"
@@ -1099,10 +1304,6 @@ def _checked_memory_reference_row(connection, row):
                 or (effect.proposal_id is not None and details.get("proposal_id") != effect.proposal_id)
                 or (candidate["method"] == "memory.forget" and details.get("memory_id") != effect.record_id)):
             raise ValueError("memory_original_audit_changed")
-        if payload["state"] == "unknown":
-            # Original-present Unknown is not verified history without the
-            # genuine M5 MACs. Keep it denied until that branch is complete.
-            raise ValueError("memory_unknown_original_verification_unavailable")
         if payload["absences"]:
             raise ValueError("memory_current_absence_unavailable")
         if _native_memory_current_rows_digest(payload["rows"], row["run_identity"]) != payload["rows_digest"]:
@@ -1738,7 +1939,7 @@ class CompositionSessionGuard:
         before = None if creating else composition_row_digest(table, key, _composition_row(connection, table, key))
         self.touched[(table, key)] = before
 
-    def _check_private_journal(self, before, after, *, run_id):
+    def _check_private_journal(self, before, after, *, run_id, statement=None):
         from src.workflows.job_runtime import _protected_composition_checkpoint
         def protected(raw):
             records = json.loads(raw or "[]")
@@ -1754,18 +1955,17 @@ class CompositionSessionGuard:
             return selected
         previous, current = protected(before), protected(after)
         memory_ids = {"memory:original-reference.v2", "memory:current-reference.v2"}
+        memory_permission = ()
         if any(previous.get(key) != current.get(key) for key in memory_ids):
-            # The complete actual Memory source/reserve/current/copy contract
-            # is not installed yet. Generic claim/turn db.info receipts cannot
-            # grant authority to mint or reduce these private journals.
-            raise ProductionWorkspaceReconciliationError("composition_memory_retention_unavailable")
+            memory_permission = _consume_native_memory_publication(
+                self.db, statement, run_id, before, after, previous, current)
         task_ids = {"runtime-service-invocation:task-capability:" + phase
             for phase in ("admission", "source", "invoke", "outcome", "cleanup")}
         if task_ids.intersection(current):
             from src.runtime_plugins.task_capability import preflight_report_journal
             preflight_report_journal(json.loads(after or "[]"))
         family_permission = self.db.info.get("composition_native_turn_family_receipt")
-        permitted = (self.db.info.get("composition_native_claim_receipt"), self.db.info.get("composition_native_turn_receipt"), family_permission)
+        permitted = (self.db.info.get("composition_native_claim_receipt"), self.db.info.get("composition_native_turn_receipt"), family_permission, *memory_permission)
         if any(previous.get(key) != current.get(key) for key in task_ids):
             from src.runtime_plugins.task_capability import validate_task_publication
             task_permission = validate_task_publication(self.db, previous, current, run_id=run_id,
@@ -1794,6 +1994,8 @@ class CompositionSessionGuard:
                 raise ProductionWorkspaceReconciliationError("composition_turn_family_receipt_invalid")
         for identifier, receipt in previous.items():
             if current.get(identifier) != receipt:
+                if identifier in memory_ids and current.get(identifier) in memory_permission:
+                    continue
                 if identifier in controls and current.get(identifier) in control_permission:
                     continue
                 if identifier == FAMILY_CHECKPOINT_ID and current.get(identifier) == family_permission:
@@ -1874,7 +2076,7 @@ class CompositionSessionGuard:
                             raw = getattr(value, "value", None)
                             if type(raw) is not str:
                                 raise ProductionWorkspaceReconciliationError("composition_private_journal_expression_denied")
-                            self._check_private_journal(_composition_row(connection, name, identity)["checkpoint_receipts_json"], raw, run_id=identity)
+                            self._check_private_journal(_composition_row(connection, name, identity)["checkpoint_receipts_json"], raw, run_id=identity, statement=statement)
                 if (name, identity) in self.members:
                     self._touch(connection, name, identity)
             state.update_execution_options(_composition_tracked_writer=self)
@@ -1987,8 +2189,8 @@ class CompositionSessionGuard:
         def checked_snapshot(conn):
             if self.header_budget is None:
                 return composition_closure(conn, verify_files=native_composition_files)
-            from src.memory.composition_headers import preflight_composition_superset, snapshot_reads
-            certificate = preflight_composition_superset(conn, self.header_budget)
+            from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
+            certificate = _certify_current_memory_snapshot_on_connection(conn, self.header_budget)
             with snapshot_reads(certificate):
                 return composition_closure(conn, verify_files=native_composition_files)
         target, members = await connection.run_sync(checked_snapshot)
@@ -2090,10 +2292,10 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         def checked_snapshot(conn):
             if header_budget is None:
                 return composition_closure(conn, verify_files=native_composition_files)
-            from src.memory.composition_headers import preflight_composition_superset, snapshot_reads
+            from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
             if not conn.connection.driver_connection.in_transaction:
                 conn.exec_driver_sql("BEGIN")
-            certificate = preflight_composition_superset(conn, header_budget)
+            certificate = _certify_current_memory_snapshot_on_connection(conn, header_budget)
             with snapshot_reads(certificate):
                 return composition_closure(conn, verify_files=native_composition_files)
         base, members = await connection.run_sync(checked_snapshot)

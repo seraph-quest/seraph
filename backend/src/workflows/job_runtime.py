@@ -18,9 +18,10 @@ import re
 import asyncio
 from contextvars import ContextVar
 from functools import wraps
+from inspect import signature
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from types import MappingProxyType
@@ -51,6 +52,30 @@ _MEMORY_MAINTENANCE_SCOPES = {}
 _CURRENT_MEMORY_MAINTENANCE = ContextVar("original_memory_maintenance", default=None)
 
 
+async def _deny_original_memory_generic_body(repository, job_id):
+    """A target scalar denies a generic writer; it issues no frame or Source."""
+    if type(job_id) is not str:
+        return
+    async with repository._session() as db:
+        rows = (await db.execute(text(
+            "SELECT typeof(job_kind),job_kind COLLATE BINARY='runtime_service_memory_v1' "
+            "FROM workflow_run_states INDEXED BY ix_workflow_run_states_run_identity "
+            "WHERE run_identity COLLATE BINARY=:identity LIMIT 2"),
+            {"identity": job_id})).all()
+        if rows == [("text", 1)]:
+            raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
+
+
+def _deny_original_memory_generic_entry(method):
+    parameters = signature(method)
+    @wraps(method)
+    async def denied(self, *args, **kwargs):
+        bound = parameters.bind(self, *args, **kwargs)
+        await _deny_original_memory_generic_body(self, bound.arguments["job_id"])
+        return await method(self, *args, **kwargs)
+    return denied
+
+
 def _original_memory_maintenance_scope(repository):
     scope = _CURRENT_MEMORY_MAINTENANCE.get()
     if scope is None:
@@ -67,6 +92,11 @@ def _original_memory_maintenance_entry(method):
     """One original call owns capacity across its existing nested transactions."""
     @wraps(method)
     async def scoped(self, *args, **kwargs):
+        # Preserve the existing initial native queue's original numeric frame.
+        # Its original admission/queue gates remain inside transition_job.
+        if (method.__name__ == "transition_job" and kwargs.get("header_budget") is not None
+                and (args[1] if len(args) > 1 else kwargs.get("to_status")) == "queued"):
+            return await method(self, *args, **kwargs)
         if _original_memory_maintenance_scope(self) is not None:
             return await method(self, *args, **kwargs)
         budget = None
@@ -87,7 +117,9 @@ def _original_memory_maintenance_entry(method):
         _MEMORY_MAINTENANCE_SCOPES[id(scope)] = scope
         token = _CURRENT_MEMORY_MAINTENANCE.set(scope)
         try:
-            return await method(self, *args, **kwargs)
+            from src.memory.composition_headers import _memory_current_snapshot_scope
+            with (_memory_current_snapshot_scope(budget) if budget is not None else nullcontext()):
+                return await method(self, *args, **kwargs)
         finally:
             scope.live = False
             _CURRENT_MEMORY_MAINTENANCE.reset(token)
@@ -107,9 +139,9 @@ async def _original_memory_maintenance_snapshot(repository, db, *, writer=False)
     if not (await connection.get_raw_connection()).driver_connection.in_transaction:
         await db.execute(text("BEGIN IMMEDIATE" if writer else "BEGIN"))
     from src.memory.universe import native_memory_universe
-    from src.memory.composition_headers import certify_composition_superset
+    from src.memory.composition_headers import _certify_current_memory_snapshot
     await native_memory_universe(db)
-    return await certify_composition_superset(db, scope.header_budget)
+    return await _certify_current_memory_snapshot(db, scope.header_budget)
 
 
 @dataclass(frozen=True, eq=False)
@@ -2591,11 +2623,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     {"header_budget": header_budget} if header_budget is not None else {}))
                 db.info["composition_writer_owner"] = "durable_jobs"
             elif header_budget is not None:
-                from src.memory.composition_headers import certify_composition_superset
+                from src.memory.composition_headers import _certify_current_memory_snapshot
                 connection = await db.connection()
                 if not (await connection.get_raw_connection()).driver_connection.in_transaction:
                     await db.execute(text("BEGIN IMMEDIATE" if maintenance is not None else "BEGIN"))
-                await certify_composition_superset(db, header_budget)
+                await _certify_current_memory_snapshot(db, header_budget)
             if maintenance is not None:
                 await _original_memory_maintenance_snapshot(self, db, writer=True)
             yield db
@@ -4412,9 +4444,6 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             maintenance = _original_memory_maintenance_scope(self)
             if maintenance is not None and maintenance.header_budget is not None:
-                from src.workspace.accounting_witness import prepare_composition_session
-                if getattr(db, "info", {}).get("composition_guard") is not None:
-                    await prepare_composition_session(db, header_budget=maintenance.header_budget)
                 await _original_memory_maintenance_snapshot(self, db, writer=True)
             near_writer_started = False
             general_writer_started = False
@@ -4834,11 +4863,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if to_status not in {"failed", "cancelled"}:
                 await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
-            result_update = await _execute_original_memory_negative(self, db, run,
-                conditions, values, receipt={"kind": "transition", "status": "recorded",
-                    "from": current, "to": to_status, "reason": _text(reason) or None,
-                    "fencing_token": run.fencing_token, "revision": current_revision + 1,
-                    "operator_visible": True})
+            if run.job_kind == "runtime_service_memory_v1" and to_status == "queued" and header_budget is not None:
+                result_update = await db.execute(update(WorkflowRunState).execution_options(
+                    synchronize_session=False).where(*conditions).values(**values))
+            else:
+                result_update = await _execute_original_memory_negative(self, db, run,
+                    conditions, values, receipt={"kind": "transition", "status": "recorded",
+                        "from": current, "to": to_status, "reason": _text(reason) or None,
+                        "fencing_token": run.fencing_token, "revision": current_revision + 1,
+                        "operator_visible": True})
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("durable job changed or lease fencing token is stale")
             if header_budget is not None:
@@ -6340,6 +6373,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     # Keep the shorter name available to scheduler/workflow adapters.
     heartbeat = heartbeat_job
 
+    @_deny_original_memory_generic_entry
     async def transfer_lease(
         self,
         job_id: str,
@@ -6441,6 +6475,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(transferred)
             return _serialize(transferred, receipt=receipt)
 
+    @_deny_original_memory_generic_entry
     async def record_checkpoint(
         self,
         job_id: str,
@@ -7589,6 +7624,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed_child)
             return _serialize(refreshed_parent), _serialize(refreshed_child)
 
+    @_deny_original_memory_generic_entry
     async def record_recovery_checkpoint(
         self,
         job_id: str,
@@ -7781,6 +7817,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         run.updated_at = _utc_now()
         return receipt
 
+    @_deny_original_memory_generic_entry
     async def record_artifact(
         self,
         job_id: str,
@@ -7901,6 +7938,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "artifact", "status": "recorded", **receipt})
 
+    @_deny_original_memory_generic_entry
     async def record_recovery_artifact(
         self,
         job_id: str,
@@ -8355,6 +8393,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "capacity_closed": closed_read,
                 "artifact_id": record["artifact_id"], "content_sha256": artifact_sha256})
 
+    @_deny_original_memory_generic_entry
     async def record_effect(
         self,
         job_id: str,
@@ -8740,6 +8779,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": receipt_kind, "status": "recorded", **receipt})
 
+    @_deny_original_memory_generic_entry
     async def record_readback(
         self,
         job_id: str,
@@ -8817,6 +8857,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """
         safe_receipt, receipt_digest = _canonical_remote_inference_receipt(receipt)
         job_id = str(safe_receipt["job_id"])
+        await _deny_original_memory_generic_body(self, job_id)
         current = await self.get_job(job_id)
         if current is None:
             raise DurableJobNotFound(job_id)
@@ -8847,6 +8888,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             expected_revision=expected_revision,
         )
 
+    @_deny_original_memory_generic_entry
     async def record_remote_inference_intent(
         self,
         *,
@@ -9007,6 +9049,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 receipt={"kind": "effect", "status": "recorded", **receipt},
             )
 
+    @_deny_original_memory_generic_entry
     async def retry_job(
         self,
         job_id: str,

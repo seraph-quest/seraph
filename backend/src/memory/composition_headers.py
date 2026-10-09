@@ -1,7 +1,10 @@
 """Source-closed SQL byte preflight. Nothing in this module grants authority."""
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import asyncio
+import threading
+from weakref import WeakValueDictionary
 import json
 import math
 from types import MappingProxyType
@@ -24,6 +27,109 @@ _FTS_META = {'session_recall_fts': {'columns': [[0, 'entry_key', '', 0, None, 0,
 
 def _sql(connection, query, parameters=()):
     return connection.exec_driver_sql(query, parameters) if hasattr(connection, "exec_driver_sql") else connection.execute(query, parameters)
+
+
+_SNAPSHOT_SCOPE_SEAL = object()
+_SNAPSHOT_SCOPES = WeakValueDictionary()
+_SNAPSHOT_CERTIFICATES = WeakValueDictionary()
+_CURRENT_SNAPSHOT_SCOPE = ContextVar("original_memory_snapshot_scope", default=None)
+
+
+@dataclass(eq=False)
+class _MemoryCurrentSnapshotScope:
+    budget: object
+    task: object
+    thread: int
+    invocation: object = field(default_factory=object)
+    seal: object = field(default=_SNAPSHOT_SCOPE_SEAL, repr=False)
+    certificates: dict = field(default_factory=dict, repr=False)
+    live: bool = True
+
+
+def _checked_current_snapshot_scope(budget):
+    scope = _CURRENT_SNAPSHOT_SCOPE.get()
+    if scope is None:
+        return None
+    if (type(scope) is not _MemoryCurrentSnapshotScope or scope.seal is not _SNAPSHOT_SCOPE_SEAL
+            or _SNAPSHOT_SCOPES.get(id(scope)) is not scope or not scope.live
+            or scope.budget is not budget or scope.task is not _snapshot_current_task()
+            or scope.thread != threading.get_ident()):
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    return scope
+
+
+def _snapshot_current_task():
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+@contextmanager
+def _memory_current_snapshot_scope(budget):
+    """One lexical numeric operation; never a Source or writer permission."""
+    if type(budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("header_request_bound")
+    current = _checked_current_snapshot_scope(budget)
+    if current is not None:
+        yield current
+        return
+    scope = _MemoryCurrentSnapshotScope(budget, _snapshot_current_task(), threading.get_ident())
+    _SNAPSHOT_SCOPES[id(scope)] = scope
+    token = _CURRENT_SNAPSHOT_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        scope.live = False
+        scope.certificates.clear()
+        _SNAPSHOT_SCOPES.pop(id(scope), None)
+        _CURRENT_SNAPSHOT_SCOPE.reset(token)
+
+
+def _snapshot_schema_cookies(connection, budget):
+    cookies = (_sql(connection, "PRAGMA main.schema_version").scalar_one(),
+               _sql(connection, "PRAGMA temp.schema_version").scalar_one())
+    if any(type(value) is not int or not 0 <= value < 2**31 for value in cookies):
+        raise HeaderBoundsError("header_schema_cookie_unavailable")
+    budget.debit(_metadata_cost(cookies), appearance=("schema-cookies",))
+    return cookies
+
+
+def _certify_current_memory_snapshot_on_connection(connection, budget):
+    """Reuse only an original issued certificate for this exact live snapshot."""
+    if type(budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("header_request_bound")
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is None:
+        return preflight_composition_superset(connection, budget)
+    current = scope.certificates.get(connection)
+    if current is not None:
+        certificate, cookies = current
+        if (type(certificate) is not CompositionHeaderCertificate
+                or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate
+                or certificate.budget is not budget or certificate.connection is not connection):
+            raise HeaderBoundsError("header_certificate_unavailable")
+        try:
+            _validate(connection, certificate)
+        except HeaderBoundsError as error:
+            if str(error) != "header_certificate_stale":
+                raise
+        else:
+            if _snapshot_schema_cookies(connection, budget) == cookies:
+                return certificate
+    cookies = _snapshot_schema_cookies(connection, budget)
+    certificate = preflight_composition_superset(connection, budget)
+    if _snapshot_schema_cookies(connection, budget) != cookies:
+        raise HeaderBoundsError("header_schema_cookie_changed")
+    _validate(connection, certificate)
+    _SNAPSHOT_CERTIFICATES[id(certificate)] = certificate
+    scope.certificates[connection] = (certificate, cookies)
+    return certificate
+
+
+async def _certify_current_memory_snapshot(db, budget):
+    return await (await db.connection()).run_sync(
+        lambda connection: _certify_current_memory_snapshot_on_connection(connection, budget))
 
 
 def _metadata_cost(rows):
@@ -270,6 +376,17 @@ def snapshot_reads(certificate):
     token=_CURRENT.set(certificate)
     try:yield
     finally:_CURRENT.reset(token)
+
+
+@asynccontextmanager
+async def snapshot_reads_async(db, certificate):
+    """Validate on the real driver greenlet before an original async execute."""
+    await validate_composition_certificate(db, certificate)
+    token = _CURRENT.set(certificate)
+    try:
+        yield
+    finally:
+        _CURRENT.reset(token)
 
 
 def charge_row(connection,table,key):

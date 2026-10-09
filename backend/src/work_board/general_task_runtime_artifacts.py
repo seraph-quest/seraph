@@ -420,8 +420,9 @@ async def read_current_native_outputs(db, parent, task, attempt, manifest, envel
             raise BoardError("general_task_dependency_unverified", "Canonical predecessor invocation missing", status_code=409)
         binding = child_binding(child)
         effects = json.loads(child.effect_receipts_json)
+        degraded_build = child.status == "degraded" and envelope.task_input.document_build is not None
         if (receipt.status != "verified" or receipt.contact_state != "settled"
-            or child.status != "succeeded" or binding.step_id != dependency
+            or (child.status != "succeeded" and not degraded_build) or binding.step_id != dependency
             or binding.creation_digest != manifest.creation_digest
             or binding.selected_grant_digest != manifest.selected_grant_digest
             or binding.original_root_id != task.owner_session_id
@@ -462,6 +463,19 @@ async def read_current_native_outputs(db, parent, task, attempt, manifest, envel
         if predecessor is None:
             raise BoardError("general_task_dependency_unverified", "Frozen predecessor step missing", status_code=409)
         validate_schema(predecessor.output_contract, body["output"])
+        if degraded_build:
+            from src.work_board import document_build_native, document_build_storage
+            original = envelope.task_input.document_build
+            if (descriptor != document_build_native.descriptor() or predecessor.tool_id != "document_build"
+                    or body["output"].get("pdf_artifact") is not None or not body["output"].get("warnings")):
+                raise BoardError("general_task_dependency_unverified", "The fixed verified degraded build is required", status_code=409)
+            owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+            row, value = await document_build_storage.owned(db, owner, original.build_ref.split(":", 1)[1])
+            await document_build_storage.authority(db, owner, row, value, metadata_only=True)
+            if (document_build_storage.build_binding(row, value) != original.model_dump(mode="json")
+                    or value.get("phase") != "degraded" or value.get("output") != body["output"]):
+                raise BoardError("general_task_dependency_unverified", "The original private degraded output changed", status_code=409)
+            await document_build_native.validate_output_readback(db, task, attempt, child, row, value)
         outputs[dependency] = body["output"]
     return outputs
 

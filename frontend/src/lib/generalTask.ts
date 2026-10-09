@@ -1,6 +1,7 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
 import type { WorkBoardTask } from "../types";
+import { validBuildBinding, type DocumentBuildTaskBinding } from "./documentBuild";
 
 export const GENERAL_TASK_CAPABILITY = "agent.task.v1";
 export interface GeneralTaskLimits {
@@ -16,6 +17,7 @@ export interface GeneralTaskInput {
   requested_output: Record<string, unknown>; limits: GeneralTaskLimits;
   tool_set_digest?: string; inference_egress_acknowledged: boolean;
   document_source?: DocumentTaskBinding;
+  document_build?: DocumentBuildTaskBinding;
 }
 export interface TaskPlan {
   schema_version: 1; revision: number;
@@ -164,7 +166,7 @@ function validatePartialOptions(v: unknown, task: WorkBoardTask, native: Record<
 const artifactReference = (v: unknown): boolean => record(v) && typeof v.artifact_id === "string"
   && v.artifact_id.length > 0 && v.artifact_id.length <= 128 && typeof v.digest === "string"
   && /^[a-f0-9]{64}$/.test(v.digest) && typeof v.schema_version === "string";
-function validDocumentTaskBinding(value: unknown): value is DocumentTaskBinding {
+export function validDocumentTaskBinding(value: unknown): value is DocumentTaskBinding {
   return record(value) && typeof value.artifact_ref === "string" && /^document-source:[0-9a-f-]{36}$/.test(value.artifact_ref)
     && typeof value.source_revision === "number" && Number.isSafeInteger(value.source_revision) && value.source_revision >= 1
     && typeof value.metadata_digest === "string" && /^[a-f0-9]{64}$/.test(value.metadata_digest)
@@ -179,6 +181,7 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || typeof value.accepted !== "boolean" || value.no_learning !== true || !record(value.task_input)
     || value.task_input.goal_ref !== task.goal_id || typeof value.task_input.intent !== "string"
     || (value.task_input.document_source !== undefined && !validDocumentTaskBinding(value.task_input.document_source))
+    || (value.task_input.document_build !== undefined && !validBuildBinding(value.task_input.document_build))
     || !record(value.task_input.limits) || !Array.isArray(value.descriptors) || !record(value.strategy)
     || (value.plan === null ? (value.accepted !== false || typeof value.proposal_error !== "string")
       : (!record(value.plan) || value.plan.schema_version !== 1 || !Number.isSafeInteger(value.plan.revision) || !Array.isArray(value.plan.steps) || !value.plan.steps.length || !value.descriptors.length))) {
@@ -268,6 +271,19 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || !record(s.input) || !record(s.output_contract) || !Array.isArray(s.depends_on)
     || !s.depends_on.every(x => typeof x === "string") || !descriptors.some(d => record(d) && d.tool_id === s.tool_id))) {
     throw new Error("Plan steps do not match the registered tool descriptors.");
+  }
+  if (value.task_input.document_build !== undefined) {
+    const binding = value.task_input.document_build as DocumentBuildTaskBinding;
+    const steps = record(value.plan) ? value.plan.steps as Record<string, unknown>[] : [];
+    const step = steps[0], limits = value.task_input.limits;
+    if (steps.length !== 1 || !record(step) || step.step_id !== "build" || step.tool_id !== "document_build"
+      || !record(step.input) || Object.keys(step.input).length !== 2 || step.input.build_ref !== binding.build_ref || step.input.spec_digest !== binding.spec_digest
+      || !Array.isArray(step.depends_on) || step.depends_on.length !== 0 || value.task_input.intent !== "Build the reviewed local document specification"
+      || value.task_input.document_source !== undefined || value.task_input.inference_egress_acknowledged !== false
+      || limits.max_steps !== 1 || limits.max_inference_calls !== 0 || limits.max_cost_microusd !== 0 || limits.max_outstanding_children !== 0
+      || typeof limits.wall_seconds !== "number" || limits.wall_seconds > 60) {
+      throw new Error("Document builds require their original fixed zero-inference local renderer plan. Refresh Work before reviewing.");
+    }
   }
   return value as unknown as GeneralTaskPlanRead;
 }

@@ -1849,6 +1849,11 @@ class _ChildAdmission:
         descriptors = [item for item in envelope.descriptors if step is not None and item.tool_id == step.tool_id]
         if len(descriptors) != 1 or digest(descriptors[0].model_dump(mode="json")) != binding.descriptor_digest:
             raise DurableJobLeaseError("general task child descriptor is outside the original selected grant")
+        if step.tool_id == "document_build":
+            authority = json.loads(child.declared_authority_json)
+            if (child.priority != task.priority or authority.get("document_build_priority") != task.priority
+                    or authority.get("document_build_input_artifact_id") != task.input_artifact_id):
+                raise DurableJobLeaseError("original document build priority/input binding changed")
         native_input, input_record = verify_staged_task_artifact(self.staged_input,
             parent_job_id=parent.run_identity, creation_digest=previous.creation_digest)
         resolved_inputs = await resolve_current_native_step_inputs(

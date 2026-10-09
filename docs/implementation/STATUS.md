@@ -334,8 +334,8 @@ focused source/producer/native run passed 36 checks, the consumer regression run
 66 and the UI run 64; these separate proof runs retain their own source epochs.
 Scripted final service transports and actual local SQLite/private-file effects
 prove mechanics, not provider quality, learned improvement, general usefulness
-or native macOS execution. Whole cumulative independent review and merge remain
-required. See the
+or native macOS execution. Whole cumulative independent review passed before
+the milestone merged through #1053. See the
 [operator flow](./12-current-app-guide.md#reusable-general-procedures-1002)
 and [accepted contract](./decisions/028-reviewed-task-methods.md).
 

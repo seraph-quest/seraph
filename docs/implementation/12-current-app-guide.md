@@ -1154,6 +1154,87 @@ Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Communication preparation (#1016)
+
+**Intended Partial scope after independently reviewed merge:** this describes
+the source branch for [#1016](https://github.com/seraph-quest/seraph/issues/1016).
+Availability requires its implementation merge in the installed `develop`
+revision. The existing Python lifecycle owns this composition; configuration
+alone does not make Mail or Calendar ready.
+
+In the private Mail review or Calendar event selection, explicitly add current
+sources to communication preparation. Choose the same current owned Goal,
+review the selected sources and finite cost limit, then prepare one bounded
+task. Each reschedule candidate requires its selected meeting source. Existing
+source-specific model consent and grants must remain current. The accepted
+original task invokes the actual native Mail reply-draft and Calendar meeting-
+preparation owners sequentially under its original shared inference group,
+reserved limits and absolute cutoff. Internal source tasks cannot be promoted
+or retried as independent work. Private source bodies do not enter the general
+task planner; a new authority generation does not renew original reservations,
+Unknown costs, attempts or effects.
+
+Open the current private communication plan from its Work card. Its closed
+five-field value contains exact source references, up to five reply drafts,
+five meeting preparations, three reschedule proposals and bounded unresolved
+questions. Drafts and briefs come from physically read-back original native
+outputs. The encrypted aggregate is privately read and revalidated under the
+current owner, Root, Goal, task and source permissions. Source drift hides only
+affected entries and keeps their blocker visible; loss of Root or Goal authority
+hides the whole private value. Historical recovered selection is read-only
+metadata and grants no private-body access or fresh execution. Generic Calendar
+readers remain root-only; the specialized private aggregate reader does not
+expand their authority.
+
+Select only the actions wanted, inspect each fresh exact native preview and
+approve each independently. **Validate selected independent exact approvals**
+checks an inert `ActionBundle`; it performs no effects and grants no collective
+approval. Execute through each action's existing native controls. Mail follows
+[ADR-016](./decisions/016-exact-gmail-reply-send.md): one exact send and independent
+sender-Sent readback, which does not prove recipient delivery. Calendar follows
+[ADR-019](./decisions/019-exact-calendar-reschedule.md): one conditional owned-event
+patch and independent exact-event readback. A changed source, recipient, body,
+connection or event invalidates the affected action; a conflict does not erase
+another action's verified result. Unseen calendar occupancy remains unresolved
+and grants no broad free/busy read.
+
+Response loss keeps the original operation Unknown, with no automatic send,
+patch, reversal or replacement. Use the original action's finite read-only
+reconciliation controls. A separate current RecoveryGoal/read grant can observe
+the original effect only while its original Root remains authorized and owned
+transport closure is established. It cannot regrant the old write, change its
+deadline or settle historical cost liability by observation. An unconfirmed
+task admission retains its exact request in the current owner session's memory
+for explicit reconciliation; it does not create a replacement automatically.
+Preparation and actions explicitly record `no_learning`. Feedback must use a
+separate governed lesson proposal.
+
+The private view states the retention limit: access expiry does not delete
+artifacts. **Clean up aggregate private plan** deliberately requests cleanup
+at the exact current task revision. Only verified physical absence clears it
+as deleted; unresolved deletion or response loss stays visible and retains the
+original cleanup request for explicit reconciliation. Authoritative access
+denial discards the private view without claiming deletion. Cleanup removes only
+the encrypted aggregate, preserving original Mail drafts, Calendar briefs and
+immutable approvals/effect history under their existing owners. Original
+Calendar preparation briefs remain bounded local plaintext with private file
+modes; aggregate encryption does not migrate that storage. No automatic TTL
+deletion exists. Same-user filesystem replacement between the final inode check
+and unlink remains a residual race; no atomic conditional unlink is claimed.
+
+The [native composition journey](../../backend/tests/test_communication_native.py)
+uses actual isolated authenticated tasks, source callbacks, encrypted physical
+readback, separate native Mail/Calendar effects and literal provider readbacks,
+with scripted inference only at its owned transport. The
+[communication UI tests](../../frontend/src/components/cockpit/CommunicationPlanPanel.test.tsx)
+cover independent selection, stale authority, response loss and cleanup states.
+Current Linux validation still retains unresolved native process crashes
+(ordinary exit 139 and guarded exit 245); one debugger run passing 24 tests does
+not resolve them or establish runtime readiness. Only verified cleanup has a
+captured authenticated API wire receipt; unresolved cleanup has service and UI
+coverage. Live provider usefulness, native macOS execution and model quality
+remain unverified.
+
 ### Task lesson drafts (proposal-only)
 
 The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary

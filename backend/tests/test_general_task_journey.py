@@ -14,10 +14,11 @@ from sqlalchemy import select
 
 from tests.test_general_task_planner import accounting_db, forbid_external_inference, prepare
 from tests.test_work_board_m6_provider_free_journey import _goal
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 
 
 @pytest.mark.asyncio
-async def test_http_governed_intent_plan_accept_native_readback_and_restart(accounting_db, monkeypatch):
+async def test_http_governed_intent_plan_accept_native_readback_and_restart(accounting_db, monkeypatch, build_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.api import work_board as module
     from src.db.models import WorkBoardTask, WorkflowRunState
@@ -29,6 +30,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     operator = await authenticate_session(owner.session_id, touch=False)
@@ -179,7 +181,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
 
 
 @pytest.mark.asyncio
-async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_lesson(accounting_db, monkeypatch):
+async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_lesson(accounting_db, monkeypatch, build_admission_lifecycle):
     """Actual failed general-task contact remains no-learning under the optional hook."""
     from uuid import uuid4
     from src.auth import service as auth_service
@@ -199,6 +201,7 @@ async def test_opted_in_general_task_actual_missing_read_creates_no_automatic_le
         return issued
     monkeypatch.setattr(auth_service, "create_session", capture_actual_session)
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     assert len(issued_tokens) == 1

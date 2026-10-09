@@ -14,6 +14,7 @@ from src.workflows.delegation_contracts import (
     recheck_delegation_evidence,
 )
 from tests.test_general_task_persistence import task_runtime
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
 
@@ -135,7 +136,7 @@ async def evidence_parent(task_runtime, *, text="hello"):
 
 
 @pytest.mark.asyncio
-async def test_selected_evidence_is_real_readback_and_empty_selection_copies_nothing(task_runtime):
+async def test_selected_evidence_is_real_readback_and_empty_selection_copies_nothing(task_runtime, native_admission_lifecycle):
     sessions, _workspace, owner, service, envelope, registry = await evidence_parent(task_runtime)
     refs = envelope.task_input.evidence_refs
     async with sessions() as db:
@@ -149,7 +150,7 @@ async def test_selected_evidence_is_real_readback_and_empty_selection_copies_not
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["foreign_owner", "root_revoked", "goal_revoked", "producer_goal_revoked", "producer_revoked", "unknown_effect", "tamper", "symlink"])
-async def test_canonical_revocation_or_physical_tamper_denies_without_contact(task_runtime, failure):
+async def test_canonical_revocation_or_physical_tamper_denies_without_contact(task_runtime, failure, native_admission_lifecycle):
     from src.db.models import OperatorSession, Goal, WorkBoardTask, WorkBoardStatus, WorkBoardAttempt, WorkflowRunState
     sessions, workspace, owner, service, envelope, registry = await evidence_parent(task_runtime)
     refs = envelope.task_input.evidence_refs
@@ -189,7 +190,7 @@ async def test_canonical_revocation_or_physical_tamper_denies_without_contact(ta
 
 
 @pytest.mark.asyncio
-async def test_known_vault_secret_instruction_denies_in_original_sqlite(task_runtime):
+async def test_known_vault_secret_instruction_denies_in_original_sqlite(task_runtime, native_admission_lifecycle):
     from src.vault.repository import vault_repository
     sessions, _workspace = task_runtime
     await vault_repository.store("handoff-secret", "credential-canary-original")
@@ -200,7 +201,7 @@ async def test_known_vault_secret_instruction_denies_in_original_sqlite(task_run
 
 
 @pytest.mark.asyncio
-async def test_one_byte_known_credential_instruction_and_physical_handoff_are_denied(task_runtime):
+async def test_one_byte_known_credential_instruction_and_physical_handoff_are_denied(task_runtime, native_admission_lifecycle):
     from src.vault.repository import vault_repository
     from src.vault.redaction import redact_secrets_in_text_readonly
     await vault_repository.store("single-byte-secret", "Z")
@@ -226,7 +227,7 @@ async def test_one_byte_known_credential_instruction_and_physical_handoff_are_de
     ("secret://" + "a" * 32, "delegation_credentials_denied"),
     ("x" * 32700, "delegation_handoff_limit"),
 ])
-async def test_actual_output_cannot_copy_credentials_conversation_or_oversized_envelope(task_runtime, text, code):
+async def test_actual_output_cannot_copy_credentials_conversation_or_oversized_envelope(task_runtime, text, code, native_admission_lifecycle):
     from src.vault.repository import vault_repository
     if code == "delegation_credentials_denied":
         await vault_repository.store("handoff-secret", "credential-canary-original")
@@ -240,7 +241,7 @@ async def test_actual_output_cannot_copy_credentials_conversation_or_oversized_e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["none", "copied", "mutated", "root", "goal", "run", "vault"])
-async def test_staged_source_packet_metadata_recheck_has_no_io_and_fences_races(task_runtime, monkeypatch, change):
+async def test_staged_source_packet_metadata_recheck_has_no_io_and_fences_races(task_runtime, monkeypatch, change, native_admission_lifecycle):
     from dataclasses import replace
     from src.db.models import OperatorSession, Goal, WorkBoardAttempt, WorkflowRunState
     from src.vault.repository import vault_repository

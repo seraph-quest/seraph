@@ -9,11 +9,12 @@ from tests.test_inference_accounting import accounting_db
 from tests.test_general_documents import fixture_bytes, read_request
 from tests.test_general_task_planner import prepare, forbid_external_inference
 from tests.test_work_board_m6_provider_free_journey import _goal
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 
 
 @pytest.mark.parametrize("fmt,scenario", [(fmt, "success") for fmt in ("pdf", "docx", "xlsx", "csv")]
     + [("csv", case) for case in ("late_source", "late_cipher", "late_cancel", "late_fence", "late_deadline", "late_goal", "late_root", "early_goal")])
-async def test_actual_document_preparation_task_private_readback(accounting_db, monkeypatch, fmt, scenario):
+async def test_actual_document_preparation_task_private_readback(accounting_db, monkeypatch, fmt, scenario, build_admission_lifecycle):
     from src.api import documents, work_board
     from src.auth.service import create_session, authenticate_token
     from src.work_board.contracts import WorkBoardOwner
@@ -24,6 +25,7 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
     from src.vault import crypto
     from config.settings import settings
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     token, operator = await create_session()
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
     workspace, _engine, factory = accounting_db

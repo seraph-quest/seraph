@@ -595,6 +595,7 @@ class TelegramTransportAdapter:
             "configured": row.pairing_state == "active" and bool(row.token_secret_ref),
             "pairing_state": row.pairing_state,
             "pairing_id": row.pairing_id,
+            "state_revision": telegram_state_revision(row),
             "operator_id": row.operator_id,
             "chat_id": row.chat_id,
             "owner_principal_id": row.owner_principal_id,
@@ -969,6 +970,49 @@ class TelegramTransportAdapter:
         )
 
     async def ingest_update(
+        self, payload: dict[str, Any], *, owner_principal_id: str, operator_session_id: str,
+    ) -> dict[str, Any]:
+        receipt = await self._ingest_update(payload, owner_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id)
+        capture = receipt.get("channel_task_capture")
+        if isinstance(capture, dict) and capture.get("phase") in {"reserved", "linked"}:
+            from src.work_board.channel_capture import ChannelTaskIngress, ChannelReplyContext
+            reservation = capture["reservation"]
+            ingress = ChannelTaskIngress(pairing_id=capture["pairing_id"],
+                event_id=receipt["idempotency_key"], text_or_transcript_ref="message:" + reservation["canonical_message_id"],
+                attachment_refs=[], reply_context=ChannelReplyContext(
+                    capture_binding_digest=capture["binding_digest"],
+                    conversation_session_id=reservation["conversation_session_id"]))
+            task = await self.capture_task(ingress, owner_principal_id=owner_principal_id,
+                operator_session_id=operator_session_id)
+            return {**receipt, "channel_task_capture": {"phase": "linked", **task}}
+        return receipt
+
+    async def capture_task(self, ingress, *, owner_principal_id, operator_session_id):
+        from src.api.work_board import dispatcher
+        from src.work_board.contracts import WorkBoardOwner
+        from src.work_board.channel_capture import reserved_telegram_capture, check_telegram_capture_source
+        from src.work_board.repository import BoardError, _begin_sqlite_immediate
+        service = dispatcher.general_tasks
+        if service is None:
+            raise BoardError("general_task_inactive", "Restore the current Task service", status_code=503)
+        owner = WorkBoardOwner(principal_id=_owner(owner_principal_id), session_id=_session(operator_session_id))
+        async with db_engine.get_session() as db:
+            request, capture = await reserved_telegram_capture(db, owner, ingress, adapter=self)
+            mutation = await service.capture_intent(db, owner, request, capture=capture)
+            task_id, revision = mutation.task.task_id, mutation.task.task_revision
+            async with self._lock:
+                await _begin_sqlite_immediate(db)
+                event, _reservation = await check_telegram_capture_source(db, owner, ingress, adapter=self)
+                receipt = json.loads(event.receipt_json)
+                receipt["channel_task_capture"] = {**receipt["channel_task_capture"],
+                    "phase": "linked", "task_id": task_id, "task_revision": revision}
+                event.receipt_json = json.dumps(receipt, sort_keys=True)
+                await db.commit()
+            return {"task_id": task_id, "task_revision": revision,
+                "idempotent_replay": mutation.idempotent_replay, "no_learning": True}
+
+    async def _ingest_update(
         self,
         payload: dict[str, Any],
         *,
@@ -1144,6 +1188,16 @@ class TelegramTransportAdapter:
                         "ingress_receipt": receipt,
                     },
                 ).as_dict()
+                if content.startswith("/task "):
+                    from src.api.work_board import dispatcher
+                    from src.work_board.channel_capture import reserve_telegram_event_capture
+                    if dispatcher.general_tasks is None:
+                        receipt_payload["channel_task_capture"] = {"phase": "blocked", "reason": "general_task_inactive"}
+                    elif update_payload.attachment:
+                        receipt_payload["channel_task_capture"] = {"phase": "blocked", "reason": "channel_document_source_unsealed"}
+                    else:
+                        await reserve_telegram_event_capture(db, row, canonical_message, receipt_payload,
+                            event_key=result.idempotency_key, adapter=self, service=dispatcher.general_tasks)
                 db.add(TelegramInboundUpdate(
                     idempotency_key=result.idempotency_key,
                     request_digest=result.request_digest,

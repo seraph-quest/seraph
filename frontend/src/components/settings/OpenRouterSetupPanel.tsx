@@ -4,7 +4,7 @@ import { apiFetch } from "../../lib/api";
 import {
   normalizeModelFabricSettings,
   type ModelFabricSettingsStatus,
-  type OpenRouterPurpose,
+  type OpenRouterOptionalPurpose,
   type OpenRouterRouteValue,
   type OpenRouterSetupStatus,
   type OpenRouterSetupValue,
@@ -15,6 +15,7 @@ const CAPABILITIES = {
   text: ["text", "tool_use", "structured_output", "streaming"],
   vision: ["text", "vision", "structured_output"],
   embedding: ["embedding"],
+  audio: ["text", "audio_input"],
 };
 interface RouteDraft {
   enabled: boolean;
@@ -28,7 +29,8 @@ interface RouteDraft {
   requestCostBoundMicrousd: string;
 }
 interface SetupDraft {
-  routes: Record<OpenRouterPurpose, RouteDraft>;
+  routes: Record<OpenRouterOptionalPurpose, RouteDraft>;
+  audioSetup: boolean;
   egressClass: string;
   cloudEgressAcknowledged: boolean;
   spendCeilingMicrousd: string;
@@ -43,22 +45,23 @@ interface OpenRouterSetupPanelProps {
   policyRevision?: number;
   policyRevoked?: boolean;
 }
-function routeDraft(route: OpenRouterRouteValue | null | undefined, slot: OpenRouterPurpose): RouteDraft {
+function routeDraft(route: OpenRouterRouteValue | null | undefined, slot: OpenRouterOptionalPurpose): RouteDraft {
   return {
     enabled: route?.enabled ?? false,
     modelId: route?.model_id ?? "",
-    capabilities: route ? [...route.capabilities] : slot === "vision" ? ["text", "vision", "structured_output"] : slot === "embedding" ? ["embedding"] : ["text", "structured_output"],
+    capabilities: route ? [...route.capabilities] : slot === "audio" ? ["text", "audio_input"] : slot === "vision" ? ["text", "vision", "structured_output"] : slot === "embedding" ? ["embedding"] : ["text", "structured_output"],
     temperature: String(route?.temperature ?? 0.7),
     maxOutputTokens: String(route?.max_output_tokens ?? 4096),
-    timeoutSeconds: String(route?.timeout_seconds ?? 120),
+    timeoutSeconds: String(route?.timeout_seconds ?? (slot === "audio" ? 60 : 120)),
     allowedUpstreams: route?.allowed_upstreams.join(", ") ?? "",
-    zeroDataRetention: route?.zero_data_retention ?? false,
+    zeroDataRetention: route?.zero_data_retention ?? (slot === "audio"),
     requestCostBoundMicrousd: route ? String(route.request_cost_bound_microusd) : "",
   };
 }
 function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined, revoked = false): SetupDraft {
   return {
-    routes: { text: routeDraft(setup?.routes.text, "text"), vision: routeDraft(setup?.routes.vision, "vision"), embedding: routeDraft(setup?.routes.embedding, "embedding") },
+    routes: { text: routeDraft(setup?.routes.text, "text"), vision: routeDraft(setup?.routes.vision, "vision"), embedding: routeDraft(setup?.routes.embedding, "embedding"), audio: routeDraft(setup?.routes.audio, "audio") },
+    audioSetup: setup?.schema_version === "seraph.openrouter.setup.v3",
     egressClass: setup?.egress_class ?? "cloud_allowed_full",
     cloudEgressAcknowledged: !revoked && (setup?.cloud_egress_acknowledged ?? false),
     spendCeilingMicrousd: setup?.spend_ceiling_microusd == null ? "" : String(setup.spend_ceiling_microusd),
@@ -77,21 +80,23 @@ function boundedNumber(value: string, label: string, min: number, max: number, i
   }
   return parsed;
 }
-function routeValue(draft: RouteDraft, slot: OpenRouterPurpose, ceiling: number): OpenRouterRouteValue | null {
+function routeValue(draft: RouteDraft, slot: OpenRouterOptionalPurpose, ceiling: number): OpenRouterRouteValue | null {
   // An untouched absent purpose stays absent and does not block saving text.
   if (!draft.enabled && !draft.modelId.trim()) return null;
   const model = draft.modelId.trim();
   if (!/^[^\s,\/]+\/[^\s,]+$/.test(model)) throw new Error(slot + ": select one qualified OpenRouter model ID.");
   const upstreams = splitList(draft.allowedUpstreams);
   if (!upstreams.length) throw new Error(slot + ": an explicit upstream allow-list is required.");
-  const required = slot === "vision" ? ["text", "vision"] : [slot];
+  const required = slot === "audio" ? ["text", "audio_input"] : slot === "vision" ? ["text", "vision"] : [slot];
+  if (slot === "audio" && (upstreams.length !== 1 || !/^[a-z0-9][a-z0-9_.:-]{0,63}(?:\/[a-z0-9][a-z0-9_.:-]{0,63})?$/.test(upstreams[0]))) throw new Error("audio: select one exact lowercase upstream endpoint.");
+  if (slot === "audio" && (draft.capabilities.length !== 2 || !draft.zeroDataRetention)) throw new Error("audio: text and audio input with zero data retention are required.");
   if (!required.every((capability) => draft.capabilities.includes(capability))) throw new Error(slot + ": required capabilities are " + required.join(", ") + ".");
   if (slot !== "text" && draft.enabled && !draft.zeroDataRetention) throw new Error(slot + ": zero data retention is required.");
   return {
     model_id: model, enabled: draft.enabled, capabilities: [...draft.capabilities], allowed_upstreams: upstreams,
     temperature: boundedNumber(draft.temperature, slot + " temperature", 0, 2),
-    max_output_tokens: boundedNumber(draft.maxOutputTokens, slot + " max output tokens", 1, 131072, true),
-    timeout_seconds: boundedNumber(draft.timeoutSeconds, slot + " timeout", 1, 120),
+    max_output_tokens: boundedNumber(draft.maxOutputTokens, slot + " max output tokens", 1, slot === "audio" ? 8192 : 131072, true),
+    timeout_seconds: boundedNumber(draft.timeoutSeconds, slot + " timeout", 1, slot === "audio" ? 60 : 120),
     zero_data_retention: draft.zeroDataRetention,
     request_cost_bound_microusd: boundedNumber(draft.requestCostBoundMicrousd, slot + " request cost bound", 1, ceiling, true),
   };
@@ -112,7 +117,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
   const [revision, setRevision] = useState(policyRevision);
   const [revoked, setRevoked] = useState(policyRevoked ?? false);
   const [draft, setDraft] = useState(() => draftFromSetup(setup, policyRevoked));
-  const [purposeAcks, setPurposeAcks] = useState({ vision: false, embedding: false });
+  const [purposeAcks, setPurposeAcks] = useState({ vision: false, embedding: false, audio: false });
   const [credential, setCredential] = useState("");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -121,9 +126,12 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
   const [metadataRetained, setMetadataRetained] = useState(stale);
   const dirty = useRef(false);
   const mounted = useRef(true);
+  const lifecycle = useRef(0);
+  const refreshController = useRef<AbortController | null>(null);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    lifecycle.current += 1;
+    return () => { mounted.current = false; lifecycle.current += 1; refreshController.current?.abort(); };
   }, []);
   useEffect(() => {
     // Partial metadata must not erase last-known controls or unsaved edits.
@@ -132,7 +140,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
     // partial setup metadata retains the controls with a visible stale label.
     if (policyRevision !== undefined) setRevision(policyRevision);
     if (policyRevoked !== undefined) setRevoked(policyRevoked);
-    setPurposeAcks({ vision: false, embedding: false });
+    setPurposeAcks({ vision: false, embedding: false, audio: false });
     if (policyRevoked) setDraft((current) => ({ ...current, cloudEgressAcknowledged: false }));
     if (setup == null) { setMetadataRetained(Boolean(metadata)); return; }
     setMetadata(setup);
@@ -142,15 +150,15 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
   function update<K extends Exclude<keyof SetupDraft, "routes">>(field: K, value: SetupDraft[K]) {
     dirty.current = true;
     setDraft((current) => ({ ...current, [field]: value }));
-    setPurposeAcks({ vision: false, embedding: false });
+    setPurposeAcks({ vision: false, embedding: false, audio: false });
   }
-  function updateRoute<K extends keyof RouteDraft>(slot: OpenRouterPurpose, field: K, value: RouteDraft[K]) {
+  function updateRoute<K extends keyof RouteDraft>(slot: OpenRouterOptionalPurpose, field: K, value: RouteDraft[K]) {
     dirty.current = true;
     setDraft((current) => ({ ...current, routes: { ...current.routes, [slot]: { ...current.routes[slot], [field]: value } } }));
     if (slot !== "text") setPurposeAcks((current) => ({ ...current, [slot]: false }));
   }
-  function needsAck(slot: "vision" | "embedding"): boolean {
-    return draft.routes[slot].enabled && (revoked || metadata?.slot_statuses[slot].error_code === "purpose_consent_stale"
+  function needsAck(slot: "vision" | "embedding" | "audio"): boolean {
+    return draft.routes[slot].enabled && (revoked || metadata?.slot_statuses[slot]?.error_code === "purpose_consent_stale"
       || !unchangedRoute(draft.routes[slot], metadata?.routes[slot]));
   }
   function safeError(value: unknown): string {
@@ -158,44 +166,50 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
     return (credential ? message.split(credential).join("[redacted]") : message).slice(0, 512);
   }
   async function refresh() {
+    const generation = lifecycle.current;
     setRefreshing(true);
     setRefreshMessage(null);
     const controller = new AbortController();
+    refreshController.current?.abort();
+    refreshController.current = controller;
+    const current = () => mounted.current && lifecycle.current === generation && refreshController.current === controller && !controller.signal.aborted;
     const timeout = window.setTimeout(() => controller.abort(), 5_000);
     try {
       const response = await apiFetch(API_URL + "/api/settings/model-fabric", { signal: controller.signal });
       if (!response.ok) throw new Error("Settings refresh failed: " + response.status);
       const next = normalizeModelFabricSettings(await response.json());
       if (!next || !Number.isSafeInteger(next.egress_revision) || (next.egress_revision ?? 0) < 1) throw new Error("Current settings revision is unavailable.");
-      if (!mounted.current) return;
+      if (!current()) return;
       // Read-only refresh preserves edits. Review and save remain explicit.
       setMetadata(next.openrouter_setup ?? metadata);
       setMetadataRetained(!next.openrouter_setup && Boolean(metadata));
       setRevision(next.egress_revision);
       setRevoked(next.egress_revoked ?? false);
-      setPurposeAcks({ vision: false, embedding: false });
+      setPurposeAcks({ vision: false, embedding: false, audio: false });
       if (next.egress_revoked) setDraft((current) => ({ ...current, cloudEgressAcknowledged: false }));
       setRefreshMessage("Current settings loaded; edits retained. Review routes and acknowledgments before saving.");
     } catch (refreshError) {
-      if (mounted.current) setRefreshMessage(safeError(refreshError));
+      if (current()) setRefreshMessage(safeError(refreshError));
     } finally {
       window.clearTimeout(timeout);
-      if (mounted.current) setRefreshing(false);
+      if (mounted.current && lifecycle.current === generation && refreshController.current === controller) setRefreshing(false);
     }
   }
   async function save() {
+    const generation = lifecycle.current;
+    const current = () => mounted.current && lifecycle.current === generation;
     setSaving(true);
     setError(null);
     try {
       if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings to obtain the policy revision before saving.");
       const ceiling = boundedNumber(draft.spendCeilingMicrousd, "Spend ceiling", 1, 1_000_000_000, true);
       if (!draft.cloudEgressAcknowledged) throw new Error("Acknowledge cloud egress before saving.");
-      const routes = { text: routeValue(draft.routes.text, "text", ceiling), vision: routeValue(draft.routes.vision, "vision", ceiling), embedding: routeValue(draft.routes.embedding, "embedding", ceiling) };
-      for (const slot of ["vision", "embedding"] as const) {
+      const routes: OpenRouterSetupValue["routes"] = { text: routeValue(draft.routes.text, "text", ceiling), vision: routeValue(draft.routes.vision, "vision", ceiling), embedding: routeValue(draft.routes.embedding, "embedding", ceiling), ...(draft.audioSetup ? { audio: routeValue(draft.routes.audio, "audio", ceiling) } : {}) };
+      for (const slot of ["vision", "embedding", ...(draft.audioSetup ? ["audio" as const] : [])] as const) {
         if (needsAck(slot) && !purposeAcks[slot]) throw new Error("Acknowledge " + slot + " egress for the changed route before saving.");
       }
       const value: OpenRouterSetupValue = {
-        schema_version: "seraph.openrouter.setup.v2", routes, egress_class: draft.egressClass,
+        schema_version: draft.audioSetup ? "seraph.openrouter.setup.v3" : "seraph.openrouter.setup.v2", routes, egress_class: draft.egressClass,
         cloud_egress_acknowledged: true, spend_ceiling_microusd: ceiling,
         max_queued: boundedNumber(draft.maxQueued, "Max queued", 1, 64, true), max_inflight: 1,
         max_outstanding_per_owner: boundedNumber(draft.maxOutstandingPerOwner, "Max outstanding per owner", 1, 16, true),
@@ -204,9 +218,10 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
         ...(credential.trim() ? { api_key: credential } : {}),
         ...(needsAck("vision") && purposeAcks.vision ? { vision_egress_acknowledged: true as const } : {}),
         ...(needsAck("embedding") && purposeAcks.embedding ? { embedding_egress_acknowledged: true as const } : {}),
+        ...(draft.audioSetup && needsAck("audio") && purposeAcks.audio ? { audio_egress_acknowledged: true as const } : {}),
       };
       const next = await onSave({ expected_policy_revision: revision, openrouter_setup: value });
-      if (!mounted.current) return;
+      if (!current()) return;
       setCredential("");
       if (!next.openrouter_setup) throw new Error("Setup saved without complete metadata; refresh settings to verify the result.");
       dirty.current = false;
@@ -215,12 +230,12 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
       setRevision(next.egress_revision);
       setRevoked(next.egress_revoked ?? false);
       setDraft(draftFromSetup(next.openrouter_setup, next.egress_revoked));
-      setPurposeAcks({ vision: false, embedding: false });
+      setPurposeAcks({ vision: false, embedding: false, audio: false });
       setRefreshMessage(null);
     } catch (saveError) {
-      if (mounted.current) setError(safeError(saveError));
+      if (current()) setError(safeError(saveError));
     } finally {
-      if (mounted.current) setSaving(false);
+      if (current()) setSaving(false);
     }
   }
   return (
@@ -234,7 +249,11 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
         All purposes share one deployment ceiling and one in-flight request. Readiness reflects capability proof only.
       </div>
       {metadata?.error_code && <div className="mb-1 text-[9px] text-red-400">{metadata.error_code}</div>}
-      {PURPOSES.map((slot) => {
+      <label className="flex items-center gap-1 mb-2 text-[9px] text-retro-text/70">
+        <input type="checkbox" aria-label="Configure optional OpenRouter audio slot" checked={draft.audioSetup} disabled={metadata?.schema_version === "seraph.openrouter.setup.v3"} onChange={(event) => update("audioSetup", event.target.checked)} />
+        Configure optional audio slot (disabled until explicitly enabled; separate source consent and proof required)
+      </label>
+      {([...PURPOSES, ...(draft.audioSetup ? ["audio" as const] : [])]).map((slot) => {
         const route = draft.routes[slot];
         const status = metadata?.slot_statuses[slot] ?? { status: "configuration_required", error_code: "route_missing", proof_expires_at: null };
         return (
@@ -254,7 +273,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
               <div className="text-retro-text/40">Capabilities</div>
               <div className="flex flex-wrap gap-2 text-retro-text/70">{CAPABILITIES[slot].map((capability) => (
                 <label key={capability} className="flex items-center gap-1">
-                  <input type="checkbox" aria-label={"OpenRouter " + slot + " " + capability + " capability"} checked={route.capabilities.includes(capability)} onChange={() => updateRoute(slot, "capabilities", route.capabilities.includes(capability) ? route.capabilities.filter((item) => item !== capability) : [...route.capabilities, capability])} />{capability.replace(/_/g, " ")}
+                  <input type="checkbox" disabled={slot === "audio"} aria-label={"OpenRouter " + slot + " " + capability + " capability"} checked={route.capabilities.includes(capability)} onChange={() => updateRoute(slot, "capabilities", route.capabilities.includes(capability) ? route.capabilities.filter((item) => item !== capability) : [...route.capabilities, capability])} />{capability.replace(/_/g, " ")}
                 </label>
               ))}</div>
               {([

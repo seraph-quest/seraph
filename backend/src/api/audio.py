@@ -18,6 +18,7 @@ from src.guardian.audio_worker import (
     default_audio_worker,
 )
 from src.security.trust_contract import AuthorityGrant
+from src.work_board.contracts import GeneralTaskCreate
 
 
 router = APIRouter()
@@ -52,7 +53,13 @@ class AudioConsentGrantBody(BaseModel):
 class AudioExecutionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     audio_budget_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
-    max_calls: Literal[1] = 1
+    max_calls: int = Field(default=1, strict=True, ge=1, le=1)
+
+
+class AudioTaskCaptureBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_transcript_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    task: GeneralTaskCreate
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -274,12 +281,32 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
 @router.get("/audio/ptt/{request_id}")
 @router.get("/audio/ingress/{request_id}")
 async def get_audio(request_id: str, request: Request) -> dict:
-    snapshot, owner, operator_session_id, _ = await _owned_job(request_id, request)
-    return _operator_payload(
+    snapshot, owner, operator_session_id, operator = await _owned_job(request_id, request)
+    payload = _operator_payload(
         snapshot,
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+    if snapshot.status == "confirmed" and snapshot.workflow_job_id:
+        from src.api.work_board import _owner
+        from src.db.engine import get_session
+        from src.workflows.job_runtime import durable_job_repository as jobs, DurableJobError
+        source_owner = _owner(operator)
+        try:
+            async with jobs.confirmed_audio_task_source_scope(owner=source_owner,
+                request_id=request_id, message_id=snapshot.message_id,
+                confirmed_digest=snapshot.confirmed_transcript_digest):
+                async with get_session() as db:
+                    _, message = await jobs.check_confirmed_audio_task_source(db, owner=source_owner,
+                        request_id=request_id, message_id=snapshot.message_id,
+                        confirmed_digest=snapshot.confirmed_transcript_digest)
+                    payload["transcript"] = {"text": message.content,
+                        "digest": snapshot.confirmed_transcript_digest,
+                        "confirmed_digest": snapshot.confirmed_transcript_digest,
+                        "review_only": True}
+        except DurableJobError:
+            raise HTTPException(status_code=409, detail={"code": "audio_confirmed_source_changed"})
+    return payload
 
 
 @router.post("/audio/ptt/{request_id}/process")
@@ -339,3 +366,35 @@ async def cancel_audio(request_id: str, request: Request) -> dict:
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+
+
+@router.post("/audio/ptt/{request_id}/task")
+async def capture_audio_task(request_id: str, body: AudioTaskCaptureBody, request: Request) -> dict:
+    """Explicit fresh Goal/C1 allowance after exact corrected confirmation."""
+    from src.api.work_board import dispatcher, _safe_task_payload, _owner, _raise_board_error
+    from src.db.engine import get_session
+    from src.work_board.channel_capture import reserve_confirmed_audio_capture
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import durable_job_repository, DurableJobError
+    snapshot, _owner_id, _root_id, operator = await _owned_job(request_id, request)
+    if snapshot.status != "confirmed":
+        raise HTTPException(status_code=409, detail={"code": "audio_confirmed_native_source_required"})
+    service = dispatcher.general_tasks
+    if service is None:
+        raise HTTPException(status_code=503, detail={"code": "general_task_inactive"})
+    if body.task.input.limits.max_cost_microusd <= 0 or body.task.input.limits.max_inference_calls <= 0:
+        raise HTTPException(status_code=422, detail={"code": "channel_capture_positive_task_allowance_required"})
+    try:
+        async with get_session() as db:
+            owner = _owner(operator)
+            capture = await reserve_confirmed_audio_capture(db, owner, body.task, service=service,
+                jobs=durable_job_repository, request_id=request_id, message_id=snapshot.message_id,
+                confirmed_digest=body.confirmed_transcript_digest)
+            mutation = await service.capture_intent(db, owner, body.task, capture=capture)
+            return {"task": await _safe_task_payload(mutation.task, db=db),
+                "idempotent_replay": mutation.idempotent_replay,
+                "audio_budget_transferred": False, "audio_workflow_job_id": snapshot.workflow_job_id}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "audio_task_capture_source_changed"}) from exc

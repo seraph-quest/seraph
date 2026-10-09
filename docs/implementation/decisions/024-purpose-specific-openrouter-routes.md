@@ -9,6 +9,12 @@ title: "ADR-024: Purpose-specific OpenRouter routes"
 
 **Decision class:** Additive model-fabric setup contract. ADR-006 remains the active provider boundary.
 
+[ADR-032](./032-governed-optional-audio-route.md) narrowly supersedes the
+exactly-three-slot restriction only for explicit setup.v3, adding an optional
+disabled audio route. This decision remains the full setup.v1/v2 contract and
+continues to govern the existing three routes in v3. Audio acceptance is an
+architecture target; it supplies no endpoint proof, budget or shipped readiness.
+
 ## Context
 
 At `0ab60c3b4411f1b6c1e59c9986b7e45b9c61f69a`,

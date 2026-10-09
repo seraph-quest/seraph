@@ -341,8 +341,17 @@ async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(acc
         calls.append("forbidden")
     for runtime_path in ("chat_agent", "embedding", "capability_probe", "screen_artifact_analysis", "audio_transcription"):
         candidate = replace(request("missing:" + runtime_path), runtime_path=runtime_path)
-        with pytest.raises(ValueError, match="continuity_unavailable"):
+        # Audio has an explicit v3/native-only contract; legacy setup denies
+        # it before the shared ledger is consulted. Other billable kinds keep
+        # their original continuity-first failure and never reach a callback.
+        denial = "audio_setup_v3_required" if runtime_path == "audio_transcription" else "continuity_unavailable"
+        with pytest.raises(ValueError, match=denial):
             await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(candidate, provider)
+    from src.db.models import WorkflowRunState, InferenceCostReservation
+    from sqlalchemy import select
+    async with accounting_db[2].accounting_sessions() as db:
+        assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+        assert (await db.execute(select(InferenceCostReservation))).scalars().all() == []
     await DurableJobRepository().configure_inference_accounting(1000)
     with pytest.raises(ValueError, match="authority_invalid"):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("invalid-owner", owner="unbound-principal"), provider)

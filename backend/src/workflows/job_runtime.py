@@ -3237,7 +3237,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             elif status == "cancelled":
                 values.update(lease_owner=None, lease_expires_at=None, finished_at=_utc_now())
             elif status in {"succeeded", "degraded", "failed"}:
-                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                if status == "failed" and not require_current:
+                    # An expired original cutoff may close its own execution;
+                    # it cannot publish a result or replace a newer owner.
+                    if (run.status != "running" or not owner or run.lease_owner != owner
+                        or fencing_token is None or run.fencing_token != fencing_token):
+                        raise DurableJobLeaseError("audio_original_owner_required")
+                else:
+                    self._assert_lease(run, owner=owner, fencing_token=fencing_token)
                 if status == "succeeded":
                     from src.workflows.audio_native import AudioTranscriptionResultV1
                     from src.db.models import InferenceCostReservation
@@ -3343,6 +3350,94 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             lease_expires_at=None, finished_at=_utc_now(), updated_at=_utc_now()).execution_options(synchronize_session=False))
         if not _rowcount_is_one(changed):
             raise DurableJobLeaseError("audio_cancel_pair_stale")
+
+    @staticmethod
+    def audio_task_capture_scope():
+        # Reuse the current audio effect owner; no parallel source lane.
+        from src.guardian.audio_worker import _AUDIO_EFFECT_LOCK
+        return _AUDIO_EFFECT_LOCK
+
+    def confirmed_audio_task_source_scope(self, *, owner, request_id, message_id, confirmed_digest):
+        # Exact source binding is checked with populate_existing in the
+        # caller's final SQLite writer; this scope owns local audio effects.
+        return self.audio_task_capture_scope()
+
+    async def check_confirmed_audio_task_source(self, db, *, owner, request_id,
+                                               message_id, confirmed_digest):
+        from src.workflows.audio_native import guard_audio_pair, utc
+        from src.db.models import AudioIngressJob, AudioConsentGrant, Message, OperatorSession
+        audio = (await db.execute(select(AudioIngressJob).where(
+            AudioIngressJob.request_id == request_id).execution_options(populate_existing=True))).scalars().one_or_none()
+        if audio is None or not audio.workflow_job_id:
+            raise DurableJobLeaseError("audio_confirmed_native_source_required")
+        run = await self._fetch(db, audio.workflow_job_id)
+        native, audio = await guard_audio_pair(db, run, require_current=False)
+        root = await db.get(OperatorSession, native.original_root_id, populate_existing=True)
+        now = _utc_now()
+        if (owner.principal_id != native.owner_principal_id or owner.session_id != native.original_root_id
+            or root is None or root.principal_id != owner.principal_id or root.revoked_at is not None
+            or root.is_bearer_tombstone or root.replaced_by_id
+            or utc(root.idle_expires_at) <= now or utc(root.absolute_expires_at) <= now
+            or run.status != "succeeded" or audio.status != "confirmed"
+            or audio.message_id != message_id or audio.confirmed_transcript_digest != confirmed_digest):
+            raise DurableJobLeaseError("audio_confirmed_source_changed")
+        for reference, boundary in ((native.capture_grant_ref, "capture"), (native.model_grant_ref, "cloud_upload")):
+            grant = (await db.execute(select(AudioConsentGrant).where(AudioConsentGrant.reference == reference))).scalars().one_or_none()
+            if (grant is None or grant.owner_principal_id != owner.principal_id or grant.operator_session_id != owner.session_id
+                or grant.state != "active" or grant.revoked_at is not None or grant.boundary != boundary or utc(grant.expires_at) <= now):
+                raise DurableJobLeaseError("audio_confirmed_source_grant_revoked")
+        message = await db.get(Message, message_id, populate_existing=True)
+        if (message is None or message.session_id != native.conversation_session_id or message.role != "user"
+            or hashlib.sha256(message.content.encode()).hexdigest() != confirmed_digest):
+            raise DurableJobLeaseError("audio_confirmed_source_changed")
+        return audio, message
+
+    async def reserve_audio_task_capture_metadata(self, db, *, owner, request_id,
+                                                 message_id, confirmed_digest, reservation):
+        from src.work_board.channel_capture import ChannelCaptureReservationV1
+        from src.workflows.audio_native import advance_audio_pair
+        if type(reservation) is not ChannelCaptureReservationV1:
+            raise DurableJobLeaseError("audio_task_capture_reservation_required")
+        # Call only before private artifact staging. Source reads are repeated
+        # after acquiring the same canonical SQLite writer.
+        await db.rollback()
+        if db.get_bind().dialect.name == "sqlite":
+            await db.execute(text("BEGIN IMMEDIATE"))
+        audio, message = await self.check_confirmed_audio_task_source(db, owner=owner,
+            request_id=request_id, message_id=message_id, confirmed_digest=confirmed_digest)
+        payload = reservation.model_dump(mode="json")
+        if (reservation.source_kind != "audio" or reservation.source_id != request_id
+            or reservation.owner_principal_id != owner.principal_id or reservation.original_root_id != owner.session_id
+            or reservation.canonical_message_id != message_id or reservation.source_digest != confirmed_digest
+            or reservation.conversation_session_id != message.session_id
+            or reservation.task_input.intent != message.content):
+            raise DurableJobLeaseError("audio_task_capture_source_mismatch")
+        metadata = _json_load(audio.metadata_json, {})
+        previous = metadata.get("channel_task_capture.v1")
+        from src.workflows.general_task_accounting import validate_group_owner
+        await validate_group_owner(db, reservation.proposal_group)
+        if previous is not None:
+            stored = ChannelCaptureReservationV1.model_validate(previous)
+            await validate_group_owner(db, stored.proposal_group)
+            # Compare request/source, retaining the original issued group and
+            # deadline instead of minting a new financial allowance on replay.
+            if any(getattr(stored, name) != getattr(reservation, name) for name in (
+                "source_kind", "source_id", "owner_principal_id", "original_root_id", "canonical_message_id",
+                "source_digest", "conversation_session_id", "request_digest", "goal_revision", "idempotency_key", "task_input")):
+                raise DurableJobIdempotencyConflict("audio_task_capture_changed")
+            await db.commit()
+            return stored
+        run = await self._fetch(db, audio.workflow_job_id)
+        await advance_audio_pair(db, run, audio,
+            changes={"metadata_json": _canonical({**metadata, "channel_task_capture.v1": payload})},
+            task_capture_reservation=reservation)
+        changed = await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == run.run_identity,
+            WorkflowRunState.revision == run.revision, WorkflowRunState.fencing_token == run.fencing_token).values(
+            revision=WorkflowRunState.revision + 1, updated_at=_utc_now()).execution_options(synchronize_session=False))
+        if not _rowcount_is_one(changed):
+            raise DurableJobLeaseError("audio_task_capture_pair_changed")
+        await db.commit()
+        return reservation
 
     async def replace_general_task_manifest(self, job_id, **bindings):
         from src.workflows.general_task_guard import replace_manifest

@@ -516,6 +516,7 @@ def _decoder_preexec() -> None:
     for limit_name, requested in (
         (resource.RLIMIT_CPU, DECODER_CPU_SECONDS),
         (resource.RLIMIT_AS, DECODER_MEMORY_BYTES),
+        (resource.RLIMIT_STACK, 1024 * 1024),
         (resource.RLIMIT_FSIZE, NORMALIZED_WAV_MAX_BYTES),
     ):
         try:
@@ -735,6 +736,8 @@ async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tup
         "1",
         "-ar",
         "16000",
+        "-threads",
+        "1",
         "-sample_fmt",
         "s16",
         "-f",
@@ -895,12 +898,22 @@ class AudioIngressWorker:
 
     @staticmethod
     def _read_quarantine_bytes(path: Path) -> bytes:
-        """Read a regular quarantine file without following a leaf symlink."""
+        """Read through pinned directories without following any symlink."""
         flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise AudioWorkerError("quarantine_path_invalid", "safe audio file reads are unavailable")
+        flags |= os.O_NOFOLLOW
+        parent_descriptor = -1
         try:
-            descriptor = os.open(path, flags)
+            absolute = path.absolute()
+            if ".." in absolute.parts:
+                raise AudioWorkerError("quarantine_path_invalid", "audio quarantine path is invalid")
+            parent_descriptor = os.open(absolute.anchor, flags | os.O_DIRECTORY)
+            for component in absolute.parts[1:-1]:
+                next_descriptor = os.open(component, flags | os.O_DIRECTORY, dir_fd=parent_descriptor)
+                os.close(parent_descriptor)
+                parent_descriptor = next_descriptor
+            descriptor = os.open(absolute.name, flags, dir_fd=parent_descriptor)
             try:
                 info = os.fstat(descriptor)
                 if not stat.S_ISREG(info.st_mode) or info.st_size < 0:
@@ -915,6 +928,9 @@ class AudioIngressWorker:
             raise
         except OSError as exc:
             raise AudioWorkerError("normalized_audio_missing", "normalized audio is unavailable") from exc
+        finally:
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
 
     def _work_dir(self, quarantine_identity: str) -> Path:
         """Create a directory from a worker-owned bounded identity only."""

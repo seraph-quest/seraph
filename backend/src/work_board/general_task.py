@@ -366,7 +366,6 @@ class GeneralTaskService:
                      publication_authority_scope=None):
         if request.input.document_source is not None and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
-        from src.work_board.input_artifacts import prepare_input_artifact
         from sqlalchemy import select
         from src.db.models import WorkBoardTask, WorkBoardEvent
         from src.work_board.repository import BoardMutation
@@ -443,6 +442,70 @@ class GeneralTaskService:
         if envelope.task_input.document_source is not None:
             from src.work_board.document_preparation import resolve
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
+        return await self._publish_envelope(db, owner, request, envelope,
+            publication_authority_check=publication_authority_check,
+            publication_authority_scope=publication_authority_scope)
+
+    async def capture_intent(self, db, owner, request: GeneralTaskCreate, *, capture):
+        """Publish one source-sealed intent for local review, without planning."""
+        from sqlalchemy import select
+        from src.db.models import WorkBoardTask, WorkBoardEvent
+        from src.work_board.repository import BoardMutation
+        from src.work_board.dispatcher import _parse_typed_input
+        from src.work_board.channel_capture import check_capture_publication
+        reservation = await check_capture_publication(db, owner, request, capture)
+        existing = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.owner_principal_id == owner.principal_id,
+            WorkBoardTask.owner_session_id == owner.session_id,
+            WorkBoardTask.idempotency_scope == "general-task",
+            WorkBoardTask.idempotency_key == request.idempotency_key))
+        if existing is not None:
+            # Source authority precedes the private artifact read, including replay.
+            async with capture.source_scope():
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                await check_capture_publication(db, owner, request, capture)
+                existing = await db.scalar(select(WorkBoardTask).where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.idempotency_scope == "general-task",
+                    WorkBoardTask.idempotency_key == request.idempotency_key)
+                    .execution_options(populate_existing=True))
+                if existing is None:
+                    raise BoardError("channel_capture_task_changed", "Original capture Task is unavailable", status_code=409)
+                original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
+                if (original.task_input != reservation.task_input
+                    or original.proposal_group != reservation.proposal_group
+                    or original.proposal_error != "channel_intent_review_required"
+                    or existing.origin_session_id != reservation.conversation_session_id
+                    or existing.goal_revision != reservation.goal_revision):
+                    raise BoardError("channel_capture_idempotency_conflict", "Original capture Task changed", status_code=409)
+                event = await db.scalar(select(WorkBoardEvent).where(WorkBoardEvent.task_id == existing.task_id)
+                    .order_by(WorkBoardEvent.event_id.desc()).limit(1))
+                if event is None:
+                    raise BoardError("general_task_event_unavailable", "Task publication needs recovery", status_code=409)
+                await db.commit()
+                return BoardMutation(existing, event, idempotent_replay=True)
+        await self.repository._validate_goal(db, owner, goal_id=reservation.task_input.goal_ref,
+            goal_revision=reservation.goal_revision)
+        envelope = GeneralTaskEnvelope(task_input=reservation.task_input,
+            proposal_error="channel_intent_review_required",
+            strategy=await self.strategy(owner, reservation.task_input.goal_ref),
+            evidence=await self.evidence(db, owner, reservation.task_input.evidence_refs),
+            proposal_group=reservation.proposal_group)
+        async def source_check(db):
+            await check_capture_publication(db, owner, request, capture)
+        return await self._publish_envelope(db, owner, request, envelope,
+            publication_authority_check=source_check,
+            publication_authority_scope=capture.source_scope,
+            origin_session_id=reservation.conversation_session_id)
+
+    async def _publish_envelope(self, db, owner, request, envelope, *,
+                                publication_authority_check=None,
+                                publication_authority_scope=None,
+                                origin_session_id=None):
+        """Publish the exact sealed input through the original artifact/Task owners."""
+        from src.work_board.input_artifacts import prepare_input_artifact
         from src.work_board.general_task_proposal import seal_proposal_publication
         publication = await seal_proposal_publication(db, owner, envelope, goal_revision=request.goal_revision)
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
@@ -461,7 +524,8 @@ class GeneralTaskService:
                 capability_id=CAPABILITY, input_artifact_id=artifact.artifact_id,
                 status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
                 idempotency_scope="general-task", idempotency_key=request.idempotency_key,
-                requires_review=True), publication_authority_check=publication_authority_check)
+                requires_review=True), origin_session_id=origin_session_id,
+                publication_authority_check=publication_authority_check)
             if publication_authority_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.

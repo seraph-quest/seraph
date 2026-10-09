@@ -133,6 +133,7 @@ class _AccountingHandle:
     ephemeral: bool
     contacted: bool = False
     committed_denial: object | None = None
+    audio_native: object | None = None
 
 
 @dataclass
@@ -144,6 +145,31 @@ class _SettlementContext:
 
 
 _current_settlement: ContextVar[_SettlementContext | None] = ContextVar("inference_settlement_owner", default=None)
+
+
+def assert_audio_contact_accounting(context) -> None:
+    """Require the actual broker's already-committed original contact owner."""
+    from .contracts import InferenceRequestContext
+    from .remote_inference_admission import RemoteInferenceReceiptBinding, current_remote_inference_receipt_binding
+    from src.workflows.audio_native import AudioNativeAdmissionBindingV1
+    current = _current_settlement.get()
+    binding = current_remote_inference_receipt_binding()
+    if type(context) is not InferenceRequestContext or current is None or type(binding) is not RemoteInferenceReceiptBinding:
+        raise InferenceAccountingError("audio_native_contact_required")
+    handle, native = current.handle, current.handle.audio_native
+    if (type(native) is not AudioNativeAdmissionBindingV1 or handle.ephemeral or not handle.contacted
+        or handle.request.runtime_path != "audio_transcription" or context.runtime_path != "audio_transcription"
+        or handle.request.operation_id != native.operation_id or handle.request.job_id != native.workflow_job_id
+        or context.job_id != native.workflow_job_id or context.session_id != native.conversation_session_id
+        or context.principal.principal_id != native.owner_principal_id
+        or context.principal.operator_session_id != native.original_root_id
+        or context.data_digest != handle.request.data_digest or context.deadline_at != handle.request.deadline_at
+        or binding.repository is not handle.repository or binding.job_id != handle.job_id
+        or binding.owner != handle.owner or binding.fencing_token != handle.fence
+        or _current_policy_digest.get() != native.policy_digest
+        or tuple(context.requirements.capabilities) != ("text", "audio_input")):
+        raise InferenceAccountingError("audio_native_contact_required")
+    assert_current_inference_policy()
 
 
 class DurableInferenceBrokerMixin:
@@ -450,7 +476,7 @@ class DurableInferenceBrokerMixin:
                 general_task_binding=task_binding,
             )
             return _AccountingHandle(request, repository, job_id, owner, fence, policy_digest,
-                reservation["sequence"], ephemeral)
+                reservation["sequence"], ephemeral, audio_native=native_audio if request.runtime_path == "audio_transcription" else None)
         except Exception as exc:
             from .remote_inference_admission import RemoteInferenceBindingError
             if created_job is not None:
@@ -498,10 +524,31 @@ class DurableInferenceBrokerMixin:
             adoption_allowed = _policy_for_runtime(handle.request.runtime_path)[1] == handle.policy_digest
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
-                operator = await authenticate_session(handle.request.session_id, touch=False)
+                root_id = handle.request.session_id
+                if handle.request.runtime_path == "audio_transcription":
+                    from src.workflows.audio_native import AudioNativeAdmissionBindingV1
+                    from .remote_inference_admission import RemoteInferenceReceiptBinding
+                    if type(handle.audio_native) is not AudioNativeAdmissionBindingV1:
+                        raise InferenceAccountingError("audio_native_binding_required")
+                    receipt_binding = RemoteInferenceReceiptBinding(repository=handle.repository,
+                        owner=handle.owner, fencing_token=handle.fence, job_id=handle.job_id)
+                    current = await handle.repository.validate_audio_inference_binding(handle.request, receipt_binding)
+                    if current != handle.audio_native:
+                        raise InferenceAccountingError("audio_native_binding_changed")
+                    root_id = current.original_root_id
+                operator = await authenticate_session(root_id, touch=False)
                 adoption_allowed = adoption_allowed and operator.principal.principal_id == handle.request.owner_id
         except Exception:
             adoption_allowed = False
+        if handle.request.runtime_path == "audio_transcription":
+            snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
+            adoption_allowed = (adoption_allowed and row["state"] == "settled"
+                and type(row.get("actual_cost_microusd")) is int
+                and isinstance(row.get("provider_operation_id"), str)
+                and row.get("provider_operation_id") == (payload or {}).get("id")
+                and snapshot.get("accounting_continuity_verified") is True
+                and snapshot.get("status") == "ready"
+                and snapshot.get("overrun_max_cost_microusd", 0) == 0)
         if near:
             snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
             adoption_allowed = (adoption_allowed and billing is not None and row["state"] == "settled"
@@ -581,6 +628,8 @@ class DurableInferenceBrokerMixin:
                 _near_billing.reset(billing_token)
 
     def execute_sync(self, request, operation, **kwargs):
+        if request.runtime_path == "audio_transcription":
+            raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
@@ -623,6 +672,8 @@ class DurableInferenceBrokerMixin:
                 _current_policy_digest.reset(policy_token)
 
     async def stream(self, request, operation, **kwargs):
+        if request.runtime_path == "audio_transcription":
+            raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:

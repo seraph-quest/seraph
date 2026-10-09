@@ -1312,6 +1312,10 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                                 await audio_route_witness(profile)
                             state.update(status="ready", error_code=None,
                                 proof_expires_at=datetime.fromtimestamp(min(proof.expires_at for proof in proofs), timezone.utc).isoformat())
+                    except PermissionError as exc:
+                        audio_reason = str(exc)
+                        state["error_code"] = audio_reason if slot == "audio" and audio_reason in {
+                            "audio_format_unverified", "audio_documentary_acquisition_unavailable"} else "proof_metadata_unavailable"
                     except Exception:
                         state["error_code"] = "audio_format_unverified" if slot == "audio" else "proof_metadata_unavailable"
             if original_setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:

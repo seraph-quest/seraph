@@ -1645,6 +1645,12 @@ async def _governed_bounded_chat_transfer(
     """
     if envelope not in {"research", "audio"}:
         raise ValueError("governed_envelope_invalid")
+    if envelope == "audio":
+        from src.model_fabric.accounting import assert_audio_contact_accounting
+        from src.security.trust_contract import canonical_digest
+        assert_audio_contact_accounting(context)
+        if context.data_digest != canonical_digest(body):
+            raise PermissionError("audio_payload_binding_invalid")
     response_limit = 64 * 1024 if envelope == "research" else 256 * 1024
     import httpx
     from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
@@ -1692,13 +1698,18 @@ async def _governed_bounded_chat_transfer(
                     raise RuntimeError(f"{envelope}_response_truncated")
                 response = httpx.Response(incoming.status_code, headers=incoming.headers,
                     content=bytes(content), request=incoming.request)
-    capture_response_usage(response)
+    if envelope == "research":
+        capture_response_usage(response)
     assert_runtime_not_revoked()
     assert_current_inference_policy()
     if 300 <= response.status_code < 400:
         raise RuntimeError("model_fabric_redirect_denied")
     response.raise_for_status()
-    payload = response.json()
+    if envelope == "audio":
+        from decimal import Decimal
+        payload = json.loads(response.text, parse_float=Decimal)
+    else:
+        payload = response.json()
     return payload
 
 
@@ -1719,7 +1730,9 @@ async def _governed_research_chat_completion(*, decision, context, body, api_key
 
 async def _governed_audio_chat_completion(*, decision, context, input_audio, evidence, api_key):
     """Strict nonstreaming audio variant; caller retains the native broker lease."""
-    from src.model_fabric.audio_contracts import AudioOfficialEvidenceV1, input_audio_payload, validate_audio_response
+    from src.model_fabric.audio_contracts import AudioOfficialEvidenceV1, validate_audio_response
+    from src.model_fabric.accounting import assert_audio_contact_accounting
+    assert_audio_contact_accounting(context)
     from src.model_fabric.remote_inference_admission import current_remote_inference_receipt_binding
     if not isinstance(evidence, AudioOfficialEvidenceV1) or context.runtime_path != "audio_transcription":
         raise ValueError("audio_native_binding_required")
@@ -1739,6 +1752,8 @@ async def _governed_audio_chat_completion(*, decision, context, input_audio, evi
         body=body, api_key=api_key, envelope="audio")
     transcript, generation, cost = validate_audio_response(payload,
         model_id=evidence.endpoint.model_id, upstream=evidence.endpoint.upstream_endpoint_tag)
+    from src.model_fabric.accounting import capture_inference_usage
+    capture_inference_usage(payload)
     message = ChatMessage.from_dict({"role": "assistant", "content": transcript}, raw=payload)
     return SimpleNamespace(choices=[SimpleNamespace(message=message)]), payload
 

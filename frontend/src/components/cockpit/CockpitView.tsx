@@ -92,6 +92,7 @@ import {
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
 import { PttAudioControl } from "../chat/PttAudioControl";
+import { TelegramCaptureControl } from "./TelegramCaptureControl";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
@@ -18063,6 +18064,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <PttAudioControl
                   sessionId={sessionId}
                   disabled={isAgentBusy}
+                  ownerPrincipalId={operatorAuth.principalId}
+                  ownerSessionId={operatorAuth.sessionId}
+                  goals={activeGoalsForCockpit}
+                  onTaskCreated={(taskId) => { setFocusTaskId(taskId); selectCockpitSection("work"); }}
                 />
               </section>
               </CockpitWorkspaceWindow>
@@ -18081,6 +18086,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               >
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
+                  <TelegramCaptureControl ownerPrincipalId={operatorAuth.principalId} ownerSessionId={operatorAuth.sessionId} goals={activeGoalsForCockpit} />
                   <div className="cockpit-operator-row">
                     <span className="cockpit-key">continuity details</span>
                     <span className="cockpit-operator-link">{renderDeepLoadState("presence")}</span>

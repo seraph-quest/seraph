@@ -666,6 +666,18 @@ costs, and embedding usefulness remain externally unverified.
 
 ### Local cockpit interaction boundaries
 
+Optional governed audio and paired-channel Task capture under
+[ADR-032](./decisions/032-governed-optional-audio-route.md) and
+[#1022](https://github.com/seraph-quest/seraph/issues/1022) are **Planned**.
+The accepted target keeps audio disabled without exact source-attested endpoint,
+codec and finite chat-audio pricing proof. Audio confirmation saves one corrected
+canonical Message. A separate explicit current Goal and native Task allowance
+prepares a review-only C1 intent; confirmation never executes a plan or transfers
+audio costs. Ordinary paired chat remains conversation input. Channel controls
+inspect, pause, resume, cancel or open exact cockpit review; they grant no remote
+approval or replacement attempt. Live Telegram, provider operation and native
+macOS/Safari capture remain unverified by provider-free implementation checks.
+
 The managed development cockpit may be opened over local HTTP for text and
 operator controls. Browser microphone capture follows the browser secure
 context rule: `http://localhost` is eligible, while a LAN HTTP origin such as

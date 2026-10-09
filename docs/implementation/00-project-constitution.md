@@ -164,6 +164,14 @@ The following architecture decisions are normative:
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
+32. [ADR-032: Optional governed OpenRouter audio transcription](./decisions/032-governed-optional-audio-route.md)
+
+ADR-032 extends only the versioned setup.v3 target with one optional disabled
+audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay
+in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
+original audio native ownership and a separately selected Goal/Task allowance
+are mandatory. Accepted audio and paired-channel Task capture are **Planned**;
+acceptance and scripted mechanics do not establish operational voice readiness.
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

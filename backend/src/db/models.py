@@ -2690,6 +2690,7 @@ class TelegramTransportState(SQLModel, table=True):
     transit_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
     model_consent_reference: Optional[str] = Field(default=None, index=True)
     model_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    capture_binding_json: Optional[str] = Field(default=None)
     cursor: int = Field(default=0, index=True)
     sequence: int = Field(default=0, index=True)
     rate_events_json: str = Field(default="[]")

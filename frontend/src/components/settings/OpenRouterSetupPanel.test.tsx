@@ -63,6 +63,37 @@ afterEach(() => {
   window.localStorage.clear();
 });
 describe("OpenRouterSetupPanel", () => {
+  it("keeps audio absent in legacy saves and upgrades only on explicit optional-slot selection", async () => {
+    const onSave = vi.fn(async () => savedSettings());
+    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    expect(screen.queryByLabelText("OpenRouter audio model ID")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Configure optional OpenRouter audio slot"));
+    expect(screen.getByLabelText("OpenRouter audio model ID")).toHaveValue("");
+    expect(screen.getByLabelText("Enable OpenRouter audio route")).not.toBeChecked();
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(request(onSave).openrouter_setup).toMatchObject({ schema_version: "seraph.openrouter.setup.v3", routes: { audio: null } });
+    expect(request(onSave).openrouter_setup).not.toHaveProperty("audio_egress_acknowledged");
+  });
+
+  it("requires independent audio consent and preserves the blocked server proof status", async () => {
+    const v3: OpenRouterSetupStatus = { ...setup, schema_version: "seraph.openrouter.setup.v3", routes: { ...setup.routes, audio: null }, slot_statuses: { ...setup.slot_statuses, audio: { status: "blocked", error_code: "audio_documentary_acquisition_unavailable", proof_expires_at: null } } };
+    const onSave = vi.fn(async () => savedSettings(v3));
+    render(<OpenRouterSetupPanel setup={v3} stale={false} policyRevision={7} onSave={onSave} />);
+    expect(screen.getByTestId("openrouter-audio-status")).toHaveTextContent("audio_documentary_acquisition_unavailable");
+    fireEvent.click(screen.getByLabelText("Enable OpenRouter audio route"));
+    change("OpenRouter audio model ID", "fixture/audio");
+    change("OpenRouter audio upstream allow-list", "fixture/audio");
+    change("OpenRouter audio request cost bound", "500");
+    save();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Acknowledge audio egress");
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Acknowledge OpenRouter audio egress"));
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(request(onSave).openrouter_setup).toMatchObject({ schema_version: "seraph.openrouter.setup.v3", audio_egress_acknowledged: true, routes: { audio: { capabilities: ["text", "audio_input"], timeout_seconds: 60, zero_data_retention: true } } });
+  });
+
   it("has three independent absent slots without inventing a model or upstream", () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);

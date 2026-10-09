@@ -227,7 +227,7 @@ def validate_audio_response(payload, *, model_id: str, upstream: str):
     if not isinstance(payload, dict) or normalize_openrouter_model_id(payload.get("model", "")) != model_id or payload.get("provider") != upstream:
         raise ValueError("audio_response_identity_invalid")
     generation = payload.get("id")
-    if type(generation) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", generation) is None:
+    if type(generation) is not str or re.fullmatch(r"gen-[A-Za-z0-9_-]{1,124}", generation) is None:
         raise ValueError("audio_response_identity_invalid")
     if {"audio", "audio_chunks", "modalities", "delta", "tool_calls", "function_call", "refusal"}.intersection(payload):
         raise ValueError("audio_response_invalid")
@@ -251,12 +251,24 @@ def validate_audio_response(payload, *, model_id: str, upstream: str):
     if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
         raise ValueError("audio_response_billing_invalid")
     cost = usage.get("cost")
-    if type(cost) not in (int, float, str) or type(cost) is bool:
+    if type(cost) not in (int, float, str, Decimal) or type(cost) is bool:
+        raise ValueError("audio_response_billing_invalid")
+    if len(str(cost)) > 64:
         raise ValueError("audio_response_billing_invalid")
     try:
-        money = Decimal(str(cost)) * Decimal(1000000)
+        exact_cost = Decimal(str(cost))
+        parts = exact_cost.as_tuple()
+        if not exact_cost.is_finite() or len(parts.digits) > 64 or not -64 <= parts.exponent <= 3:
+            raise ValueError("audio_response_billing_invalid")
+        with localcontext() as precision:
+            precision.prec = 128
+            money = exact_cost * Decimal(1000000)
     except InvalidOperation as exc:
         raise ValueError("audio_response_billing_invalid") from exc
     if not money.is_finite() or not 0 <= money <= 1000000000:
         raise ValueError("audio_response_billing_invalid")
-    return content, generation, int(money.to_integral_value(rounding=ROUND_CEILING))
+    from src.workflows.inference_accounting import account_charge_microusd
+    authoritative_cost, authoritative_generation = account_charge_microusd(payload)
+    if authoritative_cost is None or authoritative_generation != generation:
+        raise ValueError("audio_response_billing_invalid")
+    return content, generation, authoritative_cost

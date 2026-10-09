@@ -459,6 +459,16 @@ revision. Live Telegram remains unverified; see
 
 ## Legend
 
+Optional governed OpenRouter audio and paired-channel Task capture under
+[ADR-032](./decisions/032-governed-optional-audio-route.md) are **Planned**.
+The accepted target adds only an optional disabled setup.v3 audio purpose;
+legacy setup versions remain unchanged. Missing source-attested endpoint/codec
+or finite chat-audio pricing keeps production audio blocked. Corrected transcript
+confirmation and the separate current Goal/Task allowance do not transfer audio
+liability or grant execution. Existing bounded Telegram notice controls retain
+their Partial scope; target adoption and scripted receipts establish no live
+Telegram, provider or native macOS/Safari operation.
+
 - `[x]` shipped on `develop`
 - `[ ]` not fully shipped on `develop`
 - in-flight branch work should be tracked in open PRs, not in this file

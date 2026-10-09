@@ -16,7 +16,9 @@ async def execute(worker, row, budget):
     from src.auth.service import authenticate_session
     from src.db.models import AudioConsentGrant, OperatorSession
     from src.llm_runtime import (_provider_profile, _profile_options, build_audio_chat_body,
-        _governed_preflight_target_async, _governed_audio_chat_completion)
+        _governed_preflight_target_async, _governed_audio_chat_completion, _token_usage_from_payload)
+    from src.approval.runtime import set_runtime_context, reset_runtime_context
+    from src.model_fabric.hooks import RouteReceiptSession
     from src.model_fabric.audio_contracts import audio_route_witness, input_audio_payload
     from src.guardian.audio_ingress import OpenRouterInputAudio
     from src.model_fabric.effective_policy import current_inference_policy
@@ -103,18 +105,47 @@ async def execute(worker, row, budget):
             owner_budget_microusd=budget, requirements=replace(context.requirements, max_latency_ms=profile.max_latency_ms))
         target = {"profile": profile.id, "model_id": profile.routing_model or profile.model,
             "api_base": profile.api_base, "api_key": profile.api_key, "source": "primary", "options": _profile_options(profile.id)}
-        decision, _ = await _governed_preflight_target_async(target, context)
+        decision, proofs = await _governed_preflight_target_async(target, context)
         if decision is None or not decision.allowed:
             raise AudioWorkerError("audio_route_not_ready")
         request = GpuAdmissionRequest.from_inference_context(context, operation_id=binding.operation_id, uncertain_on_error=True)
-        with bind_remote_inference_receipt(repository=jobs, job_id=job_id, owner=lease_owner, fencing_token=fence):
-            await prepare_bound_remote_inference(request, profile_id=profile.id)
-            async def invoke():
-                return await _governed_audio_chat_completion(decision=decision, context=context,
-                    input_audio=part, evidence=evidence, api_key=profile.api_key)
-            response, _payload = await worker.admission_broker.execute(request, invoke)
-            await worker.admission_broker.persist_receipt(worker.admission_broker.receipt_for(request.operation_id),
-                repository=jobs, owner=lease_owner, fencing_token=fence)
+        hooks = RouteReceiptSession(context=context)
+        started = False
+        tokens = set_runtime_context(row.session_id, "high_risk", trust_principal=principal)
+        try:
+            with bind_remote_inference_receipt(repository=jobs, job_id=job_id, owner=lease_owner, fencing_token=fence):
+                await prepare_bound_remote_inference(request, profile_id=profile.id)
+                async def invoke():
+                    nonlocal started
+                    hooks.attempt_started(decision, capability_proof_hashes=proofs)
+                    started = True
+                    return await _governed_audio_chat_completion(decision=decision, context=context,
+                        input_audio=part, evidence=evidence, api_key=profile.api_key)
+                try:
+                    response, _payload = await worker.admission_broker.execute(request, invoke)
+                except BaseException:
+                    if started:
+                        hooks.attempt_finished(outcome="failed", error_code="audio_provider_incomplete", decision=decision)
+                        await hooks.finalize(outcome="failed")
+                    else:
+                        await hooks.finalize_denied(decision=decision, reason_codes=("audio_contact_denied",))
+                    try:
+                        receipt = worker.admission_broker.receipt_for(request.operation_id)
+                    except KeyError:
+                        receipt = None
+                    if receipt is not None:
+                        await worker.admission_broker.persist_receipt(receipt, repository=jobs,
+                            owner=lease_owner, fencing_token=fence)
+                    raise
+                hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
+                    usage=_token_usage_from_payload(_payload))
+                route = await hooks.finalize(outcome="succeeded")
+                if not route.persisted:
+                    raise AudioWorkerError("audio_route_receipt_unpersisted")
+                await worker.admission_broker.persist_receipt(worker.admission_broker.receipt_for(request.operation_id),
+                    repository=jobs, owner=lease_owner, fencing_token=fence)
+        finally:
+            reset_runtime_context(tokens)
         snapshot = await jobs.inference_accounting_snapshot(job_id=job_id)
         cost = next((op for op in snapshot["operations"] if op["operation_id"] == binding.operation_id), None)
         if not cost or cost["state"] != "settled" or cost["actual_cost_microusd"] is None:

@@ -225,11 +225,20 @@ async def guard_audio_pair(db, run, *, require_current=True, physical=False):
     return binding, row
 
 
-async def advance_audio_pair(db, run, audio, *, changes=None):
+async def advance_audio_pair(db, run, audio, *, changes=None, task_capture_reservation=None):
     from src.workflows.job_runtime import DurableJobLeaseError
     if audio is None:
         return
     allowed = {"status", "transcript", "transcript_digest", "confirmed_transcript_digest", "result_digest", "error_code", "provider_status", "transport_status", "cleanup_status", "raw_path", "normalized_path", "admission_operation_id"}
+    if task_capture_reservation is not None:
+        from src.work_board.channel_capture import ChannelCaptureReservationV1
+        if type(task_capture_reservation) is not ChannelCaptureReservationV1:
+            raise DurableJobLeaseError("audio_task_capture_reservation_required")
+        original = json.loads(audio.metadata_json or "{}")
+        updated = dict(original, **{"channel_task_capture.v1": task_capture_reservation.model_dump(mode="json")})
+        if changes != {"metadata_json": canonical(updated)}:
+            raise DurableJobLeaseError("audio_task_capture_metadata_invalid")
+        allowed.add("metadata_json")
     if set(changes or {}) - allowed:
         raise DurableJobLeaseError("audio_pair_changes_invalid")
     values = dict(changes or {}, revision=AudioIngressJob.revision + 1, updated_at=datetime.now(timezone.utc))

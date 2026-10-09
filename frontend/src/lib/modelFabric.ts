@@ -72,6 +72,7 @@ export interface ModelFabricRuntimeStatus {
 }
 
 export type OpenRouterPurpose = "text" | "vision" | "embedding";
+export type OpenRouterOptionalPurpose = OpenRouterPurpose | "audio";
 
 // Values accepted by PUT exclude the response's readiness and proof metadata.
 export interface OpenRouterRouteValue {
@@ -95,13 +96,14 @@ export interface OpenRouterSlotStatus {
 export interface OpenRouterRouteStatus extends OpenRouterRouteValue, OpenRouterSlotStatus {}
 
 export interface OpenRouterSetupValue {
-  schema_version: "seraph.openrouter.setup.v2";
-  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null>;
+  schema_version: "seraph.openrouter.setup.v2" | "seraph.openrouter.setup.v3";
+  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null> & { audio?: OpenRouterRouteValue | null };
   api_key?: string;
   egress_class: string;
   cloud_egress_acknowledged: true;
   vision_egress_acknowledged?: true;
   embedding_egress_acknowledged?: true;
+  audio_egress_acknowledged?: true;
   spend_ceiling_microusd: number;
   max_queued: number;
   max_inflight: 1;
@@ -114,12 +116,12 @@ export interface OpenRouterSetupValue {
 }
 
 export interface OpenRouterSetupStatus {
-  schema_version: "seraph.openrouter.setup.v2";
+  schema_version: "seraph.openrouter.setup.v2" | "seraph.openrouter.setup.v3";
   profile_id: string;
   api_base: string;
   provider_kind: string;
-  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null>;
-  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus>;
+  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null> & { audio?: OpenRouterRouteStatus | null };
+  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus> & { audio?: OpenRouterSlotStatus };
   allow_fallbacks: boolean;
   require_parameters: boolean;
   data_collection: string;
@@ -361,11 +363,12 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
   // Legacy migration and purpose consent belong to the backend. Never infer a
   // new purpose from cached v1 metadata or a partially returned route.
   const rawRoutes = recordOf(record?.routes);
-  if (!record || record.schema_version !== "seraph.openrouter.setup.v2" || !rawRoutes) return null;
+  if (!record || !["seraph.openrouter.setup.v2", "seraph.openrouter.setup.v3"].includes(String(record.schema_version)) || !rawRoutes) return null;
   const rawStatuses = recordOf(record.slot_statuses);
   const routes = {} as OpenRouterSetupStatus["routes"];
   const slot_statuses = {} as OpenRouterSetupStatus["slot_statuses"];
-  for (const slot of ["text", "vision", "embedding"] as const) {
+  const slots: OpenRouterOptionalPurpose[] = record.schema_version === "seraph.openrouter.setup.v3" ? ["text", "vision", "embedding", "audio"] : ["text", "vision", "embedding"];
+  for (const slot of slots) {
     const route = recordOf(rawRoutes[slot]);
     if (rawRoutes[slot] != null && (!route || typeof route.model_id !== "string"
       || typeof route.enabled !== "boolean" || !Array.isArray(route.capabilities)
@@ -394,7 +397,7 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     } : null;
   }
   return {
-    schema_version: "seraph.openrouter.setup.v2",
+    schema_version: record.schema_version as OpenRouterSetupStatus["schema_version"],
     profile_id: typeof record.profile_id === "string" ? record.profile_id : "openrouter",
     api_base: typeof record.api_base === "string" ? record.api_base : "",
     provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "openrouter",

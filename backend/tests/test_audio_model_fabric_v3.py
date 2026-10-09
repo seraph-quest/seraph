@@ -122,7 +122,7 @@ def valid_response():
 
 def test_result_requires_exact_identity_billing_and_literal_transcript():
     assert validate_audio_response(valid_response(), model_id="openrouter/vendor/audio", upstream="deepinfra/turbo") == ("Literal transcript", "gen-scripted", 66)
-    for mutation in ({"provider": "deepinfra"}, {"model": "vendor/other"}, {"choices": []},
+    for mutation in ({"id": "not-provider-generation"}, {"currency": "EUR"}, {"provider": "deepinfra"}, {"model": "vendor/other"}, {"choices": []},
         {"choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": "truncated"}}]},
         {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "x", "audio": {}}}]},
         {"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
@@ -164,9 +164,10 @@ async def test_shared_transfer_retains_research_envelope_and_audio_envelope(monk
     context = SimpleNamespace(deadline_at=time.time()+10, fallback_allowed=False)
     with pytest.raises(RuntimeError, match="invalid_research"):
         await llm_runtime._governed_research_chat_completion(decision=decision, context=context, body={}, api_key=None)
-    payload = await llm_runtime._governed_bounded_chat_transfer(decision=decision, context=context, body={}, api_key=None, envelope="audio")
-    assert len(payload["choices"][0]["message"]["content"]) == 17000
-    assert len(calls) == 2  # In-process transport, zero sockets/provider calls.
+    from src.workflows.inference_accounting import InferenceAccountingError
+    with pytest.raises(InferenceAccountingError, match="audio_native_contact_required"):
+        await llm_runtime._governed_bounded_chat_transfer(decision=decision, context=context, body={}, api_key=None, envelope="audio")
+    assert len(calls) == 1  # Research fixture only; absent native audio never constructs a client.
 
 
 @pytest.mark.asyncio
@@ -284,3 +285,49 @@ async def test_actual_proof_repository_caller_documentary_json_never_authorizes_
     # still cannot substitute for the unadopted documentary issuance owner.
     with pytest.raises(PermissionError, match="audio_documentary_acquisition_unavailable"):
         await audio_route_witness(profile, proof_ref=proof.proof_hash)
+
+
+@pytest.mark.asyncio
+async def test_audio_leaf_requires_actual_broker_contact_not_lookalike_binding(monkeypatch):
+    from src import llm_runtime
+    from src.model_fabric.remote_inference_admission import set_remote_inference_receipt_binding, reset_remote_inference_receipt_binding
+    from src.workflows.inference_accounting import InferenceAccountingError
+    from src.guardian.audio_ingress import OpenRouterInputAudio
+    profile = next(p for p in openrouter_profiles_for_setup(configured_audio()) if p.id == "openrouter.audio")
+    context = SimpleNamespace(runtime_path="audio_transcription", job_id="native-audio")
+    token = set_remote_inference_receipt_binding(SimpleNamespace(job_id="native-audio"))
+    try:
+        with pytest.raises(InferenceAccountingError, match="audio_native_contact_required"):
+            await llm_runtime._governed_audio_chat_completion(decision=SimpleNamespace(selected=SimpleNamespace(profile=profile)),
+                context=context, input_audio=OpenRouterInputAudio(data="YQ==", format="wav"),
+                evidence=evidence(profile), api_key=None)
+    finally:
+        reset_remote_inference_receipt_binding(token)
+
+
+@pytest.mark.asyncio
+async def test_audio_broker_rejects_sync_and_stream_before_accounting_or_transport():
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.workflows.inference_accounting import InferenceAccountingError
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    request = SimpleNamespace(runtime_path="audio_transcription")
+    calls = []
+    def forbidden():
+        calls.append("forbidden")
+    with pytest.raises(InferenceAccountingError, match="audio_async_nonstreaming_required"):
+        broker.execute_sync(request, forbidden)
+    with pytest.raises(InferenceAccountingError, match="audio_async_nonstreaming_required"):
+        async for _ in broker.stream(request, forbidden):
+            pytest.fail("audio cannot yield chunks")
+    assert calls == []
+
+
+def test_audio_cost_wire_bound_and_decimal_upward_rounding():
+    from decimal import Decimal
+    payload = valid_response()
+    exact = {**payload, "usage": {**payload["usage"], "cost": Decimal("0.000001000000000000000000000000000001")}}
+    assert validate_audio_response(exact, model_id="openrouter/vendor/audio", upstream="deepinfra/turbo")[2] == 2
+    for cost in ("0."+"0"*65+"1", "1e-1000000000", Decimal("1E+1000000000")):
+        invalid = {**payload, "usage": {**payload["usage"], "cost": cost}}
+        with pytest.raises(ValueError, match="billing_invalid"):
+            validate_audio_response(invalid, model_id="openrouter/vendor/audio", upstream="deepinfra/turbo")

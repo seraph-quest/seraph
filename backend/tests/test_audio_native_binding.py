@@ -100,6 +100,25 @@ async def test_pair_claim_cancel_suppresses_late_publication(native, async_db):
 
 
 @pytest.mark.asyncio
+async def test_restart_before_any_reservation_preserves_binding_budget_and_fences_old_owner(native):
+    worker, row, binding, spec, jobs = native
+    admitted = await jobs.admit_job(spec, audio_admission=binding)
+    audio = await worker._job(row.request_id)
+    claimed = await jobs.audio_transition(binding.workflow_job_id, expected_revision=admitted["revision"],
+        expected_audio_revision=audio.revision, status="running", audio_changes={"status": "processing"},
+        owner="dead-native", fencing_token=0)
+    await jobs.recover_audio_owner()
+    recovered = await jobs.get_job(binding.workflow_job_id)
+    assert recovered["status"] == "queued" and recovered["lease"]["fencing_token"] == 2
+    assert recovered["declared_authority"][AUTHORITY_KEY] == binding.payload()
+    assert recovered["declared_authority"]["budget_microusd"] == 10
+    with pytest.raises(RuntimeError, match="audio_pair_revision_stale"):
+        await jobs.audio_transition(binding.workflow_job_id, expected_revision=claimed["revision"],
+            expected_audio_revision=audio.revision+1, status="failed", audio_changes={"status": "blocked"},
+            owner="dead-native", fencing_token=1, require_current=False)
+
+
+@pytest.mark.asyncio
 async def test_real_process_overflow_timeout_and_reap():
     import sys
     with pytest.raises(AudioWorkerError, match="audio processing failed") as overflow:
@@ -108,6 +127,27 @@ async def test_real_process_overflow_timeout_and_reap():
     with pytest.raises(AudioWorkerError) as timeout:
         await _run_process([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.05)
     assert timeout.value.code == "decoder_timeout"
+
+
+@pytest.mark.asyncio
+async def test_installed_decoder_actual_file_only_wav_process(tmp_path, monkeypatch):
+    import src.guardian.audio_worker as module
+    from src.guardian.audio_worker import _decode_with_ffmpeg
+    from tests.test_audio_worker import _wav
+    raw, normalized = tmp_path / "quarantine.bin", tmp_path / "normalized.wav"
+    raw.write_bytes(_wav(rate=16000, seconds=.1, channels=1))
+    original, receipts = module._run_process, []
+    async def recorded(command, **kwargs):
+        result = await original(command, **kwargs)
+        receipts.append((command[0], result[0], result[2].decode(errors="replace")))
+        return result
+    monkeypatch.setattr(module, "_run_process", recorded)
+    try:
+        result = await _decode_with_ffmpeg(raw, normalized, ("audio/wav", "wav", "pcm_s16le"),
+            original_deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20))
+    except AudioWorkerError:
+        pytest.fail(repr(receipts))
+    assert normalized.is_file() and result.normalized_duration_seconds > 0
 
 
 @pytest.mark.parametrize("field,value", [("audio_budget_microusd", True), ("max_calls", True), ("max_calls", 2),

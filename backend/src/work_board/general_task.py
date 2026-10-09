@@ -1038,8 +1038,11 @@ class GeneralTaskService:
             raise BoardError("general_task_resume_binding_changed", "Original pending plan step required", status_code=409)
         await read_current_native_outputs(db, parent, task, attempt, manifest, envelope, step.depends_on)
         private = read_bound_native_tool_input(child, binding)
-        descriptor = next((item for item in self.registry.descriptors() if item.tool_id == private.tool_id), None)
-        if descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest:
+        descriptor = next((item for item in envelope.descriptors if item.tool_id == private.tool_id), None)
+        current_descriptor = next((item for item in self.registry.descriptors() if item.tool_id == private.tool_id), None)
+        from src.workflows.procedure_contracts import procedure_execution_descriptor_matches
+        if (descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest
+            or not procedure_execution_descriptor_matches(current_descriptor, descriptor)):
             raise BoardError("general_task_tool_contract_changed", "Original registered descriptor required", status_code=409)
         metadata = self.registry.approval_context(descriptor, private.inputs, job_id=child.run_identity)
         if (metadata["fingerprint"] != transition.approval_fingerprint
@@ -1136,8 +1139,8 @@ class GeneralTaskService:
                     if envelope.specialist_handoff is None:
                         raise ValueError("copied evidence pointers require an internal handoff")
                     validate_evidence_pointers(step.input, envelope.task_input.evidence_refs)
-                descriptor = by_id.get(step.tool_id)
-                if descriptor is None or descriptor not in envelope.descriptors:
+                descriptor = next((item for item in envelope.descriptors if item.tool_id == step.tool_id), None)
+                if descriptor is None or not procedure_execution_descriptor_matches(by_id.get(step.tool_id), descriptor):
                     raise ValueError("step descriptor is unavailable")
                 validate_schema(step.output_contract, check_value=False)
                 if not schema_accepts_output(descriptor.output_schema, step.output_contract):

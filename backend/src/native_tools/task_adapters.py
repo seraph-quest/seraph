@@ -281,7 +281,7 @@ class ToolRegistry:
     def compile_capacity(self, descriptor):
         from src.tools.approval import ApprovalTool
         entry = self._entries().get(descriptor.tool_id)
-        if entry is None or entry[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if entry is None or not procedure_execution_descriptor_matches(entry[0], descriptor):
             raise PermissionError("task tool capacity contract changed")
         producer = getattr(self._invoke_sync, "__func__", None)
         begin = getattr(self.begin_invocation, "__func__", None)

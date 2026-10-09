@@ -36,6 +36,24 @@ _MAX_LESSON_BYTES = 64 * 1024
 _PROCESS_INSTANCE = str(uuid4())
 
 
+async def sanitize_procedure_candidate(candidate: ProcedureCandidateV3) -> str:
+    """Check a closed typed artifact, without changing M5 prose limits."""
+    from src.memory.m5 import _SECRET_ASSIGNMENT, _AUTHORITY_TEXT, vault_redaction
+    from src.workflows.procedure_contracts import procedure_v3_digest
+    if type(candidate) is not ProcedureCandidateV3:
+        raise ValueError("exact typed procedure candidate required")
+    typed = ProcedureCandidateV3.model_validate(candidate.model_dump(mode="json"))
+    payload = typed.model_dump(mode="json")
+    procedure_v3_digest(payload)
+    text = canonical(payload)
+    if len(text.encode("utf-8")) > _MAX_LESSON_BYTES:
+        raise ValueError("procedure artifact exceeds 64KiB")
+    redacted = await vault_redaction.redact_secrets_in_text(text, fail_closed=True)
+    if redacted != text or _SECRET_ASSIGNMENT.search(text) or _AUTHORITY_TEXT.search(text):
+        raise ValueError("procedure artifact contains secrets or authority text")
+    return text
+
+
 def _host_platform():
     return sys.platform
 
@@ -645,9 +663,10 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             if build_procedure_candidate(_procedure_witness, _procedure_request.parameter_selections) != _procedure_candidate:
                 raise BoardError("procedure_candidate_changed", "Use only original producer-offered parameter fields")
             old = _procedure_candidate
-            candidate_text = canonical(_procedure_candidate.model_dump(mode="json"))
-            if await sanitize_m5_memory_text_async(candidate_text) != candidate_text:
-                raise BoardError("procedure_candidate_unsafe", "Remove secrets or unsafe fixed input from the source task", status_code=422)
+            try:
+                await sanitize_procedure_candidate(_procedure_candidate)
+            except ValueError as error:
+                raise BoardError("procedure_candidate_unsafe", "Remove secrets or unsafe fixed input from the source task", status_code=422) from error
         else:
             old, audit_token = await _observed_method(db, task, run, request.scope.family,
                 structured_research=_structured_strategy is not None)

@@ -623,6 +623,8 @@ def classify_procedure_inputs(steps, descriptors):
 
 def procedure_execution_descriptor_matches(current, original):
     """Legacy execution compatibility does not upgrade original source pins."""
+    if current is None or original is None:
+        return False
     actual = current.model_dump(mode="json")
     retained = original.model_dump(mode="json")
     if original.procedure_inputs is None:

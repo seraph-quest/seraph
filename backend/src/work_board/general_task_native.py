@@ -176,8 +176,10 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         plan = current_plan(read_manifest(parent_row), envelope)
         step = next(item for item in plan.steps if item.step_id == binding.step_id)
     descriptors = {descriptor.tool_id: descriptor for descriptor in service.registry.descriptors()}
-    descriptor = descriptors.get(private.tool_id)
-    if descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest:
+    descriptor = next((item for item in envelope.descriptors if item.tool_id == private.tool_id), None)
+    from src.workflows.procedure_contracts import procedure_execution_descriptor_matches
+    if (descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest
+        or not procedure_execution_descriptor_matches(descriptors.get(private.tool_id), descriptor)):
         raise BoardError("general_task_tool_contract_changed", "Original registered descriptor required", status_code=409)
     async with jobs._session() as db:
         await service.recheck_authority(db, WorkBoardOwner(principal_id=principal.principal_id,

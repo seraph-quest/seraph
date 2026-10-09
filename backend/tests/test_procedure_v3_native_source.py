@@ -44,6 +44,7 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
     operator = await auth_service.authenticate_token(issued_tokens[0], touch=False)
     await enroll(operator)
     workspace, _engine, factory = accounting_db
+    workspace.chmod(0o700)
     sessions = factory.accounting_sessions
     source = "Private local content carried only by actual dependency artifacts.\n"
     (workspace / "original.txt").write_text(source)
@@ -261,6 +262,8 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
                 path = workspace / artifact["file_path"]
                 assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["content_sha256"]
                 assert path.stat().st_mode & 0o077 == 0
+                if checkpoint["checkpoint_id"] == "general:verified:research":
+                    assert "Fixture source" in json.loads(path.read_text())["output"]["content"]
             assert json.loads((workspace / "mcp-physical-readback.json").read_text()) == {"value": source, "sha256": source_sha}
             assert (await client.post(f"/api/work-board/tasks/{task_id}/plan/resume", json=resume_body)).status_code == 409
             await dispatcher.reconcile_linked_attempts()
@@ -275,7 +278,15 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             from src.workflows.procedure_contracts import ProcedureSaveRequest
             operator = await auth_service.authenticate_token(issued_tokens[0], touch=False)
             source_info = await eligible_procedure_source(operator, task_id)
-            assert source_info["eligible"], source_info
+            assert source_info["eligible"], source_info["reason_code"]
+            wire_fixtures = {"source": source_info, "source_task": completed.json()["task"],
+                "goal": goal.model_dump(mode="json")}
+            fixture_path = workspace / "procedure-wire-fixtures.json"
+            def persist_wire(name, value):
+                wire_fixtures[name] = value
+                fixture_path.write_text(json.dumps(wire_fixtures, sort_keys=True))
+                fixture_path.chmod(0o600)
+            persist_wire("source", source_info)
             assert {offer["step_id"] for offer in source_info["parameter_offers"]} == {"research", "read", "write"}
             request = ProcedureSaveRequest(expected_revision=source_info["expected_revision"],
                 source_attempt=source_info["source_attempt"], idempotency_key="save-original-dag",
@@ -283,8 +294,10 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
                     ("_path" if offer["step_id"] != "research" else "_" + offer["input_pointer"][1:])}
                     for offer in source_info["parameter_offers"]])
             proposed = await save_procedure_method(operator, task_id, request)
+            persist_wire("save", proposed)
             assert proposed["status"] == "proposed" and proposed["result"] == "candidate_inert"
             inspected = await inspect_task_lesson(operator, proposed["proposal_id"])
+            persist_wire("proposal", inspected)
             assert inspected["source_current"] is True
             candidate = inspected["new_method"]
             assert candidate["schema_version"] == "ProcedurePlan.v3"
@@ -313,7 +326,9 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
                     scope_digest=preview["scope_digest"], action=name,
                     reason="Explicit reviewed procedure " + name, idempotency_key=key)
             preview = await methods.inspect_method(operator, proposed["proposal_id"])
-            await methods.review_method(operator, action(preview, "accept", "adopt-source-dag"))
+            persist_wire("pre_adopt", preview)
+            persist_wire("adopt", await methods.review_method(operator, action(preview, "accept", "adopt-source-dag")))
+            persist_wire("post_adopt", await methods.inspect_method(operator, proposed["proposal_id"]))
             binding = await method_owner.resolve(owner, goal.id, "work.general-task.v1")
             assert binding.status == "active", binding.reason
             from src.db.task_method_models import TaskMethodActive
@@ -330,7 +345,9 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
                     "read_path": "new-original.txt", "write_path": "new-copied.txt"},
                 limits={"max_inference_calls": 0, "max_cost_microusd": 0},
                 inference_egress_acknowledged=False, idempotency_key="fresh-invocation")
+            persist_wire("invoke_request", invoke_body.model_dump(mode="json"))
             invoked = await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
+            persist_wire("invoke", invoked)
             new_task = invoked["task_id"]
             assert new_task != task_id
             replayed = await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
@@ -338,6 +355,95 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             with pytest.raises(BoardError):
                 await invoke_method(operator, proposed["proposal_id"], invoke_body.model_copy(update={
                     "parameters": {**invoke_body.parameters, "read_path": "original.txt", "write_path": "other-copy.txt"}}), service)
+            # Corrupt only real first-publication receipts, then restore them:
+            # neither missing nor conflicting provenance may unlock a replay.
+            from src.db.models import WorkBoardEvent, WorkBoardTask
+            from src.memory.task_method_invocation import INVOCATION_EVENT
+            async with sessions() as db:
+                event = (await db.execute(select(WorkBoardEvent).where(
+                    WorkBoardEvent.task_id == new_task, WorkBoardEvent.kind == INVOCATION_EVENT))).scalar_one()
+                event_id, original_event = event.event_id, event.metadata_json
+                task_count_before = len(list((await db.execute(select(WorkBoardTask))).scalars()))
+                event.kind = "test.missing-invocation-binding"
+                await db.commit()
+            contacts_before = (len(protocol_calls), len(search_requests), len(effects))
+            with pytest.raises(BoardError) as missing:
+                await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
+            assert missing.value.code == "method_invocation_binding_missing"
+            async with sessions() as db:
+                event = await db.get(WorkBoardEvent, event_id)
+                event.kind = INVOCATION_EVENT
+                changed_event = json.loads(original_event)
+                changed_event["identity"]["request_digest"] = "0" * 64
+                event.metadata_json = json.dumps(changed_event)
+                await db.commit()
+            with pytest.raises(BoardError) as corrupted:
+                await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
+            assert corrupted.value.code == "method_invocation_idempotency_conflict"
+            async with sessions() as db:
+                event = await db.get(WorkBoardEvent, event_id)
+                event.metadata_json = original_event
+                await db.commit()
+                stored_task = (await db.execute(select(WorkBoardTask).where(
+                    WorkBoardTask.task_id == new_task))).scalar_one()
+                original_payload_path = workspace / stored_task.typed_input_ref.removeprefix("workspace-json:")
+                original_payload = original_payload_path.read_bytes()
+            # A literal envelope alteration is rejected by the original private
+            # artifact digest before it can be treated as a new valid request.
+            altered_payload = json.loads(original_payload)
+            altered_payload["input"]["strategy"]["digest"] = "0" * 64
+            original_payload_path.write_text(json.dumps(altered_payload))
+            try:
+                from src.work_board.dispatcher import TypedInputError
+                with pytest.raises(TypedInputError):
+                    await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
+            finally:
+                original_payload_path.write_bytes(original_payload)
+            # Even mutually consistent corrupted file/Task/artifact/event
+            # hashes cannot replace the independently signed current pin or
+            # the complete original caller body. All records are restored.
+            from src.db.models import WorkBoardInputArtifact
+            from src.memory.procedure_recommendations import canonical, digest
+            for corrupted_field, denial in (("pin", "method_invocation_pin_changed"),
+                                             ("body", "method_invocation_input_changed")):
+                altered_payload = json.loads(original_payload)
+                if corrupted_field == "pin":
+                    altered_payload["input"]["strategy"]["digest"] = "0" * 64
+                else:
+                    altered_payload["input"]["task_input"]["intent"] = "Changed original caller intent"
+                altered_bytes = canonical(altered_payload).encode()
+                altered_sha = hashlib.sha256(altered_bytes).hexdigest()
+                original_payload_path.write_bytes(altered_bytes)
+                async with sessions() as db:
+                    corrupted_task = (await db.execute(select(WorkBoardTask).where(
+                        WorkBoardTask.task_id == new_task))).scalar_one()
+                    corrupted_artifact = await db.get(WorkBoardInputArtifact, corrupted_task.input_artifact_id)
+                    original_sha = corrupted_task.typed_input_digest
+                    corrupted_task.typed_input_digest = corrupted_artifact.payload_sha256 = altered_sha
+                    corrupted_event = await db.get(WorkBoardEvent, event_id)
+                    altered_event = json.loads(original_event)
+                    altered_event["typed_input_digest"] = altered_sha
+                    altered_event["envelope_digest"] = digest(altered_payload["input"])
+                    corrupted_event.metadata_json = canonical(altered_event)
+                    await db.commit()
+                try:
+                    with pytest.raises(BoardError) as changed_original:
+                        await invoke_method(operator, proposed["proposal_id"], invoke_body, service)
+                    assert changed_original.value.code == denial
+                finally:
+                    original_payload_path.write_bytes(original_payload)
+                    async with sessions() as db:
+                        corrupted_task = (await db.execute(select(WorkBoardTask).where(
+                            WorkBoardTask.task_id == new_task))).scalar_one()
+                        corrupted_artifact = await db.get(WorkBoardInputArtifact, corrupted_task.input_artifact_id)
+                        corrupted_task.typed_input_digest = corrupted_artifact.payload_sha256 = original_sha
+                        corrupted_event = await db.get(WorkBoardEvent, event_id)
+                        corrupted_event.metadata_json = original_event
+                        await db.commit()
+            assert await invoke_method(operator, proposed["proposal_id"], invoke_body, service) == replayed
+            async with sessions() as db:
+                assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == task_count_before
+            assert (len(protocol_calls), len(search_requests), len(effects)) == contacts_before
             new_detail = await client.get(f"/api/work-board/tasks/{new_task}")
             new_card = new_detail.json()["task"]
             promoted = await client.post(f"/api/work-board/tasks/{new_task}/actions", json={
@@ -358,25 +464,159 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             assert resumed_new.json()["task"]["status"] == "review"
             assert protocol_calls.count("tools/call") == 2
             assert json.loads((workspace / "mcp-physical-readback.json").read_text())["value"] == new_source
+            completed_new = await client.post(f"/api/work-board/tasks/{new_task}/actions", json={
+                "action": "complete_review", "expected_revision": resumed_new.json()["task"]["task_revision"],
+                "attempt_id": new_pause["attempt_id"]})
+            assert completed_new.status_code == 200, completed_new.text
+            persist_wire("rollback_source_task", completed_new.json()["task"])
+            source_b = await eligible_procedure_source(operator, new_task)
+            assert source_b["eligible"], source_b["reason_code"]
+            persist_wire("source_b", source_b)
+            request_b = ProcedureSaveRequest(expected_revision=source_b["expected_revision"],
+                source_attempt=source_b["source_attempt"], idempotency_key="save-fresh-dag-B",
+                parameter_selections=[{"offer_id": offer["offer_id"], "name": offer["step_id"] +
+                    ("_path" if offer["step_id"] != "research" else "_" + offer["input_pointer"][1:])}
+                    for offer in source_b["parameter_offers"]])
+            proposal_b = await save_procedure_method(operator, new_task, request_b)
+            persist_wire("save_b", proposal_b)
+            preview_b = await methods.inspect_method(operator, proposal_b["proposal_id"])
+            await methods.review_method(operator, action(preview_b, "accept", "adopt-fresh-dag-B"))
+            binding_b = await method_owner.resolve(owner, goal.id, "work.general-task.v1")
+            assert binding_b.version != binding.version and binding_b.digest != binding.digest
+            async with sessions() as db:
+                pointer_b = (await db.execute(select(TaskMethodActive))).scalar_one()
+                revision_b = pointer_b.revision
+                from src.db.models import WorkBoardTask
+                task_count = len(list((await db.execute(select(WorkBoardTask))).scalars()))
+            with pytest.raises(BoardError):
+                await invoke_method(operator, proposal_b["proposal_id"], invoke_body.model_copy(update={
+                    "version": binding_b.version, "digest": binding_b.digest,
+                    "expected_pointer_revision": revision_b}), service)
+            async with sessions() as db:
+                assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == task_count
+            preview_b = await methods.inspect_method(operator, proposal_b["proposal_id"])
+            persist_wire("pre_rollback", preview_b)
+            persist_wire("rollback", await methods.review_method(operator, action(preview_b, "rollback", "rollback-exact-A")))
+            persist_wire("post_rollback_b", await methods.inspect_method(operator, proposal_b["proposal_id"]))
+            assert (await method_owner.resolve(owner, goal.id, "work.general-task.v1")) == binding
+            persist_wire("post_rollback", await methods.inspect_method(operator, proposed["proposal_id"]))
+            async with sessions() as db:
+                restored_pointer = (await db.execute(select(TaskMethodActive))).scalar_one()
+                restored_revision = restored_pointer.revision
+            restored = await invoke_method(operator, proposed["proposal_id"], invoke_body.model_copy(update={
+                "expected_pointer_revision": restored_revision, "idempotency_key": "restored-A-new-task"}), service)
+            assert restored["task_id"] not in {task_id, new_task}
+            # Exercise both existing early-return paths directly against the
+            # genuine published Task/envelope and its original caller key.
+            from src.memory.task_method_invocation import _InvocationGate
+            from src.memory.procedure_recommendations import digest
+            from src.work_board.contracts import GeneralTaskCreate, GeneralTaskEnvelope, WorkBoardTaskCreate
+            from src.work_board.dispatcher import _parse_typed_input
+            restored_request = invoke_body.model_copy(update={
+                "expected_pointer_revision": restored_revision, "idempotency_key": "restored-A-new-task"})
+            async with sessions() as db:
+                stored = (await db.execute(select(WorkBoardTask).where(
+                    WorkBoardTask.task_id == restored["task_id"]))).scalar_one()
+                original_envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(stored))
+                artifact_id = stored.input_artifact_id
+                task_count_before = len(list((await db.execute(select(WorkBoardTask))).scalars()))
+            def original_gate():
+                gate = _InvocationGate(owner, proposed["proposal_id"], restored_request,
+                    digest({"owner": owner.model_dump(mode="json"), "proposal_id": proposed["proposal_id"],
+                        "request": restored_request.model_dump(mode="json")}), binding=binding)
+                gate.stage_envelope(original_envelope)
+                return gate
+            preview = await methods.inspect_method(operator, proposed["proposal_id"])
+            await methods.review_method(operator, action(preview, "disable", "matrix-disable-replays"))
+            async with sessions() as db:
+                with pytest.raises(BoardError) as service_replay:
+                    await service.create(db, owner, GeneralTaskCreate(input=original_envelope.task_input,
+                        plan=original_envelope.plan, goal_revision=1, expected_plan_revision=1,
+                        idempotency_key=restored_request.idempotency_key), _procedure_invocation=original_gate())
+                assert service_replay.value.code == "method_invocation_pointer_changed"
+            async with sessions() as db:
+                with pytest.raises(BoardError) as repository_replay:
+                    await service.repository.create_task(db, owner, WorkBoardTaskCreate(
+                        title=original_envelope.task_input.intent[:200], body="General registered-tool task",
+                        goal_id=goal.id, goal_revision=1, capability_id="agent.task.v1",
+                        input_artifact_id=artifact_id, status="triage", requires_review=True,
+                        idempotency_scope="general-task", idempotency_key=restored_request.idempotency_key),
+                        _procedure_invocation=original_gate())
+                assert repository_replay.value.code == "method_invocation_pointer_changed"
+            preview = await methods.inspect_method(operator, proposed["proposal_id"])
+            await methods.review_method(operator, action(preview, "activate", "matrix-activate-replays"))
+            async with sessions() as db:
+                stage_pointer = (await db.execute(select(TaskMethodActive))).scalar_one()
+                stage_revision = stage_pointer.revision
+            # Real private artifact staging completes first; a separate genuine
+            # M5 writer withdraws the pointer before Task publication acquires
+            # its writer. This must leave only an inert staged input artifact.
+            from src.work_board import input_artifacts
+            real_prepare_input = input_artifacts.prepare_input_artifact
+            staged_artifacts = []
+            staging_action_key = "matrix-disable-staging"
+            async def withdraw_after_real_staging(*args, **kwargs):
+                staged = await real_prepare_input(*args, **kwargs)
+                staged_artifacts.append(staged.artifact_id)
+                preview = await methods.inspect_method(operator, proposed["proposal_id"])
+                await methods.review_method(operator, action(preview, "disable", staging_action_key))
+                return staged
+            contacts_before = (len(protocol_calls), len(search_requests), len(effects))
+            with monkeypatch.context() as scoped_patch:
+                scoped_patch.setattr(input_artifacts, "prepare_input_artifact", withdraw_after_real_staging)
+                with pytest.raises(BoardError) as staging_race:
+                    await invoke_method(operator, proposed["proposal_id"], invoke_body.model_copy(update={
+                        "expected_pointer_revision": stage_revision, "idempotency_key": "pointer-stage-race"}), service)
+                assert staging_race.value.code == "method_invocation_pointer_changed"
+            from src.db.models import WorkBoardInputArtifact
+            async with sessions() as db:
+                assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == task_count_before
+                assert len(staged_artifacts) == 1
+                staged = await db.get(WorkBoardInputArtifact, staged_artifacts[0])
+                assert staged.bound_task_id is None and staged.state == "pending"
+            assert (len(protocol_calls), len(search_requests), len(effects)) == contacts_before
+            preview = await methods.inspect_method(operator, proposed["proposal_id"])
+            await methods.review_method(operator, action(preview, "activate", "matrix-activate-staging"))
+            staging_action_key = "matrix-disable-ordinary-staging"
+            with monkeypatch.context() as scoped_patch:
+                scoped_patch.setattr(input_artifacts, "prepare_input_artifact", withdraw_after_real_staging)
+                async with sessions() as db:
+                    with pytest.raises(BoardError) as ordinary_staging_race:
+                        await service.create(db, owner, GeneralTaskCreate(input=original_envelope.task_input,
+                            plan=original_envelope.plan, goal_revision=1, expected_plan_revision=1,
+                            idempotency_key="ordinary-pointer-stage-race"))
+                    assert ordinary_staging_race.value.code == "method_invocation_pointer_changed"
+            async with sessions() as db:
+                assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == task_count_before
+                assert len(staged_artifacts) == 2
+                ordinary_staged = await db.get(WorkBoardInputArtifact, staged_artifacts[-1])
+                assert ordinary_staged.bound_task_id is None and ordinary_staged.state == "pending"
+            assert (len(protocol_calls), len(search_requests), len(effects)) == contacts_before
+            preview = await methods.inspect_method(operator, proposed["proposal_id"])
+            await methods.review_method(operator, action(preview, "activate", "matrix-activate-ordinary-staging"))
             # Restart the dedicated owner and read exact immutable selection.
             await method_owner.stop()
             await method_owner.start()
             assert (await method_owner.resolve(owner, goal.id, "work.general-task.v1")) == binding
             preview = await methods.inspect_method(operator, proposed["proposal_id"])
-            await methods.review_method(operator, action(preview, "disable", "disable-family"))
+            persist_wire("disable", await methods.review_method(operator, action(preview, "disable", "disable-family")))
+            persist_wire("post_disable", await methods.inspect_method(operator, proposed["proposal_id"]))
             assert (await method_owner.resolve(owner, goal.id, "work.general-task.v1")).status == "none"
             with pytest.raises(BoardError):
                 await invoke_method(operator, proposed["proposal_id"], invoke_body.model_copy(update={"idempotency_key": "disabled-new"}), service)
             preview = await methods.inspect_method(operator, proposed["proposal_id"])
-            await methods.review_method(operator, action(preview, "activate", "reactivate-family"))
+            persist_wire("activate", await methods.review_method(operator, action(preview, "activate", "reactivate-family")))
+            persist_wire("post_activate", await methods.inspect_method(operator, proposed["proposal_id"]))
             preview = await methods.inspect_method(operator, proposed["proposal_id"])
-            await methods.review_method(operator, action(preview, "delete", "delete-canonical-method"))
+            persist_wire("delete", await methods.review_method(operator, action(preview, "delete", "delete-canonical-method")))
+            persist_wire("post_delete", await methods.inspect_method(operator, proposed["proposal_id"]))
             with pytest.raises(BoardError):
                 await method_owner.validate_pinned(owner, goal.id, binding)
             print(json.dumps({"flow": "auth_manual_plan_accept_read_write_stock_mcp_approval_resume",
                 "native_children": 8, "tools_call": 2, "search_https_receipts": len(search_requests),
                 "physical_effect_sha256": effects[0]["sha256"],
-                "no_learning": True, "external_socket_contacts": 0}, sort_keys=True))
+                "native_no_learning": True, "explicit_review_adoptions": 2,
+                "canonical_tombstones": 1, "external_socket_contacts": 0}, sort_keys=True))
     finally:
         if service is not None:
             service.stop()

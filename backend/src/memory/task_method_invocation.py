@@ -16,7 +16,7 @@ from src.memory.task_methods import (Closed, Id, Sha, ActiveMethodBinding,
     _context, _pointer, _pointer_valid, _fail, _stage)
 from src.work_board.contracts import (TaskLimits, GeneralTaskInput, GeneralTaskCreate,
     WorkBoardOwner, GeneralTaskEnvelope)
-from src.work_board.repository import _begin_sqlite_immediate
+from src.work_board.repository import _begin_sqlite_immediate, BoardError
 
 INVOCATION_EVENT = "task_method.invocation.v3"
 
@@ -133,6 +133,18 @@ class _InvocationGate:
 
 
 async def invoke_method(operator, proposal_id, request, service):
+    from src.auth.service import AuthFailure
+    from sqlalchemy.exc import SQLAlchemyError
+    from src.extensions.capability_execution import CapabilityJournalError
+    try:
+        return await _invoke_method(operator, proposal_id, request, service)
+    except AuthFailure as error:
+        raise BoardError("method_current_owner_required", "Authenticate the current method owner", status_code=403) from error
+    except (OSError, SQLAlchemyError, CapabilityJournalError) as error:
+        raise BoardError("method_invocation_store_unavailable", "Restore canonical method storage and private source artifacts", status_code=503) from error
+
+
+async def _invoke_method(operator, proposal_id, request, service):
     from src.workflows.procedure_contracts import ProcedureCandidateV3, instantiate_procedure_plan
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
     gate = _InvocationGate(owner, proposal_id, request,
@@ -148,6 +160,10 @@ async def invoke_method(operator, proposal_id, request, service):
             WorkBoardTask.idempotency_key == request.idempotency_key))
         if existing is not None:
             await gate.check(db, existing)
+            # Preserve only this fully loaded original row for off-writer file
+            # verification. Rollback expires attached SQLAlchemy instances;
+            # the later writer re-fetches and checks canonical metadata again.
+            db.expunge(existing)
         await db.rollback()
     source_stage = await _stage(operator, proposal_id, acceptance=True)
     if (source_stage.candidate.model_dump(mode="json") != binding.typed_data
@@ -159,7 +175,8 @@ async def invoke_method(operator, proposal_id, request, service):
         original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
         async with database.get_session() as db:
             await _begin_sqlite_immediate(db)
-            fresh = await db.get(WorkBoardTask, existing.task_id, populate_existing=True)
+            fresh = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == existing.task_id)
+                .execution_options(populate_existing=True))
             if fresh is None:
                 _fail("method_invocation_task_missing")
             await gate.check(db, fresh, original=original)

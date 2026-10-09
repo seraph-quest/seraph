@@ -184,7 +184,7 @@ async def stage_completed_procedure_source(db, task, parent):
     from src.workflows.job_runtime import DurableJobError
     try:
         return await _stage_completed_procedure_source(db, task, parent)
-    except (DurableJobError, ValueError, KeyError, TypeError, OSError) as error:
+    except (DurableJobError, ValueError, KeyError, TypeError, OSError, SchemaValueError, SchemaError) as error:
         if isinstance(error, ValueError) and str(error) == "source_contract_review_required":
             raise BoardError("source_contract_review_required",
                 "Complete a fresh task with original producer input pins before saving this method") from error
@@ -209,12 +209,13 @@ async def _stage_completed_procedure_source(db, task, parent):
     envelope = await verify_readonly_native_projection(db, WorkBoardOwner(
         principal_id=task.owner_principal_id, session_id=task.owner_session_id), parent, task, attempt, manifest)
     plan = current_plan(manifest, envelope)
-    if [step.step_id for step in plan.steps] != manifest.step_ids:
+    if {step.step_id for step in plan.steps} != set(manifest.step_ids):
         _deny()
     descriptors = {descriptor.tool_id: descriptor for descriptor in envelope.descriptors}
     offers = classify_procedure_inputs(plan.steps, envelope.descriptors)
     by_id = {child.run_identity: child for child in children}
-    for index, step in enumerate(plan.steps):
+    for step in plan.steps:
+        index = manifest.step_ids.index(step.step_id)
         receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
             artifact_id=manifest.step_receipt_artifact_ids[index], digest=manifest.step_receipt_digests[index],
             schema_version="StepReceipt.v1"), parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)

@@ -80,6 +80,10 @@ async def test_existing_review_owner_disable_activate_and_canonical_delete(async
         deleted = await methods.review_method(operator, review(await methods.inspect_method(operator, original.method_id),
             "delete", "delete-canonical-method"))
         assert deleted["configured_baseline"] is True
+        deleted_readback = await methods.inspect_method(operator, original.method_id)
+        assert deleted_readback["status"] == "deleted" and deleted_readback["new_method"] is None
+        assert deleted_readback["old_method"] is None and deleted_readback["parameters"] == []
+        assert deleted_readback["version"] == original.version and deleted_readback["tombstone"]["id"]
         async with async_db() as db:
             from sqlalchemy import select
             assert await db.scalar(select(MemoryTombstone).where(MemoryTombstone.memory_id == original.version)) is not None
@@ -113,10 +117,23 @@ async def test_ordinary_original_no_pin_task_executes_without_source_upgrade(asy
         async with async_db() as db:
             created = await service.create(db, owner, read_request(registry, "ordinary-before-classification"))
         monkeypatch.setattr(registry, "descriptors", modern_descriptors)
-        result = await dispatcher.run_pass()
-        assert result["completed"] == 1, result
         async with async_db() as db:
-            task = await db.get(WorkBoardTask, created.task.task_id)
+            retained = GeneralTaskEnvelope.model_validate(_parse_typed_input(created.task))
+            await service.recheck_authority(db, owner, retained, require_current_strategy=True)
+        from src.work_board import general_task_native as native
+        original_step = native.run_native_step
+        callback_errors = []
+        async def observed_step(*args, **kwargs):
+            try:
+                return await original_step(*args, **kwargs)
+            except Exception as error:
+                callback_errors.append((type(error).__name__, getattr(error, "code", None), str(error)))
+                raise
+        monkeypatch.setattr(native, "run_native_step", observed_step)
+        result = await dispatcher.run_pass()
+        assert result["completed"] == 1, (result, callback_errors)
+        async with async_db() as db:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == created.task.task_id))
             original = _parse_typed_input(task)
             assert all("procedure_inputs" not in descriptor for descriptor in original["descriptors"])
             attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id))
@@ -126,5 +143,47 @@ async def test_ordinary_original_no_pin_task_executes_without_source_upgrade(asy
         eligibility = await eligible_procedure_source(operator, created.task.task_id)
         assert eligibility["eligible"] is False
         assert eligibility["reason_code"] == "source_contract_review_required"
+    finally:
+        service.stop(); registry.stop(); await current.stop()
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_canonical_pointer_refresh_denies_loaded_old_revision_after_second_writer(async_db, monkeypatch, tmp_path, no_inference):
+    """Real signed pointer and independent action writer, no seeded receipt."""
+    from src.memory.task_lessons import LessonScope
+    from src.memory.task_method_invocation import _InvocationGate, TaskMethodInvoke
+    from src.work_board.contracts import TaskLimits
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.db.models import WorkBoardTask
+    from sqlalchemy import select
+    operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    try:
+        binding = await current.resolve(owner, "goal", "work.general-task.v1")
+        preview = await methods.inspect_method(operator, binding.method_id)
+        scope = LessonScope(goal_id="goal", goal_revision=1, family="general")
+        async with async_db() as first:
+            identity, _ = await methods._context(first, owner, "goal", "general")
+            originally_loaded = await methods._pointer(first, identity, scope)
+            original_revision = originally_loaded.revision
+            await first.commit()
+            # A separately opened canonical review writer mutates and signs
+            # the exact pointer while the first identity map retains its row.
+            await methods.review_method(operator, review(preview, "disable", "second-writer-disable"))
+            assert originally_loaded.revision == original_revision
+            await _begin_sqlite_immediate(first)
+            refreshed = await methods._pointer(first, identity, scope)
+            assert refreshed is originally_loaded
+            assert refreshed.revision == original_revision + 1 and refreshed.baseline
+            request = TaskMethodInvoke(version=binding.version, digest=binding.digest,
+                expected_pointer_revision=original_revision, goal_id="goal", goal_revision=1,
+                parameters={}, limits=TaskLimits(), inference_egress_acknowledged=False,
+                idempotency_key="stale-loaded-pointer")
+            gate = _InvocationGate(owner, binding.method_id, request, digest(request.model_dump(mode="json")))
+            with pytest.raises(BoardError) as denied:
+                await gate.current(first)
+            assert denied.value.code == "method_invocation_pointer_changed"
+            assert await first.scalar(select(WorkBoardTask.task_id).where(
+                WorkBoardTask.idempotency_key == request.idempotency_key)) is None
     finally:
         service.stop(); registry.stop(); await current.stop()

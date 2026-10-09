@@ -614,7 +614,7 @@ async def _verified_workflow_readback(
     return proof if _safe_verification_receipt(proof, require_complete=True) else None
 
 
-async def _stage_terminal_report_input(db, task):
+async def _stage_terminal_report_input(db, task, *, header_budget=None):
     if db.info.get("native_writer_started") and db.in_transaction():
         raise BoardError("pipeline_output_unverified", "Original report physical stage must precede writer")
     from src.work_board.input_artifacts import resolve_input_artifact_for_copy
@@ -640,9 +640,14 @@ async def _stage_terminal_report_input(db, task):
     operation, value = await owned(db, owner, task.pipeline_operation_id)
     if operation.status != "accepted" or (operation.opportunity_id and source is None):
         raise BoardError("pipeline_source_changed", "The actual accepted report operation changed")
+    if header_budget is not None:
+        from src.memory.header_bounds import INPUT_ARTIFACT
+        if not task.typed_input_ref.endswith(f"/{task.input_artifact_id}-{task.typed_input_digest}.json"):
+            raise BoardError("pipeline_input_changed", "The actual consumed report Input changed")
+        await header_budget.certify(db, INPUT_ARTIFACT, (task.input_artifact_id,))
     resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=task.typed_input_ref,
         typed_input_digest=task.typed_input_digest, goal_id=task.goal_id, goal_revision=task.goal_revision,
-        capability_id=task.capability_id, allow_goal_change=False)
+        capability_id=task.capability_id, allow_goal_change=False, header_budget=header_budget)
     if resolved.row.state != "consumed" or resolved.row.bound_task_id != task.task_id:
         raise BoardError("pipeline_input_changed", "The actual consumed report Input is required")
     return resolved.payload, source, canonical_bytes(value["live_root"]), row_token(operation)
@@ -699,7 +704,8 @@ async def _report_done_events(db, task, attempt, run):
 
 
 async def native_report_memory_metadata(db, task, attempt, run, *, _report_input_bytes=None,
-    _report_source_witness=None, _report_workspace_identity=None):
+    _report_source_witness=None, _report_workspace_identity=None, _report_operation_token=None,
+    header_budget=None):
     """Current terminal correlation; historical admission tokens grant no read."""
     if type(_report_input_bytes) is not bytes or type(_report_workspace_identity) is not bytes:
         raise BoardError("pipeline_output_unverified", "Original report physical stage required; M5 activation excluded")
@@ -708,7 +714,7 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
     from src.db.models import WorkBoardInputArtifact
     from src.work_board.input_artifacts import _metadata_digest
     from src.work_board.dispatcher import _decode_typed_input_payload
-    from src.work_board.pipelines import task_guard
+    from src.work_board.pipelines import task_guard, utc
     from src.guardian.opportunity_plans import recheck_accepted_plan_task
     if (task.capability_id != "work.local-evidence-report.v1" or task.status != WorkBoardStatus.done
         or attempt.task_id != task.task_id or attempt.ended_at is None or attempt.outcome != "verified"
@@ -717,6 +723,9 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
         raise ValueError("native_memory_report_source_changed")
     value = read_report_candidate(run)
     await validate_run(db, run)
+    if header_budget is not None:
+        from src.memory.header_bounds import INPUT_ARTIFACT
+        await header_budget.certify(db, INPUT_ARTIFACT, (value["input_id"],))
     artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
     latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
@@ -727,6 +736,8 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
             artifact.capability_id, artifact.capability_version, artifact.bound_task_id) !=
             (task.owner_principal_id, task.owner_session_id, task.goal_id, task.goal_revision, task.capability_id, "1", task.task_id)
         or artifact.state != "consumed" or artifact.consumed_at is None or not artifact.metadata_digest
+        or (header_budget is not None and (artifact.expires_at is None
+            or utc(artifact.expires_at) <= _now()))
         or type(artifact.bound_task_revision) is not int or artifact.bound_task_revision < 1
         or artifact.payload_sha256 != value["payload_sha256"] or artifact.payload_sha256 != task.typed_input_digest
         or artifact.typed_input_ref != value["typed_input_ref"] or artifact.typed_input_ref != task.typed_input_ref
@@ -742,6 +753,10 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
     await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=_report_source_witness)
     operation, operation_value = await task_guard(db, task, attempt=attempt,
         workspace_identity=_report_workspace_identity, source_witness=_report_source_witness)
+    if _report_operation_token is not None:
+        from src.work_board.pipelines import row_token
+        if row_token(operation) != _report_operation_token:
+            raise ValueError("native_memory_report_source_changed")
     reservation = operation_value["reservations"].get(task.pipeline_slot)
     if (not isinstance(reservation, Mapping) or reservation.get("state") != "bound"
         or reservation.get("artifact_ref") != artifact.artifact_id

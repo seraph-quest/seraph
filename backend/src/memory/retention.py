@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from src.memory.header_bounds import (
     HeaderBoundsError, MAX_BYTES, MAX_ROWS, MEMORY_DESCRIPTORS,
-    preflight_exact_rows, validate_certificate,
+    validate_certificate,
 )
 
 MEMORY_VERSION = "native-composition-memory.v1"
@@ -63,7 +63,23 @@ class BoundedMemoryRows:
     certified_upper_bytes: int
 
 
-async def read_memory_rows(db, references, *, remaining_bytes, existing_references=(), reserved_bytes=0):
+async def read_memory_rows(db, references, *, header_budget, remaining_bytes,
+                           existing_references=(), reserved_bytes=0):
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if type(header_budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("memory_closure_request_invalid")
+    guard = db.info.get("composition_guard")
+    if type(guard) is not CompositionSessionGuard:
+        raise HeaderBoundsError("memory_retention_writer_unavailable")
+    with guard._retention_reads(header_budget):
+        return await _read_memory_rows(db, references, header_budget=header_budget,
+            remaining_bytes=remaining_bytes, existing_references=existing_references,
+            reserved_bytes=reserved_bytes)
+
+
+async def _read_memory_rows(db, references, *, header_budget, remaining_bytes,
+                            existing_references=(), reserved_bytes=0):
     """Certify ALL selected headers before materializing any private row.
 
     The original source owner supplies the remainder after charging core/v3,
@@ -86,7 +102,7 @@ async def read_memory_rows(db, references, *, remaining_bytes, existing_referenc
     if remainder < 0:
         raise HeaderBoundsError("canonical_bound_not_certified")
     from src.memory.retention_schema import validate_memory_schema
-    await validate_memory_schema(db)
+    await validate_memory_schema(db, header_budget)
     certificates = []
     upper_bytes = 0
     for table in sorted({table for table, _ in selected}):
@@ -94,9 +110,11 @@ async def read_memory_rows(db, references, *, remaining_bytes, existing_referenc
         if descriptor is None:
             raise HeaderBoundsError("memory_closure_reference_invalid")
         identities = tuple(key for current_table, key in selected if current_table == table)
-        certificate = await preflight_exact_rows(db, descriptor, identities, remainder - upper_bytes)
+        certificate = await header_budget.certify(db, descriptor, identities)
         certificates.append(certificate)
         upper_bytes += certificate.upper_bytes
+        if upper_bytes > remainder:
+            raise HeaderBoundsError("canonical_bound_not_certified")
     rows, digests = [], []
     encoded_bytes = 0
     # No new write may occur between these headers and their actual row reads.

@@ -193,6 +193,39 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
                     _report_source_witness=witness.report_source_witness,
                     _report_workspace_identity=witness.report_workspace_identity)
                 assert metadata == json.loads(witness.proof_bytes)
+                # These negatives use the genuinely executed terminal report;
+                # they do not mint a native Memory Source or bypass its frame.
+                from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, MAX_BYTES
+                from src.db.models import WorkBoardInputArtifact
+                budget = HeaderReadBudget()
+                budget.debit(MAX_BYTES)
+                input_reads = []
+                original_get = db.get
+                async def observe_input_body(model, *args, **kwargs):
+                    if model is WorkBoardInputArtifact:
+                        input_reads.append(args)
+                    return await original_get(model, *args, **kwargs)
+                with monkeypatch.context() as negative:
+                    negative.setattr(db, 'get', observe_input_body)
+                    with pytest.raises(HeaderBoundsError):
+                        await native_report_memory_metadata(db, task, attempt, run,
+                            _report_input_bytes=witness.report_input_bytes,
+                            _report_source_witness=witness.report_source_witness,
+                            _report_workspace_identity=witness.report_workspace_identity,
+                            header_budget=budget)
+                assert input_reads == []
+                artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+                from datetime import timedelta
+                from src.work_board.pipelines import utc
+                with monkeypatch.context() as negative:
+                    negative.setattr('src.work_board.review._now',
+                        lambda: utc(artifact.expires_at) + timedelta(microseconds=1))
+                    with pytest.raises(ValueError, match='native_memory_report_source_changed'):
+                        await native_report_memory_metadata(db, task, attempt, run,
+                            _report_input_bytes=witness.report_input_bytes,
+                            _report_source_witness=witness.report_source_witness,
+                            _report_workspace_identity=witness.report_workspace_identity,
+                            header_budget=HeaderReadBudget())
                 record_property('actual_report_source', json.dumps({'task_id': task.task_id, 'attempt_id': attempt.attempt_id,
                     'input_ref': task.typed_input_ref, 'input_digest': task.typed_input_digest,
                     'report_sha256': hashlib.sha256(content).hexdigest(), 'metadata': metadata}, default=str))

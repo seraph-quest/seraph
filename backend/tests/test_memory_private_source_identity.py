@@ -37,3 +37,21 @@ async def test_reconstructed_operation_never_certifies_an_effect():
     operation = _MemoryOwnerSourceOperation(source, object(), None, object(), object(), None)
     with pytest.raises(NativeServiceBlocked, match="native_memory_actual_operation_unavailable"):
         await _validate_memory_owner_source(None, None, operation, effect=object())
+
+
+@pytest.mark.asyncio
+async def test_wrong_process_memory_source_denies_before_registry_or_sql(monkeypatch):
+    """PID gate mechanics only; this does not issue a genuine live Source."""
+    import os
+    from src.runtime_plugins import memory_producer as producer
+    source = _NativeMemoryDispatchSource(object(), object(), object(), object(), object())
+    object.__setattr__(source, '_seal', producer._MEMORY_SOURCE_SEAL)
+    object.__setattr__(source, '_issued_id', id(source))
+    object.__setattr__(source, '_issued_pid', os.getpid() + 1)
+    class ForbiddenRegistry:
+        def get(self, *_args):
+            pytest.fail('wrong process must deny before consulting inherited registry')
+    monkeypatch.setattr(producer, '_MEMORY_SOURCES', ForbiddenRegistry())
+    scope = OriginalServiceInvocation({}, object(), 'unissued', native_memory_source=source)
+    with pytest.raises(NativeServiceBlocked, match='native_memory_actual_source_unavailable'):
+        await _validate_memory_dispatch_source(None, None, scope)

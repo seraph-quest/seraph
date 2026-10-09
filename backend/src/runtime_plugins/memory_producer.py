@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 import re
 import threading
 import weakref
@@ -185,6 +186,7 @@ class _NativeMemoryDispatchSource:
     _live: object = field(default_factory=threading.Event, init=False, repr=False)
     _seal: object = field(default=None, init=False, repr=False)
     _issued_id: int = field(default=0, init=False, repr=False)
+    _issued_pid: int = field(default=0, init=False, repr=False)
     _scope: object = field(default=None, init=False, repr=False)
 
     def close(self):
@@ -215,6 +217,7 @@ def _issue_memory_dispatch_source(claim, admission, operator, host):
     source = _NativeMemoryDispatchSource(claim, admission, operator, host, admission.report_source)
     object.__setattr__(source, "_seal", _MEMORY_SOURCE_SEAL)
     object.__setattr__(source, "_issued_id", id(source))
+    object.__setattr__(source, "_issued_pid", os.getpid())
     source._live.set()
     _MEMORY_SOURCES[id(source)] = source
     scope = replace(original, native_memory_report_source=admission.report_source, native_memory_source=source)
@@ -234,7 +237,8 @@ def memory_dispatch_header_budget(*, dispatcher, scope, called_scope, invocation
         raise NativeServiceBlocked("native_memory_actual_source_required")
     source = scope.native_memory_source
     if (type(source) is not _NativeMemoryDispatchSource or source._seal is not _MEMORY_SOURCE_SEAL
-            or source._issued_id != id(source) or _MEMORY_SOURCES.get(id(source)) is not source
+            or source._issued_id != id(source) or source._issued_pid != os.getpid()
+            or _MEMORY_SOURCES.get(id(source)) is not source
             or not source._live.is_set() or source._scope is not scope
             or source.report_source is not scope.native_memory_report_source
             or type(source.claim) is not NativeServiceClaim or type(source.host) is not CordisHost
@@ -275,7 +279,8 @@ async def _validate_memory_dispatch_source(db, run, scope):
         raise NativeServiceBlocked("native_memory_actual_source_required")
     source = scope.native_memory_source
     if (type(source) is not _NativeMemoryDispatchSource or source._seal is not _MEMORY_SOURCE_SEAL
-            or source._issued_id != id(source) or _MEMORY_SOURCES.get(id(source)) is not source
+            or source._issued_id != id(source) or source._issued_pid != os.getpid()
+            or _MEMORY_SOURCES.get(id(source)) is not source
             or not source._live.is_set() or source._scope is not scope
             or source.report_source is not scope.native_memory_report_source):
         raise NativeServiceBlocked("native_memory_actual_source_unavailable")
@@ -365,6 +370,7 @@ def _memory_live_claim_source(original_claim):
         raise NativeServiceBlocked("native_memory_actual_claim_source_unavailable")
     source = sources[0]
     if (source._seal is not _MEMORY_SOURCE_SEAL or source._issued_id != id(source)
+            or source._issued_pid != os.getpid()
             or source._scope.native_memory_source is not source
             or source.host is not original_claim._host or not source.host.admitting
             or source.host.boot_nonce != original_claim.host_boot_nonce):
@@ -381,7 +387,8 @@ async def _validate_memory_lifecycle_source(db, run, original_claim):
     return source
 
 
-async def source_binding(db, *, principal_id, session_id, task_id, revision, attempt_id, header_budget=None):
+async def source_binding(db, *, principal_id, session_id, task_id, revision, attempt_id,
+                         header_budget=None, report_stage=None, report_stage_out=None):
     from src.db.models import Goal, WorkBoardTask
     from src.memory import m5
     from sqlalchemy import text
@@ -443,13 +450,21 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
         raise NativeServiceBlocked("native_memory_original_goal_changed")
     if task.capability_id == REPORT_SOURCE_CAPABILITY:
         from src.db.models import WorkBoardAttempt, WorkflowRunState
-        from src.work_board.review import native_report_memory_metadata
+        from src.work_board.review import native_report_memory_metadata, _stage_terminal_report_input
         attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
         run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity ==
             (attempt.workflow_run_id if attempt is not None else "")).execution_options(populate_existing=True))
         if attempt is None or run is None:
             raise NativeServiceBlocked("native_memory_original_source_changed")
-        readback = await native_report_memory_metadata(db, task, attempt, run)
+        if report_stage is None:
+            report_stage = await _stage_terminal_report_input(db, task, header_budget=budget)
+        if report_stage_out is not None:
+            report_stage_out.append(report_stage)
+        payload, plan_source, workspace, operation = report_stage
+        readback = await native_report_memory_metadata(db, task, attempt, run,
+            _report_input_bytes=payload, _report_source_witness=plan_source,
+            _report_workspace_identity=workspace, _report_operation_token=operation,
+            header_budget=budget)
         proof = m5._source_proof_from_rows(task, attempt, run, readback)
     else:
         proof = await m5._verified_source(db, task, requested_attempt_id=attempt_id)
@@ -472,6 +487,8 @@ class NativeMemoryReportSourceWitness:
     output_digest: str
     byte_count: int
     typed_input_json: str
+    report_input_stage: tuple = field(repr=False, compare=False)
+    output_bytes: bytes = field(repr=False, compare=False)
     _identity: object = field(default=None, init=False, repr=False, compare=False)
     _consumed: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -480,11 +497,18 @@ class NativeMemoryReportSourceWitness:
 class _MemoryReportSourceIssuance:
     source_identity: int
     content_digest: str
+    process_id: int
+    stage_identity: int
+    plan_source_identity: int
 
 
 def _memory_report_source_digest(source):
-    return _digest({name: getattr(source, name) for name in ("candidate_digest", "row_tokens", "proof_json",
-        "output_reference", "output_digest", "byte_count", "typed_input_json")})
+    payload, _, workspace, operation = source.report_input_stage
+    return _digest({**{name: getattr(source, name) for name in ("candidate_digest", "row_tokens", "proof_json",
+        "output_reference", "output_digest", "byte_count", "typed_input_json")},
+        "input_sha256": hashlib.sha256(payload).hexdigest(),
+        "workspace_sha256": hashlib.sha256(workspace).hexdigest(), "operation": operation,
+        "output_sha256": hashlib.sha256(source.output_bytes).hexdigest()})
 
 
 @dataclass(frozen=True)
@@ -512,7 +536,7 @@ async def _memory_report_rows(db, proof, *, header_budget):
         for row in (task, attempt, run, artifact, goal))
 
 
-async def stage_memory_report_source(db, admission):
+async def stage_memory_report_source(db, admission, *, report_stage=None):
     """Actual source/input/file reads occur before admission BEGIN."""
     if db.info.get("native_writer_started"):
         raise NativeServiceBlocked("native_memory_original_ingress_required")
@@ -522,18 +546,21 @@ async def stage_memory_report_source(db, admission):
     old = value["source"]
     if old["capability_id"] != REPORT_SOURCE_CAPABILITY:
         raise NativeServiceBlocked("native_memory_source_profile_unsupported")
+    stages = []
     current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
         session_id=value["operator_session_id"], task_id=old["task_id"],
-        revision=old["expected_task_revision"], attempt_id=old["attempt_id"], header_budget=admission.header_budget)
+        revision=old["expected_task_revision"], attempt_id=old["attempt_id"], header_budget=admission.header_budget,
+        report_stage=report_stage, report_stage_out=stages)
     if current != old:
         raise NativeServiceBlocked("native_memory_original_source_changed")
-    from src.work_board.dispatcher import _parse_typed_input
+    from src.work_board.dispatcher import _decode_typed_input_payload
     from src.work_board.pipeline_cpu import read_output
     from src.runtime_plugins.task_capability import read_report_candidate, REPORT_CHECKPOINT_IDS, _journal
     metadata = read_report_candidate(proof.run)
     invoked = next(item["payload"] for item in _journal(proof.run.checkpoint_receipts_json)
         if item["checkpoint_id"] == REPORT_CHECKPOINT_IDS[2])
-    inputs = _parse_typed_input(proof.task)
+    report_stage = stages[0]
+    inputs = _decode_typed_input_payload(proof.task, report_stage[0])
     from src.workflows.job_runtime import _digest as input_digest
     from src.work_board.pipeline_contracts import EvidenceConsumerInput
     handoffs = json.loads(proof.attempt.parent_handoff_context_json)
@@ -547,17 +574,22 @@ async def stage_memory_report_source(db, admission):
         raise NativeServiceBlocked("native_memory_original_source_changed")
     source = NativeMemoryReportSourceWitness(admission.candidate_digest,
         await _memory_report_rows(db, proof, header_budget=admission.header_budget),
-        _canonical(proof.readback), invoked["output_reference"], invoked["output_sha256"], len(raw), _canonical(inputs))
-    object.__setattr__(source, "_identity", _MemoryReportSourceIssuance(id(source), _memory_report_source_digest(source)))
+        _canonical(proof.readback), invoked["output_reference"], invoked["output_sha256"], len(raw),
+        _canonical(inputs), report_stage, raw)
+    object.__setattr__(source, "_identity", _MemoryReportSourceIssuance(id(source),
+        _memory_report_source_digest(source), os.getpid(), id(report_stage), id(report_stage[1])))
     return replace(admission, report_source=source)
 
 
 async def recheck_memory_report_source(db, task, attempt, context, *, read_current):
-    """One adopted 64KiB private report read; no other writer file access."""
+    """Adopt the actual pre-writer snapshot after current SQL authority checks."""
     if (type(context) is not _MemoryReportReadContext or context.writer is not db
         or type(context.source) is not NativeMemoryReportSourceWitness
         or type(context.source._identity) is not _MemoryReportSourceIssuance
         or context.source._identity.source_identity != id(context.source)
+        or context.source._identity.process_id != os.getpid()
+        or context.source._identity.stage_identity != id(context.source.report_input_stage)
+        or context.source._identity.plan_source_identity != id(context.source.report_input_stage[1])
         or context.source._identity.content_digest != _memory_report_source_digest(context.source)
         or context.admission.report_source is not context.source
         or context.source.candidate_digest != context.admission.candidate_digest):
@@ -572,7 +604,7 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
     current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
         session_id=value["operator_session_id"], task_id=old["task_id"],
         revision=old["expected_task_revision"], attempt_id=old["attempt_id"],
-        header_budget=context.admission.header_budget)
+        header_budget=context.admission.header_budget, report_stage=source.report_input_stage)
     if (current != old or await _memory_report_rows(db, proof,
             header_budget=context.admission.header_budget) != source.row_tokens
         or _canonical(proof.readback) != source.proof_json
@@ -584,17 +616,9 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
         object.__setattr__(source, "_consumed", True)
         if not source.output_reference.startswith("artifacts/work-board/evidence/"):
             raise NativeServiceBlocked("native_memory_source_profile_unsupported")
-        from src.work_board.pipeline_cpu import read_output
-        import time
-        began = time.monotonic()
-        try:
-            raw = read_output(source.output_reference, source.output_digest, max_bytes=65536,
-                              header_budget=context.admission.header_budget)
-        except (ValueError, OSError) as exc:
-            raise NativeServiceBlocked("native_memory_report_readback_changed") from exc
-        finally:
-            db.info["native_memory_report_read_seconds"] = time.monotonic() - began
-        if len(raw) != source.byte_count:
+        if (type(source.output_bytes) is not bytes or not 0 < source.byte_count <= 65536
+            or len(source.output_bytes) != source.byte_count
+            or hashlib.sha256(source.output_bytes).hexdigest() != source.output_digest):
             raise NativeServiceBlocked("native_memory_report_readback_changed")
         await context.authority_check(db)
         if datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"]):
@@ -650,6 +674,7 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
             {"principal": principal, "session": session, "method": method, "key": idempotency_key}),
         "idempotency_key": idempotency_key, "original_deadline": original_deadline.isoformat(),
         "host_boot_nonce": host_boot_nonce, "composition_binding_digest": composition_binding_digest}
+    report_stages = []
     if method == "memory.forget":
         if set(request) != {"record_ref", "mode", "privacy_boundary", "reason"}:
             raise NativeServiceBlocked("native_memory_candidate_invalid")
@@ -663,7 +688,8 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
             if set(request) != {"task_id", "expected_task_revision", "attempt_id"}:
                 raise NativeServiceBlocked("native_memory_candidate_invalid")
             source, proof = await source_binding(db, principal_id=principal, session_id=session,
-                task_id=request["task_id"], revision=request["expected_task_revision"], attempt_id=request["attempt_id"], header_budget=budget)
+                task_id=request["task_id"], revision=request["expected_task_revision"], attempt_id=request["attempt_id"],
+                header_budget=budget, report_stage_out=report_stages)
             if source["capability_id"] != REPORT_SOURCE_CAPABILITY:
                 raise NativeServiceBlocked("native_memory_source_profile_unsupported")
             admission = NativeMemoryMutationAdmission.from_candidate({**common, "source": source,
@@ -683,7 +709,8 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
                 or proposal.preview_text_digest != request["expected_preview_text_digest"]):
                 raise NativeServiceBlocked("native_memory_original_review_changed")
             source, _ = await source_binding(db, principal_id=principal, session_id=session,
-                task_id=proposal.source_task_id, revision=request["expected_task_revision"], attempt_id=proposal.source_attempt_id, header_budget=budget)
+                task_id=proposal.source_task_id, revision=request["expected_task_revision"], attempt_id=proposal.source_attempt_id,
+                header_budget=budget, report_stage_out=report_stages)
             if source["capability_id"] != REPORT_SOURCE_CAPABILITY:
                 raise NativeServiceBlocked("native_memory_source_profile_unsupported")
             expires = m5._utc(proposal.expires_at)
@@ -694,8 +721,10 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
                 "proposal_schema": proposal.schema_version, "proposal_expires_at": expires.isoformat(),
                 "prepared_text": asdict(await _prepare_original_memory_text(db, text, budget))})
     admission = replace(admission, header_budget=budget)
+    admission = await stage_memory_report_source(db, admission,
+        report_stage=report_stages[0] if report_stages else None)
     await validate_original_memory_owner(db, admission)
-    return await stage_memory_report_source(db, admission)
+    return admission
 
 
 async def validate_original_memory_owner(db, admission):
@@ -718,7 +747,8 @@ async def validate_original_memory_owner(db, admission):
         old = value["source"]
         current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
             session_id=value["operator_session_id"], task_id=old["task_id"],
-            revision=old["expected_task_revision"], attempt_id=old["attempt_id"], header_budget=admission.header_budget)
+            revision=old["expected_task_revision"], attempt_id=old["attempt_id"], header_budget=admission.header_budget,
+            report_stage=admission.report_source.report_input_stage if admission.report_source is not None else None)
         if current != old:
             raise NativeServiceBlocked("native_memory_original_source_changed")
         original = m5._structured_source_candidate(proof)

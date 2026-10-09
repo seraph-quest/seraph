@@ -501,6 +501,11 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
     if guard is None:
         guard = await prepare_composition_session(db, fresh=fresh, **(
             {"header_budget": header_budget} if header_budget is not None else {}))
+    if header_budget is not None and guard is not None:
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        if (type(guard) is not CompositionSessionGuard or guard.header_budget is not header_budget
+                or guard._retention_closed):
+            raise CompositionBindingError("composition_native_writer_budget_changed")
     if db.in_transaction():
         raise CompositionBindingError("composition_native_writer_not_fresh")
     await db.execute(text("BEGIN IMMEDIATE"))
@@ -509,6 +514,9 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
         await certify_composition_superset(db, header_budget)
     db.info["native_writer_started"] = True
     db.info["composition_writer_owner"] = owner
+    if header_budget is not None and guard is not None:
+        await (await db.connection()).run_sync(
+            lambda connection: guard._capture_native_writer_snapshot(connection, header_budget, owner))
     return guard
 
 

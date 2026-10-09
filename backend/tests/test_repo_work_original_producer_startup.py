@@ -54,6 +54,121 @@ async def exact_canonical_bytes(factory):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
+@pytest.mark.parametrize("corruption", ["missing_member", "rehashed_shape"])
+@pytest.mark.parametrize("reverse_candidates", [False, True])
+async def test_startup_preserves_proven_lineage_before_malformed_original(
+        accounting_db, monkeypatch, unknown, corruption, reverse_candidates, repository_admission_signer):
+    from sqlalchemy import event, or_
+    from src.workflows.job_runtime import _canonical, _digest
+    captured = await registered_running_source(accounting_db, monkeypatch)
+    jobs, service, job_id, owner = (captured[key] for key in ("jobs", "service", "job_id", "owner"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        binding = source.read_repository_original(root)[4]
+        lease_owner, fence = root.lease_owner, root.fencing_token
+    if unknown:
+        await source._quarantine_original_uncertainty(service, jobs, job_id=job_id, owner=owner,
+            lease_owner=lease_owner, fencing_token=fence, reason="repository_process_closure_unproven",
+            result={"no_learning": True, "operator_action": "reconcile_original_process",
+                "iteration_id": captured["actual_job"].iteration_binding.iteration_id})
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        history = json.loads(root.checkpoint_receipts_json)
+        original = next(item for item in history if item["checkpoint_id"] == "repository:original:v1")
+        if corruption == "missing_member":
+            original["payload"].pop("original_input")
+        else:
+            original["payload"]["native_binding"] = {"invocation_id": "foreign"}
+        original["state_digest"] = _digest(original["payload"])
+        root.checkpoint_receipts_json = _canonical(history)
+        await db.commit()
+    before = await exact_canonical_bytes(factory)
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    candidates = select(WorkflowRunState).where(WorkflowRunState.status == "running",
+        or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= observed))
+    async with factory() as db:
+        original_order = [row.run_identity for row in (await db.scalars(candidates)).all()]
+
+    def reverse_scan(connection, _record, _proxy):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA reverse_unordered_selects=ON")
+        cursor.close()
+
+    if reverse_candidates:
+        event.listen(accounting_db[1].sync_engine, "checkout", reverse_scan)
+    try:
+        async with factory() as db:
+            observed_order = [row.run_identity for row in (await db.scalars(candidates)).all()]
+        assert len(original_order) >= 2
+        assert observed_order == (list(reversed(original_order)) if reverse_candidates else original_order)
+        assert await jobs.recover_inference_accounting(now=observed) == []
+        assert await jobs.recover_stale_jobs(now=observed) == []
+        for protected_id in (job_id, binding.invocation_id, binding.parent_job_id):
+            receipt = await jobs.recover_stale_job(protected_id, now=observed)
+            assert receipt["receipt"]["reason"] == "original_repository_source_recovery_required"
+    finally:
+        if reverse_candidates:
+            event.remove(accounting_db[1].sync_engine, "checkout", reverse_scan)
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edge", ["indexed_root", "native_owner", "parent_owner", "marker_prefix", "marker_duplicate", "marker_unsafe", "marker_hash"])
+async def test_startup_protects_only_exact_proven_prefix(
+        accounting_db, monkeypatch, edge, repository_admission_signer):
+    from src.workflows.job_runtime import _canonical
+    from src.work_board.repository import _begin_sqlite_immediate
+    captured = await registered_running_source(accounting_db, monkeypatch)
+    jobs, job_id = (captured[key] for key in ("jobs", "job_id"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        binding = source.read_repository_original(root)[4]
+        expected = {job_id}
+        if edge == "indexed_root":
+            root.idempotency_binding = "foreign-indexed-binding"
+        elif edge == "native_owner":
+            child = await jobs._fetch(db, binding.invocation_id)
+            child.owner_principal_id = "foreign-owner"
+        elif edge == "parent_owner":
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            parent.owner_principal_id = "foreign-owner"
+            expected.add(binding.invocation_id)
+        else:
+            history = json.loads(root.checkpoint_receipts_json)
+            marker = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
+            if edge == "marker_prefix":
+                marker["checkpoint_id"] += ":foreign"
+                expected = set()
+            elif edge == "marker_duplicate":
+                history.append(dict(marker))
+                expected.update({binding.invocation_id, binding.parent_job_id})
+            elif edge == "marker_unsafe":
+                marker["safe"] = False
+                expected.update({binding.invocation_id, binding.parent_job_id})
+            else:
+                marker["state_digest"] = "0" * 64
+                expected.update({binding.invocation_id, binding.parent_job_id})
+            root.checkpoint_receipts_json = _canonical(history)
+        await db.commit()
+    before = await exact_canonical_bytes(factory)
+    async with source._repository_startup_mutation_fence():
+        async with factory() as db:
+            await _begin_sqlite_immediate(db)
+            assert await source._repository_startup_protected_lineage(db) == expected
+    if edge in {"marker_duplicate", "marker_unsafe", "marker_hash"}:
+        observed = datetime.now(timezone.utc) + timedelta(days=1)
+        assert await jobs.recover_inference_accounting(now=observed) == []
+        assert await jobs.recover_stale_jobs(now=observed) == []
+        for protected_id in expected:
+            receipt = await jobs.recover_stale_job(protected_id, now=observed)
+            assert receipt["receipt"]["reason"] == "original_repository_source_recovery_required"
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
 @pytest.mark.parametrize("corrupt", [False, True])
 async def test_startup_preserves_registered_original_lineage_and_accounting(
         accounting_db, monkeypatch, unknown, corrupt, repository_admission_signer):

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import base64
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -24,6 +25,7 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 from typing import Any, Callable
 import weakref
 
@@ -38,6 +40,8 @@ _COMMANDS = weakref.WeakKeyDictionary()
 _LIVE_COMPLETIONS = weakref.WeakKeyDictionary()
 _ENABLED_SERVICES = weakref.WeakKeyDictionary()
 _PHYSICAL_COMPLETIONS = weakref.WeakKeyDictionary()
+_PHYSICAL_SCOPES = weakref.WeakKeyDictionary()
+_PHYSICAL_GROUPS = weakref.WeakKeyDictionary()
 
 
 def canonical(value):
@@ -130,7 +134,59 @@ class _OriginalProducerPhysicalCompletion:
     """Physical facts only; the Source owner supplies current-row authority."""
 
 
+def original_producer_live_owner(service, jobs, result):
+    """Resolve the actual wait-result owner; never revive its closed pidfd."""
+    if type(result) is not dict:
+        raise ValueError("actual_original_producer_live_completion_required")
+    ready = result.get("original_producer_ready")
+    observed = _READIES.get(ready) if type(ready) is OriginalProducerReady else None
+    owner = observed[0] if observed is not None else None
+    owned = _OWNERS.get(owner) if type(owner) is OriginalProducerOwner else None
+    if owned is None or owned[0] is not service or owned[1] is not jobs or service.jobs is not jobs:
+        raise ValueError("actual_original_producer_live_owner_required")
+    assert_original_producer_live_completion(owner, result)
+    lane = service._iterative_lanes.get(owner.job_id)
+    if (lane is None or lane._descriptor != owner.guard_fd
+            or str(lane.lock_path) != owned[2] or str(lane.workspace_root) != owned[3]):
+        raise ValueError("original_producer_live_lane_changed")
+    metadata = os.fstat(owner.guard_fd)
+    if (metadata.st_dev, metadata.st_ino) != ready.guard_identity:
+        raise ValueError("original_producer_guard_changed")
+    return owner
+
+
+def _physical_task():
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+def _assert_original_completion_scope(witness, *, primary_only=False):
+    root_ref = _PHYSICAL_GROUPS.get(witness) if type(witness) is _OriginalProducerPhysicalCompletion else None
+    primary = root_ref() if root_ref is not None else None
+    scope = _PHYSICAL_SCOPES.get(primary) if primary is not None else None
+    if (scope is None or witness not in _PHYSICAL_COMPLETIONS
+            or primary_only and witness is not primary):
+        raise ValueError("actual_original_producer_physical_completion_required")
+    if scope["task"] is not _physical_task() or scope["thread"] != threading.get_ident():
+        raise ValueError("original_producer_completion_scope_owner_changed")
+    owner = scope["owner"]
+    if owner is not None:
+        owned = _OWNERS.get(owner)
+        if (owned is None or owned[0]._iterative_lanes.get(owner.job_id) is not scope["lane"]
+                or scope["lane"]._descriptor != scope["owned_descriptor"] or owner.guard_fd != scope["owned_descriptor"]):
+            raise ValueError("original_producer_live_lane_changed")
+    return scope
+
+
+def assert_original_producer_completion_scope(witness):
+    """Lifetime assertion only: no filesystem or physical reads inside SQL."""
+    _assert_original_completion_scope(witness)
+
+
 def original_producer_completion_result(witness):
+    _assert_original_completion_scope(witness)
     stored = _PHYSICAL_COMPLETIONS.get(witness) if type(witness) is _OriginalProducerPhysicalCompletion else None
     if stored is None:
         raise ValueError("actual_original_producer_physical_completion_required")
@@ -192,6 +248,94 @@ def _current_native_host_binding(binding):
         "proc_identity": [proc.st_dev, proc.st_ino], "proc_mount_sha256": digest(mounts[0].encode())}
 
 
+def _assert_registered_host(registration, ready):
+    host = registration["native_host_binding"]
+    if (_current_native_host_binding(host) != host or host["boot_id"] != ready.boot_id
+            or host["guard_path"] != registration["guard_path"]
+            or host["guard_identity"] != list(ready.guard_identity)
+            or registration["producer_sources"] != original_producer_sources()):
+        raise ValueError("original_producer_native_host_changed")
+
+
+def _assert_original_pid_absent(ready):
+    from src.execution.repo_supervisor import pidfd_open
+    try:
+        descriptor = pidfd_open(ready.pid)
+    except ProcessLookupError:
+        return
+    os.close(descriptor)
+    raise ValueError("pending_original_producer")
+
+
+def _read_registered_bundle(registration, ready):
+    from src.execution.repo_sandbox import _open_trusted_directory
+    directory = _open_trusted_directory(Path(registration["directory_path"]))
+    try:
+        admission_raw = read_file(directory, "admission.json", MAX_ENVELOPE)
+    finally:
+        os.close(directory)
+    admission = json.loads(admission_raw)
+    maximum = admission["original_producer"]["max_output_bytes"]
+    if (digest(admission_raw) != registration["admission_digest"]
+            or ready.admission_digest != registration["admission_digest"]
+            or admission["original_producer"]["sources"] != registration["producer_sources"]
+            or type(maximum) is not int or not 0 < maximum <= 16 * 1024 * 1024):
+        raise ValueError("original_producer_admission_changed")
+    return verify_completion(registration["directory_path"], ready, digest(canonical(registration)),
+        maximum_output=maximum, expected_deadline=registration["monotonic_deadline"],
+        expected_wall_cutoff=registration["execution_deadline_at"])
+
+
+def _recovered_result(registration, ready, body, outputs):
+    return {"status": body["manifest"]["status"], "manifest": body["manifest"],
+        "readback": body["manifest"], "outputs": outputs, "original_producer_completion": body,
+        "original_producer_ready": ready,
+        "original_producer_registration": OriginalProducerRegistrationAck(digest(canonical(registration)), registration["ready_digest"]),
+        "original_producer_directory": registration["directory_path"],
+        "cleanup": {"cleanup_proven": True}, "learning": "no_learning", "operator_visible": True}
+
+
+def stage_original_producer_related_completion(active_primary, registration):
+    """Verify another original iteration under this SAME held physical guard."""
+    scope = _assert_original_completion_scope(active_primary, primary_only=True)
+    original_producer_completion_result(active_primary)
+    anchor = json.loads(scope["registration"])
+    keys = ("job_id", "repository_attempt_id", "owner_principal_id", "owner_session_id",
+        "root_fence", "root_authority_digest", "original_source_digest", "native_binding",
+        "native_host_binding", "guard_path", "original_deadline_at", "producer_sources", "source_artifact_digest")
+    if (registration.get("schema") != PROFILE or any(registration.get(key) != anchor[key] for key in keys)
+            or type(registration.get("iteration_index")) is not int
+            or not 1 <= registration["iteration_index"] <= 3
+            or registration["iteration_id"] in scope["iterations"] or len(scope["iterations"]) >= 3):
+        raise ValueError("original_producer_related_registration_changed")
+    from src.workflows.repo_repair_source import iteration_identity
+    if (registration["iteration_id"] != iteration_identity(registration["job_id"], registration["repository_attempt_id"],
+            registration["native_binding"]["input_digest"], registration["iteration_index"])
+            or registration["process_binding"]["repository_job_id"] != registration["job_id"]
+            or registration["process_binding"]["repository_attempt_id"] != registration["repository_attempt_id"]
+            or registration["process_binding"]["repository_fence"] != registration["root_fence"]
+            or registration["process_binding"]["iteration_id"] != registration["iteration_id"]
+            or registration["process_binding"]["iteration_index"] != registration["iteration_index"]):
+        raise ValueError("original_producer_related_registration_changed")
+    values = dict(registration["ready"])
+    for name in ("directory_identity", "guard_identity"):
+        values[name] = tuple(values[name])
+    ready = OriginalProducerReady(**values)
+    if ready.guard_identity != tuple(anchor["ready"]["guard_identity"]):
+        raise ValueError("original_producer_guard_changed")
+    _assert_registered_host(registration, ready)
+    _assert_original_pid_absent(ready)
+    body, outputs = _read_registered_bundle(registration, ready)
+    result = _recovered_result(registration, ready, body, outputs)
+    witness = _OriginalProducerPhysicalCompletion()
+    _PHYSICAL_COMPLETIONS[witness] = (scope["descriptor"], ready.guard_identity, result,
+        digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()})
+    _PHYSICAL_GROUPS[witness] = weakref.ref(active_primary)
+    scope["members"].add(witness)
+    scope["iterations"].add(registration["iteration_id"])
+    return witness
+
+
 @contextmanager
 def stage_original_producer_completion(registration, *, owner=None, result=None):
     """Stage literal same-boot completion under the original guard until CAS.
@@ -200,19 +344,22 @@ def stage_original_producer_completion(registration, *, owner=None, result=None)
     This helper neither reconstructs a Popen nor grants execution or SQL writes.
     """
     from src.execution.repo_sandbox import _open_trusted_directory
-    from src.execution.repo_supervisor import pidfd_open, platform_ready
+    from src.execution.repo_supervisor import platform_ready
     platform_ready()
     if registration.get("schema") != PROFILE:
         raise ValueError("original_producer_registration_required")
     live = owner is not None or result is not None
     if live:
         assert_original_producer_live_completion(owner, result)
+        owned = _OWNERS[owner]
+        if original_producer_live_owner(owned[0], owned[1], result) is not owner:
+            raise ValueError("actual_original_producer_live_owner_required")
         ready = result["original_producer_ready"]
-        descriptor = owner.guard_fd
         if (ready.projection() != registration["ready"]
                 or result["original_producer_registration"].registration_digest != digest(canonical(registration))
                 or result["original_producer_directory"] != registration["directory_path"]):
             raise ValueError("original_producer_live_registration_changed")
+        descriptor = os.dup(owner.guard_fd)
     else:
         values = dict(registration["ready"])
         for name in ("directory_identity", "guard_identity"):
@@ -221,12 +368,7 @@ def stage_original_producer_completion(registration, *, owner=None, result=None)
         descriptor = None
     witness = None
     try:
-        host = registration["native_host_binding"]
-        if (_current_native_host_binding(host) != host or host["boot_id"] != ready.boot_id
-                or host["guard_path"] != registration["guard_path"]
-                or host["guard_identity"] != list(ready.guard_identity)
-                or registration["producer_sources"] != original_producer_sources()):
-            raise ValueError("original_producer_native_host_changed")
+        _assert_registered_host(registration, ready)
         if not live:
             guard_path = Path(registration["guard_path"])
             parent = _open_trusted_directory(guard_path.parent)
@@ -246,47 +388,31 @@ def stage_original_producer_completion(registration, *, owner=None, result=None)
                 raise ValueError("pending_original_producer") from exc
             # A newly opened pidfd cannot impersonate the old parent's Popen.
             # Any current occupant is conservatively blocked, including reuse.
-            try:
-                original_pidfd = pidfd_open(ready.pid)
-            except ProcessLookupError:
-                original_pidfd = None
-            if original_pidfd is not None:
-                os.close(original_pidfd)
-                raise ValueError("pending_original_producer")
-        directory = _open_trusted_directory(Path(registration["directory_path"]))
-        try:
-            admission_raw = read_file(directory, "admission.json", MAX_ENVELOPE)
-        finally:
-            os.close(directory)
-        admission = json.loads(admission_raw)
-        maximum = admission["original_producer"]["max_output_bytes"]
-        if (digest(admission_raw) != registration["admission_digest"]
-                or ready.admission_digest != registration["admission_digest"]
-                or admission["original_producer"]["sources"] != registration["producer_sources"]
-                or type(maximum) is not int or not 0 < maximum <= 16 * 1024 * 1024):
-            raise ValueError("original_producer_admission_changed")
-        body, outputs = verify_completion(registration["directory_path"], ready, digest(canonical(registration)),
-            maximum_output=maximum, expected_deadline=registration["monotonic_deadline"],
-            expected_wall_cutoff=registration["execution_deadline_at"])
+            _assert_original_pid_absent(ready)
+        body, outputs = _read_registered_bundle(registration, ready)
         if live:
             if body != result["original_producer_completion"] or outputs != result["outputs"]:
                 raise ValueError("original_producer_live_completion_changed")
             staged = result
         else:
-            staged = {"status": body["manifest"]["status"], "manifest": body["manifest"],
-                "readback": body["manifest"], "outputs": outputs, "original_producer_completion": body,
-                "original_producer_ready": ready,
-                "original_producer_registration": OriginalProducerRegistrationAck(digest(canonical(registration)), registration["ready_digest"]),
-                "original_producer_directory": registration["directory_path"],
-                "cleanup": {"cleanup_proven": True}, "learning": "no_learning", "operator_visible": True}
+            staged = _recovered_result(registration, ready, body, outputs)
         witness = _OriginalProducerPhysicalCompletion()
         _PHYSICAL_COMPLETIONS[witness] = (descriptor, ready.guard_identity, staged,
             digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()})
+        _PHYSICAL_SCOPES[witness] = {"task": _physical_task(), "thread": threading.get_ident(),
+            "descriptor": descriptor, "registration": canonical(registration),
+            "owned_descriptor": owner.guard_fd if live else descriptor,
+            "owner": owner, "lane": _OWNERS[owner][0]._iterative_lanes[owner.job_id] if live else None,
+            "members": weakref.WeakSet([witness]), "iterations": {registration["iteration_id"]}}
+        _PHYSICAL_GROUPS[witness] = weakref.ref(witness)
         yield witness
     finally:
         if witness is not None:
-            _PHYSICAL_COMPLETIONS.pop(witness, None)
-        if not live and descriptor is not None:
+            scope = _PHYSICAL_SCOPES.pop(witness, None)
+            for member in list(scope["members"]) if scope is not None else [witness]:
+                _PHYSICAL_COMPLETIONS.pop(member, None)
+                _PHYSICAL_GROUPS.pop(member, None)
+        if descriptor is not None:
             os.close(descriptor)
 
 

@@ -29,6 +29,12 @@ class _RepositoryStopContext:
         return self.data[key]
 
 
+def assert_repository_stop_context(context, *, service, jobs=None):
+    if (type(context) is not _RepositoryStopContext or _STAGED.get(context) is not service
+            or (jobs is not None and service.jobs is not jobs)):
+        raise DurableJobLeaseError("actual Source-staged repository Stop context required")
+
+
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class _RepositoryUncertainty:
     pass
@@ -366,15 +372,25 @@ class _RepositoryStopWitness:
     jobs: object
     context: dict = field(repr=False)
     closure: RepositoryNativeStopClosureV1
+    original_completion: object = field(default=None, repr=False)
+    fence: object = field(default=None, repr=False)
 
 
 def assert_repository_stop_witness(witness):
     if (type(witness) is not _RepositoryStopWitness or _ISSUED.get(witness) is not witness.service
             or type(witness.context) is not _RepositoryStopContext or _STAGED.get(witness.context) is not witness.service):
         raise DurableJobLeaseError("actual source-owned repository stop witness required")
+    if _source().read_repository_inventory(witness.context["run"])["schema"] == "repository.checkpoint_inventory.v3":
+        from src.workflows.repo_repair_source_recovery import (
+            assert_repository_recovery_fence, assert_repository_original_stop_completion)
+        assert_repository_recovery_fence(witness.fence, service=witness.service, jobs=witness.jobs,
+            job_id=witness.context["run"].run_identity, owner=witness.context["owner"])
+        if witness.closure.process_quiescence_digest != _source()._source_digest([]):
+            assert_repository_original_stop_completion(witness.original_completion,
+                service=witness.service, jobs=witness.jobs, context=witness.context, fence=witness.fence)
 
 
-async def _positive_witness(service, jobs, context, stop):
+async def _positive_witness(service, jobs, context, stop, *, original_completion=None, fence=None):
     if type(context) is not _RepositoryStopContext or _STAGED.get(context) is not service:
         raise DurableJobLeaseError("actual source-staged stop context required")
     source = _source()
@@ -421,14 +437,25 @@ async def _positive_witness(service, jobs, context, stop):
             manifest = json.loads(service._read_private_artifact(readback["artifact_ref"],
                 expected_digest=readback["artifact_digest"]))
             transport = manifest.get("supervisor_transport", {})
+            if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+                from src.workflows.repo_repair_source_recovery import (
+                    assert_repository_original_stop_completion, repository_original_stop_completion_result)
+                assert_repository_original_stop_completion(original_completion,
+                    service=service, jobs=jobs, context=context, fence=fence)
+                actual = repository_original_stop_completion_result(original_completion, iteration_id=identity)
+                transport_proven = (actual["manifest"] == manifest
+                    and actual["outputs"]["readback.json"] == service._read_private_artifact(
+                        readback["artifact_ref"], expected_digest=readback["artifact_digest"]))
+            else:
+                transport_proven = all(transport.get(key) is True for key in ("stdin_closed", "stdout_eof",
+                    "stderr_eof", "stdout_closed", "stderr_closed", "waited"))
             if (cleanup_body.get("iteration_binding") != execution["process_binding"]
                     or manifest.get("iteration_binding") != execution["process_binding"]
                     or cleanup_body.get("process_cleanup", {}).get("oracle") != "linux_subreaper_waitpid_echild"
                     or cleanup_body.get("process_cleanup", {}).get("cleanup_proven") is not True
                     or manifest.get("stage_removed") is not True
                     or cleanup_body.get("artifact_digests", {}).get("readback.json") != readback["artifact_digest"]
-                    or any(transport.get(key) is not True for key in ("stdin_closed", "stdout_eof", "stderr_eof",
-                        "stdout_closed", "stderr_closed", "waited"))
+                    or not transport_proven
                     or source._source_digest(manifest) != readback["manifest_digest"]):
                 raise DurableJobLeaseError("literal original process quiescence changed")
             if index == latest_execution:
@@ -437,7 +464,12 @@ async def _positive_witness(service, jobs, context, stop):
                         or marker.get("cleanup_proven") is not True
                         or marker.get("terminal_receipt", {}).get("readback_sha256") != readback["artifact_digest"]):
                     raise DurableJobLeaseError("original full physical stop marker binding changed")
-                if work.language_profile == "test_node":
+                if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+                    if marker.get("process_cleanup") != {
+                            "transport_kind": "original_producer_durable_v1",
+                            "completion_digest": source._source_digest(actual["original_producer_completion"])}:
+                        raise DurableJobLeaseError("original producer marker differs from active signed completion")
+                elif work.language_profile == "test_node":
                     keys = {"profile", "job_id", "token", "supervisor_pid", "supervisor_start", "status",
                         "reason", "commands", "diff_sha256", "cleanup_proven", "process_cleanup",
                         "iteration_binding", "after_digest", "tested_file_hash_metadata"}
@@ -468,7 +500,7 @@ async def _positive_witness(service, jobs, context, stop):
         source_binding_digest=context["task_source"].binding_digest,
         limit_evidence=context["limit_evidence"] if stop["stop_reason"] in AUTOMATIC_REASONS else None,
         limit_evidence_digest=source._source_digest(context["limit_evidence"]) if stop["stop_reason"] in AUTOMATIC_REASONS else None)
-    witness = _RepositoryStopWitness(service, jobs, context, closure)
+    witness = _RepositoryStopWitness(service, jobs, context, closure, original_completion, fence)
     _ISSUED[witness] = service
     return witness
 
@@ -624,7 +656,6 @@ async def _persist_repository_stop_intent_locked(service, jobs, *, context, owne
 
 
 async def stop_repository_root(service, jobs, *, job_id, owner, general_task_service, reason="operator_cancelled"):
-    from src.model_fabric.effective_policy import configuration_mutation_lock
     from src.work_board.repository import BoardAttemptProjection
     source = _source()
     if reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
@@ -650,41 +681,42 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
                 "fencing_token": job.fencing_token, "authority_digest": job.authority_digest})
         await asyncio.wait({callback}, timeout=1)
     try:
-        async with configuration_mutation_lock:
+        async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
             source._assert_task_publication_configuration(service)
             context = await _context(service, jobs, job_id=job_id, owner=owner,
                 limit_reason=reason if reason in AUTOMATIC_REASONS else None)
-            witness = await _positive_witness(service, jobs, context, stop)
-            if job_id not in service._iterative_lanes:
-                # Cleanup recovery reacquires only the actual physical handle
-                # for this existing exact held reservation. It admits no work,
-                # extends no cutoff and creates no new reservation or lease.
-                run = context["run"]
-                held = jobs._repo_repair_reservation_state(run)
-                if (held is None or held.get("status") != "held"
-                        or not jobs._repo_repair_reservation_matches(held, job_id=job_id,
-                            attempt_id=context["original"]["repository_attempt_id"],
-                            fence=run.fencing_token, authority_digest=run.authority_digest)
-                        or held.get("execution_deadline_at") != context["original"]["original_deadline_at"]):
-                    raise DurableJobLeaseError("original stop recovery held reservation changed")
-                from src.workflows.repair_capacity import try_acquire_repo_repair_capacity
-                lane = try_acquire_repo_repair_capacity(service._workspace(), job_id=job_id)
-                if lane is None:
-                    raise DurableJobLeaseError("original stop recovery physical capacity is still owned")
-                lane.bind_owner(job_id=job_id, attempt_id=context["original"]["repository_attempt_id"],
-                    fence_token=run.fencing_token, authority_digest=run.authority_digest)
-                service._iterative_lanes[job_id] = lane
-            if reason in AUTOMATIC_REASONS:
-                # The Source owns this actual scope continuously through the
-                # existing terminal writer and commit; no configuration read
-                # or lock reacquisition occurs inside that writer.
+            async with source.stage_repository_stop_original_producer_witnesses(
+                    service, jobs, context=context, fence=fence) as original_completion:
+                witness = await _positive_witness(service, jobs, context, stop,
+                    original_completion=original_completion, fence=fence)
+                if job_id not in service._iterative_lanes:
+                    # The original SQL hold is independent of physical proof.
+                    run = context["run"]
+                    held = jobs._repo_repair_reservation_state(run)
+                    if (held is None or held.get("status") != "held"
+                            or not jobs._repo_repair_reservation_matches(held, job_id=job_id,
+                                attempt_id=context["original"]["repository_attempt_id"],
+                                fence=run.fencing_token, authority_digest=run.authority_digest)
+                            or held.get("execution_deadline_at") != context["original"]["original_deadline_at"]):
+                        raise DurableJobLeaseError("original stop recovery held reservation changed")
+                    if original_completion is None:
+                        # Legacy/undispatched closure has no producer guard.
+                        from src.workflows.repair_capacity import try_acquire_repo_repair_capacity
+                        lane = try_acquire_repo_repair_capacity(service._workspace(), job_id=job_id)
+                        if lane is None:
+                            raise DurableJobLeaseError("original stop recovery physical capacity is still owned")
+                        lane.bind_owner(job_id=job_id, attempt_id=context["original"]["repository_attempt_id"],
+                            fence_token=run.fencing_token, authority_digest=run.authority_digest)
+                        service._iterative_lanes[job_id] = lane
+                    else:
+                        # The active registered producer scope already holds
+                        # this Root's exact guard; never acquire a second flock.
+                        from src.workflows.repo_repair_source_recovery import assert_repository_original_stop_completion
+                        assert_repository_original_stop_completion(original_completion,
+                            service=service, jobs=jobs, context=context, fence=fence)
                 result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
                     operator_owner=owner, expected_task_revision=context["task"].task_revision,
                     repository_stop_witness=witness)
-        if reason not in AUTOMATIC_REASONS:
-            result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
-                operator_owner=owner, expected_task_revision=context["task"].task_revision,
-                repository_stop_witness=witness)
     except DurableJobLeaseError:
         lane = service._iterative_lanes.get(job_id)
         if lane is not None:

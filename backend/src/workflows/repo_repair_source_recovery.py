@@ -10,7 +10,7 @@ import base64
 import hashlib
 import json
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, ExitStack
 from dataclasses import dataclass, field
 import weakref
 from types import MappingProxyType
@@ -23,6 +23,7 @@ _ACTIONS = frozenset({"reconcile_original_cleanup", "settle_original_host_boot_c
 _FENCES = weakref.WeakKeyDictionary()
 _FENCE_SEAL = object()
 _COMPLETIONS = weakref.WeakKeyDictionary()
+_STOP_COMPLETIONS = weakref.WeakKeyDictionary()
 _REGISTRATION_KEYS = frozenset({"schema", "job_id", "iteration_id", "iteration_index",
     "repository_attempt_id", "owner_principal_id", "owner_session_id", "root_fence",
     "root_authority_digest", "original_source_digest", "native_binding", "execution_digest",
@@ -150,6 +151,170 @@ class _RepositoryRecoveryFence:
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class _OriginalRepositoryProducerCompletionWitness:
     """Registered only after current Source and actual original bundle checks."""
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _OriginalRepositoryStopCompletionWitness:
+    """Cleanup-only authority confined to an active original physical scope."""
+
+
+def assert_repository_original_stop_completion(witness, *, service, jobs,
+                                               context=None, fence=None):
+    from src.workflows import repo_repair_stop as stop
+    data = _STOP_COMPLETIONS.get(witness) if type(witness) is _OriginalRepositoryStopCompletionWitness else None
+    if (data is None or data["service"] is not service or data["jobs"] is not jobs
+            or context is not None and data["context"] is not context
+            or fence is not None and data["fence"] is not fence
+            or data["task"] is not asyncio.current_task()):
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_required")
+    from src.execution.repo_original_producer import assert_original_producer_completion_scope
+    stop.assert_repository_stop_context(data["context"], service=service, jobs=jobs)
+    assert_repository_recovery_fence(data["fence"], service=service, jobs=jobs,
+        job_id=data["job_id"], owner=data["owner"])
+    for identity, physical in data["physical"].items():
+        try:
+            assert_original_producer_completion_scope(physical)
+        except (ValueError, OSError) as exc:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
+        result = data["results"][identity]
+        if (_source()._source_digest(result["original_producer_completion"]) != data["digests"][identity]
+                or result["status"] != data["bindings"][identity]["status"]
+                or _source()._source_digest(result["manifest"]) != data["bindings"][identity]["manifest"]
+                or _source()._source_digest(result["readback"]) != data["bindings"][identity]["readback"]
+                or _source()._source_digest(result.get("cleanup")) != data["bindings"][identity]["cleanup"]
+                or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}
+                    != data["bindings"][identity]["outputs"]):
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+
+
+def repository_original_stop_completion_result(witness, *, iteration_id):
+    data = _STOP_COMPLETIONS.get(witness) if type(witness) is _OriginalRepositoryStopCompletionWitness else None
+    if data is None:
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_required")
+    assert_repository_original_stop_completion(witness, service=data["service"], jobs=data["jobs"])
+    if iteration_id not in data["results"]:
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_iteration_changed")
+    return data["results"][iteration_id]
+
+
+@asynccontextmanager
+async def stage_repository_original_stop_completion(service, jobs, *, context, owner, fence):
+    """Already-committed full Running v3 cleanup under one active guard.
+
+    This issues no publication, dispatch, accounting settlement or Unknown
+    successor authority. The terminal Stop writer retains its own exact CAS.
+    """
+    from src.workflows import repo_repair_stop as stop
+    from src.workflows.job_runtime import _canonical
+    from src.execution.repo_original_producer import (original_producer_live_owner,
+        stage_original_producer_completion, stage_original_producer_related_completion,
+        original_producer_completion_result)
+    stop.assert_repository_stop_context(context, service=service, jobs=jobs)
+    source = _source()
+    run, work = context["run"], context["work"]
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=run.run_identity, owner=owner)
+    if (run.status != "running" or source.read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3"
+            or source._repository_record(run, "repository:stop-uncertainty-successor:v1") is not None
+            or source._repository_record(run, stop.STOP_ID) is None
+            or (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id)):
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_unavailable")
+    entries = []
+    for index in range(1, work.limits.max_iterations + 1):
+        identity = source.iteration_identity(run.run_identity, context["original"]["repository_attempt_id"],
+            source._source_digest(context["original"]["original_input"]), index)
+        execution = source._repository_record(run, "repository:execution:" + identity)
+        if execution is None:
+            continue
+        registration = read_registered_repository_producer(run, iteration_index=index)
+        cleanup = source._repository_record(run, "repository:cleanup:" + identity)
+        readback = source._repository_record(run, "repository:readback:" + identity)
+        if (cleanup is None or readback is None or cleanup.get("cleanup_proven") is not True
+                or cleanup.get("status") not in {"succeeded", "failed"}
+                or readback.get("status") != cleanup["status"]
+                or cleanup.get("source_completion_cas") != readback.get("source_completion_cas")):
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_pending")
+        entries.append((identity, registration, cleanup, readback))
+    if not entries or len(entries) > 3:
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_pending")
+    async with jobs._session() as db:
+        for model, key, expected in context["rows"]:
+            row = await db.get(model, key, populate_existing=True)
+            if row is None or _canonical(row.model_dump(mode="json")) != expected:
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
+    latest = entries[-1]
+    callback = service._iterative_process_callbacks.get(latest[0])
+    live_result = None
+    live_owner = None
+    if callback is not None:
+        if not callback.done() or callback.cancelled() or callback.exception() is not None:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_pending")
+        live_result = callback.result()
+        try:
+            live_owner = original_producer_live_owner(service, jobs, live_result)
+        except (ValueError, OSError) as exc:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
+    witness = None
+    with ExitStack() as stages:
+        def enter_physical(manager):
+            try:
+                return stages.enter_context(manager)
+            except (ValueError, OSError) as exc:
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
+        primary = enter_physical(stage_original_producer_completion(latest[1],
+            owner=live_owner, result=live_result))
+        physical = {latest[0]: primary}
+        for identity, registration, _, _ in entries[:-1]:
+            try:
+                physical[identity] = stage_original_producer_related_completion(primary, registration)
+            except (ValueError, OSError) as exc:
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
+        results, digests, bindings = {}, {}, {}
+        for identity, registration, cleanup, readback in entries:
+            try:
+                result = original_producer_completion_result(physical[identity])
+            except (ValueError, OSError) as exc:
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
+            body, manifest, outputs = result["original_producer_completion"], result["manifest"], result["outputs"]
+            cas = cleanup["source_completion_cas"]
+            if (type(cas) is not dict or set(cas) != {"before_revision", "post_revision", "iteration_id",
+                    "producer_registration_digest", "producer_completion_digest", "stop_digest",
+                    "unknown_projection_digest", "rows_digest"}
+                    or type(cas["before_revision"]) is not int or cas["before_revision"] < 0
+                    or type(cas["post_revision"]) is not int or cas["post_revision"] != cas["before_revision"] + 1
+                    or cas["post_revision"] > run.revision or cas["iteration_id"] != identity
+                    or cas["producer_registration_digest"] != source._source_digest(registration)
+                    or cas["producer_completion_digest"] != source._source_digest(body)
+                    or cas["unknown_projection_digest"] is not None
+                    or cas["stop_digest"] is not None and cas["stop_digest"] != source._source_digest(source._repository_record(run, stop.STOP_ID))
+                    or type(cas["rows_digest"]) is not str or not source._SHA.fullmatch(cas["rows_digest"])):
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+            cleanup_body = json.loads(service._read_private_artifact(cleanup["artifact_ref"], expected_digest=cleanup["artifact_digest"]))
+            manifest_raw = service._read_private_artifact(readback["artifact_ref"], expected_digest=readback["artifact_digest"])
+            if (body["outcome"] not in {"completed_requested_checks", "completed_requested_check_failure"}
+                    or result["status"] != cleanup["status"] or manifest_raw != outputs["readback.json"]
+                    or json.loads(manifest_raw) != manifest or source._source_digest(manifest) != readback["manifest_digest"]
+                    or cleanup_body.get("iteration_binding") != registration["process_binding"]
+                    or cleanup_body.get("process_cleanup") != manifest["process_cleanup"]
+                    or cleanup_body.get("artifact_digests") != {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()}
+                    or manifest.get("stage_removed") is not True):
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+            if ("source_completion_cas" in cleanup_body
+                    and cleanup_body["source_completion_cas"] != cleanup["source_completion_cas"]):
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+            results[identity], digests[identity] = result, source._source_digest(body)
+            bindings[identity] = {"status": result["status"], "manifest": source._source_digest(manifest),
+                "readback": source._source_digest(result["readback"]), "cleanup": source._source_digest(result.get("cleanup")),
+                "outputs": {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()}}
+        witness = _OriginalRepositoryStopCompletionWitness()
+        _STOP_COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
+            "owner": owner, "fence": fence, "task": asyncio.current_task(), "job_id": run.run_identity,
+            "physical": physical, "results": results, "digests": digests, "bindings": bindings}
+        try:
+            assert_repository_original_stop_completion(witness, service=service, jobs=jobs, context=context, fence=fence)
+            yield witness
+        finally:
+            _STOP_COMPLETIONS.pop(witness, None)
 
 
 def assert_repository_completion_witness(witness, *, service=None, jobs=None):

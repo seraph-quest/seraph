@@ -14,6 +14,9 @@ from src.workflows.repo_repair_source_recovery import (
     repository_completion_outcome,
     recover_original_repository_cleanup,
     read_registered_repository_producer,
+    _OriginalRepositoryStopCompletionWitness,
+    assert_repository_original_stop_completion,
+    repository_original_stop_completion_result,
 )
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
@@ -30,6 +33,15 @@ def test_constructed_or_copied_completion_object_grants_no_authority(read):
         with pytest.raises(RepositorySourceRecoveryError,
                 match="original_repository_completion_witness_required"):
             read(candidate)
+
+
+def test_forged_or_copied_stop_scope_grants_no_cleanup_authority():
+    constructed = _OriginalRepositoryStopCompletionWitness()
+    for candidate in (constructed, copy.copy(constructed), {}, None):
+        with pytest.raises(RepositorySourceRecoveryError, match="original_repository_stop_completion_required"):
+            assert_repository_original_stop_completion(candidate, service=None, jobs=None)
+        with pytest.raises(RepositorySourceRecoveryError, match="original_repository_stop_completion_required"):
+            repository_original_stop_completion_result(candidate, iteration_id="0" * 64)
 
 
 @pytest.mark.asyncio

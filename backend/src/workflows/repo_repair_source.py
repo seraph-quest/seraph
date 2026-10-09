@@ -76,20 +76,31 @@ async def _repository_startup_protected_lineage(db):
             present = False
             try:
                 history = _history(root)
-                present = any(item["checkpoint_id"].startswith("repository:producer:") for item in history)
+                markers = [item for item in history if isinstance(item.get("checkpoint_id"), str)
+                    and re.fullmatch(r"repository:producer:[0-9a-f]{64}", item["checkpoint_id"])]
+                present = bool(markers)
                 if not present:
                     continue
-                original, work, _, _, binding, _ = read_repository_original(root)
-                expected_mapping = _binding(owner_principal_id=binding.owner_principal_id,
-                    goal_id=binding.goal_id, goal_revision=binding.goal_revision,
-                    idempotency_scope="original-repository-child", dedupe_key=binding.invocation_id)
+                if (root.capability_version != "1" or root.root_run_identity != root.run_identity
+                        or root.parent_job_id or root.idempotency_scope != "original-repository-child"
+                        or not isinstance(root.idempotency_key, str) or not root.idempotency_key):
+                    raise DurableJobLeaseError("original startup Root mapping changed")
+                expected_mapping = _binding(owner_principal_id=root.owner_principal_id,
+                    goal_id=root.goal_id, goal_revision=root.goal_revision,
+                    idempotency_scope="original-repository-child", dedupe_key=root.idempotency_key)
                 mapped = (await db.execute(select(WorkflowRunState).where(
                     WorkflowRunState.idempotency_binding == expected_mapping))).scalar_one_or_none()
-                if mapped is None or mapped.id != root.id:
+                if mapped is None or mapped.id != root.id or root.idempotency_binding != expected_mapping:
                     raise DurableJobLeaseError("original startup repository mapping changed")
                 child = (await db.execute(select(WorkflowRunState).where(
-                    WorkflowRunState.run_identity == binding.invocation_id))).scalar_one_or_none()
-                if child is None or child_binding(child) != binding:
+                    WorkflowRunState.run_identity == root.idempotency_key))).scalar_one_or_none()
+                binding = child_binding(child) if child is not None else None
+                if (binding is None or binding.invocation_id != root.idempotency_key
+                        or json.loads(child.arguments_json).get("tool_id") != "repository_work"
+                        or (root.owner_principal_id, root.operator_session_id, root.session_id,
+                            root.goal_id, root.goal_revision) !=
+                           (binding.owner_principal_id, binding.original_root_id, binding.original_root_id,
+                            binding.goal_id, binding.goal_revision)):
                     raise DurableJobLeaseError("original startup native mapping changed")
                 established.add(child.run_identity)
                 parent = (await db.execute(select(WorkflowRunState).where(
@@ -101,6 +112,12 @@ async def _repository_startup_protected_lineage(db):
                             binding.goal_id, binding.goal_revision)):
                     raise DurableJobLeaseError("original startup explicit parent changed")
                 established.add(parent.run_identity)
+                if (len({item["checkpoint_id"] for item in markers}) != len(markers)
+                        or any(item.get("safe") is not True for item in markers)):
+                    raise DurableJobLeaseError("original startup producer marker changed")
+                original, work, _, _, original_binding, _ = read_repository_original(root)
+                if original_binding != binding:
+                    raise DurableJobLeaseError("original startup native provenance changed")
                 inventory = _repository_record(root, "repository:inventory:v1")
                 if inventory is None or inventory.get("schema") != "repository.checkpoint_inventory.v3":
                     raise DurableJobLeaseError("original startup registered inventory changed")
@@ -122,6 +139,26 @@ async def _repository_startup_protected_lineage(db):
             if present:
                 protected.update(established)
     return frozenset(protected)
+
+
+@asynccontextmanager
+async def stage_repository_stop_original_producer_witnesses(service, jobs, *, context, fence):
+    from src.workflows.repo_repair_stop import assert_repository_stop_context
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_recovery_fence, stage_repository_original_stop_completion)
+    assert_repository_stop_context(context, service=service, jobs=jobs)
+    run, original, work = context["run"], context["original"], context["work"]
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=run.run_identity, owner=context["owner"])
+    dispatched = any(_repository_record(run, "repository:execution:" + iteration_identity(
+        run.run_identity, original["repository_attempt_id"], _source_digest(original["original_input"]), index))
+        is not None for index in range(1, work.limits.max_iterations + 1))
+    if read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3" or not dispatched:
+        yield None
+        return
+    async with stage_repository_original_stop_completion(service, jobs, context=context,
+            owner=context["owner"], fence=fence) as witness:
+        yield witness
 
 
 async def _validate_repository_completion_post_context_sql(db, service, jobs, *, witness, context):

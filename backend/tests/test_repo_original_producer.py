@@ -252,3 +252,98 @@ async def test_actual_node_passed_check_with_unapproved_output_is_not_completed_
     assert body["manifest"]["reason"] == "node_unapproved_diff_path"
     assert body["manifest"]["commands"][0]["exit_code"] == 0
     assert body["manifest"]["cleanup_proven"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["test_python", "test_node"])
+async def test_actual_three_iteration_group_keeps_same_live_guard_and_scope(
+        accounting_db, monkeypatch, language, repository_admission_signer):
+    import asyncio
+    from dataclasses import replace
+    from src.workflows import repo_repair_source_recovery as recovery
+    from tests.test_repo_work_task_publication import _actual_source_callback_journey
+    original_publish = recovery.publish_original_repository_completion
+    checked = []
+
+    async def observe_group(service, jobs, **kwargs):
+        if kwargs["iteration_index"] == 3:
+            result = kwargs["actual_result"]
+            owner = producer.original_producer_live_owner(service, jobs, result)
+            assert owner is kwargs["producer_owner"]
+            with pytest.raises(ValueError):
+                producer.original_producer_live_owner(service, jobs, dict(result))
+            with pytest.raises(ValueError):
+                producer.original_producer_live_owner(service, object(), result)
+            async with jobs._session() as db:
+                run = await jobs._fetch(db, kwargs["job_id"])
+                registrations = [recovery.read_registered_repository_producer(run, iteration_index=index)
+                    for index in (1, 2, 3)]
+            with pytest.raises(ValueError):
+                with producer.stage_original_producer_completion(registrations[2], owner=replace(owner), result=result):
+                    pytest.fail("copied original owner was accepted")
+            with producer.stage_original_producer_completion(registrations[2], owner=owner, result=result) as primary:
+                def forbidden(*args, **kwargs):
+                    raise AssertionError("filesystem/second flock used by the wrong phase")
+                with monkeypatch.context() as scoped:
+                    scoped.setattr(os, "fstat", forbidden)
+                    producer.assert_original_producer_completion_scope(primary)
+                async def borrowed_task():
+                    with pytest.raises(ValueError, match="completion_scope_owner_changed"):
+                        producer.assert_original_producer_completion_scope(primary)
+                await asyncio.create_task(borrowed_task())
+                wrong = json.loads(producer.canonical(registrations[0]))
+                wrong["job_id"] += ":foreign"
+                with pytest.raises(ValueError, match="related_registration_changed"):
+                    producer.stage_original_producer_related_completion(primary, wrong)
+                wrong = json.loads(producer.canonical(registrations[0]))
+                wrong["ready"]["pid"] = os.getpid()
+                with pytest.raises(ValueError, match="pending_original_producer"):
+                    producer.stage_original_producer_related_completion(primary, wrong)
+                wrong = json.loads(producer.canonical(registrations[0]))
+                wrong["directory_path"] = registrations[2]["directory_path"]
+                with pytest.raises(ValueError):
+                    producer.stage_original_producer_related_completion(primary, wrong)
+                envelope_path = Path(registrations[0]["directory_path"]) / "completion.json"
+                original = envelope_path.read_bytes()
+                try:
+                    envelope = json.loads(original)
+                    envelope["signature"] = base64.b64encode(b"x" * 64).decode()
+                    envelope_path.write_bytes(producer.canonical(envelope))
+                    with pytest.raises(ValueError, match="signature_invalid"):
+                        producer.stage_original_producer_related_completion(primary, registrations[0])
+                finally:
+                    envelope_path.write_bytes(original)
+                with monkeypatch.context() as scoped:
+                    scoped.setattr(fcntl, "flock", forbidden)
+                    related = [producer.stage_original_producer_related_completion(primary, registration)
+                        for registration in registrations[:2]]
+                for witness in related:
+                    assert producer.original_producer_completion_result(witness)["original_producer_completion"]["outcome"] == "completed_requested_check_failure"
+                    with monkeypatch.context() as scoped:
+                        scoped.setattr(os, "fstat", forbidden)
+                        producer.assert_original_producer_completion_scope(witness)
+                with pytest.raises(ValueError, match="related_registration_changed"):
+                    producer.stage_original_producer_related_completion(primary, registrations[0])
+                fourth = json.loads(producer.canonical(registrations[0]))
+                fourth["iteration_index"] = 4
+                with pytest.raises(ValueError, match="related_registration_changed"):
+                    producer.stage_original_producer_related_completion(primary, fourth)
+                with pytest.raises(ValueError, match="physical_completion_required"):
+                    producer.stage_original_producer_related_completion(related[0], registrations[2])
+                contender = os.open(registrations[2]["guard_path"], os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+            # Closing the primary closes only its duplicate, not the Source lane.
+            assert os.fstat(owner.guard_fd).st_ino == registrations[2]["ready"]["guard_identity"][1]
+            for witness in [primary, *related]:
+                with pytest.raises(ValueError, match="physical_completion_required"):
+                    producer.assert_original_producer_completion_scope(witness)
+            checked.append(language)
+        return await original_publish(service, jobs, **kwargs)
+
+    monkeypatch.setattr(recovery, "publish_original_repository_completion", observe_group)
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
+    assert checked == [language]

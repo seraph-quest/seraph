@@ -10,6 +10,82 @@ from src.workflows.repo_repair_source_recovery import read_registered_repository
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
+async def test_original_stop_holds_actual_scope_through_writer_and_revokes(
+        accounting_db, monkeypatch, language, repository_admission_signer):
+    import asyncio
+    import copy
+    from contextlib import asynccontextmanager
+    from src.execution import repo_original_producer as producer
+    from src.work_board.contracts import TaskLimits
+    from src.workflows import repo_repair_source as source, repo_repair_stop as stop
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_original_stop_completion, RepositorySourceRecoveryError)
+    observed = {}
+    original_scope = source.stage_repository_stop_original_producer_witnesses
+    original_positive = stop._positive_witness
+
+    async def positive(*args, **kwargs):
+        try:
+            return await original_positive(*args, **kwargs)
+        except Exception as error:
+            observed["denial"] = (type(error).__name__, str(error))
+            raise
+
+    @asynccontextmanager
+    async def actual_scope(service, jobs, *, context, fence):
+        try:
+            async with original_scope(service, jobs, context=context, fence=fence) as witness:
+                assert witness is not None
+                observed.update(witness=witness, service=service, jobs=jobs, context=context, fence=fence)
+                assert_repository_original_stop_completion(witness, service=service,
+                    jobs=jobs, context=context, fence=fence)
+                with pytest.raises(RepositorySourceRecoveryError):
+                    assert_repository_original_stop_completion(copy.copy(witness), service=service, jobs=jobs)
+
+                async def inherited_child():
+                    with pytest.raises(RepositorySourceRecoveryError):
+                        assert_repository_original_stop_completion(witness, service=service, jobs=jobs)
+                await asyncio.create_task(inherited_child())
+                original_cancel = jobs.cancel_general_task_native_parent
+
+                def forbidden(*args, **kwargs):
+                    raise AssertionError("Terminal writer cannot inspect physical producer descriptors or artifacts")
+
+                async def actual_cancel(*args, **kwargs):
+                    with monkeypatch.context() as writer:
+                        writer.setattr(producer, "original_producer_completion_result", forbidden)
+                        writer.setattr(producer.os, "fstat", forbidden)
+                        writer.setattr(service, "_read_private_artifact", forbidden)
+                        assert_repository_original_stop_completion(witness, service=service,
+                            jobs=jobs, context=context, fence=fence)
+                        observed["writer_entered"] = True
+                        return await original_cancel(*args, **kwargs)
+
+                with monkeypatch.context() as actual:
+                    actual.setattr(jobs, "cancel_general_task_native_parent", actual_cancel)
+                    yield witness
+        except Exception as error:
+            observed["denial"] = (type(error).__name__, str(error))
+            raise
+
+    monkeypatch.setattr(source, "stage_repository_stop_original_producer_witnesses", actual_scope)
+    monkeypatch.setattr(stop, "_positive_witness", positive)
+    try:
+        await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
+            stop_at="cost_exhausted", task_limits=TaskLimits(max_inference_calls=5,
+                max_cost_microusd=500, wall_seconds=900),
+            work_limits={"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.000100},
+            actual_model_cost_microusd=100)
+    except AssertionError:
+        pytest.fail("Actual Source Stop denial: " + repr(observed.get("denial")))
+    assert observed["writer_entered"] is True
+    with pytest.raises(RepositorySourceRecoveryError):
+        assert_repository_original_stop_completion(observed["witness"], service=observed["service"],
+            jobs=observed["jobs"], context=observed["context"], fence=observed["fence"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["test_python", "test_node"])
 async def test_original_source_registers_actual_producer_before_native_command(
         accounting_db, monkeypatch, language, repository_admission_signer):
     flow = await _actual_source_callback_journey(accounting_db, monkeypatch, False, language)

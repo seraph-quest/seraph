@@ -1,4 +1,5 @@
 """Disposable actual Board children; scripted final inference transport only."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from dataclasses import replace
 
 import pytest
@@ -11,7 +12,7 @@ from tests.test_general_task_specialist_planning import specialist_fixture
 
 
 @pytest.mark.asyncio
-async def test_native_delegation_declared_execution_grant_is_required(task_runtime, monkeypatch):
+async def test_native_delegation_declared_execution_grant_is_required(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, accounting, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     from src.auth.service import authenticate_session
     from src.workflows.specialist_delegation import current_delegation
@@ -29,7 +30,7 @@ async def test_native_delegation_declared_execution_grant_is_required(task_runti
 
 
 @pytest.mark.asyncio
-async def test_actual_specialist_board_child_output_is_read_back(task_runtime, monkeypatch):
+async def test_actual_specialist_board_child_output_is_read_back(task_runtime, monkeypatch, native_admission_lifecycle):
     monkeypatch.setattr("src.workflows.job_runtime.get_session", task_runtime[0])
     sessions, dispatcher, planner, transport, owner, group, accounting, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     service = dispatcher.general_tasks
@@ -75,7 +76,7 @@ async def test_actual_specialist_board_child_output_is_read_back(task_runtime, m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("second_failure", [None, "proposal", "tool"])
-async def test_actual_parent_adopts_two_original_specialist_children(task_runtime, monkeypatch, second_failure):
+async def test_actual_parent_adopts_two_original_specialist_children(task_runtime, monkeypatch, second_failure, native_admission_lifecycle):
     from config.settings import settings
     from src.native_tools.registry import ToolRegistry
     from src.work_board.general_task import GeneralTaskService, digest

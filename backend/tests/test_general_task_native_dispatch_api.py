@@ -5,6 +5,8 @@ import pytest
 from tests.test_general_task_approval import approval_journey, create_and_run, get_plan
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_general_task_persistence import task_runtime
+from tests.general_task_method_lifecycle import native_admission_lifecycle
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
@@ -69,7 +71,7 @@ async def test_native_approval_api_keeps_original_child_and_finishes_with_readba
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revise_pending", [False, True])
-async def test_operator_api_safe_pause_and_resume_use_same_original_attempt(task_runtime, monkeypatch, revise_pending):
+async def test_operator_api_safe_pause_and_resume_use_same_original_attempt(task_runtime, monkeypatch, revise_pending, native_admission_lifecycle):
     import httpx
     from fastapi import FastAPI
     from src.auth.service import authenticate_session
@@ -174,7 +176,7 @@ async def test_operator_api_safe_pause_and_resume_use_same_original_attempt(task
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completed_first", [False, True])
-async def test_dispatcher_restart_recovers_only_original_native_child(task_runtime, completed_first):
+async def test_dispatcher_restart_recovers_only_original_native_child(task_runtime, completed_first, native_admission_lifecycle):
     from sqlalchemy import select
     from src.db.models import WorkflowRunState, WorkBoardTask
     from src.auth.service import authenticate_session
@@ -221,7 +223,7 @@ async def test_dispatcher_restart_recovers_only_original_native_child(task_runti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("full_key_capacity,foreign_root_seal", [(False, False), (True, False), (False, True)])
-async def test_native_cancel_api_fences_held_original_file_callback(accounting_db, monkeypatch, full_key_capacity, foreign_root_seal):
+async def test_native_cancel_api_fences_held_original_file_callback(accounting_db, monkeypatch, full_key_capacity, foreign_root_seal, build_admission_lifecycle):
     import asyncio
     import threading
     import httpx
@@ -239,6 +241,7 @@ async def test_native_cancel_api_fences_held_original_file_callback(accounting_d
     from tests.test_work_board_m6_provider_free_journey import _goal
 
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     (workspace / "held-source.txt").write_text("Only the original callback may close")
@@ -411,7 +414,7 @@ async def test_native_cancel_api_fences_held_original_file_callback(accounting_d
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("proof", ["verified", "original_root", "missing_output", "tampered_output", "foreign_witness", "symlink_output", "hardlink_output"])
-async def test_authenticated_cancel_after_original_readback_before_closure(accounting_db, monkeypatch, proof):
+async def test_authenticated_cancel_after_original_readback_before_closure(accounting_db, monkeypatch, proof, build_admission_lifecycle):
     import asyncio
     from dataclasses import replace
     import httpx
@@ -429,6 +432,7 @@ async def test_authenticated_cancel_after_original_readback_before_closure(accou
     from tests.test_work_board_m6_provider_free_journey import _goal
 
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     (workspace / "readback-source.txt").write_text("Original physical output only")

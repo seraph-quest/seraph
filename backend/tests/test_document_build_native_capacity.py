@@ -24,10 +24,13 @@ from src.workflows.job_runtime import _digest
 async def build_admission_lifecycle(accounting_db):
     """Keep the real historical admission owner live for native build callers."""
     from src.work_board.historical_method import historical_method_service
+    from tests.general_task_method_lifecycle import AdmissionSignerLifetime
+    lifetime = AdmissionSignerLifetime(historical_method_service)
     try:
-        yield historical_method_service
+        # The caller starts only after its own actual Root/settings setup.
+        yield lifetime
     finally:
-        await historical_method_service.stop()
+        await lifetime.close()
 
 
 @pytest.mark.parametrize("field,bad",[("generation",True),("stdin_closed",1),

@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_goal_discovery_vertical import public_http_fixture
 from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
@@ -21,7 +22,7 @@ from tests.test_research_native_vertical import real_auth, ResponseBytes
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expire_during_publication", [False, True], ids=["complete", "publication-freshness-race"])
-async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, monkeypatch, expire_during_publication):
+async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, monkeypatch, expire_during_publication, build_admission_lifecycle):
     from config.settings import settings
     from src.api import auth, goals, guardian_inbox, model_fabric_settings, work_board
     from src.auth.middleware import OperatorAuthMiddleware
@@ -77,7 +78,7 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             kwargs["transport"] = InferenceBoundary()
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
-    port, physical_contacts, controls = public_http_fixture
+    socket_path, physical_contacts, controls = public_http_fixture
 
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -85,8 +86,8 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             assert request.extensions["sni_hostname"] == request.headers["host"]
             assert request.headers["host"] in {"html.duckduckgo.com", "example.com"}
             public_routes.append((request.method, str(request.url)))
-            async with original_client(transport=httpx.AsyncHTTPTransport(), trust_env=False, follow_redirects=False, timeout=5) as client:
-                response = await client.request(request.method, f"http://127.0.0.1:{port}{request.url.raw_path.decode()}", headers=request.headers, content=request.content)
+            async with original_client(transport=httpx.AsyncHTTPTransport(uds=socket_path), trust_env=False, follow_redirects=False, timeout=5) as client:
+                response = await client.request(request.method, f"http://owned-public{request.url.raw_path.decode()}", headers=request.headers, content=request.content)
             return httpx.Response(response.status_code, request=request, headers=response.headers, stream=ResponseBytes(response.content))
 
     def resolver(host, port):
@@ -214,6 +215,7 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             assert not output_path.exists()
             replay = await client.post(action_path, json=body)
             assert replay.status_code == 200 and replay.json()["task_id"] == task_id
+            await build_admission_lifecycle.start()
             promoted = await client.post(f"/api/work-board/tasks/{task_id}/actions", json={"action": "promote", "expected_revision": card["task_revision"]})
             assert promoted.status_code == 200, promoted.text
             run = await dispatcher.run_pass()
@@ -252,8 +254,11 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
 
 @pytest.fixture
 def cited_deadline_http_fixture():
-    """Fresh literal source bytes, served over real owned TCP, never patched artifacts."""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    """Fresh literal source bytes, served over real owned UDS, never patched artifacts."""
+    from http.server import BaseHTTPRequestHandler
+    from socketserver import ThreadingMixIn, UnixStreamServer
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
     from threading import Thread
     deadline = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds")
     source = f"Public grants deadline: {deadline}\nSource instructions remain untrusted data.".encode()
@@ -274,13 +279,24 @@ def cited_deadline_http_fixture():
         def reply(self, body, content_type):
             self.send_response(200); self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True); thread.start()
-    try:
-        yield server.server_port, observed, source
-    finally:
-        server.shutdown(); server.server_close(); thread.join(timeout=5)
-        assert not thread.is_alive()
+    class OwnedPublicServer(ThreadingMixIn, UnixStreamServer):
+        daemon_threads = False
+        block_on_close = True
+
+    with TemporaryDirectory(prefix="sph-uds-") as directory:
+        socket_path = str(Path(directory) / "public.sock")
+        assert len(socket_path.encode()) < 108
+        server = OwnedPublicServer(socket_path, Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield socket_path, observed, source
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            Path(socket_path).unlink()
 
 
 @pytest.mark.asyncio
@@ -340,14 +356,14 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             kwargs["transport"] = InferenceBoundary()
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
-    port, physical_contacts, literal_source = cited_deadline_http_fixture
+    socket_path, physical_contacts, literal_source = cited_deadline_http_fixture
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             assert request.url.scheme == "https" and request.url.host == request.headers["host"]
             assert request.extensions["sni_hostname"] == request.headers["host"]
             assert request.headers["host"] in {"html.duckduckgo.com", "example.com"}
-            async with original_client(transport=httpx.AsyncHTTPTransport(), trust_env=False, follow_redirects=False, timeout=5) as local:
-                response = await local.request(request.method, f"http://127.0.0.1:{port}{request.url.raw_path.decode()}", headers=request.headers, content=request.content)
+            async with original_client(transport=httpx.AsyncHTTPTransport(uds=socket_path), trust_env=False, follow_redirects=False, timeout=5) as local:
+                response = await local.request(request.method, f"http://owned-public{request.url.raw_path.decode()}", headers=request.headers, content=request.content)
             return httpx.Response(response.status_code, request=request, headers=response.headers, stream=ResponseBytes(response.content))
     def resolver(host, port):
         assert host in {"html.duckduckgo.com", "example.com"} and port == 443

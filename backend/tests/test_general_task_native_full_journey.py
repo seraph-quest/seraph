@@ -14,12 +14,13 @@ import pytest
 from fastapi import FastAPI, Request, Response
 from sqlalchemy import select
 
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_general_task_planner import accounting_db, forbid_external_inference, prepare
 from tests.test_work_board_m6_provider_free_journey import _goal
 
 
 @pytest.mark.asyncio
-async def test_authenticated_three_tools_stock_mcp_protocol_same_child_approval(accounting_db, monkeypatch):
+async def test_authenticated_three_tools_stock_mcp_protocol_same_child_approval(accounting_db, monkeypatch, build_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.api import work_board as api
     from src.api.approvals import router as approvals_router
@@ -31,6 +32,7 @@ async def test_authenticated_three_tools_stock_mcp_protocol_same_child_approval(
     from src.work_board.general_task import GeneralTaskService
 
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     source = "Private local content carried only by actual dependency artifacts.\n"

@@ -1,4 +1,5 @@
 """Actual canonical specialist association events; never dependency authority."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 import pytest
 from sqlalchemy import select,delete,func
@@ -9,7 +10,7 @@ from tests.test_specialist_evidence_runtime import copied_evidence_fixture,reser
 
 
 @pytest.mark.asyncio
-async def test_actual_lineage_pair_replay_repair_and_foreign_scope(task_runtime,monkeypatch):
+async def test_actual_lineage_pair_replay_repair_and_foreign_scope(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.workflows.specialist_delegation import execute_specialist
     from src.workflows.specialist_lineage import KINDS,SpecialistLineage
     from src.work_board.events import _event_payload

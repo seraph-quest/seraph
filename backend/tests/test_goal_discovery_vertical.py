@@ -16,7 +16,10 @@ from src.workflows.job_runtime import DurableJobRepository, _digest
 
 @pytest.fixture
 def public_http_fixture():
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from http.server import BaseHTTPRequestHandler
+    from socketserver import ThreadingMixIn, UnixStreamServer
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
     from threading import Thread
     from urllib.parse import parse_qs
     observed = []
@@ -64,16 +67,24 @@ def public_http_fixture():
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_port, observed, controls
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        assert not thread.is_alive()
+    class OwnedPublicServer(ThreadingMixIn, UnixStreamServer):
+        daemon_threads = False
+        block_on_close = True
+
+    with TemporaryDirectory(prefix="sph-uds-") as directory:
+        socket_path = str(Path(directory) / "public.sock")
+        assert len(socket_path.encode()) < 108
+        server = OwnedPublicServer(socket_path, Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield socket_path, observed, controls
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            Path(socket_path).unlink()
 
 
 @pytest.mark.parametrize("scenario", ["completed", "goal_before_claim", "goal_after_query", "identity_before_claim", "unselected_id", "model_timeout",
@@ -178,7 +189,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             kwargs["transport"] = ModelBoundary()
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
-    port, physical_contacts, physical_controls = public_http_fixture
+    socket_path, physical_contacts, physical_controls = public_http_fixture
     physical_controls["scenario"] = scenario
     class PublicFixtureBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -186,11 +197,11 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             assert request.url.scheme == "https" and request.url.host == request.headers["host"]
             assert request.extensions["sni_hostname"] == request.headers["host"]
             assert request.headers["host"] in {"html.duckduckgo.com", "example.com"}
-            # Literal owned TCP fixture after production public DNS/pin checks.
+            # Literal owned UDS fixture after production public DNS/pin checks.
             # No real DDG, source TLS or external reachability is claimed.
-            async with original_client(transport=httpx.AsyncHTTPTransport(), trust_env=False,
+            async with original_client(transport=httpx.AsyncHTTPTransport(uds=socket_path), trust_env=False,
                     follow_redirects=False, timeout=5) as fixture:
-                response = await fixture.request(request.method, f"http://127.0.0.1:{port}{request.url.raw_path.decode()}",
+                response = await fixture.request(request.method, f"http://owned-public{request.url.raw_path.decode()}",
                     headers=request.headers, content=request.content)
             return httpx.Response(response.status_code, request=request, headers=response.headers,
                 stream=ResponseBytes(response.content))

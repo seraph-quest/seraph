@@ -1,4 +1,5 @@
 """Real original specialist stop writer, never synthetic callback closure."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import pytest
 from sqlalchemy import select
 from tests.test_general_task_persistence import task_runtime
@@ -26,7 +27,7 @@ async def waiting_specialist(task_runtime,monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('action',['cancel','pause'])
-async def test_original_stop_fences_unclaimed_child_and_preserves_callback_unknown(task_runtime,monkeypatch,action):
+async def test_original_stop_fences_unclaimed_child_and_preserves_callback_unknown(task_runtime,monkeypatch,action, native_admission_lifecycle):
     from src.db.models import WorkBoardTask,WorkflowRunState
     from src.workflows.general_task_guard import read_manifest,read_general_task_native_cancel,_cancel_witness
     from src.workflows.specialist_stop import verify_specialist_stop
@@ -69,7 +70,7 @@ async def test_original_stop_fences_unclaimed_child_and_preserves_callback_unkno
 
 
 @pytest.mark.asyncio
-async def test_claimed_fifo_tool_cancel_retains_real_unknown_and_original_rows(task_runtime,monkeypatch):
+async def test_claimed_fifo_tool_cancel_retains_real_unknown_and_original_rows(task_runtime,monkeypatch, native_admission_lifecycle):
     import asyncio,os,sys
     from src.db.models import WorkflowRunState,WorkBoardAttempt
     from src.workflows.general_task_guard import read_manifest,_cancel_witness
@@ -145,7 +146,7 @@ async def test_claimed_fifo_tool_cancel_retains_real_unknown_and_original_rows(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure',['capacity_count','capacity_bytes','late_cas'])
-async def test_stop_preflight_and_joint_writer_roll_back_every_row(task_runtime,monkeypatch,failure):
+async def test_stop_preflight_and_joint_writer_roll_back_every_row(task_runtime,monkeypatch,failure, native_admission_lifecycle):
     import json
     from sqlalchemy import update
     from src.db.models import WorkBoardTask,WorkBoardAttempt,WorkflowRunState

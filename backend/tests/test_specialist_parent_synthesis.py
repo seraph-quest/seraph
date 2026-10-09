@@ -4,6 +4,7 @@ Only the fixture origin's DNS and final HTTP transport are simulated. The MCP
 handshake, advertisement, guarded session, typed registry, approval wrapper,
 CPU concatenation, filesystem effects and readbacks remain their actual owners.
 """
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
@@ -230,7 +231,7 @@ async def charged_parent(task_runtime, monkeypatch, registry, mcp_descriptor):
 
 
 @pytest.mark.asyncio
-async def test_charged_parent_consumes_two_distinct_specialists_after_restart(task_runtime, monkeypatch):
+async def test_charged_parent_consumes_two_distinct_specialists_after_restart(task_runtime, monkeypatch, native_admission_lifecycle):
     from sqlalchemy import select
     from src.db.models import WorkBoardTask, WorkflowRunState, InferenceCostReservation, ApprovalRequest
     from src.work_board.general_task import GeneralTaskService

@@ -1,4 +1,5 @@
 """Literal local persistence/readback; no inference credentials or transports."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import socket
 from contextlib import asynccontextmanager
 
@@ -127,7 +128,7 @@ async def test_plan_edit_keeps_one_task_revokes_prior_artifact_and_fences_stale_
 
 
 @pytest.mark.asyncio
-async def test_accepted_task_executes_real_durable_root_and_private_artifact_readback(task_runtime):
+async def test_accepted_task_executes_real_durable_root_and_private_artifact_readback(task_runtime, native_admission_lifecycle):
     sessions, workspace = task_runtime
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     async with sessions() as db:
@@ -161,7 +162,7 @@ async def test_accepted_task_executes_real_durable_root_and_private_artifact_rea
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("step_count", [8, 16])
-async def test_dependency_chain_retains_artifacts_and_stops_before_reserved_capacity(task_runtime, step_count):
+async def test_dependency_chain_retains_artifacts_and_stops_before_reserved_capacity(task_runtime, step_count, native_admission_lifecycle):
     sessions, workspace = task_runtime
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     async with sessions() as db:
@@ -215,7 +216,7 @@ async def test_dependency_chain_retains_artifacts_and_stops_before_reserved_capa
 
 
 @pytest.mark.asyncio
-async def test_sixteen_step_dependency_chain_has_independent_verified_artifacts(task_runtime):
+async def test_sixteen_step_dependency_chain_has_independent_verified_artifacts(task_runtime, native_admission_lifecycle):
     """All sixteen actual production read callbacks fit their proved capacity."""
     import hashlib
     import json
@@ -293,7 +294,7 @@ async def test_sixteen_step_dependency_chain_has_independent_verified_artifacts(
 
 
 @pytest.mark.asyncio
-async def test_step_schema_violation_and_removed_tool_block_before_execution_admission(task_runtime):
+async def test_step_schema_violation_and_removed_tool_block_before_execution_admission(task_runtime, native_admission_lifecycle):
     sessions, workspace = task_runtime
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     async with sessions() as db:

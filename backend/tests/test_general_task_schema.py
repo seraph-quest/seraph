@@ -1,4 +1,5 @@
 """Schema admission mechanics and physical-file nonexecution; no inference."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import socket
 import json
 from unittest.mock import AsyncMock
@@ -271,16 +272,100 @@ async def test_mcp_unsafe_finite_pattern_excluded_before_json_validator(mcp_regi
     payload = json.loads(path.read_text())
     payload["task_tools"][tool.name] = declaration
     path.write_text(json.dumps(payload))
+    unsafe_validator = Draft202012Validator(schema)
+    expected_pointer = "/properties/query/pattern" if boundary == "input" else "/pattern"
+
+    def unsafe_pointers(contract):
+        remaining = 4096
+        found = []
+        def segment(value):
+            if type(value) is not str:
+                raise AssertionError("schema tripwire non-JSON key")
+            return value.replace("~", "~0").replace("/", "~1")
+        def visit(item, pointer="", depth=0):
+            nonlocal remaining
+            remaining -= 1
+            if depth > 32 or remaining < 0:
+                raise AssertionError("schema tripwire scan limit")
+            if type(item) is dict:
+                if item.get("pattern") == "^(a+)+$":
+                    found.append(pointer + "/pattern")
+                for keyword, child in item.items():
+                    if keyword in {"enum", "const", "default", "examples"}:
+                        continue
+                    child_pointer = pointer + "/" + segment(keyword)
+                    if keyword in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and type(child) is dict:
+                        for name, subschema in child.items():
+                            visit(subschema, child_pointer + "/" + segment(name), depth + 1)
+                    else:
+                        visit(child, child_pointer, depth + 1)
+            elif type(item) is list:
+                for index, child in enumerate(item):
+                    visit(child, pointer + "/" + str(index), depth + 1)
+            elif item is not None and type(item) not in {str, int, float, bool}:
+                raise AssertionError("schema tripwire non-JSON value")
+        visit(contract)
+        return found
+
+    assert unsafe_pointers(schema) == [expected_pointer]
+    literal = {"pattern": "^(a+)+$"}
+    assert unsafe_pointers({"type": "object", "properties": {"pattern": {"type": "string"}},
+        "enum": [literal], "const": literal, "default": literal, "examples": [literal]}) == []
     contacts = []
-    def forbidden(*args, **kwargs):
-        contacts.append(True)
-        raise AssertionError("unsafe MCP schema reached JSON Schema validator")
-    for name in ("check_schema", "validate", "is_valid"):
-        monkeypatch.setattr(Draft202012Validator, name, forbidden)
+    safe_validations = []
+    matcher_hits = []
+    from jsonschema import _keywords
+    original_search = _keywords.re.search
+    def matcher(pattern, *args, **kwargs):
+        if pattern == "^(a+)+$":
+            matcher_hits.append(True)
+            raise AssertionError("unsafe MCP pattern reached matcher")
+        return original_search(pattern, *args, **kwargs)
+    monkeypatch.setattr(_keywords.re, "search", matcher)
+    original_check = Draft202012Validator.check_schema
+    original_validate = Draft202012Validator.validate
+    original_is_valid = Draft202012Validator.is_valid
+    def inspect_schema(method, contract):
+        pointers = unsafe_pointers(contract)
+        if pointers:
+            contacts.append((method, pointers))
+            raise AssertionError("unsafe MCP schema reached JSON Schema validator")
+        safe_validations.append(method)
+    def check_schema(cls, contract, *args, **kwargs):
+        inspect_schema("check_schema", contract)
+        return original_check(contract, *args, **kwargs)
+    def validate(validator, *args, **kwargs):
+        inspect_schema("validate", validator.schema)
+        return original_validate(validator, *args, **kwargs)
+    def is_valid(validator, *args, **kwargs):
+        inspect_schema("is_valid", validator.schema)
+        return original_is_valid(validator, *args, **kwargs)
+    monkeypatch.setattr(Draft202012Validator, "check_schema", classmethod(check_schema))
+    monkeypatch.setattr(Draft202012Validator, "validate", validate)
+    monkeypatch.setattr(Draft202012Validator, "is_valid", is_valid)
+    value = {"query": "a"} if boundary == "input" else "a"
+    for invocation in (
+        lambda: Draft202012Validator.check_schema(schema),
+        lambda: unsafe_validator.validate(value),
+        lambda: unsafe_validator.is_valid(value),
+    ):
+        with pytest.raises(AssertionError, match="unsafe MCP schema reached JSON Schema validator"):
+            invocation()
+    assert contacts == [(name, [expected_pointer]) for name in ("check_schema", "validate", "is_valid")]
+    assert matcher_hits == []
+    contacts.clear()  # Only deliberate canary interceptions are discarded.
+    deep = {}
+    for _ in range(34):
+        deep = {"items": deep}
+    for bounded_out in (deep, {"anyOf": [True] * 4096}):
+        with pytest.raises(AssertionError, match="schema tripwire scan limit"):
+            Draft202012Validator.check_schema(bounded_out)
     assert not any(item.server_id == "local" for item in current.descriptors())
     assert any(item["tool_id"] == "mcp:local:repo_read" for item in current.blocked_tools())
     assert tool.calls == 0
     assert contacts == []
+    assert "check_schema" in safe_validations
+    assert matcher_hits == []
 
 
 @pytest.mark.asyncio
@@ -501,7 +586,7 @@ async def test_edit_and_preflight_reject_mismatch_preserving_original_plan(task_
 
 
 @pytest.mark.asyncio
-async def test_existing_permissive_object_contract_accepts_and_rechecks(task_runtime, monkeypatch):
+async def test_existing_permissive_object_contract_accepts_and_rechecks(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, workspace = task_runtime
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     async with sessions() as db:

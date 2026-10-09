@@ -1,4 +1,5 @@
 """Actual sealed callback wait and original child wake, no provider spend."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 import pytest
 from sqlalchemy import select
@@ -7,7 +8,7 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 @pytest.mark.asyncio
-async def test_wait_releases_callback_and_reconcile_runs_exact_original_child(task_runtime,monkeypatch):
+async def test_wait_releases_callback_and_reconcile_runs_exact_original_child(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.db.models import WorkflowRunState,WorkBoardTask,WorkBoardAttempt
     from src.workflows.specialist_delegation import read_reservation,current_delegation
@@ -69,7 +70,7 @@ async def test_wait_releases_callback_and_reconcile_runs_exact_original_child(ta
 
 
 @pytest.mark.asyncio
-async def test_changed_original_wait_cannot_contact_admitted_child(task_runtime,monkeypatch):
+async def test_changed_original_wait_cannot_contact_admitted_child(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.db.models import WorkflowRunState
     from src.workflows.specialist_lifecycle import WAIT_KEY
@@ -98,7 +99,7 @@ async def test_changed_original_wait_cannot_contact_admitted_child(task_runtime,
 
 
 @pytest.mark.asyncio
-async def test_staged_callback_output_tamper_holds_actual_original_wait(task_runtime,monkeypatch):
+async def test_staged_callback_output_tamper_holds_actual_original_wait(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.db.models import WorkflowRunState
     from src.workflows.specialist_lifecycle import WAIT_KEY,CLOSURE_KEY,read_fact,SpecialistWaitV1,SpecialistDelegationClosureV1

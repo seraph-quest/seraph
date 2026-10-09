@@ -65,6 +65,10 @@ def override_session_factory(
 
 
 OPERATOR_REQUIRED_TABLES = (
+    "programme_digest_receipts",
+    "programme_follow_through",
+    "programme_finding_actions",
+    "programme_notification_preferences",
     "sessions",
     "messages",
     "approval_requests",

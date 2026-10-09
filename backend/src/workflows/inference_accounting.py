@@ -385,7 +385,12 @@ class InferenceAccountingRepositoryMixin:
         return account, rows
 
     def _assert_accounting_continuity(self, workspace, account, rows):
+        from src.workflows.general_task_accounting import entry_for
         from src.workflows.inference_group_lookup import assert_group_lookup
+        # Original evidence failures take precedence over derived lookup drift,
+        # including drift on an earlier reservation in this complete ledger.
+        for row in rows:
+            entry_for(row)
         for row in rows:
             assert_group_lookup(row)
         receipt = read_lifecycle_receipt(workspace)

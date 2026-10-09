@@ -417,7 +417,8 @@ class GeneralTaskService:
                         await publication_authority_check(db)
                     artifact = await read_input_artifact_metadata(db, owner,
                         artifact_id=existing.input_artifact_id)
-                    fresh = await db.get(WorkBoardTask, existing.task_id, populate_existing=True)
+                    fresh = await db.scalar(select(WorkBoardTask).where(
+                        WorkBoardTask.task_id == existing.task_id).execution_options(populate_existing=True))
                     if (fresh is None or fresh.typed_input_digest != artifact.typed_input_digest
                             or fresh.typed_input_ref != artifact.typed_input_ref
                             or fresh.model_dump(mode="json") != original_task_row):

@@ -1404,6 +1404,15 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
 
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Repository sandbox settings are localhost-only")
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        _persist_repo_sandbox_selector_update(body)
+    # Readiness/preflight work runs after the short canonical mutation fence.
+    return await get_repo_sandbox_settings()
+
+
+def _persist_repo_sandbox_selector_update(body: RepoSandboxSettingsRequest):
+    """The existing selector owner, called under its configuration fence."""
     current, _configuration_error = _load_persisted_repo_sandbox_settings()
     updates = body.model_dump(exclude_none=True)
     try:
@@ -1441,7 +1450,6 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
     # failed write therefore cannot leave this process executing selectors it
     # could not recover after restart.
     settings.repo_sandbox = candidate
-    return await get_repo_sandbox_settings()
 
 
 @router.post("/settings/end-of-day-report/manual")

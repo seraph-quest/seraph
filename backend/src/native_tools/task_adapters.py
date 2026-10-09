@@ -27,6 +27,43 @@ def _producer_digest(function):
     return hashlib.sha256(marshal.dumps(code)).hexdigest() if code is not None else None
 
 
+def repository_work_descriptor():
+    """Fixed bundled descriptor data; not registered until its owner is ready."""
+    from config.settings import settings
+    from src.workflows.repo_repair import (RepoWorkInput, RepoWorkLimits,
+        RepoWorkVerifiedResult, RepoIteration)
+    from src.tools.policy import get_task_policy_snapshot
+    inputs = RepoWorkInput.model_json_schema()
+    output = RepoWorkVerifiedResult.model_json_schema()
+    # C1 deliberately excludes schema references. Inline only these two
+    # fixed owned nested DTOs, preserving that existing closed-schema rule.
+    if (inputs["properties"]["limits"] != {"$ref": "#/$defs/RepoWorkLimits"}
+            or output["properties"]["iterations"]["items"] != {"$ref": "#/$defs/RepoIteration"}):
+        raise ValueError("fixed repository schema shape changed")
+    inputs["properties"]["limits"] = RepoWorkLimits.model_json_schema()
+    # C1's finite regex subset excludes the Git SHA1/SHA256 alternation.
+    # The fixed source owner still parses the full strict RepoWorkInput before
+    # any inspection/publication, including exact hexadecimal Git identity.
+    inputs["properties"]["base_commit"].pop("pattern")
+    inputs["properties"]["base_commit"].update(minLength=40, maxLength=64)
+    output["properties"]["iterations"]["items"] = RepoIteration.model_json_schema()
+    for name in ("input_tree_digest", "patch_digest"):
+        output["properties"]["iterations"]["items"]["properties"][name]["pattern"] = "^[a-f0-9]{64}$"
+    inputs.pop("$defs")
+    output.pop("$defs")
+    return ToolDescriptor(tool_id="repository_work", version="1",
+        input_schema=inputs, output_schema=output,
+        effects=["workspace_read", "workspace_write", "remote_inference"],
+        permissions=["capability_execute"], deadline=900,
+        verifier="repository_final_physical_readback.v1",
+        policy_digest=_digest({"policy": get_task_policy_snapshot(),
+            "workspace": str(settings.workspace_dir),
+            "selected_executor": settings.repo_sandbox.model_dump(mode="json"),
+            "source_owner": "RepoRepairService", "max_iterations": 3,
+            "max_total_seconds": 900, "source_input_bytes": 65536,
+            "optional_publication": "separate_exact_approval"}))
+
+
 @dataclass(frozen=True)
 class TaskToolApprovalBinding:
     descriptor_digest: str

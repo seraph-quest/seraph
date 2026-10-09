@@ -386,6 +386,34 @@ class RepoIteration(BaseModel):
         return values
 
 
+class RepoWorkVerifiedResult(BaseModel):
+    """Only a successful physical final result can become C1 tool output.
+
+    Blocked, exhausted, cancelled and Unknown outcomes stay source-owned
+    recovery projections and cannot satisfy this verified-output contract.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    iterations: list[RepoIteration] = Field(min_length=1, max_length=3)
+    patch_artifact_ref: str = Field(min_length=1, max_length=512)
+    final_readback_ref: str = Field(min_length=1, max_length=512)
+    no_learning: Literal[True] = True
+
+    @field_validator("patch_artifact_ref", "final_readback_ref")
+    @classmethod
+    def private_references(cls, value):
+        if (not value.startswith("workspace-json:artifacts/repo-repair/")
+                or "\\" in value or any(part in {"", ".", ".."}
+                    for part in value.removeprefix("workspace-json:").split("/"))):
+            raise ValueError("exact private repository artifact reference required")
+        return value
+
+    @model_validator(mode="after")
+    def original_consecutive_sequence(self):
+        if [item.index for item in self.iterations] != list(range(1, len(self.iterations) + 1)):
+            raise ValueError("original consecutive iteration sequence required")
+        return self
+
+
 class RepoRepairInput(BaseModel):
     """Strict operator intent; all authority is server-derived."""
 

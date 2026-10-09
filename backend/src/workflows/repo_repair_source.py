@@ -22,6 +22,25 @@ _SHA = re.compile(r"^[0-9a-f]{64}$")
 _task_publication = ContextVar("repository_task_publication", default=None)
 
 
+def _assert_task_publication_configuration(service, *, staged_config=None):
+    from config.settings import settings
+    from src.security.trust_contract import canonical_digest
+    from src.workspace import canonical_workspace_root
+    from src.work_board.repository import BoardError
+    if staged_config is None:
+        from src.execution.repo_sandbox import load_persisted_repo_sandbox_settings
+        staged_config, error = load_persisted_repo_sandbox_settings()
+        if error is not None:
+            raise BoardError("repository_source_current_configuration_changed",
+                "Restore the canonical private repository selector", status_code=409)
+    if (canonical_digest(staged_config.model_dump(mode="json")) !=
+            canonical_digest(service.sandbox.config.model_dump(mode="json"))
+            or service._workspace() != canonical_workspace_root(settings.workspace_dir)):
+        raise BoardError("repository_source_current_configuration_changed",
+            "Use the current canonical repository profile and workspace", status_code=409)
+    return staged_config
+
+
 def prepare_repository_task_publication(service, envelope, *, owner, goal_revision, replay=False):
     """Inspect the fixed source before publication; never accept caller metadata.
 
@@ -36,10 +55,19 @@ def prepare_repository_task_publication(service, envelope, *, owner, goal_revisi
         raise BoardError("repository_source_unscoped_replay", "Old Tasks cannot acquire repository source authority on replay", status_code=409)
     if type(service) is not RepoRepairService or envelope.plan is None:
         raise BoardError("repository_source_owner_required", "Current fixed repository source owner required", status_code=409)
+    _assert_task_publication_configuration(service)
     steps = [step for step in envelope.plan.steps if step.tool_id == "repository_work"]
     if len(steps) != 1 or envelope.proposal_group is None:
         raise BoardError("repository_source_binding_invalid", "One original grouped repository step required", status_code=409)
-    work = RepoWorkInput.model_validate(steps[0].input)
+    from src.native_tools.task_adapters import repository_work_descriptor
+    fixed_descriptor = repository_work_descriptor()
+    selected_descriptors = [item for item in envelope.descriptors if item.tool_id == "repository_work"]
+    if selected_descriptors != [fixed_descriptor]:
+        raise BoardError("repository_source_descriptor_changed", "Exact current fixed repository descriptor required", status_code=409)
+    try:
+        work = RepoWorkInput.model_validate(steps[0].input)
+    except ValueError as exc:
+        raise BoardError("repository_source_input_invalid", "Review the exact closed repository input", status_code=422) from exc
     group = envelope.proposal_group
     if (group.owner_principal_id != owner.principal_id or group.owner_session_id != owner.session_id
             or group.goal_id != envelope.task_input.goal_ref or group.goal_revision != goal_revision):
@@ -65,7 +93,11 @@ def prepare_repository_task_publication(service, envelope, *, owner, goal_revisi
     @asynccontextmanager
     async def scope():
         from src.model_fabric.effective_policy import configuration_mutation_lock
+        from config.settings import settings
         async with configuration_mutation_lock:
+            staged_config = _assert_task_publication_configuration(service)
+            if repository_work_descriptor() != fixed_descriptor:
+                raise BoardError("repository_source_descriptor_changed", "Original fixed descriptor policy changed", status_code=409)
             # Physical work precedes the publication writer, including replay.
             facts = json.loads(service._read_private_artifact(binding.source_artifact_ref,
                 expected_digest=binding.source_artifact_digest))
@@ -78,7 +110,8 @@ def prepare_repository_task_publication(service, envelope, *, owner, goal_revisi
                     or facts.get("original_root_id") != owner.session_id
                     or facts.get("goal_id") != group.goal_id or facts.get("goal_revision") != goal_revision):
                 raise BoardError("repository_source_changed", "Original physical source or execution profile changed", status_code=409)
-            token = _task_publication.set((asyncio.current_task(), witness))
+            token = _task_publication.set((asyncio.current_task(), witness, staged_config,
+                canonical_digest(settings.repo_sandbox.model_dump(mode="json"))))
             try:
                 yield
             finally:
@@ -86,11 +119,21 @@ def prepare_repository_task_publication(service, envelope, *, owner, goal_revisi
 
     async def check(db):
         from src.workflows.general_task_accounting import validate_group_owner
-        if _task_publication.get() != (asyncio.current_task(), witness):
+        from config.settings import settings
+        held = _task_publication.get()
+        if held is None or held[:2] != (asyncio.current_task(), witness):
             raise BoardError("repository_source_scope_required", "Original source publication scope required", status_code=409)
+        _assert_task_publication_configuration(service, staged_config=held[2])
+        if canonical_digest(settings.repo_sandbox.model_dump(mode="json")) != held[3]:
+            raise BoardError("repository_source_current_configuration_changed", "Original canonical settings changed", status_code=409)
+        if repository_work_descriptor() != fixed_descriptor:
+            raise BoardError("repository_source_descriptor_changed", "Original fixed descriptor policy changed", status_code=409)
         if canonical_digest(service.sandbox.config.model_dump(mode="json")) != binding.executor_profile_digest:
             raise BoardError("repository_source_changed", "Original execution profile changed", status_code=409)
         await validate_group_owner(db, group)
+        _assert_task_publication_configuration(service, staged_config=held[2])
+        if canonical_digest(settings.repo_sandbox.model_dump(mode="json")) != held[3]:
+            raise BoardError("repository_source_current_configuration_changed", "Original canonical settings changed", status_code=409)
 
     return binding, check, scope
 
@@ -259,16 +302,21 @@ async def stage_repository_canonical_source(service, db, *, repository_job_id,
     from src.workflows.job_runtime import DurableJobLeaseError
     if type(service) is not RepoRepairService:
         raise DurableJobLeaseError("actual fixed repository source owner required")
-    run = await db.get(WorkflowRunState, repository_job_id, populate_existing=True)
-    child = await db.get(WorkflowRunState, native_invocation_id, populate_existing=True)
+    from sqlalchemy import select
+    run = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == repository_job_id).execution_options(populate_existing=True))
+    child = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == native_invocation_id).execution_options(populate_existing=True))
     if run is None or child is None:
         raise DurableJobLeaseError("original repository and native child required")
     original, work, compiled, group, binding, task_source = read_repository_original(run)
     if child_binding(child) != binding:
         raise DurableJobLeaseError("original repository native child changed")
     await assert_general_task_child_current(db, child)
-    parent = await db.get(WorkflowRunState, binding.parent_job_id, populate_existing=True)
-    task = await db.get(WorkBoardTask, binding.task_id, populate_existing=True)
+    parent = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == binding.parent_job_id).execution_options(populate_existing=True))
+    task = await db.scalar(select(WorkBoardTask).where(
+        WorkBoardTask.task_id == binding.task_id).execution_options(populate_existing=True))
     attempt = await db.get(WorkBoardAttempt, binding.attempt_id, populate_existing=True)
     if parent is None or task is None or attempt is None:
         raise DurableJobLeaseError("original C1 Task source required")

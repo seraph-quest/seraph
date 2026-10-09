@@ -26,6 +26,7 @@ import { NearTextWorkPanel } from "./NearTextWorkPanel";
 import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import type { InspectPartialArtifact } from "./partialArtifactInspection";
 import { GeneralTaskPanel } from "./GeneralTaskPanel";
 import { GENERAL_TASK_CAPABILITY } from "../../lib/generalTask";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
@@ -142,6 +143,7 @@ export interface WorkBoardPanelProps {
   onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  onInspectPartialArtifact?: InspectPartialArtifact;
   focusTaskId?: string | null;
   onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
@@ -879,6 +881,7 @@ function WorkBoardPanel({
   onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
+  onInspectPartialArtifact,
   focusTaskId,
   onFocusTaskHandled,
   ownerPrincipalId,
@@ -4282,7 +4285,7 @@ function WorkBoardPanel({
               {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && <GeneralTaskPanel
                 key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
-                onInspectArtifact={onInspectArtifact}
+                onInspectArtifact={onInspectArtifact} onInspectPartialArtifact={onInspectPartialArtifact}
                 onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
               <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />

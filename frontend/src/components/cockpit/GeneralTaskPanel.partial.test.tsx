@@ -1,9 +1,15 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
+import { CockpitView } from "./CockpitView";
+import { useChatStore } from "../../stores/chatStore";
+import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
+import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
+import { getDefaultPaneVisibility } from "./layouts";
 import { GeneralTaskPanel } from "./GeneralTaskPanel";
 import { WorkBoardPanel } from "./WorkBoardPanel";
 import { validateGeneralTaskPlan } from "../../lib/generalTask";
+import type { PartialArtifactInspectionRequest, PartialArtifactInspectionReceipt } from "./partialArtifactInspection";
 import type { WorkBoardTask } from "../../types";
 
 vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
@@ -43,16 +49,17 @@ function overlay(key: string) { return { state: "partial_review_pending_debt", d
 function receipt(body: { partial_decision: { idempotency_key: string } }) {
   return { task, attempt: task.latest_attempt, partial_review: overlay(body.partial_decision.idempotency_key), idempotent_replay: false };
 }
+const successfulInspection = vi.fn(async ({ binding }: PartialArtifactInspectionRequest) => ({ binding, presented: true as const }));
 async function selectAndInspect(inspect = true) {
   fireEvent.click(await screen.findByLabelText("Select partial step delegate"));
-  if (inspect) fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  if (inspect) { await act(async () => { fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` })); }); await waitFor(() => expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeEnabled()); }
 }
-beforeEach(() => { vi.mocked(apiFetch).mockReset(); vi.mocked(apiFetch).mockResolvedValue(response(plan)); });
+beforeEach(() => { successfulInspection.mockClear(); vi.mocked(apiFetch).mockReset(); vi.mocked(apiFetch).mockResolvedValue(response(plan)); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 it("passes the existing Work Board artifact inspector through the actual selected task panel", async () => {
   const boardTask = task;
-  const inspect = vi.fn();
+  const inspect = successfulInspection;
   const boardResponse = async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith(`/api/work-board/tasks/${task.task_id}/plan`)) return response(plan);
@@ -65,28 +72,27 @@ it("passes the existing Work Board artifact inspector through the actual selecte
   vi.stubGlobal("fetch", vi.fn(boardResponse));
   vi.mocked(apiFetch).mockImplementation(boardResponse);
   vi.stubGlobal("WebSocket", class { close() {} });
-  render(<WorkBoardPanel {...owner} onInspectArtifact={inspect} />);
+  render(<WorkBoardPanel {...owner} onInspectPartialArtifact={inspect} />);
   fireEvent.click(await screen.findByRole("button", { name: "Open task Stopped specialist work" }));
-  fireEvent.click(await screen.findByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
-  expect(inspect).toHaveBeenCalledWith({ reference: { artifact_id: output.artifact_id, content_sha256: output.content_sha256 },
-    ownerSessionId: owner.ownerSessionId, workflowRunId: output.child_job_id, parentWorkflowRunId: output.delegation_invocation_id });
+  const inspectButton = await screen.findByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` });
+  await act(async () => { fireEvent.click(inspectButton); });
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ binding: expect.objectContaining({ output, ownerSessionId: owner.ownerSessionId }) }));
 });
 
 it("routes the selected genuine-shaped child reference to the existing inspector before acknowledgment", async () => {
-  const inspect = vi.fn(); render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={inspect} />);
+  const inspect = successfulInspection; render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={inspect} />);
   await selectAndInspect(false);
   expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
   expect(screen.getByRole("button", { name: "Accept selected partial results" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
-  expect(inspect).toHaveBeenCalledWith({ reference: { artifact_id: output.artifact_id, content_sha256: output.content_sha256 }, ownerSessionId: owner.ownerSessionId,
-    workflowRunId: output.child_job_id, parentWorkflowRunId: output.delegation_invocation_id });
-  expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeEnabled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` })); });
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ binding: expect.objectContaining({ output, ownerSessionId: owner.ownerSessionId }) }));
+  await waitFor(() => expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeEnabled());
   expect(apiFetch).toHaveBeenCalledTimes(1);
 });
 
 it("submits only the exact original decision and keeps accepted results pending debt", async () => {
   vi.mocked(apiFetch).mockImplementation(async (_url, init) => init?.method === "POST" ? response(receipt(JSON.parse(String(init.body)))) : response(plan));
-  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} />);
   await selectAndInspect(); fireEvent.click(screen.getByLabelText("Acknowledge unresolved partial debt"));
   fireEvent.click(screen.getByRole("button", { name: "Accept selected partial results" }));
   expect(await screen.findByLabelText("Accepted partial results pending debt")).toHaveTextContent("unresolved effects: 2");
@@ -116,7 +122,7 @@ it("retains one uncertain POST for explicit exact reconciliation and never autom
     if (bodies.length === 1) throw Error("response lost");
     return response({ ...receipt(body), idempotent_replay: true });
   });
-  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} />);
   await selectAndInspect(); fireEvent.click(screen.getByLabelText("Acknowledge unresolved partial debt"));
   fireEvent.click(screen.getByRole("button", { name: "Accept selected partial results" }));
   await screen.findByRole("alert"); expect(bodies).toHaveLength(1);
@@ -128,7 +134,7 @@ it("retains one uncertain POST for explicit exact reconciliation and never autom
 
 it("drops stale CAS selection and requires refreshed inspection instead of a new automatic decision", async () => {
   vi.mocked(apiFetch).mockImplementation(async (_url, init) => init?.method === "POST" ? response({}, 409) : response(plan));
-  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} />);
   await selectAndInspect(); fireEvent.click(screen.getByLabelText("Acknowledge unresolved partial debt"));
   fireEvent.click(screen.getByRole("button", { name: "Accept selected partial results" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("revision changed");
@@ -147,11 +153,11 @@ it("fences a late acceptance receipt when the authenticated owner changes", asyn
     if (init?.method !== "POST") return response(plan);
     posted = JSON.parse(String(init.body)); return new Promise(resolve => { finish = resolve; });
   });
-  const changed = vi.fn(); const { rerender } = render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} onChanged={changed} />);
+  const changed = vi.fn(); const { rerender } = render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} onChanged={changed} />);
   await selectAndInspect(); fireEvent.click(screen.getByLabelText("Acknowledge unresolved partial debt"));
   fireEvent.click(screen.getByRole("button", { name: "Accept selected partial results" }));
   await waitFor(() => expect(finish).toBeDefined());
-  rerender(<GeneralTaskPanel ownerPrincipalId="foreign" ownerSessionId="foreign-session" task={task} onInspectArtifact={vi.fn()} onChanged={changed} />);
+  rerender(<GeneralTaskPanel ownerPrincipalId="foreign" ownerSessionId="foreign-session" task={task} onInspectPartialArtifact={successfulInspection} onChanged={changed} />);
   await act(async () => finish(response(receipt(posted!))));
   expect(screen.queryByLabelText("Accepted partial results pending debt")).toBeNull(); expect(changed).not.toHaveBeenCalled();
   expect(screen.queryByLabelText("Review specialist partial results")).toBeNull();
@@ -164,7 +170,7 @@ it("renders a historical partial overlay after full cancellation as pending debt
   vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, native_execution: { ...native, phase: "cancelled",
     cancellation: { ...native.cancellation, state: "fully_cancelled", callback_closed: true, effect_debt: false },
     partial_review_options: { eligible: false, reason: "already_reviewed" }, partial_review: partial } }));
-  render(<GeneralTaskPanel {...owner} task={cancelled} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={cancelled} onInspectPartialArtifact={successfulInspection} />);
   expect(await screen.findByLabelText("Accepted partial results pending debt")).toHaveTextContent("Current cancellation: fully_cancelled");
   expect(screen.getByLabelText("Accepted partial results pending debt")).toHaveTextContent("pending debt");
   expect(screen.getByLabelText("Accepted partial results pending debt")).toHaveTextContent("current unresolved effects: 0");
@@ -182,7 +188,7 @@ it.each(["full success", "foreign owner", "renewed fence", "changed revision"])(
     if (mutation === "renewed fence") return response({ ...value, attempt: { ...value.attempt, fencing_token: 2 } });
     return response({ ...value, task: { ...value.task, task_revision: 9 } });
   });
-  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} />);
   await selectAndInspect(); fireEvent.click(screen.getByLabelText("Acknowledge unresolved partial debt"));
   fireEvent.click(screen.getByRole("button", { name: "Accept selected partial results" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("unconfirmed");
@@ -199,6 +205,120 @@ it.each([
   const malformed = { ...plan, native_execution: { ...native, partial_review_options: change(options) } };
   expect(() => validateGeneralTaskPlan(malformed, task)).toThrow();
   vi.mocked(apiFetch).mockResolvedValue(response(malformed));
-  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={successfulInspection} />);
   await screen.findByRole("alert"); expect(screen.queryByLabelText("Review specialist partial results")).toBeNull();
+});
+
+
+it("ordinary void navigation cannot qualify as receipt inspection", async () => {
+  render(<GeneralTaskPanel {...owner} task={task} onInspectArtifact={vi.fn()} />); await selectAndInspect(false);
+  expect(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` })).toBeDisabled();
+  expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
+});
+
+it.each(["success", "selection", "owner", "task revision", "refreshed manifest", "unmount"])("awaits and fences deferred presentation: %s", async mutation => {
+  let complete!: (receipt: PartialArtifactInspectionReceipt) => void; let request!: PartialArtifactInspectionRequest;
+  const inspect = vi.fn((value: PartialArtifactInspectionRequest) => { request = value; return new Promise<PartialArtifactInspectionReceipt>(resolve => { complete = resolve; }); });
+  const { rerender, unmount } = render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={inspect} />);
+  await selectAndInspect(false); fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Accept selected partial results" })).toBeDisabled();
+  if (mutation === "selection") { fireEvent.click(screen.getByLabelText("Select partial step delegate")); fireEvent.click(screen.getByLabelText("Select partial step delegate")); }
+  if (mutation === "owner") rerender(<GeneralTaskPanel ownerPrincipalId="foreign" ownerSessionId="foreign" task={task} onInspectPartialArtifact={inspect} />);
+  if (mutation === "task revision") rerender(<GeneralTaskPanel {...owner} task={{ ...task, task_revision: 9 }} onInspectPartialArtifact={inspect} />);
+  if (mutation === "refreshed manifest") { vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, native_execution: { ...native, manifest_revision: 10, partial_review_options: { ...options, expected_manifest_revision: 10 } } })); fireEvent.click(screen.getByRole("button", { name: "Refresh current task plan" })); await screen.findByLabelText("Select partial step delegate"); }
+  if (mutation === "unmount") unmount();
+  await act(async () => complete({ binding: request.binding, presented: true }));
+  if (mutation === "success") expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeEnabled();
+  else { expect(request.signal.aborted).toBe(true); if (screen.queryByLabelText("Acknowledge unresolved partial debt")) expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled(); }
+  expect(apiFetch).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ method: "POST" }));
+});
+
+it.each(["failure", "missing", "wrong hash", "wrong owner", "wrong size", "wrong lineage", "wrong manifest"])("keeps %s receipt inspection blocked", async mutation => {
+  const inspect = vi.fn(async ({ binding }: PartialArtifactInspectionRequest) => {
+    if (mutation === "failure") throw Error("load failed"); if (mutation === "missing") return null;
+    return { binding: { ...binding, ownerSessionId: mutation === "wrong owner" ? "foreign" : binding.ownerSessionId,
+      manifestRevision: mutation === "wrong manifest" ? 99 : binding.manifestRevision,
+      output: { ...binding.output, content_sha256: mutation === "wrong hash" ? "b".repeat(64) : binding.output.content_sha256,
+        size_bytes: mutation === "wrong size" ? 1 : binding.output.size_bytes,
+        delegation_invocation_id: mutation === "wrong lineage" ? "foreign" : binding.output.delegation_invocation_id } }, presented: true as const };
+  });
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={inspect} />);
+  await selectAndInspect(false); fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  await screen.findByRole("alert"); expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Accept selected partial results" })).toBeDisabled(); expect(apiFetch).toHaveBeenCalledTimes(1);
+});
+
+it("times out unresolved inspection without unlocking or automatic retry", async () => {
+  const inspect = vi.fn(() => new Promise<null>(() => {}));
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={inspect} />); await selectAndInspect(false); vi.useFakeTimers();
+  fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(6500); });
+  expect(screen.getByRole("alert")).toHaveTextContent("timed out");
+  expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled(); expect(inspect).toHaveBeenCalledTimes(1); vi.useRealTimers();
+});
+
+
+it.each(["success", "http failure", "missing artifact", "wrong digest", "wrong size", "wrong lineage", "wrong job"])("actual Cockpit partial inspector gates DOM presentation: %s", async mutation => {
+  useChatStore.setState({ messages: [], sessionId: "session-one", sessions: [], connectionStatus: "connected", isAgentBusy: false, onboardingCompleted: true });
+  useCockpitLayoutStore.setState({ activeSection: "work", activeLayoutId: "default", inspectorVisible: true,
+    paneVisibility: getDefaultPaneVisibility("default"), savedPaneVisibility: { default: getDefaultPaneVisibility("default") } });
+  usePanelLayoutStore.setState(usePanelLayoutStore.getInitialState(), true);
+  let finish!: (value: Response) => void;
+  const job = { job_id: output.child_job_id, parent_job_id: output.delegation_invocation_id, status: "succeeded", job_kind: "general-task",
+    artifacts: [{ artifact_id: output.artifact_id, file_path: "artifacts/private/specialist.json", content_sha256: output.content_sha256, size_bytes: output.size_bytes, exists: true }], effects: [],
+    started_at: "2026-10-09T00:00:00Z", updated_at: "2026-10-09T00:00:01Z" };
+  const transport = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith(`/api/workflows/jobs/${output.child_job_id}`)) return new Promise<Response>(resolve => { finish = resolve; });
+    if (url.endsWith("/api/auth/session")) return response({ authenticated: true, principal_id: owner.ownerPrincipalId, session_id: owner.ownerSessionId, absolute_expires_at: "2099-01-01T00:00:00Z", idle_expires_at: "2099-01-01T00:00:00Z" });
+    if (url.endsWith(`/api/work-board/tasks/${task.task_id}/plan`)) return response(plan);
+    if (url.includes("/api/work-board/tasks?")) return response({ tasks: [task], next_after: null, last_event_id: 1 });
+    if (url.endsWith(`/api/work-board/tasks/${task.task_id}`)) return response({ task, events: [], attempts: [task.latest_attempt], parents: [], children: [], comments: [], revision: task.task_revision });
+    if (url.includes("/api/work-board/events")) return response({ events: [], last_event_id: 1, gap: false });
+    if (url.includes("/api/sessions") || url.includes("/api/goals/tree") || url.includes("/api/audit/events") || url.includes("/api/approvals/pending")) return response([]);
+    if (url.includes("/api/goals/dashboard")) return response({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 });
+    return response({});
+  });
+  vi.stubGlobal("fetch", transport); vi.mocked(apiFetch).mockImplementation(transport);
+  vi.stubGlobal("WebSocket", class { readyState = 0; close() {} send() {} });
+  await act(async () => { render(<CockpitView onSend={() => {}} />); });
+  await act(async () => { fireEvent.click(screen.getByTestId("cockpit-section-work")); });
+  const windows = screen.getByRole("button", { name: "Windows" });
+  await act(async () => { fireEvent.click(windows); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Show all" })); });
+  await act(async () => { fireEvent.click(windows); });
+  fireEvent.click(await screen.findByRole("button", { name: "Open task Stopped specialist work" }));
+  await selectAndInspect(false);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  await waitFor(() => expect(finish).toBeDefined());
+  expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Accept selected partial results" })).toBeDisabled();
+  if (mutation === "missing artifact") job.artifacts = [];
+  if (mutation === "wrong digest") job.artifacts[0].content_sha256 = "b".repeat(64);
+  if (mutation === "wrong size") job.artifacts[0].size_bytes = 1;
+  if (mutation === "wrong lineage") job.parent_job_id = "foreign";
+  if (mutation === "wrong job") job.job_id = "foreign";
+  await act(async () => { finish(response({ job }, mutation === "http failure" ? 403 : 200)); });
+  if (mutation === "success") {
+    expect(await screen.findByLabelText("Authenticated partial artifact receipt")).toHaveTextContent(`${output.size_bytes} bytes`);
+    expect(screen.getByLabelText("Authenticated partial artifact receipt")).toHaveTextContent(output.content_sha256);
+    expect(screen.getByLabelText("Authenticated partial artifact receipt")).toHaveTextContent(output.child_job_id);
+    expect(screen.getByLabelText("Authenticated partial artifact receipt")).toHaveTextContent("File content is not previewed");
+    await waitFor(() => expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeEnabled());
+  } else {
+    await screen.findAllByRole("alert");
+    expect(screen.queryByLabelText("Authenticated partial artifact receipt")).toBeNull();
+    expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
+  }
+  expect(transport.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
+});
+
+
+it("revokes an earlier presentation if explicit reinspection fails", async () => {
+  const inspect = vi.fn(async ({ binding }: PartialArtifactInspectionRequest) => ({ binding, presented: true as const }) as PartialArtifactInspectionReceipt | null);
+  render(<GeneralTaskPanel {...owner} task={task} onInspectPartialArtifact={inspect} />); await selectAndInspect();
+  inspect.mockResolvedValueOnce(null);
+  fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));
+  await screen.findByRole("alert"); expect(screen.getByLabelText("Acknowledge unresolved partial debt")).toBeDisabled();
 });

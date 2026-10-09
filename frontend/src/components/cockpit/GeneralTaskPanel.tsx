@@ -7,11 +7,14 @@ import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan, Specialis
 import { parseDocumentPreparationView, type DocumentPreparationView } from "../../lib/documentPreparation";
 import type { WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
+import { partialInspectionKey, type InspectPartialArtifact, type PartialArtifactInspectionBinding } from "./partialArtifactInspection";
+
 interface Props {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
   task?: WorkBoardTask; goals?: GoalInfo[]; onClose?: () => void;
   onCreated?: (task: WorkBoardTask) => void | Promise<void>; onChanged?: () => void | Promise<void>;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  onInspectPartialArtifact?: InspectPartialArtifact;
 }
 // Pending intent stays in memory under its original owner, never in browser storage.
 const pendingCreates = new Map<string, GeneralTaskCreateRequest>();
@@ -32,7 +35,7 @@ async function readDocumentPreparation(taskId: string, selectedRefs: string[]): 
   }
   return parseDocumentPreparationView(await response.json(), selectedRefs);
 }
-export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated, onChanged, onInspectArtifact }: Props) {
+export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated, onChanged, onInspectArtifact, onInspectPartialArtifact }: Props) {
   const scope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}:${ownerSessionId}` : null;
   const [pending, setPending] = useState<GeneralTaskCreateRequest | null>(() => scope ? pendingCreates.get(scope) ?? null : null);
   const [goalId, setGoalId] = useState(pending?.input.goal_ref ?? "");
@@ -53,12 +56,17 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [pendingPartial, setPendingPartial] = useState<SpecialistPartialRequest | null>(null);
   const [acceptedPartial, setAcceptedPartial] = useState<SpecialistPartialReview | null>(null);
   const generation = useRef(0);
+  const partialInspection = useRef<AbortController | null>(null);
+  const partialContext = useRef("");
+  const [inspectingPartial, setInspectingPartial] = useState(false);
+  function resetPartialInspection() { partialInspection.current?.abort(); partialInspection.current = null; setInspectingPartial(false); setOpenedPartial([]); setPartialAck(false); }
   const ownedGoals = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
   const goal = ownedGoals.find(g => g.id === goalId);
   const owned = Boolean(scope && (!task || (task.owner_principal_id === ownerPrincipalId && task.owner_session_id === ownerSessionId && task.ownership_access !== "recovered_read_only")));
   async function refresh() {
     if (!task || !owned) return;
     const version = generation.current;
+    resetPartialInspection();
     setRead(null); setAck(false); setError(null); setPreparationView(null);
     setPartialSteps([]); setOpenedPartial([]); setPartialAck(false); setAcceptedPartial(null);
     try {
@@ -80,13 +88,14 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     } catch (e) { if (version === generation.current) setError((e as Error).message); }
   }
   useEffect(() => {
+    resetPartialInspection();
     ++generation.current; setBusy(false); setRead(null); setAck(false); setError(null); setPendingEdit(null); setPlanDraft("");
     setPendingRevision(null); setReplacementDraft(""); setRevisionReason("");
     const retained = scope ? pendingCreates.get(scope) ?? null : null;
     setPending(retained); setIntent(retained?.input.intent ?? ""); setGoalId(retained?.input.goal_ref ?? "");
     setCost(String(retained?.input.limits.max_cost_microusd ?? 0)); setEgress(retained?.input.inference_egress_acknowledged ?? false);
     if (task && owned) void refresh();
-    return () => { ++generation.current; };
+    return () => { ++generation.current; partialInspection.current?.abort(); };
   }, [scope, task?.task_id, task?.task_revision, owned]); // Exact scope fences late readbacks.
   useEffect(() => {
     setPendingPartial(null); setAcceptedPartial(null); setPartialSteps([]); setOpenedPartial([]); setPartialAck(false);
@@ -95,14 +104,41 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const eligiblePartial = partialOptions && "selected_steps" in partialOptions && partialOptions.eligible ? partialOptions : null;
   const partialOverlay = acceptedPartial ?? read?.native_execution?.partial_review;
   const selectedPartialOutputs = eligiblePartial?.selected_steps.filter(step => partialSteps.includes(step.step_id)).flatMap(step => step.outputs) ?? [];
-  const partialInspected = Boolean(selectedPartialOutputs.length && selectedPartialOutputs.every(output => openedPartial.includes(output.artifact_id)));
-  function inspectPartial(output: SpecialistPartialOutput) {
-    if (!owned || !ownerSessionId || !onInspectArtifact || busy) return;
+  function inspectionBinding(output: SpecialistPartialOutput): PartialArtifactInspectionBinding | null {
+    if (!task || !read || !ownerPrincipalId || !ownerSessionId || !eligiblePartial) return null;
+    return { ownerPrincipalId, ownerSessionId, taskId: task.task_id, taskRevision: read.task_revision,
+      attemptId: eligiblePartial.attempt_id, workflowRunId: eligiblePartial.workflow_run_id,
+      planRevision: eligiblePartial.expected_plan_revision, manifestRevision: eligiblePartial.expected_manifest_revision, output };
+  }
+  partialContext.current = JSON.stringify([scope, task?.task_id, task?.task_revision, read?.plan?.revision, eligiblePartial, partialSteps]);
+  const partialInspected = Boolean(!inspectingPartial && selectedPartialOutputs.length && selectedPartialOutputs.every(output => {
+    const binding = inspectionBinding(output); return binding && openedPartial.includes(partialInspectionKey(binding));
+  }));
+  async function inspectPartial(output: SpecialistPartialOutput) {
+    const binding = inspectionBinding(output);
+    if (!owned || !binding || !onInspectPartialArtifact || busy || inspectingPartial) return;
+    const controller = new AbortController(); partialInspection.current = controller;
+    const context = partialContext.current, version = generation.current;
+    const current = () => !controller.signal.aborted && context === partialContext.current && version === generation.current;
+    setOpenedPartial(previous => previous.filter(key => key !== partialInspectionKey(binding)));
+    setInspectingPartial(true); setPartialAck(false); setError(null);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      onInspectArtifact({ reference: { artifact_id: output.artifact_id, content_sha256: output.content_sha256 },
-        ownerSessionId, workflowRunId: output.child_job_id, parentWorkflowRunId: output.delegation_invocation_id });
-      setOpenedPartial(previous => [...new Set([...previous, output.artifact_id])]); setPartialAck(false);
-    } catch { setError("Artifact inspector is unavailable. Inspect every selected output before acknowledging this decision."); }
+      const receipt = await Promise.race([
+        onInspectPartialArtifact({ binding, signal: controller.signal }),
+        new Promise<null>(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null); }, 6500); }),
+      ]);
+      if (!current()) return;
+      if (!receipt || receipt.presented !== true || partialInspectionKey(receipt.binding) !== partialInspectionKey(binding)) throw Error("Artifact receipt was not loaded and presented with its exact owner and lineage.");
+      setOpenedPartial(previous => [...new Set([...previous, partialInspectionKey(binding)])]);
+    } catch (e) { if (current()) setError(`${(e as Error).message} Inspect every selected artifact receipt before acknowledging this decision.`); }
+    finally {
+      clearTimeout(timer);
+      if (partialInspection.current === controller && version === generation.current) {
+        partialInspection.current = null; setInspectingPartial(false);
+        if (controller.signal.aborted && context === partialContext.current && version === generation.current) setError("Artifact receipt inspection timed out or was cancelled. Retry inspection explicitly.");
+      }
+    }
   }
   async function acceptPartial() {
     if (!task || !read || !owned || busy || read.task_revision !== task.task_revision || partialOverlay
@@ -330,22 +366,22 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
             <p className="break-all text-xs">Decision {partialOverlay.decision_digest} · partial result {partialOverlay.result_ref.artifact_id}</p>
             {partialOverlay.selected_outputs.map(output => <div key={output.artifact_id} className="mt-1 text-xs">
               <p>{output.step_id} · specialist {output.child_task_id} · {output.size_bytes} bytes · SHA-256 {output.content_sha256}</p>
-              <button type="button" disabled={busy || !owned || !onInspectArtifact} onClick={() => inspectPartial(output)}>Inspect accepted partial artifact {output.artifact_id}</button>
+              <button type="button" disabled={busy || !owned || !onInspectArtifact} onClick={() => onInspectArtifact?.({ reference: { artifact_id: output.artifact_id, content_sha256: output.content_sha256 }, ownerSessionId: ownerSessionId ?? null, workflowRunId: output.child_job_id, parentWorkflowRunId: output.delegation_invocation_id })}>Inspect accepted partial artifact {output.artifact_id}</button>
             </div>)}
           </section>}
           {eligiblePartial && !partialOverlay && <section aria-label="Review specialist partial results" className="mt-2 rounded border border-amber-400/30 p-2">
             <p>Accept only these producer-issued successful outputs for partial review. Remaining work, Unknown effects and accounting debt stay unresolved; no task or attempt is renewed and no learning occurs.</p>
             {eligiblePartial.selected_steps.map(step => <div key={step.step_id} className="mt-2">
               <label><input type="checkbox" aria-label={`Select partial step ${step.step_id}`} checked={partialSteps.includes(step.step_id)} disabled={busy || !owned || Boolean(pendingPartial)}
-                onChange={event => { setPartialSteps(previous => event.target.checked ? [...previous, step.step_id] : previous.filter(id => id !== step.step_id)); setPartialAck(false); }} />Select successful step {step.step_id}</label>
+                onChange={event => { resetPartialInspection(); setPartialSteps(previous => event.target.checked ? [...previous, step.step_id] : previous.filter(id => id !== step.step_id)); setPartialAck(false); }} />Select successful step {step.step_id}</label>
               {step.outputs.map(output => <div key={output.artifact_id} className="ml-3 text-xs">
                 <p className="break-all">Specialist {output.child_task_id} · {output.size_bytes} bytes · SHA-256 {output.content_sha256}</p>
-                <button type="button" disabled={busy || !owned || !onInspectArtifact || Boolean(pendingPartial)} onClick={() => inspectPartial(output)}>Inspect partial artifact {output.artifact_id}</button>
+                <button type="button" disabled={busy || !owned || !onInspectPartialArtifact || inspectingPartial || Boolean(pendingPartial)} onClick={() => void inspectPartial(output)}>Inspect partial artifact {output.artifact_id}</button>
               </div>)}
             </div>)}
-            <p className="text-xs">Opening the inspector is not proof of successful readback. Confirm that you inspected every selected artifact before acknowledging the remaining debt.</p>
+            <p className="text-xs">Review the selected artifact receipts (identity, lineage, SHA-256 and size). File content is not previewed here; the server physically verifies it when accepting the decision.</p>
             <label><input type="checkbox" aria-label="Acknowledge unresolved partial debt" checked={partialAck}
-              disabled={busy || !owned || !partialInspected || Boolean(pendingPartial)} onChange={event => setPartialAck(event.target.checked)} />I inspected these selected artifacts and acknowledge unresolved effects and accounting; accept partial review only.</label>
+              disabled={busy || !owned || !partialInspected || Boolean(pendingPartial)} onChange={event => setPartialAck(event.target.checked)} />I inspected these selected artifact receipts and acknowledge unresolved effects and accounting; accept partial review only.</label>
             <button type="button" disabled={busy || !owned || (!pendingPartial && (!partialAck || !partialInspected))} onClick={() => void acceptPartial()}>{pendingPartial ? "Reconcile exact partial decision" : "Accept selected partial results"}</button>
           </section>}
           {pendingPartial && !partialOverlay && <p role="status">The partial decision has an unconfirmed receipt. Refresh this original task to inspect it, or reconcile the exact request with the same idempotency key. No new selection or automatic retry is allowed.</p>}

@@ -120,6 +120,16 @@ async def test_existing_target_jobs_are_blocked_freshly_fenced_and_retry_is_exac
             await repository.record_checkpoint(job_id, checkpoint_id="stale-worker-write", state={"output": "must not adopt"},
                 owner="old-worker", fencing_token=prior["fencing_token"], expected_revision=prior["revision"])
     snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["status"] == "blocked" and snapshot["reason_code"] == "general_task_group_lookup_invalid", snapshot
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        lookup_rows = (await connection.exec_driver_sql(
+            "SELECT group_lookup_key FROM inference_cost_reservations")).all()
+        assert len(lookup_rows) == 2 and all(row[0] is None for row in lookup_rows)
+        await _ensure_inference_group_lookup(connection)
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["status"] == "ready", snapshot
     assert snapshot["committed_microusd"] == 17 and snapshot["unknown_microusd"] == 100
     assert snapshot["remaining_microusd"] == 883
     assert calls == ["settled", "unknown"]

@@ -12,9 +12,10 @@ from src.operator.home_projection import home_projection
 from tests.test_home_continuation import accounting_db, home_setup
 from tests.test_general_task_planner import forbid_external_inference
 from tests.test_general_task_methods import test_genuine_completed_native_source_review_next_task_and_future_rollback as genuine_method_journey
+from tests.test_general_task_methods import method_admission_lifecycle
 
 
-async def test_genuine_native_method_history_read_without_body_or_file_access(accounting_db,monkeypatch,tmp_path,forbid_external_inference):
+async def test_genuine_native_method_history_read_without_body_or_file_access(accounting_db,monkeypatch,tmp_path,forbid_external_inference,method_admission_lifecycle):
     client,_ = await home_setup(accounting_db,monkeypatch)
     actual_create = auth.create_session
     actual_pass = WorkBoardDispatcher.run_pass
@@ -22,8 +23,7 @@ async def test_genuine_native_method_history_read_without_body_or_file_access(ac
     async def capture_actual_root(*args,**kwargs):
         result = await actual_create(*args,**kwargs)
         client.cookies.set(settings.operator_auth_cookie_name,result[0])
-        await historical_method_service.stop()
-        await historical_method_service.start()
+        await method_admission_lifecycle.start()
         assert historical_method_service.signing_key is not None
         home_projection.stop()
         home_projection.start()
@@ -70,7 +70,7 @@ async def test_genuine_native_method_history_read_without_body_or_file_access(ac
             # admits another Task and rolls back during its actual claim.
             native_root = tmp_path/"actual-native-source"
             native_root.mkdir()
-            await genuine_method_journey(accounting_db[2].accounting_sessions,monkeypatch,native_root,forbid_external_inference)
+            await genuine_method_journey(accounting_db[2].accounting_sessions,monkeypatch,native_root,forbid_external_inference,method_admission_lifecycle)
             original_pin = next(row["method"] for body in snapshots for section in ("task_next_actions","prepared_outputs")
                 for row in body[section]["items"] if row.get("method") and row["method"]["status"]=="admitted")
             from src.db.models import Memory,MemoryTombstone
@@ -159,4 +159,4 @@ async def test_genuine_native_method_history_read_without_body_or_file_access(ac
         assert (active[0]["method_id"],active[0]["version"],active[0]["digest"]) == (
             rolled_back[0]["method_id"],rolled_back[0]["version"],rolled_back[0]["digest"])
     finally:
-        await historical_method_service.stop()
+        await method_admission_lifecycle.close()

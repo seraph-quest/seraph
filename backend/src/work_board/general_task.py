@@ -329,6 +329,29 @@ class GeneralTaskService:
             raise BoardError("general_task_strategy_changed", "Original method pin changed", status_code=409)
         return binding
 
+    async def _specialist_strategy(self, db, owner, request, context):
+        """Only the original private reservation selects a narrowed child plan."""
+        from src.workflows.specialist_delegation import current_delegation
+        if db is None:
+            raise BoardError("specialist_delegation_publication_changed", "Original specialist writer required", status_code=409)
+        original = await current_delegation(db, context.callback.run_identity,
+            callback_fence=context.callback.fencing_token)
+        if (original.request != context.request or original.reservation != context.reservation
+            or original.envelope != context.envelope
+            or (owner.principal_id, owner.session_id) != (original.task.owner_principal_id, original.task.owner_session_id)
+            or request.input.goal_ref != original.task.goal_id or request.goal_revision != original.task.goal_revision
+            or request.idempotency_key != original.reservation.child_publication_key
+            or request.plan is None or len(request.plan.steps) > original.request.limits.max_steps
+            or any(step.tool_id not in original.request.allowed_tool_ids for step in request.plan.steps)
+            or request.input.intent != original.request.instruction
+            or request.input.limits != original.envelope.task_input.limits
+            or request.input.evidence_refs != original.request.evidence_refs):
+            raise BoardError("specialist_delegation_publication_changed", "Original reserved specialist plan required", status_code=409)
+        await self.validate_pinned_strategy(db, owner, original.envelope)
+        # This child executes the sealed DelegateRequest, not a new general
+        # method admission. The parent's immutable method remains its owner.
+        return TaskStrategyBinding(status="none", reason="specialist_original_tool_subset")
+
     def method_constraints(self, binding):
         descriptors, _ = self.snapshot()
         return method_constraints(binding, descriptors)
@@ -420,7 +443,7 @@ class GeneralTaskService:
                 "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": size})
         return result
 
-    async def validate(self, owner: WorkBoardOwner, request: GeneralTaskCreate, *, _specialist_context=None):
+    async def validate(self, owner: WorkBoardOwner, request: GeneralTaskCreate, *, _specialist_context=None, db=None):
         descriptors, tool_digest = self.snapshot()
         if request.plan is None:
             raise BoardError("general_task_plan_required", "Generate and review a typed plan first", status_code=422)
@@ -463,7 +486,8 @@ class GeneralTaskService:
                 raise ValueError("requested output contract is incompatible")
         except Exception as exc:
             raise BoardError("general_task_plan_invalid", "Plan violates a registered tool contract", status_code=422) from exc
-        strategy = await self.strategy(owner, request.input.goal_ref)
+        strategy = (await self.strategy(owner, request.input.goal_ref) if _specialist_context is None
+            else await self._specialist_strategy(db, owner, request, _specialist_context))
         envelope = GeneralTaskEnvelope(task_input=request.input, plan=request.plan,
             descriptors=list(selected.values()), strategy=strategy)
         self.validate_method_plan(envelope)
@@ -517,7 +541,10 @@ class GeneralTaskService:
             return BoardMutation(existing, event, idempotent_replay=True)
         await self.repository._validate_goal(db, owner, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision)
-        await self.strategy(owner, request.input.goal_ref)
+        if _specialist_context is None:
+            await self.strategy(owner, request.input.goal_ref)
+        else:
+            await self._specialist_strategy(db, owner, request, _specialist_context)
         if _specialist_context is not None:
             from src.workflows.specialist_evidence import read_specialist_handoff
             copied = await read_specialist_handoff(db, _specialist_context)
@@ -560,7 +587,7 @@ class GeneralTaskService:
                     strategy=await self.strategy(owner, task_input.goal_ref),
                     proposal_group=proposal.group, proposal_provenance=proposal.provenance)
         else:
-            envelope = await self.validate(owner, request, _specialist_context=_specialist_context)
+            envelope = await self.validate(owner, request, _specialist_context=_specialist_context, db=db)
             if _specialist_context is not None:
                 from src.workflows.specialist_delegation import current_delegation
                 original = await current_delegation(db, _specialist_context.callback.run_identity,
@@ -1067,6 +1094,7 @@ class GeneralTaskService:
         if envelope.specialist_handoff is not None:
             from src.workflows.specialist_evidence import validate_handoff_publication, read_specialist_handoff
             context = await validate_handoff_publication(db, owner, envelope)
+            await self.validate_pinned_strategy(db, owner, context.envelope)
             copied = await read_specialist_handoff(db, context)
             evidence = [entry.model_dump(mode="json", exclude={"content"}) for entry in copied.entries]
         else:

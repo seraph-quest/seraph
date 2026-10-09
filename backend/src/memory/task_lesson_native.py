@@ -87,7 +87,8 @@ async def _project_completed_native_method(db, task, parent, family):
     from src.memory.task_lessons import TaskMethod, ToolStep, MethodOutput
     from src.work_board.contracts import WorkBoardOwner, GeneralTaskArtifactRef
     from src.work_board.general_task_runtime_artifacts import (verify_readonly_native_projection,
-        read_native_artifact_reference, read_current_native_outputs)
+        read_native_artifact_reference, read_current_native_outputs,
+        read_bound_native_tool_input, resolve_current_native_step_inputs)
     from src.work_board.general_task_native import current_plan
     from src.workflows.general_task_guard import assert_child_closed, child_binding
     from src.native_tools.registry import TOOL_METADATA
@@ -111,10 +112,28 @@ async def _project_completed_native_method(db, task, parent, family):
         if child is None or descriptor is None or step.tool_id not in TOOL_METADATA:
             _deny()
         binding = child_binding(child)
+        # The verified manifest authenticates this complete finite revision
+        # history. A continued task keeps each callback's original admitted
+        # plan pin; its executed step must remain exactly frozen in the final
+        # plan, rather than acquiring the latest revision's digest.
+        if binding.plan_revision not in manifest.revision_numbers:
+            _deny()
+        revision_index = manifest.revision_numbers.index(binding.plan_revision)
+        admitted_plan = envelope.plan if revision_index == 0 else read_native_artifact_reference(
+            GeneralTaskArtifactRef(artifact_id=manifest.revision_artifact_ids[revision_index],
+                digest=manifest.revision_artifact_digests[revision_index],
+                schema_version=manifest.revision_artifact_schemas[revision_index]),
+            parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest).plan
+        admitted_step = next((item for item in admitted_plan.steps if item.step_id == step.step_id), None)
+        private = read_bound_native_tool_input(child, binding)
+        resolved = await resolve_current_native_step_inputs(db, parent, task,
+            await _source_attempt(db, manifest.attempt_id), manifest, envelope, step)
         if (receipt.status != "verified" or receipt.contact_state != "settled"
             or receipt.step_id != step.step_id or receipt.invocation_id != child.run_identity
             or receipt.child_attempt_count != child.attempt_count or receipt.child_fence != child.fencing_token
-            or binding.step_id != step.step_id or binding.plan_digest != manifest.current_plan_digest
+            or binding.step_id != step.step_id or binding.plan_digest != digest(admitted_plan.model_dump(mode="json"))
+            or admitted_plan.revision != binding.plan_revision or admitted_step != step
+            or private.tool_id != step.tool_id or private.inputs != resolved
             or json.loads(child.arguments_json).get("tool_id") != step.tool_id
             or binding.descriptor_digest != digest(descriptor.model_dump(mode="json"))):
             _deny()

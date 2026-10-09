@@ -347,6 +347,13 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
       <button type="button" disabled={busy || !owned || Boolean(pendingEdit)} onClick={() => void refresh()}>Refresh current task plan</button>
       {read && owned && <>
         <p className="text-xs">Task revision {read.task_revision} · plan revision {read.plan?.revision ?? "not yet valid"} · no_learning. Acceptance grants no new permission; the dispatcher owns admission and each effect still requires its current approval.</p>
+        <div aria-label="Original task method binding">
+          {read.strategy.status === "active" ? <>
+            <p className="break-all">Reviewed method {read.strategy.method_id} · immutable version {read.strategy.version} · digest {read.strategy.digest}</p>
+            <pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(read.strategy.typed_data, null, 2)}</pre>
+            <p>Quality is unmeasured. Admission pins this version; future selection changes do not replace it. Current revocation and source authority still apply.</p>
+          </> : <p>{read.strategy.status === "none" ? "Explicit baseline task method" : "Task method blocked"} · {read.strategy.reason}</p>}
+        </div>
         {read.native_execution && <section aria-label="Native task execution" className="mt-3 rounded border border-white/10 p-2">
           <p role="status">Native phase {read.native_execution.phase} · manifest revision {read.native_execution.manifest_revision}</p>
           {read.native_execution.cancellation?.state && <p role="status">{

@@ -27,7 +27,7 @@ def public_schema(value, *, property_map=False):
     return value
 
 
-def planner_messages(task_input, descriptors):
+def planner_messages(task_input, descriptors, *, method_constraints=None):
     from src.work_board.general_task import canonical, validate_schema
     validate_schema(task_input.requested_output, check_value=False)
     tools = []
@@ -42,6 +42,10 @@ def planner_messages(task_input, descriptors):
     # turns private artifacts into instruction-authoritative operator input.
     data = {"intent": task_input.intent, "requested_output": public_schema(task_input.requested_output),
         "max_steps": task_input.limits.max_steps, "registered_tools": tools}
+    if method_constraints is not None:
+        # Only server-validated finite tool/guard identities; never canonical
+        # memory JSON, method prose, permissions or invented tool arguments.
+        data["reviewed_plan_constraints"] = method_constraints
     return [{"role": "system", "content":
         "Propose an inert registered-tool plan. Return only one JSON object matching "
         "PlanSpec: {schema_version:1,revision:1,steps:[{step_id,tool_id,input,depends_on,"
@@ -113,10 +117,11 @@ class GeneralTaskPlanner:
         continuation["frozen_steps"] = [step for step in current_plan(manifest, envelope).steps
             if step.step_id in manifest.step_ids]
         return await self.propose(db, owner, envelope.task_input, envelope.descriptors,
-            task.goal_revision, request_key, with_provenance=True, _continuation=continuation)
+            task.goal_revision, request_key, with_provenance=True, _continuation=continuation,
+            strategy=envelope.strategy)
 
     async def propose(self, db, owner, task_input, descriptors, goal_revision, idempotency_key,
-                      *, with_provenance=False, _continuation=None, _specialist=None):
+                      *, with_provenance=False, _continuation=None, _specialist=None, strategy=None):
         from src.auth.service import authenticate_session
         from src.approval.runtime import set_runtime_context, reset_runtime_context
         from src.model_fabric.caller_context import build_canonical_inference_context
@@ -189,11 +194,15 @@ class GeneralTaskPlanner:
         options = _profile_options(profile_id)
         if set(options) - {"provider", "_seraph_openrouter"}:
             raise BoardError("general_task_planning_options_invalid", "Unsupported provider request options", status_code=409)
+        constraints = None
+        if strategy is not None:
+            from src.work_board.general_task import method_constraints
+            constraints = method_constraints(strategy, descriptors)
         prompt_input = task_input
         if _specialist is not None:
             prompt_input = task_input.model_copy(update={"limits": task_input.limits.model_copy(
                 update={"max_steps": min(task_input.limits.max_steps, _specialist["max_steps"])})})
-        messages = planner_messages(prompt_input, descriptors)
+        messages = planner_messages(prompt_input, descriptors, method_constraints=constraints)
         if _specialist is not None:
             messages.append({"role": "user", "content": json.dumps({"specialist_role": _specialist["specialist_role"]})})
             if task_input.evidence_refs:

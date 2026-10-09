@@ -103,10 +103,12 @@ async def render_bounded_guardian_snapshot(
                 MemoryKind.routine,
             ),
             limit_per_kind=2,
+            for_model_context=True,
         )
         procedural_memories = await memory_repository.list_memories(
             kind=MemoryKind.procedural,
             limit=4,
+            for_model_context=True,
         )
     except SQLAlchemyError:
         return "", hashlib.sha256(b"guardian_snapshot_memory_unavailable").hexdigest()

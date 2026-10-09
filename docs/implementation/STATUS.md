@@ -211,13 +211,46 @@ macOS ABI; unknown restart proof visibly retains capacity while same-process
 workers and manual review remain usable. macOS native execution is unverified
 on the Linux validation host. It makes no
 inference call, grants no trace-egress permission and
-does not infer a positive preference from success. Strategy adoption and
-next-task reuse (#1001) remain **Planned**. The named proof is an actual
+does not infer a positive preference from success. The named #1000 proof is an actual
 authenticated failed formatter journey with terminal failure, proven process
 cleanup, private inspectable candidate and no output adoption, plus isolated
 M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
+**Reviewed task methods (#1001): Shipped on `develop` revisions containing the
+independently reviewed milestone merge.** Earlier revisions require that merge;
+branch-local receipts do not establish availability. Explicit review accepts
+immutable closed `TaskMethod.v1` or `ResearchStrategy.v1` data into signed
+canonical M5 patterns and an atomic signed Goal-revision/family selection, with
+at most 16 accepted versions per scope. Generic recall and M5 selection exclude
+these methods. New general tasks apply supported registered tool sequences and
+finite guards through existing PlanSpec/native execution; public discovery
+applies approved research fields within its original finite programme grant.
+Structured research proposals require exact completed research-dossier sources
+and verified native output. The existing Inspector exposes bounded structured
+research fields only for that verified source, shows original Task/Attempt/Goal
+revision/references/observed receipts in private and canonical inspection, and
+requires explicit acknowledgment before adoption. Candidate preparation remains
+inert; known-candidate recovery reads the same draft and uncertain preparation
+requires explicit same-request reconciliation. Dossier execution itself remains
+explicit baseline.
+Unsupported formatter capability steps cannot activate a general-task method.
+Rollback selects baseline for future work while an admitted original immutable
+pin may continue under current source and authority; tombstones and revocation
+still deny it. Missing, invalid, changed or revoked state blocks rather than
+silently downgrading; only demonstrably never-selected scopes preserve ordinary
+baseline. Selected recovered logins are read-only.
+
+Named provider-free Linux proofs exercise an authenticated completed native
+general task, operator completion, exact source discovery, review and subsequent
+native physical output with the selected method; a completed research dossier,
+structured proposal, signed adoption and subsequent real public discovery; and
+rollback, original-pin continuation, explicit future baseline, recovery,
+signature/source/selection tamper and pre-contact revocation. Independent review
+is required for the milestone merge. These receipts establish bounded mechanics,
+not learned quality, live-provider usefulness or native macOS execution. See the
+[operator contract](./12-current-app-guide.md#reviewed-task-methods).
 
 **Finite public goal programme authority: Shipped** on `develop` revisions
 containing the independently reviewed

@@ -40,7 +40,9 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     if planner is None:
         from src.work_board.general_task_planner import GeneralTaskPlanner
         planner = GeneralTaskPlanner()
-    service = GeneralTaskService(registry, planner=planner)
+    from src.memory.task_methods import current_method, TaskMethodStrategyResolver
+    service = GeneralTaskService(registry, planner=planner,
+        strategy_resolver=TaskMethodStrategyResolver(current_method))
     if dispatcher.general_tasks is not None:
         raise RuntimeError("general task lifecycle already owned")
     try:
@@ -193,6 +195,29 @@ class DescriptorRegistry(Protocol):
                      job_id: str, fencing_token: int) -> Any: ...
 
 
+def method_constraints(binding, descriptors):
+    """Closed data projection, never a registry/lifecycle or authority grant."""
+    if binding.status == "none":
+        return None
+    if binding.status != "active":
+        raise BoardError("general_task_strategy_blocked", "Current method is blocked", status_code=409)
+    from src.memory.task_lessons import TaskMethod, ToolStep, GuardStep
+    try:
+        method = TaskMethod.model_validate(binding.typed_data)
+        if method.family != "general" or digest(method.model_dump(mode="json")) != binding.digest:
+            raise ValueError("method scope/digest mismatch")
+        available = {tool.tool_id for tool in descriptors}
+        sequence = [step.tool_id for step in method.steps if isinstance(step, ToolStep)]
+        guards = [step.check for step in method.steps if isinstance(step, GuardStep)]
+        if any(not isinstance(step, (ToolStep, GuardStep)) for step in method.steps):
+            raise ValueError("fixed capability method has no general tool execution mapping")
+        if not sequence or any(tool not in available for tool in sequence) or set(sequence) != set(method.registered_tool_ids):
+            raise ValueError("method tool sequence unavailable")
+        return {"tool_sequence": sequence, "guards": guards}
+    except Exception as exc:
+        raise BoardError("general_task_method_unsupported", "Review a supported current registered-tool method", status_code=409) from exc
+
+
 class GeneralTaskService:
     def __init__(self, registry: DescriptorRegistry, *, repository=None,
                  strategy_resolver: StrategyResolver | None = None, planner=None):
@@ -281,13 +306,77 @@ class GeneralTaskService:
     async def strategy(self, owner, goal_ref):
         binding = TaskStrategyBinding(status="none", reason="baseline")
         if self.strategy_resolver is not None:
-            binding = self.strategy_resolver.resolve(owner, goal_ref, CAPABILITY)
+            binding = self.strategy_resolver.resolve(owner, goal_ref, "work.general-task.v1")
             if inspect.isawaitable(binding):
                 binding = await binding
             binding = TaskStrategyBinding.model_validate(binding)
         if binding.status == "blocked":
             raise BoardError("general_task_strategy_blocked", binding.reason, status_code=409)
         return binding
+
+    async def validate_pinned_strategy(self, db, owner, envelope):
+        if self.strategy_resolver is None:
+            if envelope.strategy.status != "none":
+                raise BoardError("general_task_strategy_owner_unavailable", "Restore the original method owner", status_code=503)
+            return envelope.strategy
+        validator = getattr(self.strategy_resolver, "validate_pinned", None)
+        if validator is None:
+            raise BoardError("general_task_strategy_owner_unavailable", "Restore immutable method validation", status_code=503)
+        binding = validator(owner, envelope.task_input.goal_ref, envelope.strategy, db=db)
+        if inspect.isawaitable(binding):
+            binding = await binding
+        if binding != envelope.strategy:
+            raise BoardError("general_task_strategy_changed", "Original method pin changed", status_code=409)
+        return binding
+
+    def method_constraints(self, binding):
+        descriptors, _ = self.snapshot()
+        return method_constraints(binding, descriptors)
+
+    def validate_method_plan(self, envelope):
+        constraints = self.method_constraints(envelope.strategy)
+        if constraints is None or envelope.plan is None:
+            return
+        if [step.tool_id for step in envelope.plan.steps] != constraints["tool_sequence"]:
+            raise BoardError("general_task_method_sequence_mismatch", "Plan must follow the reviewed tool sequence", status_code=409)
+        if "source_exists" in constraints["guards"] and any(step.tool_id not in {"read_file", "write_file"} for step in envelope.plan.steps):
+            raise BoardError("general_task_method_guard_unsupported", "Source existence needs the original workspace file adapter", status_code=409)
+        if "preserve_source_attribution" in constraints["guards"]:
+            final = envelope.plan.steps[-1]
+            descriptor = next(item for item in envelope.descriptors if item.tool_id == final.tool_id)
+            if (not envelope.task_input.evidence_refs or "source_refs" not in descriptor.output_schema.get("properties", {})
+                or "source_refs" not in final.output_contract.get("required", [])
+                or "source_refs" not in envelope.task_input.requested_output.get("required", [])):
+                raise BoardError("general_task_method_guard_unsupported", "Use a registered output contract supporting selected source attribution", status_code=409)
+
+    def check_method_source(self, envelope, step, inputs):
+        constraints = self.method_constraints(envelope.strategy)
+        if constraints is None or "source_exists" not in constraints["guards"]:
+            return
+        import os
+        from src.tools.filesystem_tool import _assert_not_secret_like_path, _safe_resolve, _open_workspace_file
+        if step.tool_id not in {"read_file", "write_file"} or not isinstance(inputs.get("file_path"), str):
+            raise BoardError("general_task_method_guard_unsupported", "Original workspace file input required", status_code=409)
+        try:
+            _assert_not_secret_like_path(inputs["file_path"], "read")
+            resolved = _safe_resolve(inputs["file_path"])
+            with _open_workspace_file(resolved, flags=os.O_RDONLY) as fd:
+                os.fstat(fd)  # metadata only; original adapter owns content
+                os.close(fd)
+        except (OSError, ValueError) as exc:
+            raise BoardError("general_task_method_source_missing", "Restore the reviewed source file before tool contact", status_code=409) from exc
+
+    def check_method_output(self, envelope, outputs):
+        constraints = self.method_constraints(envelope.strategy)
+        if constraints is None:
+            return []
+        if set(outputs) != {step.step_id for step in envelope.plan.steps}:
+            raise BoardError("general_task_method_readback_required", "Every original native step requires its current physical readback", status_code=409)
+        if "preserve_source_attribution" in constraints["guards"]:
+            final = outputs[envelope.plan.steps[-1].step_id]
+            if not isinstance(final, dict) or final.get("source_refs") != envelope.task_input.evidence_refs:
+                raise BoardError("general_task_method_attribution_changed", "Preserve the exact authenticated selected evidence references", status_code=409)
+        return constraints["guards"]
 
     async def evidence(self, db, owner, references):
         """Only current owner-completed board output is execution evidence."""
@@ -377,6 +466,7 @@ class GeneralTaskService:
         strategy = await self.strategy(owner, request.input.goal_ref)
         envelope = GeneralTaskEnvelope(task_input=request.input, plan=request.plan,
             descriptors=list(selected.values()), strategy=strategy)
+        self.validate_method_plan(envelope)
         from src.work_board.document_preparation import check_envelope
         check_envelope(envelope)
         if any(step.tool_id == "document_prepare" for step in request.plan.steps) and request.input.document_source is None:
@@ -444,7 +534,7 @@ class GeneralTaskService:
             try:
                 proposal = await self.planner.propose(db, owner, task_input, descriptors,
                     goal_revision=request.goal_revision, idempotency_key=request.idempotency_key,
-                    with_provenance=True)
+                    with_provenance=True, strategy=await self.strategy(owner, task_input.goal_ref))
                 from src.work_board.general_task_planner import TaskProposalResult
                 if not isinstance(proposal, TaskProposalResult):
                     raise BoardError("general_task_provenance_missing", "Planner must preserve its original accounting provenance", status_code=409)
@@ -920,6 +1010,7 @@ class GeneralTaskService:
         if envelope.plan is None or envelope.proposal_error:
             raise BoardError("general_task_plan_incomplete", "Edit and save a valid plan before acceptance", status_code=409)
         current, _ = self.snapshot()
+        self.validate_method_plan(envelope)
         by_id = {item.tool_id: item for item in current}
         for prior in envelope.descriptors:
             if prior != by_id.get(prior.tool_id):
@@ -959,17 +1050,20 @@ class GeneralTaskService:
         if task.status != WorkBoardStatus.triage:
             raise BoardError("general_task_acceptance_state", "Accept the exact inert Triage proposal", status_code=409)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
-        await self.recheck_authority(db, owner, envelope)
+        await self.recheck_authority(db, owner, envelope, require_current_strategy=True)
 
-    async def recheck_authority(self, db, owner, envelope):
+    async def recheck_authority(self, db, owner, envelope, *, require_current_strategy=False):
         self.recheck(envelope)
         from src.work_board.document_preparation import check_envelope, resolve
         check_envelope(envelope)
         if envelope.task_input.document_source is not None:
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
-        binding = await self.strategy(owner, envelope.task_input.goal_ref)
-        if binding != envelope.strategy:
-            raise BoardError("general_task_strategy_changed", "Review the current task method", status_code=409)
+        if require_current_strategy:
+            binding = await self.strategy(owner, envelope.task_input.goal_ref)
+            if binding != envelope.strategy:
+                raise BoardError("general_task_strategy_changed", "Review the current task method", status_code=409)
+        else:
+            await self.validate_pinned_strategy(db, owner, envelope)
         if envelope.specialist_handoff is not None:
             from src.workflows.specialist_evidence import validate_handoff_publication, read_specialist_handoff
             context = await validate_handoff_publication(db, owner, envelope)

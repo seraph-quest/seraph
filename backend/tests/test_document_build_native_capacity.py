@@ -507,3 +507,82 @@ async def test_authentic_comparison_build_priority_is_reciprocal(accounting_db, 
     finally:
         await document_service.stop()
         service.stop(); registry.stop()
+
+
+async def test_authentic_document_child_checkpoint_survives_generic_history(accounting_db,
+        monkeypatch, forbid_external_inference):
+    """Generic calls cannot mint or erase a real process's recovery witness."""
+    from copy import deepcopy
+    from src.db.models import AuditEvent
+    from src.work_board.general_task_native import run_native_step, retain_native_failure
+    from src.workflows.job_runtime import DurableJobTransitionError, _bounded_checkpoint_receipts
+    from src.work_board import dispatcher as dispatch_module
+    _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    sessions = accounting_db[2].accounting_sessions
+    registry = ToolRegistry(); registry.start()
+    service = GeneralTaskService(registry); service.start()
+    dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+    monkeypatch.setattr(dispatch_module, "_dispatcher", dispatcher)
+    def interrupted_publication(*args, **kwargs):
+        raise OSError("actual producer interrupted after authentic supervision")
+    monkeypatch.setattr(storage, "prepare_publications", interrupted_publication)
+    try:
+        binding, identifier = await admitted_build(accounting_db, service, dispatcher,
+            operator, owner, goal, "protected-child-history")
+        with pytest.raises(OSError, match="authentic supervision"):
+            await run_native_step(service, dispatcher.jobs, binding,
+                child_owner="history-owner", principal=operator.principal)
+        before = await dispatcher.jobs.get_job(binding.invocation_id)
+        original_child = next(item for item in before["checkpoints"]
+            if item["checkpoint_id"] == "document-child")
+        assert original_child["payload"]["supervisor_pid"] > 0
+        # The reserved generic name fails before opening the SQL writer.
+        with monkeypatch.context() as guard:
+            def forbidden_writer():
+                raise AssertionError("a generic child checkpoint must not open a writer")
+            guard.setattr(dispatcher.jobs, "_session", forbidden_writer)
+            with pytest.raises(DurableJobTransitionError, match="fixed native owner"):
+                await dispatcher.jobs.record_checkpoint(binding.invocation_id,
+                    checkpoint_id="document-child", state={"forged": True},
+                    checkpoint_payload={"supervisor_pid": 1}, owner="history-owner",
+                    fencing_token=before["lease"]["fencing_token"])
+        assert await dispatcher.jobs.get_job(binding.invocation_id) == before
+        with pytest.raises(DurableJobTransitionError, match="malformed document"):
+            _bounded_checkpoint_receipts([*before["checkpoints"], deepcopy(original_child)])
+        with pytest.raises(DurableJobTransitionError, match="malformed document"):
+            _bounded_checkpoint_receipts([{**original_child, "payload": None}])
+        for index in range(55):
+            await dispatcher.jobs.record_checkpoint(binding.invocation_id,
+                checkpoint_id=f"ordinary-history-{index}", state={"cursor": index},
+                owner="history-owner", fencing_token=before["lease"]["fencing_token"])
+        retained = await dispatcher.jobs.get_job(binding.invocation_id)
+        assert len(retained["checkpoints"]) == 50
+        assert next(item for item in retained["checkpoints"]
+            if item["checkpoint_id"] == "document-child") == original_child
+        assert any(item["checkpoint_id"] == "document-capacity" for item in retained["checkpoints"])
+        await retain_native_failure(service, dispatcher.jobs, binding, child_owner="history-owner")
+        child_before = await dispatcher.jobs.get_job(binding.invocation_id)
+        parent_before = await dispatcher.jobs.get_job(binding.parent_job_id)
+        assert any(item["status"] == "unknown" for item in child_before["effects"])
+        async with sessions() as db:
+            row, value = await storage.owned(db, owner, identifier)
+            revision, digest = row.revision, row.metadata_digest
+            body = native._supervision(value)
+            assert body["supervisor_wait_reaped"] and body["stdout_eof"] and body["stdin_closed"]
+            audits = list((await db.execute(select(AuditEvent).where(
+                AuditEvent.tool_name == "document_build"))).scalars())
+            assert {event.event_type for event in audits} >= {"tool_call", "tool_failed"}
+            assert all(event.summary == "Local document build " + event.event_type for event in audits)
+        result = await native.reconcile_reap(dispatcher.jobs, owner, identifier, operator,
+            expected_revision=revision, expected_metadata_digest=digest)
+        assert result["cleanup_proven"] and result["build_revision"] == revision + 1
+        assert await dispatcher.jobs.get_job(binding.invocation_id) == child_before
+        assert await dispatcher.jobs.get_job(binding.parent_job_id) == parent_before
+        async with sessions() as db:
+            row, value = await storage.owned(db, owner, identifier)
+            assert not value.get("output") and value["live_writer"] is None
+            assert native._authenticated_reap(value, value["renderer_binding"])
+            actual = await dispatcher.jobs._fetch(db, binding.invocation_id)
+            assert await native.held_capacity(db, actual) is False
+    finally:
+        service.stop(); registry.stop()

@@ -442,7 +442,8 @@ class ToolRegistry:
             await audit_repository.log_event(session_id=principal.session_id,
                 actor="agent", event_type=event_type, tool_name=descriptor.tool_id,
                 risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
-                summary="Local document preparation " + event_type,
+                summary=("Local document build " if descriptor.tool_id == "document_build"
+                    else "Local document preparation ") + event_type,
                 details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
         from src.tools.policy import get_task_policy_snapshot
         await audit("tool_call", {"input_digest": _digest(inputs)})

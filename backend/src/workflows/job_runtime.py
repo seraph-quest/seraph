@@ -459,7 +459,11 @@ def _bounded_checkpoint_receipts(
     from src.workflows.general_task_guard import protected_checkpoint_ids
     protected_ids = protected_checkpoint_ids(items)
     protected_ids |= {item.get("checkpoint_id") for item in items if isinstance(item, Mapping)
-        and item.get("checkpoint_id") in {"document-capacity", "document-reaped"}}
+        and item.get("checkpoint_id") in {"document-capacity", "document-child", "document-reaped"}}
+    document_children = [item for item in items if isinstance(item, Mapping)
+        and item.get("checkpoint_id") == "document-child"]
+    if len(document_children) > 1 or any(type(item.get("payload")) is not dict for item in document_children):
+        raise DurableJobTransitionError("malformed document process child checkpoint")
     latest_special: dict[str, tuple[int, Any]] = {}
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
@@ -4996,7 +5000,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
-        if checkpoint_id in {"document-capacity", "document-reaped"}:
+        if checkpoint_id in {"document-capacity", "document-child", "document-reaped"}:
             raise DurableJobTransitionError("document process reservation/reap requires its fixed native owner")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")

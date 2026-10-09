@@ -255,7 +255,12 @@ native holds. Unavailable or blocked eligibility has an explicit reason; it
 does not promise execution. Source freshness is rechecked in the final C1
 publication writer, so expiry after staging cannot publish a Task or bind its
 proposal artifact. Existing private unbound staging retains its size bound/expiry
-cleanup. See the
+cleanup. Missing, unreadable or altered physical sources finalize the original
+pending receipt with passive blocked recovery and bounded digest/status reads;
+cited source reads require review. An opted-in deadline failure retains a bounded
+negative memo without repeated unchanged-tick file reads, a notice slot or task
+creation. Actual source-file unlink, tamper and truncation journeys verify these
+failure paths. See the
 [operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
 Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
 file journey and two-programme cited-deadline/native-slot readbacks prove these

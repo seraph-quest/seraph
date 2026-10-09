@@ -286,6 +286,12 @@ staged; unresolved current work never falls back to an older successful output.
 Finalized-day ticks do not reopen historical programme artifacts. This adds no
 inference, source fetch, execution queue or cost
 ledger and does not change discovery's original UTC occurrence or deadlines.
+Missing, unreadable or altered physical source files finalize the same receipt
+with passive blocked recovery. Digest and status reads remain available with
+unavailable source/output metadata; cited brief reads return a bounded review
+reason. They do not create tasks or reopen an older successful source. An opted-in
+deadline check retains a bounded negative memo, so unchanged ticks do not repeat
+the failed physical read or consume a deadline-notice slot.
 
 Inbox delivery is the default. Native notices need a separate explicit opt-in
 and an already reviewed programme notification allowance. Across all programmes,
@@ -339,6 +345,8 @@ finding-to-C1 proposal/acceptance journey, actual checklist file/readback and
 same-card completion. Scripted inference replaces only its owned transport;
 there are no real provider contacts or spending. These receipts do not establish
 model quality or native desktop display on macOS.
+Authenticated journeys also unlink, alter and truncate actual source files and
+verify degraded reads, the original pending cutoff and no unchanged-tick replay.
 
 ## Optional NEAR HTTPS text question
 

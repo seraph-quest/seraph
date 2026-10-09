@@ -557,7 +557,8 @@ async def test_quiet_then_revoked_recipient_skip_physical_deadline_staging(diges
 
 
 @pytest.mark.asyncio
-async def test_deadline_read_failure_negative_memo_skips_repeated_fs_and_rechecks_changed_preferences(digest_owner, async_db, monkeypatch):
+@pytest.mark.parametrize("failure", ["permission", "missing", "io_error", "integrity"])
+async def test_deadline_read_failure_negative_memo_skips_repeated_fs_and_rechecks_changed_preferences(digest_owner, async_db, monkeypatch, failure):
     """Negative metadata fixture proves no success or authority from a cache."""
     from src.db.models import WorkflowRunState, OperatorSession
     operator, goal, now = await negative_deadline_pointer(digest_owner, async_db)
@@ -574,7 +575,12 @@ async def test_deadline_read_failure_negative_memo_skips_repeated_fs_and_recheck
     reads = []
     async def unreadable(*args, **kwargs):
         reads.append(args[1])
-        raise PermissionError("Private physical bytes changed; never publish this exception")
+        from src.work_board.repository import BoardError
+        errors = {"permission": PermissionError("PRIVATE_SOURCE_PATH"),
+            "missing": FileNotFoundError("PRIVATE_SOURCE_PATH"),
+            "io_error": OSError("PRIVATE_SOURCE_PATH"),
+            "integrity": BoardError("input_artifact_digest_mismatch", "PRIVATE_SOURCE_PATH")}
+        raise errors[failure]
     monkeypatch.setattr("src.workflows.research_sources.physical_discovery_inputs", unreadable)
     await digest.deliver_notices(now)
     assert len(reads) == 1

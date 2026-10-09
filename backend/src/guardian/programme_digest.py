@@ -24,6 +24,10 @@ from src.db.models import (Goal, OperatorIdentity, OperatorSession, ProgrammeDig
     InferenceCostReservation, NativeNotificationOutbox)
 from src.guardian.goal_programmes import GoalProgrammeError, _load, _aware, goal_programme_service
 from src.guardian.research_plan_contracts import ArtifactRef
+from src.work_board.repository import BoardError
+
+
+SOURCE_READBACK_ERRORS = (ValueError, PermissionError, RuntimeError, OSError, BoardError)
 
 
 class Closed(BaseModel):
@@ -263,7 +267,7 @@ async def tick(now=None):
             if brief["reference"].model_dump(mode="json") != outcome["artifact_ref"]:
                 raise ValueError("programme_digest_original_output_changed")
             staged[binding.programme_id] = (run, witness, brief["parsed"])
-        except (ValueError, PermissionError, RuntimeError):
+        except SOURCE_READBACK_ERRORS:
             staged[binding.programme_id] = None
     async with discovery_writer_scope() as policy:
       async with database.get_session() as db:
@@ -323,7 +327,8 @@ async def tick(now=None):
                     continue
                 source = staged.get(programme["id"])
                 if source is None:
-                    blocked.append("programme_no_completed_output")
+                    blocked.append("programme_output_requires_current_readback" if programme["id"] in staged
+                        else "programme_no_completed_output")
                     continue
                 original, witness, brief = source
                 if current_run is None or current_run.run_identity != original.run_identity:
@@ -413,7 +418,7 @@ async def list_digests(operator, now=None):
             visible_programme_ids.add(binding["programme_id"])
             try:
                 readback, fresh = await _read_binding(operator, binding, now)
-            except (GoalProgrammeError, ValueError, PermissionError, RuntimeError):
+            except SOURCE_READBACK_ERRORS:
                 errors.append("programme_output_requires_current_readback")
                 for index in range(binding.get("finding_count", 0)):
                     identifier = finding_id(binding["job_id"], index)
@@ -556,7 +561,7 @@ async def programme_status(operator, now):
                     last_run = _aware(completed_run.finished_at).isoformat()
                     sources_checked = len(readback["brief"]["coverage"]["sources"])
                     output = readback["artifact_ref"]["artifact_id"]
-                except (GoalProgrammeError, ValueError, PermissionError, RuntimeError):
+                except SOURCE_READBACK_ERRORS:
                     recovery = "Last completed source output requires current physical and authority readback."
             async with database.get_session() as db:
                 await owner_identity(db, operator)
@@ -743,7 +748,7 @@ async def deliver_notices(now):
                 continue
             try:
                 staged[binding["job_id"]] = await physical_discovery_inputs(goal_discovery_service.jobs, binding["job_id"], completed_read=True)
-            except (ValueError, PermissionError, RuntimeError):
+            except SOURCE_READBACK_ERRORS:
                 failed_receipts.add(candidate.id)
                 continue
     async with discovery_writer_scope() as policy:
@@ -939,7 +944,10 @@ async def action(operator, identifier, request, now=None):
     from src.guardian.goal_discovery import goal_discovery_service
     from src.workflows.research_sources import physical_discovery_inputs
     from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
-    witness = await physical_discovery_inputs(goal_discovery_service.jobs, finding["job_id"], completed_read=True)
+    try:
+        witness = await physical_discovery_inputs(goal_discovery_service.jobs, finding["job_id"], completed_read=True)
+    except SOURCE_READBACK_ERRORS:
+        raise GoalProgrammeError("programme_finding_refresh_required") from None
     if witness.plan.goal_revision != finding["goal_revision"] or witness.plan.programme_id.hex != finding["programme_id"]:
         raise GoalProgrammeError("programme_finding_original_binding_changed")
     async def recheck_disposition(db):
@@ -1051,7 +1059,10 @@ async def prepare_task(operator, finding, request, *, now=None):
     from src.guardian.goal_discovery import goal_discovery_service
     from src.workflows.research_sources import physical_discovery_inputs
     from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
-    witness = await physical_discovery_inputs(goal_discovery_service.jobs, finding["job_id"], completed_read=True)
+    try:
+        witness = await physical_discovery_inputs(goal_discovery_service.jobs, finding["job_id"], completed_read=True)
+    except SOURCE_READBACK_ERRORS:
+        raise GoalProgrammeError("programme_finding_refresh_required") from None
     if witness.plan.goal_revision != finding["goal_revision"] or witness.plan.programme_id.hex != finding["programme_id"]:
         raise GoalProgrammeError("programme_finding_original_binding_changed")
     async def publication_check(db):

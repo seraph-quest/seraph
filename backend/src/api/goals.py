@@ -98,6 +98,7 @@ async def _discovery_call(request: Request, method: str, **kwargs):
     from src.guardian.goal_discovery import goal_discovery_service
     from src.guardian.goal_programmes import GoalProgrammeError
     from src.auth.service import AuthFailure
+    from src.work_board.repository import BoardError
     operator = _require_authenticated_operator(request)
     try:
         return await getattr(goal_discovery_service, method)(operator=operator, **kwargs)
@@ -107,7 +108,7 @@ async def _discovery_call(request: Request, method: str, **kwargs):
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     except PermissionError:
         raise HTTPException(status_code=403, detail={"code": "programme_discovery_current_readback_denied"}) from None
-    except (ValueError, OSError):
+    except (ValueError, OSError, BoardError):
         raise HTTPException(status_code=409, detail={"code": "programme_discovery_readback_requires_review"}) from None
     except RuntimeError:
         raise HTTPException(status_code=503, detail={"code": "goal_discovery_service_unavailable"}) from None

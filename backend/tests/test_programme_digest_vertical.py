@@ -284,7 +284,9 @@ def cited_deadline_http_fixture():
 
 
 @pytest.mark.asyncio
-async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(accounting_db, real_auth, cited_deadline_http_fixture, monkeypatch):
+@pytest.mark.parametrize("physical_failure", [None, "unlink", "tamper", "truncate"],
+    ids=["complete", "missing-source", "changed-source", "truncated-source"])
+async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(accounting_db, real_auth, cited_deadline_http_fixture, monkeypatch, physical_failure):
     from config.settings import settings
     from src.api import auth, goals, guardian_inbox, model_fabric_settings, observer
     from src.auth.middleware import OperatorAuthMiddleware
@@ -366,7 +368,16 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             for capability in ("text", "latency_ms", "health"):
                 proof = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter", "capability": capability, "timeout_seconds": 30})
                 assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
-            bindings = []
+            bindings, source_files = [], []
+            pending_id, pending_deadline, failure_clock = None, None, None
+            def damage(path):
+                original = path.read_bytes()
+                if physical_failure == "unlink":
+                    path.unlink()
+                elif physical_failure == "tamper":
+                    path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                else:
+                    path.write_bytes(original[:-1])
             for index in range(2):
                 created = await client.post("/api/goals", json={"title": f"Private grants goal {index}"})
                 assert created.status_code == 200, created.text
@@ -380,6 +391,19 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 assert accepted.status_code == 200, accepted.text
                 programme = accepted.json()
                 job = await discovery.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
+                if physical_failure and index == 1:
+                    from src.db.models import ProgrammeDigestReceipt
+                    observed = datetime.now(timezone.utc)
+                    failure_clock = max(observed, observed.replace(hour=8, minute=0, second=0, microsecond=0))
+                    # Genuine first completed output plus second original queued
+                    # occurrence creates the existing pending owner/day receipt.
+                    await digest.tick(failure_clock)
+                    async with factory.accounting_sessions() as db:
+                        pending = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
+                        assert pending.phase == "pending"
+                        pending_id, pending_deadline = pending.id, pending.finalize_deadline
+                        assert 0 < (pending_deadline.replace(tzinfo=timezone.utc) - failure_clock).total_seconds() <= 300
+                    damage(source_files[0])
                 assert (await discovery.run(job["job_id"]))["status"] == "succeeded"
                 witness = await physical_discovery_inputs(jobs, job["job_id"])
                 snapshot = next(a["parsed"] for a in witness.artifacts.values() if a["kind"] == "snapshot")
@@ -388,7 +412,89 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 now = datetime.now(timezone.utc)
                 assert len(digest.deterministic_deadlines(witness, brief, now)) == 1
                 bindings.append((goal_id, programme["id"], job["job_id"]))
+                projection = await jobs.get_job(job["job_id"])
+                snapshot_file = next(a for a in projection["artifacts"] if a["artifact_type"] == "goal_discovery_snapshot")
+                path = workspace / snapshot_file["file_path"]
+                assert path.is_relative_to(workspace) and path.is_file()
+                source_files.append(path)
             assert len(calls) == 6 and len(physical_contacts) == 4
+            if physical_failure:
+                from src.db.models import ProgrammeDigestReceipt, WorkBoardTask, ProgrammeFollowThrough
+                import src.work_board.research_artifacts as physical_artifacts
+                original_read = physical_artifacts.read_discovery
+                physical_reads = []
+                def count_actual_reads(*args, **kwargs):
+                    physical_reads.append(args[0])
+                    return original_read(*args, **kwargs)
+                monkeypatch.setattr(physical_artifacts, "read_discovery", count_actual_reads)
+                await digest.tick(failure_clock + timedelta(seconds=1))
+                async with factory.accounting_sessions() as db:
+                    finalized = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
+                    assert finalized.id == pending_id and finalized.phase == "finalized"
+                    assert finalized.finalize_deadline == pending_deadline
+                    final_digest = json.loads(finalized.digest_json)
+                    assert "programme_output_requires_current_readback" in final_digest["blocked_reasons"]
+                    final_bindings = json.loads(finalized.finding_bindings_json)
+                    assert len(final_bindings) == 1 and final_bindings[0]["job_id"] == bindings[1][2]
+                    assert digest.finding_id(bindings[0][2], 0) not in final_digest["finding_ids"]
+                finalized_reads = len(physical_reads)
+                await digest.tick(failure_clock + timedelta(seconds=2))
+                assert len(physical_reads) == finalized_reads  # No default-Inbox repeat source staging.
+                damage(source_files[1])
+                endpoint = "/api/guardian/inbox/programme-digests"
+                degraded = await client.get(endpoint)
+                assert degraded.status_code == 200, degraded.text
+                recovered = degraded.json()
+                assert len(recovered["digests"]) == 1
+                item = recovered["digests"][0]
+                assert "programme_output_requires_current_readback" in item["digest"]["blocked_reasons"]
+                assert item["digest"]["prepared_outputs"] == []
+                finding = item["findings"][0]
+                assert finding["source_freshness"] == "blocked" and not finding["actionable"]
+                assert finding["prepared_outputs"] == finding["citations"] == []
+                assert finding["task_id"] is None and finding["follow_through"] is None
+                assert all(p["last_run"] is None and p["output"] is None and p["sources_checked"] == 0
+                    and p["recovery"] for p in recovered["programmes"])
+                for path in source_files:
+                    assert str(path) not in degraded.text and path.name not in degraded.text
+                for error_name in ("FileNotFoundError", "OSError", "BoardError", "Traceback"):
+                    assert error_name not in degraded.text
+                for selected_goal, selected_programme, selected_job in bindings:
+                    unavailable = await client.get(f"/api/goals/{selected_goal}/programmes/{selected_programme}/discovery/{selected_job}/brief")
+                    assert unavailable.status_code == 409, unavailable.text
+                    assert unavailable.json()["detail"]["code"] == "programme_discovery_readback_requires_review"
+                denied = await client.post(f"/api/guardian/inbox/programme-findings/{finding['id']}/actions",
+                    json={"action": "accept_followup", "desired_outcome": "Do not publish unreadable evidence",
+                        "idempotency_key": "unreadable-original-source"})
+                assert denied.status_code == 409 and denied.json()["detail"]["code"] == "programme_finding_refresh_required"
+                opted = await client.post("/api/guardian/inbox/programme-notifications",
+                    json={"enabled": True, "deadline_categories": ["grants"]})
+                assert opted.status_code == 200, opted.text
+                import src.observer.native_notification_queue as native_queue
+                monkeypatch.setattr(native_queue, "_utc_now", lambda: failure_clock + timedelta(seconds=3))
+                await digest.deliver_notices(failure_clock + timedelta(seconds=3))
+                async with factory.accounting_sessions() as db:
+                    receipt = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
+                    memo = json.loads(receipt.finding_bindings_json)[0]["deadline_no_match"]
+                    assert memo["reason"] == "deadline_source_requires_current_readback" and len(json.dumps(memo)) <= 160
+                    assert receipt.deadline_notice == "unreserved"
+                    assert list((await db.execute(select(WorkBoardTask))).scalars()) == []
+                    assert list((await db.execute(select(ProgrammeFollowThrough))).scalars()) == []
+                    notices = list((await db.execute(select(NativeNotificationOutbox))).scalars())
+                    assert len(notices) == 1 and notices[0].intervention_type == "programme_digest"
+                failure_reads = len(physical_reads)
+                await digest.tick(failure_clock + timedelta(seconds=4))
+                await digest.deliver_notices(failure_clock + timedelta(seconds=5))
+                assert len(physical_reads) == failure_reads  # Actual missing/integrity failure memo is negative only.
+                assert len(calls) == 6 and len(physical_contacts) == 4
+                for _, _, job_id in bindings:
+                    assert (await jobs.get_job(job_id))["status"] == "succeeded"
+                print(json.dumps({"flow": "actual_physical_source_failure", "failure": physical_failure,
+                    "owner_day_receipts": 1, "pending_deadline_preserved": True,
+                    "published_tasks": 0, "deadline_notices": 0, "unchanged_repeat_physical_reads": 0,
+                    "actual_public_http_contacts": 4, "scripted_inference_requests": 6,
+                    "real_provider_contacts": 0, "real_spend": 0}, sort_keys=True))
+                return
             now = datetime.now(timezone.utc)
             local = digest.local_clock(now)
             delivery_now = max(now, local.replace(hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc))

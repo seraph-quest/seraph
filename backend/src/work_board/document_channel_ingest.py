@@ -7,6 +7,7 @@ All filesystem, Vault and HTTP work stays outside canonical SQL writers.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -253,7 +254,7 @@ def validate_channel_metadata(row, value):
     required = {"schema", "binding", "binding_digest", "pending_payload_sha256", "contact", "observed", "publication", "task_id"}
     try:
         if (type(channel) is not dict or not required <= set(channel)
-            or set(channel) - required - {"physical", "cleanup", "task_origin_digest"} or channel["schema"] != "telegram-document-ingest.v1"
+            or set(channel) - required - {"physical", "cleanup", "task_origin_digest", "readers"} or channel["schema"] != "telegram-document-ingest.v1"
             or channel["contact"] not in {"not_started", "started", "closed", "unknown"}
             or re.fullmatch(r"[a-f0-9]{64}", str(channel["pending_payload_sha256"])) is None):
             raise ValueError()
@@ -264,6 +265,35 @@ def validate_channel_metadata(row, value):
             or row.owner_principal_id != binding.owner_principal_id or row.owner_session_id != binding.original_root_id
             or row.goal_id != binding.goal_id or row.goal_revision != binding.goal_revision or value["generation"] != 1):
             raise ValueError()
+        readers = channel.get("readers", [])
+        if type(readers) is not list or len(readers) > 2:
+            raise ValueError()
+        nonces = set()
+        for item in readers:
+            if type(item) is not dict or set(item) != {"binding", "witness"}:
+                raise ValueError()
+            producer, receipt = item["binding"], item["witness"]
+            base = {"job_id", "input_digest", "generation", "nonce"}
+            if (type(producer) is not dict or set(producer) not in (base, base|{"supervisor_pid", "parser_pid"})
+                or producer["job_id"] != row.artifact_id or producer["generation"] != 1
+                or type(producer["generation"]) is not int
+                or producer["input_digest"] != value.get("read_request_digest")
+                or re.fullmatch(r"[a-f0-9]{32}", str(producer["nonce"])) is None
+                or producer["nonce"] in nonces):
+                raise ValueError()
+            nonces.add(producer["nonce"])
+            if "parser_pid" in producer and any(type(producer[key]) is not int or producer[key] <= 0 for key in ("supervisor_pid", "parser_pid")):
+                raise ValueError()
+            if receipt is None:
+                continue
+            if receipt == {"not_launched": True} and type(receipt["not_launched"]) is bool:
+                continue
+            if (type(receipt) is not dict or set(receipt) != {"file", "sha256", "size", "device", "inode"}
+                or receipt["file"] != producer["nonce"]+".witness.json"
+                or re.fullmatch(r"[a-f0-9]{64}", str(receipt["sha256"])) is None
+                or any(type(receipt[key]) is not int or receipt[key] <= 0 for key in ("size", "device", "inode"))
+                or receipt["size"] > 4096):
+                raise ValueError()
     except (KeyError, ValueError, TypeError):
         raise BoardError("channel_document_source_changed", "Original document acquisition metadata changed", status_code=409) from None
 
@@ -336,6 +366,21 @@ async def reserve_channel_source(db, owner, witness):
         "cleanup": {"positive_exclusive_lock": True, "binding_digest": "f"*64}})
     future["sources"] = {"source": {"cipher_size": _cipher_limit(SOURCE_LIMIT), "cipher_sha256": "f"*64,
         "device": 2**63-1, "inode": 2**63-1}}
+    future["channel_ingest"]["readers"] = [{"binding": {"job_id": identifier,
+        "input_digest": "f"*64, "generation": 1, "nonce": "f"*32,
+        "supervisor_pid": 2**63-1, "parser_pid": 2**63-1},
+        "witness": {"file": "f"*32+".witness.json", "size": 4096,
+            "sha256": "f"*64, "device": 2**63-1, "inode": 2**63-1}} for _ in range(2)]
+    future.update({"parser_binding": future["channel_ingest"]["readers"][0]["binding"],
+        "read_request_digest": "f"*64, "witness_digest": "f"*64, "parser_attempts": 2,
+        "execution_deadline": (stamp+timedelta(seconds=70)).isoformat()})
+    future["channel_ingest"]["physical"]["evidence"] = {"device": 2**63-1, "inode": 2**63-1,
+        "size": 1048576, "sha256": "f"*64}
+    future["evidence"] = {"cipher_size": 1048576, "cipher_sha256": "f"*64,
+        "device": 2**63-1, "inode": 2**63-1}
+    future["channel_ingest"]["cleanup"]["retirement"] = {"revision": 2**63-1,
+        "metadata_digest": "f"*64, "task_id": "f"*128, "binding_digest": binding_digest,
+        "source_digest": "f"*64, "task_origin_digest": "f"*64}
     future["input"] = {"schema_version": 1, "artifact_ref": inputs["artifact_ref"], "format": binding.format,
         "source": {"size_bytes": SOURCE_LIMIT, "sha256": "f"*64}, "no_learning": True}
     if len(sources.canonical(future)) > 8192:
@@ -473,8 +518,9 @@ class _ObservedSource:
 
 def original_channel_lease(row, value):
     lease = value["upload_binding"]
-    writer = value.get("live_writer") or {"token": lease["binding"]["nonce"]}
-    expected = _lease_binding(row, value, writer["token"])
+    expected = _lease_binding(row, value, lease["binding"]["nonce"])
+    if value["phase"] in {"reserved", "uploading"} and value.get("live_writer") and value["live_writer"]["token"] != expected["nonce"]:
+        raise ValueError("original upload writer nonce changed")
     if lease["binding"] != expected or lease["file"] != "g1-source.upload-lock":
         raise ValueError("original document lease binding changed")
     parent, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
@@ -496,6 +542,75 @@ def original_channel_lease(row, value):
         if descriptor >= 0: os.close(descriptor)
         raise
     finally: os.close(parent)
+
+
+_SOURCE_CLAIM_SEAL = object()
+_ACTIVE_SOURCE_CLAIMS = set()
+
+
+@dataclass(frozen=True)
+class _SourceReadClaim:
+    artifact_id: str
+    owner: WorkBoardOwner
+    revision: int
+    metadata_digest: str
+    descriptor: int = field(repr=False)
+    lease_json: str = field(repr=False)
+    task: object = field(repr=False)
+    _seal: object = field(default=None, repr=False, compare=False)
+    _issued_id: int = field(default=0, repr=False, compare=False)
+
+
+def check_source_read_claim(claim, owner, row, value):
+    if (type(claim) is not _SourceReadClaim or claim._seal is not _SOURCE_CLAIM_SEAL
+        or claim._issued_id != id(claim) or id(claim) not in _ACTIVE_SOURCE_CLAIMS
+        or claim.task is not asyncio.current_task() or claim.owner != owner
+        or claim.artifact_id != row.artifact_id or claim.revision != row.revision
+        or claim.metadata_digest != row.metadata_digest
+        or claim.lease_json != sources.canonical(value["upload_binding"]).decode()):
+        raise BoardError("channel_document_read_claim_changed", "The same original private source claim is required", status_code=409)
+    facts = os.fstat(claim.descriptor)
+    lease = value["upload_binding"]
+    if (facts.st_dev, facts.st_ino) != (lease["device"], lease["inode"]) or not _private_input_file_metadata(facts):
+        raise BoardError("channel_document_read_claim_changed", "The original source claim inode changed", status_code=409)
+
+
+@asynccontextmanager
+async def channel_source_read_claim(owner, row, value, *, operator=None, reuse=None):
+    """Original kernel inode + fresh SQL admission; observation changes no revision."""
+    if not value.get("channel_ingest"):
+        yield None
+        return
+    if reuse is not None:
+        check_source_read_claim(reuse, owner, row, value)
+        yield reuse
+        return
+    from src.db.engine import get_session
+    from src.work_board.documents import current_source_root
+    staged_root = dict(root_binding())
+    try:
+        descriptor = original_channel_lease(row, value)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise BoardError("channel_document_read_busy", "The original source reader or cleanup owns its private lease", status_code=409) from None
+    claim = None
+    try:
+        async with get_session() as db:
+            await _begin_immediate(db)
+            fresh, current = await sources.owned(db, owner, row.artifact_id, revision=row.revision, capability=sources.SOURCE_CAPABILITY)
+            if (current != value or current["phase"] != "sealed" or current.get("live_writer")
+                or fresh.bound_task_id is not None or fresh.metadata_digest is None
+                or fresh.metadata_digest != _metadata_digest(fresh)):
+                raise BoardError("channel_document_read_changed", "The current sealed original source is required", status_code=409)
+            await sources.authority(db, owner, fresh, current, staged_root)
+            await current_source_root(db, owner, operator)
+            await db.commit()
+        claim = _issued(_SourceReadClaim(row.artifact_id, owner, row.revision, row.metadata_digest,
+            descriptor, sources.canonical(value["upload_binding"]).decode(), asyncio.current_task(), _SOURCE_CLAIM_SEAL))
+        _ACTIVE_SOURCE_CLAIMS.add(id(claim))
+        yield claim
+    finally:
+        if claim is not None: _ACTIVE_SOURCE_CLAIMS.discard(id(claim))
+        os.close(descriptor)
 
 
 def _cipher_limit(size):
@@ -801,18 +916,45 @@ async def reconcile_channel_source(db, owner, identifier, revision):
     finally: os.close(descriptor)
 
 
-def cleanup_channel_files(row, value):
+def cleanup_channel_files(row, value, *, held_descriptor=None):
     """Only source-issued exact inventory; partial/foreign/both-link stays charged."""
     inventory = value["channel_ingest"]["publication"] or {}
-    source_parent, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
+    readers = value["channel_ingest"].get("readers", [])
+    if value.get("parser_binding") and not readers:
+        raise OSError("original reader inventory unavailable")
+    witness_inventory = {}
+    if type(readers) is not list or len(readers) > 2:
+        raise OSError("original reader inventory bound changed")
+    for item in readers:
+        witness = item["witness"]
+        if witness == {"not_launched": True}:
+            continue
+        if not witness or witness["file"] != item["binding"]["nonce"]+".witness.json":
+            raise OSError("original reader closure unavailable")
+        witness_inventory[witness["file"]] = witness
+    evidence = value.get("evidence")
+    if evidence:
+        physical = value["channel_ingest"].get("physical", {}).get("evidence")
+        if (not physical or physical["sha256"] != evidence["cipher_sha256"]
+            or physical["size"] != evidence["cipher_size"]
+            or (physical["device"], physical["inode"]) != (evidence.get("device"), evidence.get("inode"))):
+            raise OSError("original evidence inventory unavailable")
+    try:
+        source_parent, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
+    except FileNotFoundError:
+        if not inventory and not value.get("upload_binding") and not readers and not evidence:
+            return
+        raise
     try:
         expected = {"g1-source.upload-lock"}
         if inventory:
             expected.update(inventory["source"][key] for key in ("final", "temporary"))
+        expected.update(witness_inventory)
+        if evidence: expected.add("g1-evidence.fernet")
         if set(os.listdir(source_parent)) - expected:
             raise OSError("foreign source inventory retained")
     finally: os.close(source_parent)
-    descriptor = original_channel_lease(row, value) if value.get("upload_binding") else -1
+    descriptor = held_descriptor if held_descriptor is not None else original_channel_lease(row, value) if value.get("upload_binding") else -1
     try:
         for slot, receipt in inventory.items():
             path = _inventory_path(row, value, slot, inventory)
@@ -834,6 +976,24 @@ def cleanup_channel_files(row, value):
                 if any(name in os.listdir(parent) for name in (receipt["final"], receipt["temporary"])):
                     raise OSError("original publication absence unproved")
             finally: os.close(parent)
+        extras = [(name, receipt, receipt) for name, receipt in witness_inventory.items()]
+        if evidence:
+            extras.append(("g1-evidence.fernet", {"size": evidence["cipher_size"], "sha256": evidence["cipher_sha256"]}, physical))
+        for name, receipt, original in extras:
+            path = sources.source_path(row, value, "source").with_name(name)
+            facts = _read_inventory(path, receipt)
+            if any(facts[key] != original[key] for key in ("device", "inode", "size", "sha256")):
+                raise OSError("original reader output inode changed")
+            parent, leaf = _open_input_artifact_parent(path, create=False)
+            try:
+                named = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                if (named.st_dev, named.st_ino) != (facts["device"], facts["inode"]):
+                    raise OSError("original reader output name changed")
+                os.unlink(leaf, dir_fd=parent); os.fsync(parent)
+                try: os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError: pass
+                else: raise OSError("original reader output absence unproved")
+            finally: os.close(parent)
         parent, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
         try:
             if descriptor >= 0:
@@ -845,37 +1005,124 @@ def cleanup_channel_files(row, value):
             if os.listdir(parent): raise OSError("original source cleanup incomplete")
         finally: os.close(parent)
     finally:
-        if descriptor >= 0: os.close(descriptor)
+        if descriptor >= 0 and held_descriptor is None: os.close(descriptor)
+
+
+async def _retirement_association(db, owner, row, value, identity):
+    from src.db.models import TelegramInboundUpdate, WorkBoardTask
+    from src.work_board.channel_capture import ChannelCaptureReservationV1, check_document_retirement_origin
+    if row.bound_task_id is not None:
+        raise BoardError("document_bound_pair_retained", "Unexpected generic Source ownership retains its charge", status_code=409)
+    channel = value["channel_ingest"]
+    if value["phase"] == "sealed" and (row.metadata_digest is None or row.metadata_digest != _metadata_digest(row)):
+        raise BoardError("channel_document_source_changed", "Original sealed Source metadata changed", status_code=409)
+    event = await db.scalar(select(TelegramInboundUpdate).where(
+        TelegramInboundUpdate.idempotency_key == channel["binding"]["event_id"],
+        TelegramInboundUpdate.owner_principal_id == owner.principal_id,
+        TelegramInboundUpdate.operator_session_id == owner.session_id).execution_options(populate_existing=True))
+    try:
+        stored = json.loads(event.receipt_json)["channel_task_capture"]
+        reservation = ChannelCaptureReservationV1.model_validate(stored["reservation"])
+        binding = OriginalDocumentBinding.model_validate(stored["document_acquisition"])
+        if (binding.model_dump(mode="json") != channel["binding"]
+            or binding.reservation_digest != sources.sha256(sources.canonical(reservation.model_dump(mode="json")))
+            or event.status != "accepted" or event.request_digest != binding.provider_request_digest
+            or event.canonical_message_id != binding.canonical_message_id
+            or stored.get("task_id") != channel["task_id"]):
+            raise ValueError()
+        previous = (channel.get("cleanup") or {}).get("retirement")
+        source_digest = value["input"].get("source", {}).get("sha256")
+        record = {"revision": row.revision, "metadata_digest": row.metadata_digest,
+            "task_id": channel["task_id"], "binding_digest": channel["binding_digest"],
+            "source_digest": source_digest, "task_origin_digest": channel.get("task_origin_digest")}
+        if value["phase"] == "cleanup_tombstone":
+            if not previous or any(previous[key] != record[key] for key in ("task_id", "binding_digest", "source_digest", "task_origin_digest")):
+                raise ValueError()
+            record = previous
+        if source_digest is not None:
+            ref = stored["document_source"]
+            if (ref["artifact_id"] != row.artifact_id or ref["source_digest"] != source_digest
+                or ref["revision"] != record["revision"] or ref["metadata_digest"] != record["metadata_digest"]
+                or ref.get("task_id") != channel["task_id"]):
+                raise ValueError()
+        elif stored.get("document_source") is not None:
+            raise ValueError()
+        if channel["task_id"] is not None:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == channel["task_id"]).execution_options(populate_existing=True))
+            if task is None or not task.channel_capture_origin_json or sources.sha256(task.channel_capture_origin_json.encode()) != channel["task_origin_digest"]:
+                raise ValueError()
+            await check_document_retirement_origin(db, owner, task, reservation, identity)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise BoardError("channel_document_source_changed", "Exact original reciprocal Source ownership is required for retirement", status_code=409) from None
+    return record
+
+
+async def _retirement_cas(db, row, value, *, release=False):
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+    from src.db.models import WorkBoardInputArtifact
+    original_json, original_revision, original_digest = row.document_metadata_json, row.revision, row.metadata_digest
+    next_json = sources.canonical(value).decode()
+    if len(next_json) > 8192:
+        raise BoardError("channel_document_metadata_bound", "Original retirement metadata exceeds its reserved bound", status_code=409)
+    values = {"document_metadata_json": next_json, "revision": original_revision+1, "metadata_digest": None}
+    if release: values.update(state="deleted", document_reserved_bytes=0)
+    changed = await db.execute(update(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.artifact_id == row.artifact_id,
+        WorkBoardInputArtifact.owner_principal_id == row.owner_principal_id,
+        WorkBoardInputArtifact.owner_session_id == row.owner_session_id,
+        WorkBoardInputArtifact.revision == original_revision,
+        WorkBoardInputArtifact.document_metadata_json == original_json,
+        WorkBoardInputArtifact.metadata_digest == original_digest,
+        WorkBoardInputArtifact.bound_task_id.is_(None),
+        WorkBoardInputArtifact.document_reserved_bytes == CHARGE).values(**values).execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise BoardError("channel_document_source_changed", "Original Source retirement CAS changed; retain charge", status_code=409)
+    for key, value in values.items(): set_committed_value(row, key, value)
 
 
 async def delete_channel_source(db, owner, identifier, revision):
     from src.work_board.documents import current_source_root
-    staged_root = dict(root_binding())
+    from src.work_board.channel_capture import stage_captured_identity
+    staged_root, identity = dict(root_binding()), stage_captured_identity()
     await current_source_root(db, owner, None)
-    await _begin_immediate(db)
     row, value = await sources.owned(db, owner, identifier, revision=revision, capability=sources.SOURCE_CAPABILITY)
-    if value["root"] != staged_root or value["channel_ingest"].get("task_id") or row.bound_task_id:
-        raise BoardError("document_bound_pair_retained", "Original Task owns the document association", status_code=409)
-    if value.get("live_writer"):
-        raise BoardError("document_upload_quiescence_unknown", "Reconcile the exact original writer before deleting", status_code=409)
     if value["phase"] == "deleted":
-        await db.commit(); return sources.projection(row)
-    value["phase"] = "cleanup_tombstone"
-    _persist(row, value); row.metadata_digest = None; row.revision += 1
-    tombstone_revision = row.revision
-    await db.commit()
+        if row.bound_task_id is not None:
+            raise BoardError("document_bound_pair_retained", "Unexpected Source ownership remains", status_code=409)
+        return sources.projection(row)
     try:
-        cleanup_channel_files(row, value)
-    except (OSError, ValueError, KeyError):
-        raise BoardError("document_pair_cleanup_required", "Exact original private files remain unverified; retain quota", status_code=409) from None
-    await _begin_immediate(db)
-    fresh, current = await sources.owned(db, owner, identifier, revision=tombstone_revision, capability=sources.SOURCE_CAPABILITY)
-    if current != value:
-        raise BoardError("document_pair_revision_conflict", "Original cleanup tombstone changed", status_code=409)
-    current["phase"] = "deleted"; current["sources"] = {}
-    _persist(fresh, current); fresh.state = "deleted"; fresh.document_reserved_bytes = 0; fresh.revision += 1
-    await db.commit()
-    return sources.projection(fresh)
+        descriptor = original_channel_lease(row, value)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise BoardError("document_upload_quiescence_unknown", "The exact original kernel lease is unavailable; retain charge", status_code=409) from None
+    try:
+        await _begin_immediate(db)
+        row, current = await sources.owned(db, owner, identifier, revision=revision, capability=sources.SOURCE_CAPABILITY)
+        if current != value or current["root"] != staged_root or current.get("live_writer"):
+            raise BoardError("document_upload_quiescence_unknown", "Original source reader or cleanup facts changed", status_code=409)
+        record = await _retirement_association(db, owner, row, current, identity)
+        if current["phase"] != "cleanup_tombstone":
+            current.setdefault("channel_ingest", {}).setdefault("cleanup", {})["retirement"] = record
+            current["phase"] = "cleanup_tombstone"
+            await _retirement_cas(db, row, current)
+        tombstone_revision, tombstone = row.revision, current
+        await db.commit()
+        try:
+            cleanup_channel_files(row, tombstone, held_descriptor=descriptor)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise BoardError("document_pair_cleanup_required", "Exact original files remain unverified; retain quota", status_code=409) from None
+        await _begin_immediate(db)
+        fresh, current = await sources.owned(db, owner, identifier, revision=tombstone_revision, capability=sources.SOURCE_CAPABILITY)
+        await current_source_root(db, owner, None)
+        if current != tombstone or current["root"] != staged_root or current.get("live_writer"):
+            raise BoardError("document_pair_revision_conflict", "Original cleanup tombstone changed", status_code=409)
+        await _retirement_association(db, owner, fresh, current, identity)
+        current["phase"] = "deleted"; current["sources"] = {}
+        await _retirement_cas(db, fresh, current, release=True)
+        await db.commit()
+        return sources.projection(fresh)
+    finally:
+        os.close(descriptor)
 
 
 async def check_original_document_sealed(db, owner, event, reservation, *, expected_task_id=None):
@@ -965,16 +1212,17 @@ async def stage_original_document_link(db, owner, reservation):
     stored = json.loads(event.receipt_json)["channel_task_capture"]
     row, value = await check_original_document_sealed(db, owner, event, reservation,
         expected_task_id=stored.get("task_id"))
-    inventory = value["channel_ingest"]["publication"]
-    physical = {slot: _read_inventory(_inventory_path(row, value, slot, inventory), receipt)
-        for slot, receipt in inventory.items()}
-    raw = sources.read_private(sources.source_path(row, value, "source"), value["sources"]["source"], maximum=SOURCE_LIMIT)
-    descriptor = value["input"]["source"]
-    if len(raw) != descriptor["size_bytes"] or sources.sha256(raw) != descriptor["sha256"]:
-        raise BoardError("channel_document_readback_failed", "Original source physical readback changed", status_code=409)
-    return _issued(_DocumentLinkWitness(witness, row.artifact_id, row.revision, row.metadata_digest,
-        row.payload_sha256, descriptor["sha256"], sources.canonical(inventory).decode(),
-        sources.canonical(physical).decode(), value["channel_ingest"]["task_id"], _LINK_SEAL))
+    async with channel_source_read_claim(owner, row, value):
+        inventory = value["channel_ingest"]["publication"]
+        physical = {slot: _read_inventory(_inventory_path(row, value, slot, inventory), receipt)
+            for slot, receipt in inventory.items()}
+        raw = sources.read_private(sources.source_path(row, value, "source"), value["sources"]["source"], maximum=SOURCE_LIMIT)
+        descriptor = value["input"]["source"]
+        if len(raw) != descriptor["size_bytes"] or sources.sha256(raw) != descriptor["sha256"]:
+            raise BoardError("channel_document_readback_failed", "Original source physical readback changed", status_code=409)
+        return _issued(_DocumentLinkWitness(witness, row.artifact_id, row.revision, row.metadata_digest,
+            row.payload_sha256, descriptor["sha256"], sources.canonical(inventory).decode(),
+            sources.canonical(physical).decode(), value["channel_ingest"]["task_id"], _LINK_SEAL))
 
 
 async def check_original_document_link(db, owner, reservation, link):
@@ -987,7 +1235,7 @@ async def check_original_document_link(db, owner, reservation, link):
         or row.metadata_digest != link.metadata_digest or row.payload_sha256 != link.payload_digest
         or value["input"]["source"]["sha256"] != link.source_digest
         or value["channel_ingest"]["publication"] != json.loads(link.inventory_json)
-        or value["channel_ingest"]["physical"] != json.loads(link.physical_json)):
+        or {slot: value["channel_ingest"]["physical"][slot] for slot in value["channel_ingest"]["publication"]} != json.loads(link.physical_json)):
         raise BoardError("channel_document_source_changed", "Original physical source/link revision changed", status_code=409)
     await sources.authority(db, owner, row, value, json.loads(link.acquisition.workspace_json), ingest=True)
     return row, value, event

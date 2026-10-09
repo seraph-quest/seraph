@@ -204,7 +204,14 @@ async def test_genuine_preclaim_reserves_complete_cleanup_headroom(accounting_db
 
 
 async def admitted_build(accounting_db, service, dispatcher, operator, owner, goal, key, *, priority=50):
-    sessions = accounting_db[2].accounting_sessions
+    from contextlib import asynccontextmanager
+    original_sessions = accounting_db[2].accounting_sessions
+    @asynccontextmanager
+    async def sessions():
+        from src.work_board.channel_capture import staged_captured_source_identity
+        with staged_captured_source_identity():
+            async with original_sessions() as db:
+                yield db
     jobs = dispatcher.jobs
     async with sessions() as db:
         created = await storage.create(db, owner, operator, storage.BuildCreate(

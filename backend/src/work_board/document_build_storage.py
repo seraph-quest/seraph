@@ -66,21 +66,23 @@ async def citations(db, owner, operator, identifier, *, limit=100, offset=0):
     await current_source_root(db, owner, operator)
     if not value.get("evidence") or value.get("live_writer") or value.get("phase") != "sealed":
         raise BoardError("document_build_source_unread", "Read and positively close the selected source first", status_code=409)
-    raw = sources.read_private(sources.source_path(row, value, "evidence"), value["evidence"], maximum=SOURCE_OUTPUT_LIMIT)
-    evidence = DocumentEvidence.model_validate_json(raw)
-    leaves = [leaf for section in evidence.sections for leaf in (section.table_cells or [section])]
-    if not leaves:
-        raise BoardError("document_build_source_empty", "The adopted source has no selectable literal leaves", status_code=409)
-    binding = DocumentTaskBinding(artifact_ref="document-source:" + identifier, source_revision=row.revision,
-        metadata_digest=row.metadata_digest, citation_refs=[leaves[0].source_ref],
-        selection_digest=_digest([leaves[0].source_ref]), acknowledge_local_use=True)
-    await resolve(db, owner, binding, goal_id=row.goal_id, operator=operator)
-    page = leaves[offset:offset+limit]
-    return {"artifact_ref": binding.artifact_ref, "source_revision": row.revision,
-        "goal_id": row.goal_id, "goal_revision": row.goal_revision,
-        "citations": [leaf.model_dump(mode="json", exclude={"table_cells"}) for leaf in page],
-        "next_offset": offset+limit if len(leaves) > offset+limit else None,
-        "no_learning": True, "provider_contacts": 0}
+    from src.work_board.document_channel_ingest import channel_source_read_claim
+    async with channel_source_read_claim(owner, row, value, operator=operator) as claim:
+        raw = sources.read_private(sources.source_path(row, value, "evidence"), value["evidence"], maximum=SOURCE_OUTPUT_LIMIT)
+        evidence = DocumentEvidence.model_validate_json(raw)
+        leaves = [leaf for section in evidence.sections for leaf in (section.table_cells or [section])]
+        if not leaves:
+            raise BoardError("document_build_source_empty", "The adopted source has no selectable literal leaves", status_code=409)
+        binding = DocumentTaskBinding(artifact_ref="document-source:" + identifier, source_revision=row.revision,
+            metadata_digest=row.metadata_digest, citation_refs=[leaves[0].source_ref],
+            selection_digest=_digest([leaves[0].source_ref]), acknowledge_local_use=True)
+        await resolve(db, owner, binding, goal_id=row.goal_id, operator=operator, _source_claim=claim)
+        page = leaves[offset:offset+limit]
+        return {"artifact_ref": binding.artifact_ref, "source_revision": row.revision,
+            "goal_id": row.goal_id, "goal_revision": row.goal_revision,
+            "citations": [leaf.model_dump(mode="json", exclude={"table_cells"}) for leaf in page],
+            "next_offset": offset+limit if len(leaves) > offset+limit else None,
+            "no_learning": True, "provider_contacts": 0}
 
 
 async def select_source(db, owner, operator, identifier, request):
@@ -322,7 +324,12 @@ async def authority(db, owner, row, value, *, operator=None, metadata_only=False
         raise BoardError("document_build_unavailable", "Inspect the original build and cleanup state", status_code=409)
     if row.metadata_digest != _metadata_digest(row):
         raise BoardError("document_build_metadata_changed", "The original build metadata changed", status_code=409)
-    await sources.authority(db, owner, row, value, dict(root_binding()))
+    if metadata_only:
+        from src.work_board.channel_capture import _staged_source_root_for_sql
+        staged_root = _staged_source_root_for_sql()
+    else:
+        staged_root = dict(root_binding())
+    await sources.authority(db, owner, row, value, staged_root)
     root = await current_source_root(db, owner, operator)
     if (root.replaced_by_id is not None or not root.token_hash
         or value["root_authority"] != _digest({"id": root.id, "principal": root.principal_id,
@@ -356,6 +363,13 @@ def selection_read(row, value):
 
 
 async def create(db, owner, operator, request):
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        return await _create_with_source_frame(db, owner, operator, request)
+
+
+async def _create_with_source_frame(db, owner, operator, request):
+    from src.work_board.channel_capture import _staged_source_root_for_sql
     from src.work_board.document_build_contracts import DocumentBuildSpec
     from src.work_board.documents import current_source_root
     spec = DocumentBuildSpec.model_validate(request.spec)
@@ -393,14 +407,14 @@ async def create(db, owner, operator, request):
         capability_id=CAPABILITY, capability_version="1", idempotency_key=request.idempotency_key,
         payload_sha256=_digest(payload), typed_input_ref="document-build:" + identifier, size_bytes=len(payload),
         document_reserved_bytes=CHARGE, expires_at=stamp+timedelta(hours=24))
-    value = {"schema": "document-build.v1", "root": dict(root_binding()), "input": immutable,
+    value = {"schema": "document-build.v1", "root": dict(_staged_source_root_for_sql()), "input": immutable,
         "phase": "reserved", "generation": 1, "live_writer": None, "sources": {},
         "spec_revision": 1, "spec_digest": immutable["spec_digest"],
         "selection_digest": immutable["selection_digest"], "source_binding": immutable["source_binding"],
         "formats": ["xlsx" if spec.kind == "table_workbook" else "docx", "pdf"],
         "root_authority": _digest({"id": root.id, "principal": root.principal_id,
             "token_hash": root.token_hash, "absolute": utc(root.absolute_expires_at).isoformat()})}
-    goal, budget = await sources.authority(db, owner, row, value, value["root"])
+    goal, budget = await sources.authority(db, owner, row, value, _staged_source_root_for_sql())
     row.expires_at = min(utc(row.expires_at), utc(root.idle_expires_at), utc(root.absolute_expires_at),
         *[utc(t) for t in (goal.due_date, budget.period_expires_at) if t is not None])
     value["original_deadline"] = utc(row.expires_at).isoformat()
@@ -491,6 +505,12 @@ async def preview(db, owner, operator, identifier, *, descriptor):
 
 
 async def prepare(db, owner, operator, service, identifier, request):
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        return await _prepare_with_source_frame(db, owner, operator, service, identifier, request)
+
+
+async def _prepare_with_source_frame(db, owner, operator, service, identifier, request):
     from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, TaskLimits, PlanSpec, PlanStep
     row, value = await owned(db, owner, identifier)
     prepare_digest = _digest(request.model_dump(mode="json"))

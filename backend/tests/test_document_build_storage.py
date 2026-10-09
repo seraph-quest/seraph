@@ -1,5 +1,6 @@
 """Actual authenticated private spec/row/review/retirement; no provider sockets."""
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -53,7 +54,13 @@ async def setup(accounting_db, monkeypatch):
 async def test_private_build_encrypted_spec_review_and_retire(accounting_db, monkeypatch, case):
     from src.db.models import Goal
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
-    sessions = accounting_db[2].accounting_sessions
+    original_sessions = accounting_db[2].accounting_sessions
+    @asynccontextmanager
+    async def sessions():
+        from src.work_board.channel_capture import staged_captured_source_identity
+        with staged_captured_source_identity():
+            async with original_sessions() as db:
+                yield db
     request = builds.BuildCreate(goal_id=goal.id, goal_revision=1, spec=SPEC, idempotency_key="one")
     async with sessions() as db:
         created = await builds.create(db, owner, operator, request)

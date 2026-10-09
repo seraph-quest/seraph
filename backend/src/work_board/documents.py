@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import anyio
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -115,6 +116,7 @@ def projection(row):
         "source_digest": value["input"].get("source", {}).get("sha256"), "goal_id": row.goal_id,
         "goal_revision": row.goal_revision, "reason_code": value.get("reason"),
         "ingest_deadline": value["ingest_deadline"], "no_learning": True,
+        "quota_reserved_bytes": row.document_reserved_bytes,
         "cleanup": "unknown_writer_retained" if value.get("live_writer") else "quiescent",
         "writer_kind": ("parser" if value["live_writer"].get("slot") == "parser" else "upload") if value.get("live_writer") else None,
         "provider_contacts": (0 if value.get("channel_ingest", {}).get("contact", "not_started") == "not_started" else
@@ -123,16 +125,34 @@ def projection(row):
         "typed_input_digest": row.payload_sha256 if row.metadata_digest else None}
 
 
-def read_witness(row, value):
+_READER_WITNESS_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _ReaderWitness:
+    artifact_id: str
+    revision: int
+    value_json: str
+    receipt_json: str
+    _seal: object = field(default=None, repr=False, compare=False)
+    _issued_id: int = field(default=0, repr=False, compare=False)
+
+
+def stage_reader_witness(row, value):
     binding = value["parser_binding"]
     parent, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
     descriptor = -1
     try:
-        descriptor = os.open(binding["nonce"]+".witness.json", os.O_RDONLY|os.O_NOFOLLOW, dir_fd=parent)
+        descriptor = os.open(binding["nonce"]+".witness.json", os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
         metadata = os.fstat(descriptor)
         if not _private_input_file_metadata(metadata) or not 0 < metadata.st_size <= 4096:
             raise ValueError("witness metadata changed")
         raw = os.read(descriptor, 4097)
+        if len(raw) != metadata.st_size:
+            raise ValueError("original witness EOF changed")
+        named = os.stat(binding["nonce"]+".witness.json", dir_fd=parent, follow_symlinks=False)
+        if any(getattr(named, key) != getattr(metadata, key) for key in ("st_dev", "st_ino", "st_size", "st_uid", "st_mode", "st_nlink")):
+            raise ValueError("original witness name changed")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -144,7 +164,23 @@ def read_witness(row, value):
         or any(type(witness[key]) is not int or witness[key] <= 0 for key in ("supervisor_pid", "parser_pid"))
         or any(witness.get(key) != expected for key, expected in binding.items())):
         raise ValueError("original witness binding changed")
-    return sources.sha256(raw)
+    receipt = {"file": binding["nonce"]+".witness.json", "sha256": sources.sha256(raw),
+        "size": len(raw), "device": metadata.st_dev, "inode": metadata.st_ino}
+    result = _ReaderWitness(row.artifact_id, row.revision, canonical(value).decode(), canonical(receipt).decode(), _READER_WITNESS_SEAL)
+    object.__setattr__(result, "_issued_id", id(result))
+    return result
+
+
+def check_reader_witness(row, value, witness):
+    if (type(witness) is not _ReaderWitness or witness._seal is not _READER_WITNESS_SEAL
+        or witness._issued_id != id(witness) or witness.artifact_id != row.artifact_id
+        or witness.revision != row.revision or witness.value_json != canonical(value).decode()):
+        raise BoardError("document_reader_fence_changed", "The actual original producer witness and source revision are required", status_code=409)
+    return json.loads(witness.receipt_json)
+
+
+def read_witness(row, value):
+    return json.loads(stage_reader_witness(row, value).receipt_json)["sha256"]
 
 
 async def reconcile_reader(db, owner, identifier, revision):
@@ -153,23 +189,35 @@ async def reconcile_reader(db, owner, identifier, revision):
         raise BoardError("document_pair_root_changed", "Reconcile only the original workspace", status_code=409)
     if not value.get("live_writer") or value["live_writer"].get("slot") != "parser":
         raise BoardError("document_original_reader_required", "There is no unknown original parser to reconcile", status_code=409)
+    descriptor = -1
     try:
-        witness_digest = read_witness(row, value)
+        if value.get("channel_ingest"):
+            from src.work_board.document_channel_ingest import original_channel_lease
+            descriptor = original_channel_lease(row, value)
+            readers = value["channel_ingest"].get("readers", [])
+            if not readers or readers[-1]["binding"] != value["parser_binding"] or readers[-1]["witness"] is not None:
+                raise ValueError("original producer inventory unavailable")
+        producer = stage_reader_witness(row, value)
+        await _begin_immediate(db)
+        fresh, current = await sources.owned(db, owner, identifier, revision=revision, capability=CAPABILITY)
+        if current != value:
+            raise BoardError("document_reader_fence_changed", "The original reader changed", status_code=409)
+        witness = check_reader_witness(fresh, current, producer)
+        current["live_writer"] = None
+        current["witness_digest"] = witness["sha256"]
+        if current.get("channel_ingest"):
+            current["channel_ingest"]["readers"][-1]["witness"] = witness
+        current["reason"] = "document_original_reader_reaped_output_unavailable"
+        previous = (fresh.revision, fresh.metadata_digest)
+        fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
+        fresh.metadata_digest = _metadata_digest(fresh)
+        await _source_change_receipt(db, fresh, current, previous)
+        await db.commit()
+        return projection(fresh)
     except (OSError, ValueError, KeyError):
         raise BoardError("document_parser_cleanup_unknown", "The exact positive wait witness is unavailable; retain capacity", status_code=409) from None
-    await _begin_immediate(db)
-    fresh, current = await sources.owned(db, owner, identifier, revision=revision, capability=CAPABILITY)
-    if current != value:
-        raise BoardError("document_reader_fence_changed", "The original reader changed", status_code=409)
-    current["live_writer"] = None
-    current["witness_digest"] = witness_digest
-    current["reason"] = "document_original_reader_reaped_output_unavailable"
-    previous = (fresh.revision, fresh.metadata_digest)
-    fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
-    fresh.metadata_digest = _metadata_digest(fresh)
-    await _source_change_receipt(db, fresh, current, previous)
-    await db.commit()
-    return projection(fresh)
+    finally:
+        if descriptor >= 0: os.close(descriptor)
 
 
 async def current_source_root(db, owner, operator):
@@ -354,6 +402,12 @@ class DocumentService:
             return {**result, "cleanup": "wait_reaped", "provider_contacts": 0}
 
     async def read(self, db, owner, request: DocumentReadInput, *, operator=None):
+        row, value = await sources.owned(db, owner, request.artifact_ref.split(":", 1)[1], capability=CAPABILITY)
+        from src.work_board.document_channel_ingest import channel_source_read_claim
+        async with channel_source_read_claim(owner, row, value, operator=operator):
+            return await self._read_owned(db, owner, request, operator=operator)
+
+    async def _read_owned(self, db, owner, request: DocumentReadInput, *, operator=None):
         identifier = request.artifact_ref.split(":", 1)[1]
         root = dict(root_binding())
         row, value = await sources.owned(db, owner, identifier, capability=CAPABILITY)
@@ -372,38 +426,40 @@ class DocumentService:
             if evidence["source_digest"] != value["input"]["source"]["sha256"]:
                 raise BoardError("document_evidence_source_changed", "The evidence digest no longer matches its selected source", status_code=409)
             return {"status": "succeeded", "evidence": evidence, "cleanup": "wait_reaped", "provider_contacts": 0}
-        raw = sources.read_private(sources.source_path(row, value, "source"), value["sources"]["source"], maximum=SOURCE_LIMIT)
-        if sources.sha256(raw) != value["input"]["source"]["sha256"]:
-            raise BoardError("document_source_changed", "Restore the exact immutable source", status_code=409)
         token = uuid.uuid4().hex
         from src.work_board.document_capacity import stage_capacity, assert_capacity
         capacity_snapshot = await stage_capacity(db)
-        await _begin_immediate(db)
-        fresh, current = await sources.owned(db, owner, identifier, revision=row.revision, capability=CAPABILITY)
-        await sources.authority(db, owner, fresh, current, root)
-        if current.get("live_writer"):
-            raise BoardError("document_parser_cleanup_unknown", "Reconcile the original reader before reuse", status_code=409)
-        await assert_capacity(db, snapshot=capacity_snapshot)
-        current["live_writer"] = {"token": token, "slot": "parser"}
-        attempts = current.get("parser_attempts", 0)
-        if attempts >= 2:
-            raise BoardError("document_parser_attempt_limit", "Delete the retained source and select a fresh document", status_code=409)
-        current["parser_attempts"] = attempts+1
-        from datetime import timedelta
-        from src.work_board.pipelines import now, utc
-        if not current.get("execution_deadline"):
-            deadlines = [utc(row.expires_at), now()+timedelta(seconds=70)]
-            deadlines.extend([utc(authenticated_root.idle_expires_at), utc(authenticated_root.absolute_expires_at)])
-            current["execution_deadline"] = min(deadlines).isoformat()
-        remaining = (datetime.fromisoformat(current["execution_deadline"])-now()).total_seconds()
-        if remaining < 40:
-            raise BoardError("document_original_execution_window_expired", "Delete the closed source and select a fresh document", status_code=409)
-        binding = {"job_id": identifier, "input_digest": request_digest, "generation": current["generation"], "nonce": token}
-        current["parser_binding"] = binding
-        current["read_request_digest"] = request_digest
-        # All fallible filesystem preparation precedes durable parser ownership.
-        directory, _leaf = _open_input_artifact_parent(sources.source_path(fresh, current, "source"), create=False)
+        # Stage the held directory before the canonical parser writer.
+        directory, _leaf = _open_input_artifact_parent(sources.source_path(row, value, "source"), create=False)
         try:
+            await _begin_immediate(db)
+            fresh, current = await sources.owned(db, owner, identifier, revision=row.revision, capability=CAPABILITY)
+            await sources.authority(db, owner, fresh, current, root)
+            if current.get("live_writer"):
+                raise BoardError("document_parser_cleanup_unknown", "Reconcile the original reader before reuse", status_code=409)
+            await assert_capacity(db, snapshot=capacity_snapshot)
+            current["live_writer"] = {"token": token, "slot": "parser"}
+            attempts = current.get("parser_attempts", 0)
+            if attempts >= 2:
+                raise BoardError("document_parser_attempt_limit", "Delete the retained source and select a fresh document", status_code=409)
+            current["parser_attempts"] = attempts+1
+            from datetime import timedelta
+            from src.work_board.pipelines import now, utc
+            if not current.get("execution_deadline"):
+                deadlines = [utc(row.expires_at), now()+timedelta(seconds=70)]
+                deadlines.extend([utc(authenticated_root.idle_expires_at), utc(authenticated_root.absolute_expires_at)])
+                current["execution_deadline"] = min(deadlines).isoformat()
+            remaining = (datetime.fromisoformat(current["execution_deadline"])-now()).total_seconds()
+            if remaining < 40:
+                raise BoardError("document_original_execution_window_expired", "Delete the closed source and select a fresh document", status_code=409)
+            binding = {"job_id": identifier, "input_digest": request_digest, "generation": current["generation"], "nonce": token}
+            current["parser_binding"] = binding
+            current["read_request_digest"] = request_digest
+            if current.get("channel_ingest"):
+                readers = current["channel_ingest"].setdefault("readers", [])
+                if len(readers) >= 2:
+                    raise BoardError("document_parser_attempt_limit", "Original producer inventory is bounded", status_code=409)
+                readers.append({"binding": binding, "witness": None})
             previous = (fresh.revision, fresh.metadata_digest)
             fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
             fresh.metadata_digest = _metadata_digest(fresh)
@@ -431,12 +487,18 @@ class DocumentService:
                 raise BoardError("document_original_execution_window_expired", "The original parser window cannot cover execution and cleanup", status_code=409)
             ready_binding = {**binding, "supervisor_pid": handshake["supervisor_pid"], "parser_pid": handshake["parser_pid"]}
             ready_value["parser_binding"] = ready_binding
+            if ready_value.get("channel_ingest"):
+                ready_value["channel_ingest"]["readers"][-1]["binding"] = ready_binding
             previous = (ready_row.revision, ready_row.metadata_digest)
             ready_row.document_metadata_json = canonical(ready_value).decode(); ready_row.revision += 1
             ready_row.metadata_digest = _metadata_digest(ready_row)
             await _source_change_receipt(db, ready_row, ready_value, previous)
             await db.commit()
         try:
+            result = {"status": "blocked", "reason": "document_source_changed", "cleanup": "not_launched", "no_learning": True, "provider_contacts": 0}
+            raw = sources.read_private(sources.source_path(fresh, current, "source"), current["sources"]["source"], maximum=SOURCE_LIMIT)
+            if sources.sha256(raw) != current["input"]["source"]["sha256"]:
+                raise ValueError("original source readback changed")
             result = await self.parse(raw, request, witness_directory=directory, binding=binding, on_ready=ready,
                 absolute_deadline=datetime.fromisoformat(current["execution_deadline"]).timestamp())
             if result["status"] == "succeeded":
@@ -444,6 +506,11 @@ class DocumentService:
                 candidate = sources.publish_private(sources.source_path(fresh, current, "evidence"), evidence_raw)
                 if sources.read_private(sources.source_path(fresh, current, "evidence"), candidate, maximum=OUTPUT_LIMIT) != evidence_raw:
                     raise ValueError("private evidence readback changed")
+                if current.get("channel_ingest"):
+                    from src.work_board.document_channel_ingest import _read_inventory
+                    physical = _read_inventory(sources.source_path(fresh, current, "evidence"),
+                        {"size": candidate["cipher_size"], "sha256": candidate["cipher_sha256"]})
+                    candidate.update({key: physical[key] for key in ("device", "inode")})
                 receipt = candidate
         except (ValueError, OSError):
             result = {"status": "blocked", "reason": "document_output_cleanup_required",
@@ -461,16 +528,27 @@ class DocumentService:
             async def settle():
                 nonlocal final, latest, adoption_error
                 async with asyncio.timeout(10):
+                    staged_row, staged_value = await sources.owned(db, owner, identifier, capability=CAPABILITY)
+                    staged_revision = staged_row.revision
+                    not_launched = bool(result and result.get("cleanup") == "not_launched")
+                    producer = None if not_launched else stage_reader_witness(staged_row, staged_value)
                     await _begin_immediate(db)
                     final, latest = await sources.owned(db, owner, identifier, capability=CAPABILITY)
-                    if (latest.get("live_writer") != {"token": token, "slot": "parser"}
+                    if (final.revision != staged_revision or latest != staged_value
+                        or latest.get("live_writer") != {"token": token, "slot": "parser"}
                         or latest.get("generation") != binding["generation"]
                         or latest.get("parser_binding") != ready_binding
                         or latest.get("parser_attempts") != attempts+1
                         or latest.get("execution_deadline") != current["execution_deadline"]):
                         raise BoardError("document_reader_fence_changed", "Reconcile the original reader", status_code=409)
-                    if not (result and result.get("cleanup") == "not_launched"):
-                        latest["witness_digest"] = read_witness(final, latest)
+                    witness_receipt = None if not_launched else check_reader_witness(final, latest, producer)
+                    if witness_receipt is not None:
+                        latest["witness_digest"] = witness_receipt["sha256"]
+                    if latest.get("channel_ingest"):
+                        original = latest["channel_ingest"]["readers"][-1]
+                        if original["binding"] != ready_binding or original["witness"] is not None:
+                            raise BoardError("document_reader_fence_changed", "Original producer inventory changed", status_code=409)
+                        original["witness"] = witness_receipt if witness_receipt is not None else {"not_launched": True}
                     latest["live_writer"] = None
                     latest["reason"] = result.get("reason") if result else "document_reader_interrupted"
                     if receipt is not None:
@@ -486,6 +564,10 @@ class DocumentService:
                             latest["reason"] = "document_output_cleanup_required"
                         else:
                             latest["evidence"] = receipt
+                            if latest.get("channel_ingest"):
+                                latest["channel_ingest"]["physical"]["evidence"] = {
+                                    "device": receipt["device"], "inode": receipt["inode"],
+                                    "size": receipt["cipher_size"], "sha256": receipt["cipher_sha256"]}
                     previous = (final.revision, final.metadata_digest)
                     final.document_metadata_json = canonical(latest).decode(); final.revision += 1
                     final.metadata_digest = _metadata_digest(final)

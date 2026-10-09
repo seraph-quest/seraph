@@ -46,11 +46,16 @@ def selected_view(evidence, references):
     return result
 
 
-async def resolve(db, owner, binding, *, goal_id=None, operator=None, metadata_only=False):
+async def resolve(db, owner, binding, *, goal_id=None, operator=None, metadata_only=False, _source_claim=None):
     from src.work_board.input_artifacts import _metadata_digest
     row, value = await sources.owned(db, owner, binding.artifact_ref.split(":", 1)[1],
         revision=binding.source_revision, capability=CAPABILITY)
-    await sources.authority(db, owner, row, value, dict(sources.root_binding()))
+    if metadata_only:
+        from src.work_board.channel_capture import _staged_source_root_for_sql
+        staged_root = _staged_source_root_for_sql()
+    else:
+        staged_root = dict(sources.root_binding())
+    await sources.authority(db, owner, row, value, staged_root)
     await current_source_root(db, owner, operator)
     if (row.metadata_digest != binding.metadata_digest or row.metadata_digest != _metadata_digest(row) or value.get("phase") != "sealed"
         or value.get("live_writer") or value.get("reason") == "document_output_cleanup_required"
@@ -60,14 +65,16 @@ async def resolve(db, owner, binding, *, goal_id=None, operator=None, metadata_o
         raise BoardError("document_preparation_source_changed", "Read and select the current adopted document", status_code=409)
     if metadata_only:
         return row, None
-    source_bytes = sources.read_private(sources.source_path(row, value, "source"), value["sources"]["source"], maximum=16 * 1024 * 1024)
-    if sources.sha256(source_bytes) != value["input"]["source"]["sha256"]:
-        raise BoardError("document_preparation_source_changed", "Original encrypted source readback changed", status_code=409)
-    raw = sources.read_private(sources.source_path(row, value, "evidence"), value["evidence"], maximum=OUTPUT_LIMIT)
-    evidence = DocumentEvidence.model_validate_json(raw)
-    if evidence.source_digest != value["input"]["source"]["sha256"]:
-        raise BoardError("document_preparation_source_changed", "Private source readback changed", status_code=409)
-    return row, selected_view(evidence, binding.citation_refs)
+    from src.work_board.document_channel_ingest import channel_source_read_claim
+    async with channel_source_read_claim(owner, row, value, operator=operator, reuse=_source_claim):
+        source_bytes = sources.read_private(sources.source_path(row, value, "source"), value["sources"]["source"], maximum=16 * 1024 * 1024)
+        if sources.sha256(source_bytes) != value["input"]["source"]["sha256"]:
+            raise BoardError("document_preparation_source_changed", "Original encrypted source readback changed", status_code=409)
+        raw = sources.read_private(sources.source_path(row, value, "evidence"), value["evidence"], maximum=OUTPUT_LIMIT)
+        evidence = DocumentEvidence.model_validate_json(raw)
+        if evidence.source_digest != value["input"]["source"]["sha256"]:
+            raise BoardError("document_preparation_source_changed", "Private source readback changed", status_code=409)
+        return row, selected_view(evidence, binding.citation_refs)
 
 
 def check_envelope(envelope):
@@ -103,7 +110,7 @@ def original_job_digest(task, attempt, envelope):
     return _digest(inputs)
 
 
-async def invocation(db, principal, job_id, fencing_token):
+async def invocation(db, principal, job_id, fencing_token, *, metadata_only=False):
     from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.dispatcher import _parse_typed_input
@@ -111,7 +118,7 @@ async def invocation(db, principal, job_id, fencing_token):
     candidate = await db.scalar(select(WorkflowRunState).where(
         WorkflowRunState.run_identity == job_id).execution_options(populate_existing=True))
     if candidate is not None and candidate.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
-        return await _native_invocation(db, principal, candidate, fencing_token)
+        return await _native_invocation(db, principal, candidate, fencing_token, metadata_only=metadata_only)
     attempt = (await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == job_id))).one_or_none()
     run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id).execution_options(populate_existing=True))
     if (attempt is None or attempt.ended_at is not None or attempt.cancel_requested_at is not None
@@ -134,11 +141,11 @@ async def invocation(db, principal, job_id, fencing_token):
     if (run.deadline_at is None or sources.utc(run.deadline_at) <= datetime.now(timezone.utc)
         or run.lease_expires_at is None or sources.utc(run.lease_expires_at) <= datetime.now(timezone.utc)):
         raise BoardError("document_preparation_deadline_expired", "The original execution window expired", status_code=409)
-    await resolve(db, owner, envelope.task_input.document_source, goal_id=task.goal_id)
+    await resolve(db, owner, envelope.task_input.document_source, goal_id=task.goal_id, metadata_only=metadata_only)
     return owner, envelope
 
 
-async def _native_invocation(db, principal, child, fencing_token):
+async def _native_invocation(db, principal, child, fencing_token, *, metadata_only=False):
     """The fixed child derives its original source through the shared compiler."""
     from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
     from src.work_board.contracts import WorkBoardOwner
@@ -179,7 +186,7 @@ async def _native_invocation(db, principal, child, fencing_token):
         or private.inputs != {"selection_digest": source.selection_digest}):
         raise BoardError("document_selection_changed", "Exact selected native document step is required", status_code=409)
     owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
-    await resolve(db, owner, source, goal_id=task.goal_id)
+    await resolve(db, owner, source, goal_id=task.goal_id, metadata_only=metadata_only)
     return owner, envelope
 
 
@@ -206,12 +213,14 @@ async def propose(db, owner, operator, service, request):
 
 async def invoke(principal, job_id, fencing_token, inputs):
     from src.db.engine import get_session
-    async with get_session() as db:
-        _owner, envelope = await invocation(db, principal, job_id, fencing_token)
-        binding = envelope.task_input.document_source
-        if inputs != {"selection_digest": binding.selection_digest}:
-            raise BoardError("document_selection_changed", "The accepted selection changed", status_code=409)
-        return {"source_binding": binding.model_dump(mode="json"), "no_learning": True, "provider_contacts": 0}
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        async with get_session() as db:
+            _owner, envelope = await invocation(db, principal, job_id, fencing_token)
+            binding = envelope.task_input.document_source
+            if inputs != {"selection_digest": binding.selection_digest}:
+                raise BoardError("document_selection_changed", "The accepted selection changed", status_code=409)
+            return {"source_binding": binding.model_dump(mode="json"), "no_learning": True, "provider_contacts": 0}
 
 
 def descriptor():

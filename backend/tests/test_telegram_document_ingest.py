@@ -144,6 +144,35 @@ async def test_actual_original_event_quota_before_http_physical_first_seal_and_e
         assert replay.status_code == 200 and replay.json()["channel_task_capture"]["task_id"] == capture_task_id, replay.text
         same = await acquire_original_document(adapter, owner, event_key)
         assert same["artifact_id"] == result["artifact_id"] and contacts == ["POST", "GET"]
+        async with async_db() as db:
+            source = await db.get(WorkBoardInputArtifact, result["artifact_id"])
+            assert source.bound_task_id is None
+            source_revision = source.revision
+            task_rows = (await db.scalars(select(WorkBoardTask))).all()
+            tasks_before = {task.task_id: task.model_dump(mode="json") for task in task_rows}
+            copied_inputs = {}
+            for task in task_rows:
+                artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+                copied_inputs[artifact.artifact_id] = sources._payload_path(artifact).read_bytes()
+        retired = await client.delete(f"/api/documents/sources/{result['artifact_id']}", params={"expected_revision": source_revision})
+        assert retired.status_code == 200, retired.text
+        async with async_db() as db:
+            source = await db.get(WorkBoardInputArtifact, result["artifact_id"])
+            assert source.bound_task_id is None and sources.metadata(source)["channel_ingest"]["task_id"] == capture_task_id
+            assert source.document_reserved_bytes == 0 and source.state == "deleted"
+            assert {task.task_id: task.model_dump(mode="json") for task in (await db.scalars(select(WorkBoardTask))).all()} == tasks_before
+            for identifier, original_bytes in copied_inputs.items():
+                assert sources._payload_path(await db.get(WorkBoardInputArtifact, identifier)).read_bytes() == original_bytes
+            assert not (await db.scalars(select(InferenceCostReservation))).all()
+        denied_replay = await client.post("/api/telegram/updates", json=event)
+        assert denied_replay.status_code == 409 and contacts == ["POST", "GET"], denied_replay.text
+        denied_preparation_view = await client.get(f"/api/documents/preparations/{preparation_task['task_id']}")
+        assert denied_preparation_view.status_code == 409, denied_preparation_view.text
+        denied_original_acceptance = await client.post(f"/api/work-board/tasks/{capture_task_id}/actions", json={
+            "action": "promote", "expected_revision": tasks_before[capture_task_id]["task_revision"]})
+        assert denied_original_acceptance.status_code == 409, denied_original_acceptance.text
+        assert denied_original_acceptance.json()["detail"]["code"] == "channel_document_source_unsealed"
+        assert contacts == ["POST", "GET"]
     finally:
         await service.stop(); await boundary.http.aclose(); adapter.document_service = None
 
@@ -360,5 +389,175 @@ async def test_copy_of_private_original_witness_cannot_reserve(client, async_db,
         assert contacts == []
         async with async_db() as db:
             assert not (await db.scalars(select(WorkBoardInputArtifact))).all()
+    finally:
+        await service.stop(); await boundary.http.aclose()
+
+
+async def ready_source(client, async_db, monkeypatch):
+    from src.api import documents as documents_api
+    monkeypatch.setattr(documents_api, "get_session", async_db)
+    adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db)
+    response = await client.post("/api/telegram/updates", json=event)
+    assert response.status_code == 200, response.text
+    async with async_db() as db:
+        original = await db.scalar(select(TelegramInboundUpdate).where(TelegramInboundUpdate.update_id == 51))
+        identifier = json.loads(original.receipt_json)["channel_task_capture"]["document_source"]["artifact_id"]
+        evidence = await service.read(db, owner, DocumentReadInput(artifact_ref="document-source:"+identifier, format="csv"))
+        assert evidence["status"] == "succeeded"
+    return adapter, boundary, service, event, owner, identifier, evidence, contacts
+
+
+async def test_actual_original_read_claim_delete_race_nested_citations_and_tombstone_denial(client, async_db, setup_workspace, monkeypatch):
+    from dataclasses import replace
+    from src.work_board.contracts import DocumentTaskBinding
+    from src.work_board.document_channel_ingest import channel_source_read_claim
+    from src.work_board.document_preparation import resolve
+    from src.work_board.general_task import digest
+    adapter, boundary, service, event, owner, identifier, evidence, contacts = await ready_source(client, async_db, monkeypatch)
+    try:
+        leaf = evidence["evidence"]["sections"][0]["table_cells"][0]
+        async with async_db() as db:
+            row = await db.get(WorkBoardInputArtifact, identifier)
+            value, original_revision = sources.metadata(row), row.revision
+            binding = DocumentTaskBinding(artifact_ref="document-source:"+identifier, source_revision=row.revision,
+                metadata_digest=row.metadata_digest, citation_refs=[leaf["source_ref"]],
+                selection_digest=digest([leaf["source_ref"]]), acknowledge_local_use=True)
+            async with channel_source_read_claim(owner, row, value) as claim:
+                denied = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": original_revision})
+                assert denied.status_code == 409, denied.text
+                denied_citations = await client.get(f"/api/documents/sources/{identifier}/citations")
+                assert denied_citations.status_code == 409, denied_citations.text
+                selected, view = await resolve(db, owner, binding, _source_claim=claim)
+                assert selected.artifact_id == identifier and view[0]["source_ref"] == leaf["source_ref"]
+                with pytest.raises(BoardError):
+                    await resolve(db, owner, binding, _source_claim=replace(claim))
+            retained = await db.get(WorkBoardInputArtifact, identifier, populate_existing=True)
+            assert retained.revision == original_revision and retained.document_reserved_bytes == 32*1024*1024
+        citations = await client.get(f"/api/documents/sources/{identifier}/citations")
+        assert citations.status_code == 200 and citations.json()["citations"], citations.text
+        retired = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": original_revision})
+        assert retired.status_code == 200 and retired.json()["quota_reserved_bytes"] == 0, retired.text
+        assert not list(sources.source_path(row, value, "source").parent.iterdir())
+        assert (await client.get(f"/api/documents/sources/{identifier}/citations")).status_code == 409
+        async with async_db() as db:
+            with pytest.raises(BoardError):
+                await resolve(db, owner, binding)
+            with pytest.raises(BoardError):
+                await service.read(db, owner, DocumentReadInput(artifact_ref="document-source:"+identifier, format="csv"))
+        assert contacts == ["POST", "GET"]
+    finally:
+        await service.stop(); await boundary.http.aclose()
+
+
+async def test_metadata_only_source_uses_actual_lexical_root_frame(client, async_db, setup_workspace, monkeypatch):
+    import asyncio
+    from src.work_board.channel_capture import staged_captured_source_identity, _staged_source_root_for_sql
+    from src.work_board.contracts import DocumentTaskBinding
+    from src.work_board.document_preparation import resolve
+    from src.work_board.general_task import digest
+    from src.work_board.input_artifacts import _begin_immediate
+    adapter, boundary, service, event, owner, identifier, evidence, contacts = await ready_source(client, async_db, monkeypatch)
+    try:
+        leaf = evidence["evidence"]["sections"][0]["table_cells"][0]["source_ref"]
+        async with async_db() as db:
+            row = await db.get(WorkBoardInputArtifact, identifier)
+            binding = DocumentTaskBinding(artifact_ref="document-source:"+identifier, source_revision=row.revision,
+                metadata_digest=row.metadata_digest, citation_refs=[leaf],
+                selection_digest=digest([leaf]), acknowledge_local_use=True)
+            with pytest.raises(BoardError):
+                await resolve(db, owner, binding, metadata_only=True)
+            await db.rollback()
+            with staged_captured_source_identity():
+                root = _staged_source_root_for_sql()
+                with pytest.raises(TypeError):
+                    root["inode"] = 0
+                async def foreign_task():
+                    with pytest.raises(BoardError):
+                        _staged_source_root_for_sql()
+                await asyncio.create_task(foreign_task())
+                await _begin_immediate(db)
+                selected, view = await resolve(db, owner, binding, metadata_only=True)
+                assert selected.artifact_id == identifier and view is None
+                await db.rollback()
+            with pytest.raises(BoardError):
+                _staged_source_root_for_sql()
+        assert contacts == ["POST", "GET"]
+    finally:
+        await service.stop(); await boundary.http.aclose()
+
+
+@pytest.mark.parametrize("damage", ["bound", "foreign", "both_links", "replaced_witness", "missing_inventory", "partial_unlink"])
+async def test_retirement_unknown_physical_or_generic_owner_retains_charge(client, async_db, setup_workspace, monkeypatch, damage):
+    import os
+    adapter, boundary, service, event, owner, identifier, evidence, contacts = await ready_source(client, async_db, monkeypatch)
+    try:
+        async with async_db() as db:
+            row = await db.get(WorkBoardInputArtifact, identifier)
+            value = sources.metadata(row)
+            revision = row.revision
+            if damage == "bound":
+                row.bound_task_id = "unexpected_generic_owner"
+                await db.commit()
+            elif damage == "missing_inventory":
+                value["channel_ingest"].pop("readers")
+                from src.work_board.document_channel_ingest import cleanup_channel_files
+                with pytest.raises(OSError, match="original reader inventory unavailable"):
+                    cleanup_channel_files(row, value)
+                row.document_metadata_json = sources.canonical(value).decode()
+                await db.commit()
+        directory = sources.source_path(row, value, "source").parent
+        if damage == "foreign":
+            (directory/"foreign-private-fragment").write_bytes(b"foreign")
+        elif damage == "both_links":
+            os.link(sources.source_path(row, value, "source"), directory/value["channel_ingest"]["publication"]["source"]["temporary"])
+        elif damage == "replaced_witness":
+            path = directory/value["channel_ingest"]["readers"][0]["witness"]["file"]
+            raw = path.read_bytes(); path.unlink(); path.write_bytes(raw); path.chmod(0o600)
+        elif damage == "partial_unlink":
+            sources.source_path(row, value, "source").write_bytes(b"wrong original source ciphertext")
+        denied = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": revision})
+        assert denied.status_code == 409, denied.text
+        async with async_db() as db:
+            retained = await db.get(WorkBoardInputArtifact, identifier)
+            assert retained.document_reserved_bytes == 32*1024*1024 and retained.state != "deleted"
+            assert sources.metadata(retained)["channel_ingest"]["task_id"] == value["channel_ingest"]["task_id"]
+            if damage == "partial_unlink":
+                assert sources.metadata(retained)["phase"] == "cleanup_tombstone"
+                assert not sources._payload_path(row).exists()
+        assert contacts == ["POST", "GET"]
+    finally:
+        await service.stop(); await boundary.http.aclose()
+
+
+async def test_final_source_release_cas_denies_unexpected_nonnull_generic_owner(client, async_db, setup_workspace, monkeypatch):
+    from src.work_board.document_channel_ingest import _retirement_cas
+    from src.work_board.input_artifacts import _begin_immediate
+    adapter, boundary, service, event, owner, identifier, evidence, contacts = await ready_source(client, async_db, monkeypatch)
+    try:
+        async with async_db() as db:
+            row = await db.get(WorkBoardInputArtifact, identifier)
+            value = sources.metadata(row)
+            directory = sources.source_path(row, value, "source").parent
+            (directory/"unknown-fragment").write_bytes(b"hold original charge")
+            revision = row.revision
+        denied = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": revision})
+        assert denied.status_code == 409
+        async with async_db() as db:
+            row = await db.get(WorkBoardInputArtifact, identifier)
+            assert sources.metadata(row)["phase"] == "cleanup_tombstone"
+            row.bound_task_id = "unexpected_late_generic_owner"
+            await db.commit()
+            await _begin_immediate(db)
+            row = await db.get(WorkBoardInputArtifact, identifier, populate_existing=True)
+            attempted = sources.metadata(row)
+            attempted["phase"] = "deleted"; attempted["sources"] = {}
+            with pytest.raises(BoardError):
+                await _retirement_cas(db, row, attempted, release=True)
+            await db.rollback()
+        async with async_db() as db:
+            retained = await db.get(WorkBoardInputArtifact, identifier)
+            assert retained.bound_task_id == "unexpected_late_generic_owner" and retained.document_reserved_bytes == 32*1024*1024
+            assert retained.state != "deleted" and sources.metadata(retained)["phase"] == "cleanup_tombstone"
+        assert contacts == ["POST", "GET"]
     finally:
         await service.stop(); await boundary.http.aclose()

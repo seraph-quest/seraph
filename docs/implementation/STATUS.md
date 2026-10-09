@@ -166,8 +166,31 @@ restart boundaries, full-capacity cancellation and `no_learning`; macOS executio
 and live external/provider usefulness remain unverified. The current Python
 managed lifecycle remains the execution owner before the separately owned
 [#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
-Specialist delegation in
-[#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
+**Bounded specialist delegation (#999): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#999](https://github.com/seraph-quest/seraph/issues/999)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-specialist-delegation-999)
+extends an accepted native task with actual specialist Work cards, private
+copied handoffs, durable wait and physically verified child outputs. The original
+group admits at most two active and four retained specialist children, depth
+one, and shares its twelve-call ceiling, explicit cost allowance and original
+deadline. Parent/child navigation is informational; reserved identities do not
+mean that a child has been claimed or executed. Completion remains no-learning.
+
+Original-root cancel and held pause fence further work while retaining Unknown
+callbacks, effects and contacted cost liabilities. A failed sibling does not
+discard an already verified output. The current authenticated owner can inspect
+eligible physical child outputs and explicitly accept an immutable partial
+review, including after the execution cutoff. This preserves the original
+Task, Attempt and stop state; it cannot complete the task, settle liabilities
+or resume work. Current unresolved job/effect/cost counts remain separate from
+the accepted decision's historical debt. Exact action replay requires current
+paired-owner authorization; recovered read-only access cannot issue or replay
+the decision. Isolated Linux native/API/stock-MCP, accounting and UI receipts
+cover copied-evidence boundaries, durable waits, failed-sibling retention,
+stop races, physical selection and authenticated restart replay. They establish
+neither model quality nor general callback recovery; native macOS execution and
+live external/provider usefulness remain unverified.
 
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,

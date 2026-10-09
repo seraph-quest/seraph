@@ -1098,6 +1098,88 @@ cover exact control bindings and truthful cancellation states. These isolated
 Linux receipts make no external provider call or quality claim. The contract is
 OS-agnostic; native macOS execution remains unverified.
 
+#### Bounded specialist delegation (#999)
+
+**Intended Shipped scope after reviewed merge:** available on the installed
+`develop` revision containing the independently reviewed
+[#999](https://github.com/seraph-quest/seraph/issues/999) implementation merge.
+It extends the accepted native task contract above, using the same Python
+dispatcher, canonical Work cards and governed inference accounting owner.
+
+An accepted plan can invoke the fixed `specialist_delegate` tool. The server
+reserves the original parent/step association and publishes a real specialist
+Work card with an immutable private input. Both cards expose reciprocal
+navigation after canonical publication. This is informational lineage, not a
+dependency edge or permission: Attempt/job identities are labeled reserved
+until the existing dispatcher actually claims them. Missing or foreign cards
+remain unavailable through the existing owner-filtered inspector.
+
+The original group permits at most two active and four retained specialist
+children and one specialist depth; a specialist cannot delegate recursively.
+Planning and execution share the original task's allowance of at most twelve
+inference calls, explicit cost ceiling and absolute deadline. No child obtains
+a new inference lane, approval, Root or budget from its lineage. Selected
+execution evidence is copied into a bounded private handoff under current
+producer, Goal and owner checks. The child consumes that sealed copy; it does
+not regain an arbitrary source path or inherit credentials. Changed source or
+Vault metadata, missing or altered copied artifacts and unrelated pointers
+block the governed use.
+
+The parent enters a durable wait rather than holding an active callback while
+the child works. Reconciliation uses the original protected reservation and
+actual child execution/readback. Restart can continue that retained wait or
+adopt already verified physical child output without launching another child.
+Only verified parent assembly reaches Review. A failed sibling retains the
+successful child's private output and visible original accounting; it does not
+convert partial work into successful final assembly. Outcomes record
+`no_learning`; task or child success does not update canonical memory.
+
+Cancel on the original root fences the complete original direct/specialist
+descendant set and further output adoption. Held pause also stops admission;
+it provides no new resume bridge for uncertain work. Original callbacks,
+Unknown effects and contacted cost liabilities stay visible. A stop receipt,
+lease expiry, absent process or reserved child identity does not prove positive
+callback closure. Existing original-source closure and accounting readbacks
+remain necessary for reconciliation; the partial-review action cannot supply
+them or renew execution.
+
+For eligible stopped work, the GeneralTask inspector shows producer-issued
+verified specialist steps and exact private output references. Inspect each
+selected artifact through the existing artifact inspector, then explicitly
+acknowledge the remaining effects and accounting debt. Opening that inspector
+alone is not a successful physical-readback claim. The existing task action
+`accept_partial_results` binds the original task revision, Attempt, workflow,
+manifest and plan revisions, selected steps and one UUID idempotency key.
+The server physically verifies those selected outputs and records an immutable
+`SpecialistPartialResult.v1` review artifact without changing the original
+Task/Attempt, stop state or callback closure. This metadata review can occur
+after the original execution cutoff; it grants no new contact.
+
+Accepted selections remain **partial review pending debt**, never full task
+success. The display separates the historical unresolved jobs/effects at
+acceptance from current unresolved job, effect and cost-operation counts and
+current cancellation state. Even zero current counts or later genuine stop
+reconciliation cannot make that decision a full-success result or authorize
+resume. An uncertain POST retains its exact original request for explicit
+reconciliation; there is no automatic retry or new selection. Exact replay
+after restart still requires the current authenticated paired owner before
+stale-revision handling. Foreign or recovered read-only access cannot accept
+or replay private decisions; changed selections, stale source and mismatched
+bindings require inspection and recovery.
+
+[Native specialist journeys](../../backend/tests/test_specialist_delegation_runtime.py),
+[copied evidence tests](../../backend/tests/test_specialist_evidence_runtime.py),
+[durable wait tests](../../backend/tests/test_specialist_durable_wait.py),
+[stop tests](../../backend/tests/test_specialist_stop.py) and
+[authenticated partial-review tests](../../backend/tests/test_specialist_partial.py)
+exercise actual production owners and private physical outputs with only the
+final approved model/MCP transports scripted. The
+[partial UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.partial.test.tsx)
+cover inspection, exact replay, owner changes and truthful historical/current
+debt display. These isolated Linux receipts make no external provider call,
+quality or general callback-recovery claim. Native macOS execution remains
+unverified. The optional Cordis bridge remains separately owned by #1007.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for

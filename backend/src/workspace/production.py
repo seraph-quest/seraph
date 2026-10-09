@@ -619,11 +619,12 @@ def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str
         os.close(descriptor)
 
 
-def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Mapping[str, Any]) -> Path:
+def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *,
+        _programme_transition=None, _prior_receipt=None) -> Path:
     path = lifecycle_receipt_path(workspace)
     payload = dict(receipt)
     # Lifecycle status updates must not erase the accounting high-water mark.
-    prior = read_lifecycle_receipt(workspace)
+    prior = _prior_receipt if _prior_receipt is not None else read_lifecycle_receipt(workspace)
     if (prior is not None and "runtime_composition" in prior and payload.get("operation") in {"restore", "rollback"}
             and payload.get("status") in {"restored", "rolled_back"}):
         from src.workspace.accounting_continuity import verify_promoted_composition
@@ -632,8 +633,16 @@ def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Map
         previous = prior["runtime_composition"]
         incoming = payload.get("runtime_composition", previous)
         from src.workspace.accounting_witness import validate_composition_progression
-        validate_composition_progression(previous, incoming)
+        validate_composition_progression(previous, incoming, programme_transition=_programme_transition)
         payload["runtime_composition"] = incoming
+    if prior is not None and "composition_programme_transition" in prior:
+        retained_transition = prior["composition_programme_transition"]
+        if payload.get("composition_programme_transition", retained_transition) != retained_transition:
+            raise ProductionWorkspaceError("composition programme transition history cannot change")
+        payload["composition_programme_transition"] = retained_transition
+    elif "composition_programme_transition" in payload:
+        if _programme_transition is None or payload["composition_programme_transition"] != _programme_transition:
+            raise ProductionWorkspaceError("composition explicit stopped transition owner required")
     for name in ("provider_policy", "deployment_binding", "legacy_lifecycle_migration"):
         if prior is None or name not in prior:
             continue

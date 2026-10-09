@@ -307,6 +307,9 @@ class CompositionHeaderCertificate:
     issued_id: int=0
     raw_owner: object=None
     schema_cookies: object=None
+    common_certificate: object=None
+    original_selection: object=None
+    absent: tuple=()
 
 
 def _validate(connection,certificate):
@@ -316,8 +319,85 @@ def _validate(connection,certificate):
         certificate.raw_owner._validate_budget(certificate.budget)
     if _state(connection,raw_owner=certificate.raw_owner)!=(certificate.transaction,certificate.driver,certificate.changes):
         raise HeaderBoundsError("header_certificate_stale")
-    if certificate.raw_owner is not None and _snapshot_schema_cookies(connection,certificate.budget)!=certificate.schema_cookies:
+    if certificate.schema_cookies is not None and _snapshot_schema_cookies(connection,certificate.budget)!=certificate.schema_cookies:
         raise HeaderBoundsError("header_certificate_stale")
+    if certificate.common_certificate is not None:
+        _validate(connection, certificate.common_certificate)
+        certificate.original_selection.owner._validate_programme_selection(certificate.original_selection)
+
+
+def preflight_programme_identity_component(common33, *, original_selection):
+    """Only an original rollback/native guard selects this named exception."""
+    from src.db.models import OperatorIdentity
+    from src.memory.header_bounds import _descriptor
+    connection, owner, budget = common33.connection, common33.raw_owner, common33.budget
+    _validate(connection, common33)
+    if common33.common_certificate is not None:
+        raise HeaderBoundsError("programme_identity_owner_unavailable")
+    if owner is None:
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        owner = original_selection.owner
+        if type(owner) is not CompositionSessionGuard:
+            raise HeaderBoundsError("programme_identity_owner_unavailable")
+    owner._validate_programme_selection(original_selection)
+    namespace = common33.raw_owner._namespace if common33.raw_owner is not None else None
+    descriptor = _descriptor(OperatorIdentity, "id", ("id", "created_at", "revoked_at"))
+    budget.debit(validate_descriptor_schema(connection, descriptor),
+        appearance=("programme-identity-schema",))
+    # Validate the exact source-owned single text PK BINARY ascending locator.
+    indexes = list(_sql(connection, 'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 2',
+        (descriptor.table,)))
+    budget.debit(_metadata_cost([list(row) for row in indexes]), appearance=("programme-identity-indexes",))
+    if len(indexes) != 1 or tuple(indexes[0]) != (0, "sqlite_autoindex_operator_identities_1", 1, "pk", 0):
+        raise HeaderBoundsError("programme_identity_locator_changed")
+    parts = list(_sql(connection, 'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 3',
+        (indexes[0][1],)))
+    budget.debit(_metadata_cost([list(row) for row in parts]), appearance=("programme-identity-index-parts",))
+    if [tuple(row) for row in parts] != [(0, 0, "id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0)]:
+        raise HeaderBoundsError("programme_identity_locator_changed")
+    objects = list(_sql(connection, 'SELECT type,name FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3',
+        (descriptor.table,)))
+    budget.debit(_metadata_cost([list(row) for row in objects]), appearance=("programme-identity-objects",))
+    if [tuple(row) for row in objects] != [("table", descriptor.table), ("index", indexes[0][1])]:
+        raise HeaderBoundsError("programme_identity_schema_changed")
+    present, absent = [], []
+    for identity in original_selection.identity_ids:
+        ids = _discover(connection, descriptor, budget, key=identity, database_identity=namespace)
+        if not ids:
+            if owner is original_selection.owner:
+                raise HeaderBoundsError("programme_source_identity_missing")
+            absent.append(identity)
+        elif ids != (identity,):
+            raise HeaderBoundsError("programme_identity_locator_changed")
+        else:
+            present.append(identity)
+    rows = _headers(connection, descriptor, tuple(present))
+    budget.debit(sum(cost for _, cost in rows.values()), appearance=("programme-identity-headers", tuple(present)))
+    state = _state(connection, raw_owner=common33.raw_owner)
+    certificate = CompositionHeaderCertificate(connection, *state, MappingProxyType(rows), budget, _SEAL,
+        raw_owner=common33.raw_owner, schema_cookies=_snapshot_schema_cookies(connection, budget),
+        common_certificate=common33, original_selection=original_selection, absent=tuple(absent))
+    object.__setattr__(certificate, "issued_id", id(certificate))
+    _validate(connection, certificate)
+    return certificate
+
+
+def read_programme_identity(certificate, identity):
+    """Exact original Identity3 body, fully debited before scalar strings."""
+    if certificate.common_certificate is None:
+        raise HeaderBoundsError("programme_identity_certificate_unavailable")
+    _validate(certificate.connection, certificate)
+    row = certificate.rows.get(("operator_identities", identity))
+    if row is None:
+        if identity in certificate.absent:
+            return None
+        raise HeaderBoundsError("header_row_unavailable")
+    certificate.budget.debit(row[1], appearance=("programme-identity-body", identity))
+    records = list(_sql(certificate.connection,
+        'SELECT "id","created_at","revoked_at" FROM operator_identities WHERE id=? LIMIT 2', (identity,)))
+    if len(records) != 1:
+        raise HeaderBoundsError("header_row_unavailable")
+    return tuple(records[0])
 
 
 

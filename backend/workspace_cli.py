@@ -80,6 +80,11 @@ def _parser() -> argparse.ArgumentParser:
     rebind = subparsers.add_parser("accounting-rebind", help="retain deployment accounting before adopting a different canonical root")
     rebind.add_argument("--from-root", type=Path, required=True)
     rebind.add_argument("--confirm", action="store_true")
+    programme = subparsers.add_parser("programme-envelope-transition",
+        help="explicit stopped empty-programme continuity envelope upgrade")
+    programme.add_argument("--confirm", action="store_true")
+    programme.add_argument("--recover-pending", action="store_true",
+        help="repair only the exact interrupted empty-programme transition")
     return parser
 
 
@@ -255,7 +260,17 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         registry = canonical_workspace_registry(workspace.host_root)
         prepare_lifecycle_directory(workspace)
         with maintenance_fence(workspace):
-            if args.command == "backup":
+            if args.command == "programme-envelope-transition":
+                if not args.confirm:
+                    raise WorkspaceLifecycleError("programme envelope transition requires explicit confirm=True")
+                from src.memory.header_bounds import HeaderReadBudget
+                from src.workspace.accounting_continuity import (transition_programme_envelope,
+                    reconcile_programme_envelope_transition)
+                operation = reconcile_programme_envelope_transition if args.recover_pending else transition_programme_envelope
+                # The original stopped owner publishes its exact final receipt
+                # while this fence, accounting lock and actual handle are held.
+                return operation(workspace=workspace, budget=HeaderReadBudget())
+            elif args.command == "backup":
                 destination = _validate_backup_destination(workspace, args.archive)
                 receipt = backup_workspace(
                     workspace.host_root,

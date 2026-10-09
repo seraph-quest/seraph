@@ -8,6 +8,87 @@ from datetime import datetime, timezone
 import os
 import stat
 import threading
+from dataclasses import dataclass, field
+from types import MappingProxyType, SimpleNamespace
+
+_PROGRAMME_SELECTION_SEAL = object()
+
+
+@dataclass(frozen=True, eq=False)
+class _ProgrammeSelection:
+    owner: object
+    common33: object
+    goals: object
+    issuers: object
+    runs: object
+    identity_ids: tuple
+    issued_id: int = 0
+    seal: object = field(default=_PROGRAMME_SELECTION_SEAL, repr=False)
+
+
+def _derive_programme_rows(connection, common33, *, fail):
+    from src.memory.composition_headers import _validate, snapshot_reads
+    from src.workspace.accounting_witness import _programme_reference_row_on_connection
+    from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, discovery_authority
+    from src.guardian.goal_programmes import _load
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    from src.workflows.job_runtime import _digest
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    _validate(connection, common33)
+    goals, issuers, runs, identities = {}, {}, {}, set()
+    def full(table, key):
+        with snapshot_reads(common33):
+            return _programme_reference_row_on_connection(connection, table, key)[1]
+    for table, key in common33.rows:
+        if table != "workflow_run_states":
+            continue
+        run = full(table, key)
+        if run["job_kind"] != DISCOVERY_KIND or run["composition_binding_json"] is None:
+            continue
+        authority = discovery_authority(run["declared_authority_json"])
+        binding = authority.programme_binding
+        composition = RuntimeCompositionBinding.from_json(run["composition_binding_json"])
+        if (run["owner_kind"] != "service" or run["service_id"] != DISCOVERY_SERVICE
+                or run["owner_principal_id"] != DISCOVERY_SERVICE
+                or any(run[name] is not None for name in ("session_id", "conversation_id", "operator_session_id"))
+                or run["run_identity"] != authority.original_job_id
+                or run["goal_id"] != binding.goal_id or run["goal_revision"] != binding.goal_revision
+                or composition.origin_method != "research.executeAccepted"
+                or composition.native_branch != "public_research"
+                or composition.host_package_digest is None
+                or not {"seraph.goals.v1", "seraph.inference.v1"}.issubset(
+                    item.runtime_domain for item in composition.dependency_vector)
+                or run["authority_digest"] != _digest(json.loads(run["declared_authority_json"]))
+                or run["input_digest"] != _digest(json.loads(run["arguments_json"]))):
+            fail("programme_original_lineage_changed")
+        goal = full("goals", binding.goal_id)
+        stored = _load(SimpleNamespace(**goal))
+        matching = [GoalProgramme.model_validate(generation) for generation in stored["generations"]
+            if generation["id"] == binding.programme_id and generation["grant_revision"] == binding.grant_revision]
+        if len(matching) != 1 or GoalProgrammeAuthorityBinding.from_programme(matching[0], authority.capability_id) != binding:
+            fail("programme_original_generation_changed")
+        issuer = full("operator_sessions", binding.issuer_root_id)
+        if (issuer["operator_identity_id"] != binding.owner_identity_id
+                or issuer["principal_id"] != binding.issuer_principal_id):
+            fail("programme_original_issuer_changed")
+        goals[binding.goal_id], issuers[binding.issuer_root_id] = goal, issuer
+        runs[key] = run
+        identities.add(binding.owner_identity_id)
+    pending = list(goals)
+    while pending:
+        key = pending.pop()
+        parent = goals[key]["parent_id"]
+        if parent is not None and parent not in goals:
+            goals[parent] = full("goals", parent)
+            pending.append(parent)
+    for key in goals:
+        seen, current = set(), key
+        while current is not None:
+            if current in seen:
+                fail("programme_goal_parent_cycle")
+            seen.add(current)
+            current = goals[current]["parent_id"]
+    return goals, issuers, runs, tuple(sorted(identities))
 
 
 class _RawRollbackConnection:
@@ -41,6 +122,8 @@ class _RawRollbackConnection:
         self._trace_count = 0
         self._transition_trace = 0
         self._probe_denials = 0
+        self._selection = None
+        self._pair = None
         self._db = sqlite3.connect(self._path.as_uri() + ("?mode=ro" if readonly else "?mode=rw"),
             uri=True, isolation_level=None, cached_statements=0)
         self._db.row_factory = sqlite3.Row
@@ -76,9 +159,9 @@ class _RawRollbackConnection:
         if action == sqlite3.SQLITE_PRAGMA:
             if (first not in {
                 "database_list", "schema_version", "encoding", "table_xinfo",
-                "table_list", "index_list", "index_xinfo"}
+                "table_list", "index_list", "index_xinfo", "table_info", "index_info", "foreign_key_list"}
                 or (second is not None and first not in {
-                    "table_xinfo", "table_list", "index_list", "index_xinfo"})):
+                    "table_xinfo", "table_list", "index_list", "index_xinfo", "table_info", "index_info", "foreign_key_list"})):
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
         if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ):
@@ -182,6 +265,29 @@ class _RawRollbackConnection:
         from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection
         return _certify_current_memory_snapshot_on_connection(self._db, self._budget, raw_owner=self)
 
+    def _validate_programme_selection(self, selection):
+        from src.memory.composition_headers import _validate
+        if (type(selection) is not _ProgrammeSelection or selection.seal is not _PROGRAMME_SELECTION_SEAL
+                or selection.issued_id != id(selection) or selection.owner._selection is not selection
+                or self._pair is None or selection.owner._pair is not self._pair
+                or selection.owner is not self._pair.source):
+            self._fail("programme_original_selection_unavailable")
+        _validate(selection.common33.connection, selection.common33)
+        self._validate_budget(selection.common33.budget)
+
+    def _select_programmes(self, common33):
+        """Original owner derives finite lineage after actual common33 bodies."""
+        from src.memory.composition_headers import _validate
+        _validate(self._db, common33)
+        if common33.raw_owner is not self or self._pair is None or self is not self._pair.source:
+            self._fail("programme_original_selection_unavailable")
+        goals, issuers, runs, identities = _derive_programme_rows(self._db, common33, fail=self._fail)
+        selection = _ProgrammeSelection(self, common33, MappingProxyType(goals), MappingProxyType(issuers),
+            MappingProxyType(runs), tuple(sorted(identities)))
+        object.__setattr__(selection, "issued_id", id(selection))
+        self._selection = selection
+        return selection
+
     def close(self):
         if self._live:
             self._live = False
@@ -197,6 +303,10 @@ class _RawRollbackPair:
             self.destination = _RawRollbackConnection(destination_path, budget, readonly=False)
             if self.source._observed_inode == self.destination._observed_inode:
                 self.source._fail("rollback_database_alias")
+            self.source._pair = self.destination._pair = self
+            self._preflight = None
+            self._writer = None
+            self._copies_reserved = False
         except BaseException:
             if hasattr(self, "destination"):
                 self.destination.close()
@@ -206,6 +316,89 @@ class _RawRollbackPair:
     def close(self):
         self.source.close()
         self.destination.close()
+
+    def _compare_programmes(self, source_common, destination_common, selection):
+        from src.memory.composition_headers import (snapshot_reads,
+            preflight_programme_identity_component, read_programme_identity)
+        from src.workspace.accounting_witness import _programme_reference_row_on_connection
+        self.destination._validate_programme_selection(selection)
+        from src.work_board.research_parent import DISCOVERY_KIND
+        for table, key in destination_common.rows:
+            if table != "workflow_run_states":
+                continue
+            with snapshot_reads(destination_common):
+                row = _programme_reference_row_on_connection(self.destination._db, table, key)[1]
+            if row["job_kind"] == DISCOVERY_KIND and row["composition_binding_json"] is not None:
+                source_run = selection.runs.get(key)
+                if source_run is None or any(row[name] != source_run[name] for name in _JOB_BINDING_FIELDS):
+                    self.destination._fail("programme_destination_lineage_conflict")
+        for key, source_row in selection.goals.items():
+            if ("goals", key) in destination_common.rows:
+                with snapshot_reads(destination_common):
+                    destination_row = _programme_reference_row_on_connection(self.destination._db, "goals", key)[1]
+                if tuple(destination_row.values()) != tuple(source_row.values()):
+                    self.destination._fail("programme_goal_raw_conflict")
+        source_identity = destination_identity = None
+        source_rows, destination_rows = {}, {}
+        if selection.identity_ids:
+            source_identity = preflight_programme_identity_component(source_common, original_selection=selection)
+            destination_identity = preflight_programme_identity_component(destination_common, original_selection=selection)
+            for identity in selection.identity_ids:
+                source_row = read_programme_identity(source_identity, identity)
+                destination_row = read_programme_identity(destination_identity, identity)
+                if destination_row is not None and source_row != destination_row:
+                    self.destination._fail("programme_identity_raw_conflict")
+                source_rows[identity], destination_rows[identity] = source_row, destination_row
+        return source_identity, destination_identity, MappingProxyType(source_rows), MappingProxyType(destination_rows)
+
+    def preflight_programme_conflicts(self):
+        self.source.begin()
+        self.destination.begin()
+        source, destination = self.source.certify(), self.destination.certify()
+        selection = self.source._select_programmes(source)
+        compared = self._compare_programmes(source, destination, selection)
+        self._preflight = (source, destination, selection, compared)
+        return self._preflight
+
+    def begin_current_writer(self):
+        from src.memory.composition_headers import _validate
+        if self._preflight is None:
+            self.destination._fail("programme_preflight_required")
+        source, _destination, old_selection, _compared = self._preflight
+        _validate(self.source._db, source)
+        self.destination.rollback()
+        self.destination.begin(immediate=True)
+        destination = self.destination.certify()
+        # Rederive the original source proof under its retained actual snapshot;
+        # never promote a copied source selection to current writer permission.
+        selection = self.source._select_programmes(source)
+        if (dict(selection.goals) != dict(old_selection.goals) or dict(selection.issuers) != dict(old_selection.issuers)
+                or dict(selection.runs) != dict(old_selection.runs) or selection.identity_ids != old_selection.identity_ids):
+            self.destination._fail("programme_original_selection_changed")
+        compared = self._compare_programmes(source, destination, selection)
+        self._writer = (source, destination, selection, compared)
+        return self._writer
+
+    def reserve_programme_copies(self):
+        """Reserve exact absent raw Goal/Identity destinations before effects."""
+        from src.memory.header_bounds import GOAL
+        from src.memory.composition_headers import _validate
+        if self._writer is None or self._copies_reserved:
+            self.destination._fail("programme_copy_reservation_unavailable")
+        source, destination, selection, compared = self._writer
+        _validate(self.source._db, source)
+        _validate(self.destination._db, destination)
+        source_identity, _destination_identity, _source_rows, destination_rows = compared
+        budget = self.destination._budget
+        for key in selection.goals:
+            if ("goals", key) not in destination.rows:
+                budget.reserve_future_row(GOAL, key, source.rows[("goals", key)][1],
+                    database_identity=self.destination._namespace)
+        for identity, row in destination_rows.items():
+            if row is None:
+                budget._reserve_programme_identity(self.destination, identity,
+                    source_identity.rows[("operator_identities", identity)][1])
+        self._copies_reserved = True
 
 
 # The same immutable invocation/authority binding checked by durable admission,
@@ -263,6 +456,102 @@ def _retained_job_values(source, target, account):
         "revision": values["revision"], "fencing_token": values["fencing_token"]}}, sort_keys=True, separators=(",", ":"))
     values["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     return values
+
+
+def transition_programme_envelope(*, workspace, budget, _recover_pending=False):
+    """Explicit stopped original owner transition; zero real programme seeds."""
+    from src.workspace import canonical_workspace_registry
+    from src.workspace.lifecycle import _require_production_fence
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.memory.composition_headers import snapshot_reads, charge_table
+    from src.workspace.production import (ProductionWorkspace, ProductionWorkspaceReconciliationError,
+        read_lifecycle_receipt, read_accounting_checkpoint, _write_private_checkpoint,
+        _write_lifecycle_receipt_locked, MAX_ACCOUNTING_CHECKPOINT_BYTES, MAX_LIFECYCLE_RECEIPT_BYTES)
+    from src.workspace.accounting_witness import (maintenance_accounting_lock, composition_closure,
+        native_composition_files, _programme_envelope, _programme_transition,
+        _programme_json, _programme_reference_row_on_connection, ledger_record, ledger_digest, witness)
+    from src.work_board.research_parent import DISCOVERY_KIND
+    if type(workspace) is not ProductionWorkspace or type(budget) is not HeaderReadBudget:
+        raise ProductionWorkspaceReconciliationError("programme_original_owner_unavailable")
+    registry = canonical_workspace_registry(workspace.host_root)
+    _require_production_fence(registry)
+    with maintenance_accounting_lock(workspace, header_budget=budget):
+        receipt = read_lifecycle_receipt(workspace, header_budget=budget)
+        checkpoint = read_accounting_checkpoint(workspace, header_budget=budget)
+        previous = receipt.get("runtime_composition") if receipt else None
+        if type(previous) is not dict or previous.get("schema_version") != 1:
+            raise ProductionWorkspaceReconciliationError("composition_explicit_transition_requires_v1")
+        owner = _RawRollbackConnection(workspace.host_root / registry.config.database_path, budget, readonly=False)
+        try:
+            owner.begin(immediate=True)
+            certificate = owner.certify()
+            with snapshot_reads(certificate):
+                for table, key in certificate.rows:
+                    if table != "workflow_run_states":
+                        continue
+                    row = _programme_reference_row_on_connection(owner._db, table, key)[1]
+                    if row["job_kind"] == DISCOVERY_KIND and row["composition_binding_json"] is not None:
+                        raise ProductionWorkspaceReconciliationError("composition_transition_requires_empty_programmes")
+                    if row["status"] == "running" or row["lease_owner"] is not None or row["lease_expires_at"] is not None:
+                        raise ProductionWorkspaceReconciliationError("composition_transition_requires_stopped_owner")
+                native, _members = composition_closure(owner._db,
+                    verify_files=lambda table, row: native_composition_files(table, row,
+                        root=workspace.host_root, header_budget=budget))
+                if native != previous or any(row["state"] == "draining" for row in native["inventory"]):
+                    raise ProductionWorkspaceReconciliationError("composition_transition_source_changed")
+                charge_table(owner._db, "inference_accounting_owners")
+                accounts = list(owner._db.execute("SELECT * FROM inference_accounting_owners"))
+                charge_table(owner._db, "inference_cost_reservations")
+                rows = [ledger_record(row) for row in owner._db.execute("SELECT * FROM inference_cost_reservations")]
+            if len(accounts) != 1 or checkpoint is None:
+                raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
+            account = ledger_record(accounts[0])
+            actual_witness = witness(account)
+            if (ledger_digest(account, rows) != account["ledger_digest"]
+                    or actual_witness != receipt.get("inference_accounting")
+                    or actual_witness != checkpoint.get("witness")
+                    or checkpoint.get("secret_values_included") is not False
+                    or (not _recover_pending and checkpoint.get("schema_version") == 2
+                        and checkpoint.get("composition_target") != previous)):
+                raise ProductionWorkspaceReconciliationError("composition_pending_checkpoint_requires_reconciliation")
+            target = _programme_envelope(native, None, None)
+            transition, reference = _programme_transition(previous, target)
+            target["transition_ref"] = reference
+            if _recover_pending and (checkpoint.get("schema_version") != 2
+                    or checkpoint.get("composition_base") != previous
+                    or checkpoint.get("composition_target") != target
+                    or checkpoint.get("composition_programme_transition") != transition
+                    or checkpoint.get("composition_delta") != []):
+                raise ProductionWorkspaceReconciliationError("composition_transition_recovery_binding_changed")
+            projected = {**checkpoint, "schema_version": 2, "composition_base": previous,
+                "composition_target": target, "composition_delta": [],
+                "composition_programme_transition": transition, "secret_values_included": False}
+            final_receipt = {**receipt, "runtime_composition": target,
+                "composition_programme_transition": transition, "secret_values_included": False}
+            checkpoint_size, receipt_size = len(_programme_json(projected)), len(_programme_json(final_receipt))
+            if checkpoint_size > MAX_ACCOUNTING_CHECKPOINT_BYTES or receipt_size > MAX_LIFECYCLE_RECEIPT_BYTES:
+                raise ProductionWorkspaceReconciliationError("composition_publication_size_exceeded")
+            budget.enroll({(owner._namespace, "prospective-file", "accounting-checkpoint.json"),
+                (owner._namespace, "prospective-file", "receipt.json")})
+            budget.debit(checkpoint_size, appearance=("programme-transition-checkpoint",))
+            budget.debit(receipt_size, appearance=("programme-transition-receipt",))
+            # All source/body/output bounds precede the first durable effect.
+            # Checkpoint first makes interruption an explicit pending gap.
+            if not _recover_pending:
+                _write_private_checkpoint(workspace.lifecycle_directory / "accounting-checkpoint.json", projected)
+            _write_lifecycle_receipt_locked(workspace, final_receipt,
+                _programme_transition=transition, _prior_receipt=receipt)
+            owner.rollback()
+            return {"status": "transitioned", "runtime_composition": target,
+                "composition_programme_transition": transition, "no_learning": True,
+                "secret_values_included": False}
+        finally:
+            owner.close()
+
+
+def reconcile_programme_envelope_transition(*, workspace, budget):
+    """Explicit stopped recovery of only the exact interrupted empty upgrade."""
+    return transition_programme_envelope(workspace=workspace, budget=budget, _recover_pending=True)
 
 
 def verify_accounting_generation(database, expected):

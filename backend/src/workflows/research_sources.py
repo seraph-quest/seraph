@@ -302,37 +302,147 @@ def compile_discovery_search_derivation(plan, artifacts, effects, manifest, refe
     return {"manifest_ref": reference.model_dump(mode="json"), "query_digest": query_digest, "responses": responses}
 
 
+def _discovery_original_rows(raw_workflow_row):
+    """Decode original finite provenance, without current lifecycle checks."""
+    from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
+    from src.guardian.research_plan_contracts import ArtifactRef
+    from src.workflows.job_runtime import _digest
+    if type(raw_workflow_row) is not dict or raw_workflow_row.get("job_kind") != DISCOVERY_KIND:
+        raise ValueError("programme physical inputs require native lineage")
+    authority = discovery_authority(raw_workflow_row["declared_authority_json"])
+    job_id = raw_workflow_row["run_identity"]
+    if (job_id != authority.original_job_id or raw_workflow_row.get("owner_principal_id") != DISCOVERY_SERVICE
+            or raw_workflow_row.get("owner_kind") != "service"
+            or raw_workflow_row.get("service_id") != DISCOVERY_SERVICE
+            or raw_workflow_row.get("goal_id") != authority.programme_binding.goal_id
+            or type(raw_workflow_row.get("goal_revision")) is not int
+            or raw_workflow_row["goal_revision"] != authority.programme_binding.goal_revision
+            or raw_workflow_row.get("operator_session_id") is not None
+            or raw_workflow_row.get("session_id") is not None):
+        raise ValueError("programme original service or job binding changed")
+    inputs = json.loads(raw_workflow_row["arguments_json"])
+    history = json.loads(raw_workflow_row["checkpoint_receipts_json"])
+    artifacts = json.loads(raw_workflow_row["artifact_receipts_json"])
+    effects = json.loads(raw_workflow_row["effect_receipts_json"])
+    if (_digest(inputs) != raw_workflow_row["input_digest"]
+            or _digest(json.loads(raw_workflow_row["declared_authority_json"])) != raw_workflow_row["authority_digest"]
+            or type(inputs) is not dict
+            or set(inputs) != {"plan_ref", "plan_file_path", "public_brief_ref", "public_brief_file_path", "no_learning"}
+            or inputs["no_learning"] is not True
+            or any(type(rows) is not list or any(type(item) is not dict for item in rows) for rows in (history, artifacts, effects))):
+        raise ValueError("programme original input or receipt provenance changed")
+    if (ArtifactRef.model_validate(inputs["plan_ref"]) != authority.plan_ref
+            or ArtifactRef.model_validate(inputs["public_brief_ref"]).digest != authority.programme_binding.brief_digest):
+        raise ValueError("programme physical input ref changed")
+    return job_id, authority, inputs, history, artifacts, effects
+
+
+def discovery_physical_records(raw_workflow_row):
+    """Pure original adoption checks over exact retained provenance records."""
+    from src.work_board.research_parent import DISCOVERY_KIND
+    from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS, discovery_prefix, json_bytes, sha
+    from src.guardian.research_plan_contracts import ArtifactRef
+    from src.artifacts.registry import artifact_id_for
+    job_id, authority, inputs, history, artifacts, effects = _discovery_original_rows(raw_workflow_row)
+    programme_id = authority.programme_binding.programme_id
+    selected = []
+    slots = set()
+    for entry in history:
+        if not str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"):
+            continue
+        payload = entry.get("payload")
+        if (type(payload) is not dict or payload.get("job_id") != job_id
+                or payload.get("programme_id") != programme_id or payload.get("no_learning") is not True):
+            raise ValueError("programme artifact checkpoint lineage changed")
+        kind, slot = payload.get("kind"), payload.get("slot")
+        if (type(kind) is not str or kind not in DISCOVERY_ARTIFACT_LIMITS or type(slot) is not int or not 0 <= slot < 4
+                or entry["checkpoint_id"] != f"discovery:artifact:{kind}:{slot}"
+                or (kind, slot) in slots
+                or (kind in {"plan", "public_brief", "queries", "manifest", "selection", "snapshots", "brief"} and slot != 0)):
+            raise ValueError("programme artifact shape or slot changed")
+        slots.add((kind, slot))
+        reference = ArtifactRef.model_validate(payload["artifact_ref"])
+        path = payload["file_path"]
+        expected_path = f"{discovery_prefix(programme_id)}{sha(json_bytes([job_id, kind, slot]))}-{reference.digest}.json"
+        identifier = artifact_id_for(file_path=path, artifact_type="goal_discovery_" + kind,
+            producer=DISCOVERY_KIND, run_id=job_id, content_sha256=reference.digest)
+        size = payload.get("byte_count")
+        records = [item for item in artifacts if item.get("artifact_id") == reference.artifact_id]
+        readbacks = [item for item in effects if item.get("effect_id") == "discovery-artifact:" + reference.artifact_id]
+        if (path != expected_path or reference.artifact_id != identifier or type(size) is not int
+                or not 0 < size <= DISCOVERY_ARTIFACT_LIMITS[kind] or len(records) != 1 or len(readbacks) != 1):
+            raise ValueError("programme physical artifact has no exact original adoption")
+        record, effect = records[0], readbacks[0]
+        if (record.get("file_path") != path or record.get("content_sha256") != reference.digest
+                or record.get("size_bytes") != size or type(record.get("size_bytes")) is not int
+                or record.get("producer") != DISCOVERY_KIND or record.get("artifact_type") != "goal_discovery_" + kind
+                or record.get("exists") is not True or effect.get("receipt_kind") != "readback"
+                or effect.get("effect_type") != "research_artifact_readback" or effect.get("status") != "succeeded"
+                or effect.get("target_path") != path or effect.get("target_digest") != reference.digest
+                or effect.get("content_sha256") != reference.digest
+                or effect.get("readback_id") != "discovery-readback-" + reference.artifact_id
+                or type(effect.get("details")) is not dict
+                or effect["details"].get("verified") is not True
+                or effect.get("details", {}).get("no_learning") is not True):
+            raise ValueError("programme physical artifact readback provenance changed")
+        selected.append({"checkpoint_id": entry["checkpoint_id"], "payload": payload,
+            "artifact": record, "effect": effect})
+    return tuple(selected)
+
+
+def discovery_physical_references(raw_workflow_row):
+    """Return each original read appearance, including repeated initial refs."""
+    from src.guardian.research_plan_contracts import ArtifactRef
+    _, _, inputs, _, _, _ = _discovery_original_rows(raw_workflow_row)
+    selected = [(item["payload"]["file_path"], item["artifact"]["content_sha256"],
+        item["payload"]["byte_count"], item["payload"]["kind"])
+        for item in discovery_physical_records(raw_workflow_row)]
+    initial = []
+    for kind in ("plan", "public_brief"):
+        reference = ArtifactRef.model_validate(inputs[kind + "_ref"])
+        matches = [item for item in selected if item[0] == inputs[kind + "_file_path"] and item[1] == reference.digest and item[3] == kind]
+        if len(matches) != 1:
+            raise ValueError("programme first physical input lacks original adoption")
+        initial.append(matches[0])
+    return tuple(initial + selected)
+
+
+def physical_discovery_closure(raw_workflow_row, *, root, header_budget):
+    """Original retained owner checks every appearance on its actual root."""
+    from src.work_board.research_artifacts import read_discovery, DISCOVERY_ARTIFACT_LIMITS
+    from src.memory.header_bounds import HeaderReadBudget
+    if type(header_budget) is not HeaderReadBudget:
+        raise ValueError("programme physical closure requires its original budget")
+    appearances = discovery_physical_references(raw_workflow_row)
+    authority = _discovery_original_rows(raw_workflow_row)[1]
+    contents = {}
+    for path, digest, size, kind in appearances:
+        contents[path] = read_discovery(path, digest, programme_id=authority.programme_binding.programme_id,
+            max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind], root=root, expected_size=size, header_budget=header_budget)
+    validate_discovery_physical_provenance(raw_workflow_row, contents, historical=True)
+    return appearances
+
+
 async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None):
     """Reopen immutable programme inputs BEFORE a short native writer."""
-    from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND
+    from src.work_board.research_parent import DISCOVERY_KIND
     from src.work_board.research_artifacts import read_discovery, DISCOVERY_ARTIFACT_LIMITS
-    from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, DiscoveryBriefV1
-    from src.artifacts.registry import artifact_id_for
-    from src.workflows.job_runtime import _digest, _utc_now
-    from src.guardian.goal_programmes import goal_programme_service
+    from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef
+    from src.workflows.job_runtime import _utc_now
     async with jobs._session() as db:
         run = await jobs._fetch(db, job_id)
         if run.job_kind != DISCOVERY_KIND:
             raise ValueError("programme physical inputs require native lineage")
-        authority = discovery_authority(run.declared_authority_json)
         if completed_read and run.status not in {"succeeded", "degraded"}:
             raise ValueError("programme completed readback requires its original positive terminal job")
-        inputs = json.loads(run.arguments_json)
-        history = json.loads(run.checkpoint_receipts_json)
-        canonical_artifacts = json.loads(run.artifact_receipts_json)
-        effects = json.loads(run.effect_receipts_json)
-        input_digest, authority_digest = run.input_digest, run.authority_digest
-        deadline = run.deadline_at.replace(tzinfo=timezone.utc)
+        raw_row = run.model_dump(mode="python")
+    _, authority, inputs, history, _, _ = _discovery_original_rows(raw_row)
+    discovery_physical_references(raw_row)
     binding = authority.programme_binding
-    if _digest(inputs) != input_digest or _digest(json.loads(run.declared_authority_json)) != authority_digest:
-        raise ValueError("programme original input or authority digest changed")
-    if set(inputs) != {"plan_ref", "plan_file_path", "public_brief_ref", "public_brief_file_path", "no_learning"} or inputs["no_learning"] is not True:
-        raise ValueError("programme input shape is not native and closed")
-    plan_ref = ArtifactRef.model_validate(inputs["plan_ref"])
-    brief_ref = ArtifactRef.model_validate(inputs["public_brief_ref"])
-    if plan_ref != authority.plan_ref or brief_ref.digest != binding.brief_digest:
-        raise ValueError("programme physical input ref changed")
-    raw_plan = read_discovery(inputs["plan_file_path"], plan_ref.digest, programme_id=binding.programme_id, max_bytes=65536)
+    contents = {}
+    raw_plan = read_discovery(inputs["plan_file_path"], ArtifactRef.model_validate(inputs["plan_ref"]).digest,
+        programme_id=binding.programme_id, max_bytes=65536)
+    contents[inputs["plan_file_path"]] = raw_plan
     plan_payload = json.loads(raw_plan)
     observed = datetime.fromisoformat(plan_payload["issued_at"].replace("Z", "+00:00")) if completed_read else _utc_now()
     plan = validate_goal_research_plan(plan_payload, now=observed)
@@ -343,13 +453,60 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
             await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db)
     elif plan.strategy_binding.status != "none":
         raise ValueError("programme active strategy requires its current native lifecycle owner")
+    contents[inputs["public_brief_file_path"]] = read_discovery(inputs["public_brief_file_path"],
+        ArtifactRef.model_validate(inputs["public_brief_ref"]).digest, programme_id=binding.programme_id, max_bytes=8000)
+    for entry in history:
+        if str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"):
+            payload = entry["payload"]
+            reference = ArtifactRef.model_validate(payload["artifact_ref"])
+            contents[payload["file_path"]] = read_discovery(payload["file_path"], reference.digest,
+                programme_id=binding.programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[payload["kind"]])
+    return validate_discovery_physical_provenance(raw_row, contents, historical=completed_read, stage_id=stage_id)
+
+
+def validate_discovery_physical_provenance(raw_workflow_row, contents, *, historical=False, stage_id=None):
+    """Pure original plan/output derivation over already staged exact bytes.
+
+    This returns data, never a live Source or current execution authority.
+    The original owner supplies fully charged retained rows and verifies the
+    canonical Goal/issuer/generation independently.
+    """
+    from src.work_board.research_parent import DISCOVERY_KIND
+    from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS
+    from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, DiscoveryBriefV1
+    from src.artifacts.registry import artifact_id_for
+    from src.workflows.job_runtime import _digest, _utc_now
+    job_id, authority, inputs, history, canonical_artifacts, effects = _discovery_original_rows(raw_workflow_row)
+    for path, digest, size, _ in discovery_physical_references(raw_workflow_row):
+        content = contents[path]
+        if type(content) is not bytes or len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+            raise ValueError("programme staged original physical bytes changed")
+    input_digest, authority_digest = raw_workflow_row["input_digest"], raw_workflow_row["authority_digest"]
+    deadline = raw_workflow_row["deadline_at"]
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    deadline = deadline.replace(tzinfo=timezone.utc)
+    binding = authority.programme_binding
+    if _digest(inputs) != input_digest or _digest(json.loads(raw_workflow_row["declared_authority_json"])) != authority_digest:
+        raise ValueError("programme original input or authority digest changed")
+    if set(inputs) != {"plan_ref", "plan_file_path", "public_brief_ref", "public_brief_file_path", "no_learning"} or inputs["no_learning"] is not True:
+        raise ValueError("programme input shape is not native and closed")
+    plan_ref = ArtifactRef.model_validate(inputs["plan_ref"])
+    brief_ref = ArtifactRef.model_validate(inputs["public_brief_ref"])
+    if plan_ref != authority.plan_ref or brief_ref.digest != binding.brief_digest:
+        raise ValueError("programme physical input ref changed")
+    raw_plan = contents[inputs["plan_file_path"]]
+    plan_payload = json.loads(raw_plan)
+    observed = datetime.fromisoformat(plan_payload["issued_at"].replace("Z", "+00:00")) if historical else _utc_now()
+    plan = validate_goal_research_plan(plan_payload, now=observed)
     if (plan.programme_id.hex != binding.programme_id or plan.goal_id != binding.goal_id
             or plan.programme_revision != binding.grant_revision or plan.goal_revision != binding.goal_revision
+            or plan.grant_id != binding.programme_id or plan.grant_revision != binding.grant_revision
             or plan.public_brief_digest != binding.brief_digest or plan.route_epoch != binding.route_epoch
             or plan.deadline_at != deadline or plan.limits.cost_limit_microusd > binding.cost_ceiling_microusd
             or plan.steps[0].input_refs != [brief_ref]):
         raise ValueError("programme plan aliases, original deadline or first input changed")
-    raw_brief = read_discovery(inputs["public_brief_file_path"], brief_ref.digest, programme_id=binding.programme_id, max_bytes=8000)
+    raw_brief = contents[inputs["public_brief_file_path"]]
     public_brief = raw_brief.decode("utf-8", errors="strict")
     artifacts = {brief_ref.artifact_id: {"reference": brief_ref, "content": raw_brief, "kind": "public_brief"},
         plan_ref.artifact_id: {"reference": plan_ref, "content": raw_plan, "kind": "plan"}}
@@ -380,7 +537,7 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
         if (len(records) != 1 or records[0].get("file_path") != payload["file_path"] or records[0].get("content_sha256") != reference.digest
                 or records[0].get("producer") != DISCOVERY_KIND or records[0].get("artifact_type") != "goal_discovery_" + kind):
             raise ValueError("programme physical input lacks canonical artifact adoption")
-        content = read_discovery(payload["file_path"], reference.digest, programme_id=binding.programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind])
+        content = contents[payload["file_path"]]
         if len(content) != payload["byte_count"]:
             raise ValueError("programme adopted input byte count changed")
         output_slot = next((output for step in plan.steps for output in step.output_slots if output.slot == kind), None)
@@ -432,8 +589,11 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
         for artifact in artifacts.values():
             if artifact["kind"] == "snapshot":
                 snapshot = artifact["parsed"]
-                if snapshot.result_id not in selections[0]["parsed"].selected_result_ids or known.get(snapshot.result_id) != snapshot.url:
-                    raise ValueError("programme snapshot URL was not an exact selected manifest member")
+                selected_ids = selections[0]["parsed"].selected_result_ids
+                slot = artifact["slot"]
+                if (slot >= len(selected_ids) or selected_ids[slot] != snapshot.result_id
+                        or known.get(snapshot.result_id) != snapshot.url):
+                    raise ValueError("programme snapshot slot, result and URL were not an exact selected manifest member")
     snapshots = sorted((item for item in artifacts.values() if item["kind"] == "snapshot"), key=lambda item: item["slot"])
     if len(snapshots) > plan.limits.max_sources or any(item["slot"] >= plan.limits.max_sources for item in snapshots):
         raise ValueError("programme physical snapshot count exceeds its original allowance")

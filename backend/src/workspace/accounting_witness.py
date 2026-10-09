@@ -1211,6 +1211,22 @@ def _native_memory_reference_row_on_connection(connection, table, key):
     return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
 
 
+def _programme_reference_row_on_connection(connection, table, key):
+    """Named common33 programme provenance, using unchanged raw tuple bytes."""
+    from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, HeaderBoundsError
+    from src.memory.composition_headers import charge_row, current_budget
+    if current_budget() is None or table not in {"workflow_run_states", "goals", "operator_sessions"}:
+        raise HeaderBoundsError("programme_current_bound_not_certified")
+    descriptor = COMPOSITION_DESCRIPTORS[table]
+    charge_row(connection, table, key)
+    columns = ",".join('"' + name + '"' for name in descriptor.columns)
+    records = list(_sql(connection, f'SELECT {columns} FROM "{table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,)))
+    if len(records) != 1:
+        raise HeaderBoundsError("programme_reference_row_missing")
+    row = dict(zip(descriptor.columns, records[0]))
+    return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
+
+
 def _checked_memory_original_bindings(row, run, context, binding, original, current):
     """Immutable cold evidence shape only; no SQL, M5 MAC or owner authority."""
     from dataclasses import asdict
@@ -1349,13 +1365,337 @@ def _checked_memory_reference_row(connection, row):
         raise ProductionWorkspaceReconciliationError("composition_native_memory_reference_invalid") from error
 
 
-def composition_closure(connection, *, verify_files=None):
+PROGRAMME_MANIFEST_VERSION = "native-composition-programme.v1"
+PROGRAMME_MANIFEST_DIGEST = "9ef9f8673209976ebd8c47df817509d1b637cf75a6000371d130e06a8ef4426c"
+COMPOSITION_ENVELOPE_SCHEMA = "composition-continuity-envelope.v2"
+
+
+def _programme_json(value):
+    return json.dumps(value, ensure_ascii=True, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _programme_digest(domain, value):
+    return hashlib.sha256(domain + _programme_json(value)).hexdigest()
+
+
+def _programme_aggregate(domain):
+    digest = hashlib.sha256(domain)
+    _programme_length_prefix(digest, PROGRAMME_MANIFEST_VERSION)
+    _programme_length_prefix(digest, PROGRAMME_MANIFEST_DIGEST)
+    return digest
+
+
+def _programme_length_prefix(digest, value):
+    encoded = value.encode("utf-8")
+    digest.update(len(encoded).to_bytes(8, "big"))
+    digest.update(encoded)
+
+
+def _programme_identity_leaf(key, row):
+    # Identity alone has this new explicit codec. Goal/issuer/native leaves
+    # continue to use their original accepted codecs byte for byte.
+    fields = ("id", "created_at", "revoked_at")
+    if (type(key) is not str or len(row) != 3 or row[0] != key
+            or any(value is not None and type(value) not in {str, int} for value in row)
+            or any(type(value) is int and not -(2**63) <= value < 2**63 for value in row)):
+        raise ProductionWorkspaceReconciliationError("programme_identity_raw_invalid")
+    payload = json.dumps([PROGRAMME_MANIFEST_VERSION, PROGRAMME_MANIFEST_DIGEST,
+        "operator_identities", key, [[name, value] for name, value in zip(fields, row)]],
+        ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(b"seraph-continuity-programme-identity-row-v1\0" + payload).hexdigest()
+
+
+def _programme_envelope(native, programme, transition_ref):
+    validate_composition_progression(native, native)
+    envelope = {"schema_version": 2, "projection_schema": COMPOSITION_ENVELOPE_SCHEMA,
+        "native": native, "programme": programme, "transition_ref": transition_ref}
+    _validate_programme_envelope(envelope)
+    return envelope
+
+
+def _validate_programme_envelope(value):
+    import re
+    def digest(item):
+        return type(item) is str and re.fullmatch(r"[0-9a-f]{64}", item) is not None
+    if (type(value) is not dict or set(value) != {"schema_version", "projection_schema",
+            "native", "programme", "transition_ref"} or type(value["schema_version"]) is not int
+            or value["schema_version"] != 2 or value["projection_schema"] != COMPOSITION_ENVELOPE_SCHEMA
+            or not (value["transition_ref"] is None or digest(value["transition_ref"]))
+            or type(value["native"]) is not dict or value["native"].get("schema_version") != 1):
+        raise ProductionWorkspaceReconciliationError("composition_envelope_invalid")
+    validate_composition_progression(value["native"], value["native"])
+    component = value["programme"]
+    if component is None:
+        return
+    if (type(component) is not dict or set(component) != {"manifest_version", "manifest_digest",
+            "row_counts", "closure_digest", "relation_counts", "relation_digest", "artifact_count",
+            "artifact_manifest_digest"} or component["manifest_version"] != PROGRAMME_MANIFEST_VERSION
+            or component["manifest_digest"] != PROGRAMME_MANIFEST_DIGEST
+            or any(not digest(component[key]) for key in (
+                "closure_digest", "relation_digest", "artifact_manifest_digest"))
+            or type(component["artifact_count"]) is not int or not 0 <= component["artifact_count"] <= 128):
+        raise ProductionWorkspaceReconciliationError("composition_programme_component_invalid")
+    allowed = ({"goals", "operator_sessions", "operator_identities"},
+        {"programme_goal", "goal_parent_fk", "programme_issuer_provenance", "programme_owner_identity"})
+    for name, keys in zip(("row_counts", "relation_counts"), allowed):
+        counts = component[name]
+        if (type(counts) is not dict or not set(counts) <= keys
+                or any(type(count) is not int or not 1 <= count <= 128 for count in counts.values())):
+            raise ProductionWorkspaceReconciliationError("composition_programme_component_invalid")
+    if not component["row_counts"] or not component["relation_counts"]:
+        raise ProductionWorkspaceReconciliationError("composition_programme_component_invalid")
+
+
+def _programme_transition(previous, target):
+    # Called by the existing stopped owner only after its actual zero-universe,
+    # prior-receipt and no-pending-checkpoint checks. This codec grants nothing.
+    validate_composition_progression(previous, previous)
+    _validate_programme_envelope(target)
+    if target["programme"] is not None or target["transition_ref"] is not None:
+        raise ProductionWorkspaceReconciliationError("composition_transition_requires_empty_programmes")
+    payload = {"schema_version": 1, "kind": "composition-programme-envelope-transition.v1",
+        "previous_witness_digest": _programme_digest(b"seraph-continuity-prior-witness-v1\0", previous),
+        "previous_schema_version": previous["schema_version"],
+        "previous_extension_version": previous["extension_version"],
+        "previous_extension_digest": previous["extension_digest"],
+        "target_envelope_digest": _programme_digest(b"seraph-continuity-envelope-v2\0", target),
+        "programme_manifest_version": PROGRAMME_MANIFEST_VERSION,
+        "programme_manifest_digest": PROGRAMME_MANIFEST_DIGEST, "no_learning": True}
+    return payload, _programme_digest(b"seraph-continuity-envelope-transition-v1\0", payload)
+
+
+def _programme_snapshot_http_readback_digest(record, records, effects, *, job_id,
+        programme_id, root, header_budget):
+    """Join retained original snapshot bytes to its original HTTP address.
+
+    The producer replaces its intent with the successful readback at that same
+    effect_id. No separate persisted intent or HTTP-to-normalized-text proof
+    is invented here. This digest is historical evidence, never a Source.
+    """
+    import re
+    from src.guardian.research_plan_contracts import (
+        ArtifactRef, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1)
+    from src.work_board.research_artifacts import read_discovery
+    from src.workflows.job_runtime import _digest
+
+    def denied():
+        raise ProductionWorkspaceReconciliationError("programme_snapshot_http_association_changed")
+
+    def original(kind):
+        matches = [item for item in records if item["payload"]["kind"] == kind]
+        if (len(matches) != 1 or type(matches[0]["payload"]["slot"]) is not int
+                or matches[0]["payload"]["slot"] != 0):
+            denied()
+        return matches[0]
+
+    def read(item, kind, limit):
+        payload, artifact, adoption = item["payload"], item["artifact"], item["effect"]
+        reference = ArtifactRef.model_validate(payload["artifact_ref"])
+        size = payload["byte_count"]
+        if (payload["kind"] != kind or payload["job_id"] != job_id
+                or payload["programme_id"] != programme_id
+                or type(size) is not int or type(artifact["size_bytes"]) is not int
+                or artifact["size_bytes"] != size
+                or artifact["artifact_id"] != reference.artifact_id
+                or artifact["file_path"] != payload["file_path"]
+                or artifact["content_sha256"] != reference.digest
+                or adoption["content_sha256"] != reference.digest
+                or type(payload["producer_fence"]) is not int or not 0 < payload["producer_fence"] < 2**63
+                or type(adoption.get("fencing_token")) is not int
+                or adoption["fencing_token"] != payload["producer_fence"]):
+            denied()
+        content = read_discovery(payload["file_path"], reference.digest, programme_id=programme_id,
+            root=root, max_bytes=limit, expected_size=size, header_budget=header_budget)
+        return content, reference
+
+    payload = record["payload"]
+    slot, fence = payload["slot"], payload["producer_fence"]
+    if (type(slot) is not int or not 0 <= slot < 4 or type(fence) is not int
+            or not 0 < fence < 2**63 or record["checkpoint_id"] != f"discovery:artifact:snapshot:{slot}"):
+        denied()
+    raw_snapshot, _reference = read(record, "snapshot", 65536)
+    raw_manifest, manifest_ref = read(original("manifest"), "manifest", 65536)
+    raw_selection, _selection_ref = read(original("selection"), "selection", 8192)
+    snapshot = PublicSnapshotV1.model_validate_json(raw_snapshot)
+    manifest = SearchManifestV1.model_validate_json(raw_manifest)
+    selection = SourceSelectionV1.model_validate_json(raw_selection)
+    selection.validate_manifest(manifest, manifest_ref)
+    if slot >= len(selection.selected_result_ids) or selection.selected_result_ids[slot] != snapshot.result_id:
+        denied()
+    selected = next((item for item in manifest.results if item.result_id == snapshot.result_id), None)
+    if selected is None or selected.exact_url != snapshot.url:
+        denied()
+    effect_id = f"discovery-source:{job_id}:{slot}"
+    matches = [item for item in effects if item.get("effect_id") == effect_id]
+    positive = [item for item in matches if item.get("receipt_kind") == "readback"
+        and item.get("status") == "succeeded"]
+    if not positive:
+        # The artifact can precede the HTTP readback. Keep its original bytes
+        # and unresolved intent/Unknown journal; absence grants no permission.
+        return None
+    if len(matches) != 1 or len(positive) != 1:
+        denied()
+    readback = positive[0]
+    details = readback.get("details")
+    if (readback.get("effect_type") != "public_https_read"
+            or readback.get("readback_id") != "discovery-http:" + effect_id
+            or readback.get("target_path") != snapshot.url
+            or readback.get("target_digest") != hashlib.sha256(snapshot.url.encode("utf-8")).hexdigest()
+            or type(readback.get("fencing_token")) is not int or readback["fencing_token"] != fence
+            or type(readback.get("content_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", readback["content_sha256"]) is None
+            or readback.get("reconciled") is not True or readback.get("reconciliation_status") != "resolved"
+            or type(details) is not dict or any(details.get(key) is not True
+                for key in ("verified", "read_only", "no_learning"))):
+        denied()
+    for field in ("recorded_at", "verified_at"):
+        value = readback.get(field)
+        if type(value) is not str:
+            denied()
+        try:
+            observed = datetime.fromisoformat(value)
+        except ValueError:
+            denied()
+        if observed.tzinfo is None or observed.utcoffset() != timezone.utc.utcoffset(observed):
+            denied()
+    # HTTP content hashes raw response bytes. PublicSnapshotV1 independently
+    # checks normalized lines/digest, and read_discovery checked JSON file SHA.
+    # Those three hashes need not match and certify no response transformation.
+    return _digest(readback)
+
+
+def _programme_component_on_raw_owner(owner, common33, selection, identity_certificate, *, root):
+    return _programme_component_on_connection(owner._db, common33, selection,
+        identity_certificate, root=root, original_owner=owner)
+
+
+def _programme_component_on_connection(connection, common33, selection, identity_certificate, *, root, original_owner, _leaf_sink=None):
+    """Private original rollback projection, never an execution capability."""
+    from src.memory.composition_headers import _validate, snapshot_reads, read_programme_identity
+    from src.work_board.research_parent import discovery_authority
+    from src.workflows.research_sources import physical_discovery_closure, discovery_physical_records
+    from src.workflows.job_runtime import _digest
+    original_owner._validate_programme_selection(selection)
+    _validate(connection, common33)
+    if common33.connection is not connection:
+        raise ProductionWorkspaceReconciliationError("programme_original_owner_changed")
+    if not selection.runs:
+        return None
+    rows, relations, files = {}, set(), []
+    for table, keys in (("goals", selection.goals), ("operator_sessions", selection.issuers)):
+        for key in keys:
+            with snapshot_reads(common33):
+                raw, row = _programme_reference_row_on_connection(connection, table, key)
+            rows[(table, key)] = hashlib.sha256(raw).hexdigest()
+            if table == "goals" and row["parent_id"] is not None:
+                relations.add(("goal_parent_fk", table, key, "goals", row["parent_id"]))
+            if table == "operator_sessions":
+                relations.add(("programme_owner_identity", table, key,
+                    "operator_identities", row["operator_identity_id"]))
+    for key in selection.identity_ids:
+        if identity_certificate is None or identity_certificate.connection is not connection:
+            raise ProductionWorkspaceReconciliationError("programme_identity_certificate_unavailable")
+        row = read_programme_identity(identity_certificate, key)
+        if row is None:
+            raise ProductionWorkspaceReconciliationError("programme_identity_missing")
+        rows[("operator_identities", key)] = _programme_identity_leaf(key, row)
+    slots = set()
+    for key in selection.runs:
+        with snapshot_reads(common33):
+            _raw, run = _programme_reference_row_on_connection(connection, "workflow_run_states", key)
+        binding = discovery_authority(run["declared_authority_json"]).programme_binding
+        relations.add(("programme_goal", "workflow_run_states", key, "goals", binding.goal_id))
+        relations.add(("programme_issuer_provenance", "workflow_run_states", key,
+            "operator_sessions", binding.issuer_root_id))
+        # Original safe bytes are mandatory before metadata enters this new
+        # projection. Repeated appearances still spend the same frame's bytes.
+        physical_discovery_closure(run, root=root, header_budget=common33.budget)
+        effects = json.loads(run["effect_receipts_json"])
+        physical_records = discovery_physical_records(run)
+        for record in physical_records:
+            payload, artifact, effect = record["payload"], record["artifact"], record["effect"]
+            address = (key, payload["kind"], payload["slot"])
+            if address in slots:
+                raise ProductionWorkspaceReconciliationError("programme_artifact_duplicate")
+            slots.add(address)
+            http_digest = None
+            if payload["kind"] == "snapshot":
+                http_digest = _programme_snapshot_http_readback_digest(record, physical_records, effects,
+                    job_id=key, programme_id=binding.programme_id, root=root, header_budget=common33.budget)
+            if payload["kind"] == "manifest":
+                # R53 accepted scalar rule: hash the WHOLE exact original
+                # positive effect-dict vector, ordered by actual query index.
+                # Any incomplete/duplicate vector projects null; original
+                # effect liabilities remain intact and null grants nothing.
+                from src.work_board.research_artifacts import read_discovery
+                query_records = [item for item in discovery_physical_records(run)
+                    if item["payload"]["kind"] == "queries"]
+                if len(query_records) != 1:
+                    raise ProductionWorkspaceReconciliationError("programme_queries_original_missing")
+                query = query_records[0]
+                content = read_discovery(query["payload"]["file_path"], query["artifact"]["content_sha256"],
+                    programme_id=binding.programme_id, max_bytes=16384, root=root,
+                    expected_size=query["artifact"]["size_bytes"], header_budget=common33.budget)
+                queries = json.loads(content)["queries"]
+                vector = []
+                for index in range(len(queries)):
+                    original = [item for item in effects if item.get("effect_id") == f"discovery-search:{key}:{index}"
+                        and item.get("receipt_kind") == "readback"]
+                    if (len(original) != 1 or original[0].get("effect_type") != "public_https_read"
+                            or original[0].get("status") != "succeeded"
+                            or original[0].get("details", {}).get("search_response_receipt", {}).get("query_index") != index):
+                        vector = []
+                        break
+                    vector.append(original[0])
+                if vector:
+                    http_digest = _digest(vector)
+            files.append({"job_id": key, "programme_id": payload["programme_id"],
+                "artifact_id": artifact["artifact_id"], "file_path": payload["file_path"],
+                "kind": payload["kind"], "slot": payload["slot"],
+                "content_sha256": artifact["content_sha256"], "size_bytes": artifact["size_bytes"],
+                "producer_fence": payload["producer_fence"], "checkpoint_id": record["checkpoint_id"],
+                "artifact_readback_digest": _digest(effect), "http_readback_digest": http_digest})
+    closure = _programme_aggregate(b"seraph-continuity-programme-closure-v1\0")
+    row_counts = {}
+    for (table, key), leaf in sorted(rows.items(), key=lambda item: (item[0][0], item[0][1].encode("utf-8"))):
+        for value in (table, key, leaf):
+            _programme_length_prefix(closure, value)
+        row_counts[table] = row_counts.get(table, 0) + 1
+    relation_counts = {}
+    for role, *_ in relations:
+        relation_counts[role] = relation_counts.get(role, 0) + 1
+    relation_digest = _programme_aggregate(b"seraph-continuity-programme-relations-v1\0")
+    relation_digest.update(_programme_json(sorted(relations)))
+    artifact_digest = _programme_aggregate(b"seraph-continuity-programme-artifacts-v1\0")
+    artifact_digest.update(_programme_json(sorted(files, key=lambda item: (
+        item["job_id"], item["kind"], item["slot"], item["artifact_id"]))))
+    if _leaf_sink is not None:
+        _leaf_sink.update(rows)
+    return {"manifest_version": PROGRAMME_MANIFEST_VERSION, "manifest_digest": PROGRAMME_MANIFEST_DIGEST,
+        "row_counts": row_counts, "closure_digest": closure.hexdigest(),
+        "relation_counts": relation_counts, "relation_digest": relation_digest.hexdigest(),
+        "artifact_count": len(files), "artifact_manifest_digest": artifact_digest.hexdigest()}
+
+
+def composition_closure(connection, *, verify_files=None, programme_selection=None):
     """Finite native joins. Stream row bodies; publish only hashes and counts.
 
     ``verify_files`` is the reviewed private native reader, never child input.
     Missing extension readers block rather than inventing filesystem proof.
     """
     from src.runtime_plugins.ownership import DOMAINS, RuntimeCompositionBinding, CompositionDependency
+    if programme_selection is not None:
+        if type(programme_selection.owner) is CompositionSessionGuard:
+            owner = programme_selection.owner
+            if programme_selection.common33.connection is not connection:
+                raise ProductionWorkspaceReconciliationError("programme_original_connection_unavailable")
+        else:
+            pair = programme_selection.owner._pair
+            owner = next((item for item in (pair.source, pair.destination) if item._db is connection), None)
+        if owner is None:
+            raise ProductionWorkspaceReconciliationError("programme_original_connection_unavailable")
+        owner._validate_programme_selection(programme_selection)
     tables = {row[0] for row in _sql(connection, "SELECT name FROM sqlite_master WHERE type='table'")}
     from src.memory.universe import native_memory_universe_on_connection
     from src.memory.composition_headers import current_budget, charge_table
@@ -1483,6 +1823,7 @@ def composition_closure(connection, *, verify_files=None):
                     raise ProductionWorkspaceReconciliationError("composition_recovery_predecessor_changed")
                 required("audit_events", reference)
         if table == "workflow_run_states":
+            programme_member = (programme_selection is not None and key in programme_selection.runs)
             session_role("legacy_job_session_fk", table, key, row["session_id"])
             memory_candidate = None
             if row["job_kind"] == "runtime_service_memory_v1":
@@ -1513,6 +1854,11 @@ def composition_closure(connection, *, verify_files=None):
                         ("work_board_links", "link_id"), ("work_board_handoffs", "handoff_id"),
                         ("work_board_tasks", "producer_task_id"), ("work_board_attempts", "producer_attempt_id")):
                         required(target_table, report[field])
+                elif row["job_kind"] == "goal_public_discovery_v1" and programme_member:
+                    from src.workspace.accounting_continuity import _JOB_BINDING_FIELDS
+                    original = programme_selection.runs[key]
+                    if any(row[name] != original[name] for name in _JOB_BINDING_FIELDS):
+                        raise ProductionWorkspaceReconciliationError("programme_original_lineage_changed")
                 elif row["job_kind"] not in {"workflow", "conversation_turn_v1", "research_dossier", "readonly_research_child", "runtime_service_read_v1", "runtime_service_memory_v1"}:
                     raise ProductionWorkspaceReconciliationError("composition_extension_unsupported")
             for field in ("root_run_identity", "parent_run_identity", "parent_job_id"):
@@ -1648,7 +1994,7 @@ def composition_closure(connection, *, verify_files=None):
                         ("profile_id", "profile_id"), ("runtime_path", "runtime_path")):
                     if payload[field] != operation[other]:
                         raise ProductionWorkspaceReconciliationError("composition_inference_output_operation_changed")
-            if (binding is not None or outputs is not None) and (json.loads(row["artifact_receipts_json"]) or json.loads(row["checkpoint_receipts_json"])):
+            if (binding is not None or outputs is not None) and (json.loads(row["artifact_receipts_json"]) or json.loads(row["checkpoint_receipts_json"])) and not programme_member:
                 if verify_files is None:
                     raise ProductionWorkspaceReconciliationError("composition_private_reader_unavailable")
                 for ref, digest, size, classification in verify_files(table, row):
@@ -1724,7 +2070,27 @@ def composition_closure(connection, *, verify_files=None):
             sorted(artifacts.values()), separators=(",", ":")).encode()).hexdigest()}, visited
 
 
-def validate_composition_progression(previous, incoming):
+def validate_composition_progression(previous, incoming, *, programme_transition=None):
+    previous_v2 = type(previous) is dict and previous.get("schema_version") == 2
+    incoming_v2 = type(incoming) is dict and incoming.get("schema_version") == 2
+    if previous_v2 or incoming_v2:
+        if not incoming_v2:
+            raise ProductionWorkspaceReconciliationError("composition_envelope_downgrade_forbidden")
+        _validate_programme_envelope(incoming)
+        if previous_v2:
+            _validate_programme_envelope(previous)
+            if incoming["transition_ref"] != previous["transition_ref"]:
+                raise ProductionWorkspaceReconciliationError("composition_transition_reference_changed")
+            validate_composition_progression(previous["native"], incoming["native"])
+            return
+        # An ordinary publication never silently upgrades a v1 witness. The
+        # explicit stopped transition is checked against its exact prior bytes.
+        target = dict(incoming, transition_ref=None)
+        payload, reference = _programme_transition(previous, target)
+        if programme_transition != payload or incoming["transition_ref"] != reference:
+            raise ProductionWorkspaceReconciliationError("composition_explicit_transition_required")
+        validate_composition_progression(previous, incoming["native"])
+        return
     from src.runtime_plugins.ownership import DOMAINS, CompositionDependency
     required = {"schema_version", "projection_schema", "inventory", "inventory_digest", "closure_digest",
                 "total_rows", "table_counts", "artifact_count", "artifact_manifest_digest", "extension_version", "extension_digest",
@@ -1895,6 +2261,101 @@ class CompositionSessionGuard:
         self._retention_closed = False
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
+        self._selection = None
+        self._programme_snapshot_owner = None
+        self._programme_current_leaves = {}
+        self._programme_base_leaves = {}
+        self._programme_writer = None
+
+    def _programme_tables(self):
+        return {"goals", "operator_sessions", "operator_identities"} if (
+            type(self.base) is dict and self.base.get("schema_version") == 2) else set()
+
+    def _protected_tables(self):
+        return set(RETAINED_FIELDS) | self._programme_tables()
+
+    def _address(self, table, key):
+        if table in self._programme_tables():
+            if type(key) is not str or not 0 < len(key.encode("utf-8")) <= 512:
+                raise ProductionWorkspaceReconciliationError("programme_row_address_invalid")
+            return key
+        return _composition_address(table, key)
+
+    def _ensure_programme_writer(self, connection):
+        if not self._programme_tables():
+            return
+        self._validate_native_writer_snapshot(self.header_budget, connection)
+        current = (connection, connection.get_transaction(), connection.connection.driver_connection)
+        if self._programme_writer is not None:
+            if any(actual is not original for actual, original in zip(current, self._programme_writer)):
+                raise ProductionWorkspaceReconciliationError("programme_current_writer_changed")
+            return
+        from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection
+        certificate = _certify_current_memory_snapshot_on_connection(connection, self.header_budget)
+        observed, members = self._programme_snapshot(connection, certificate, self.base)
+        if observed != self.base or members != self.members:
+            raise ProductionWorkspaceReconciliationError("programme_fresh_writer_conflict")
+        self._programme_writer = current
+
+    def _leaf(self, connection, table, key, *, original=False):
+        if table in self._programme_tables():
+            leaves = self._programme_base_leaves if original else self._programme_current_leaves
+            leaf = leaves.get((table, key))
+            if leaf is None:
+                raise ProductionWorkspaceReconciliationError("programme_selected_leaf_unavailable")
+            return leaf
+        return composition_row_digest(table, key, _composition_row(connection, table, key))
+
+    def _validate_programme_selection(self, selection):
+        import asyncio
+        import threading
+        from src.workspace.accounting_continuity import _ProgrammeSelection, _PROGRAMME_SELECTION_SEAL
+        from src.memory.composition_headers import _validate
+        if (type(selection) is not _ProgrammeSelection or selection.seal is not _PROGRAMME_SELECTION_SEAL
+                or selection.issued_id != id(selection) or selection.owner is not self
+                or self._selection is not selection or self._retention_closed
+                or self.db.info.get("composition_guard") is not self
+                or self._programme_snapshot_owner is None
+                or self._programme_snapshot_owner != (asyncio.current_task(), threading.get_ident())
+                or self.db.sync_session.connection() is not selection.common33.connection
+                or selection.common33.budget is not self.header_budget):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        _validate(selection.common33.connection, selection.common33)
+
+    def _select_programmes(self, connection, common33):
+        import asyncio
+        import threading
+        from types import MappingProxyType
+        from src.workspace.accounting_continuity import _ProgrammeSelection, _derive_programme_rows
+        def fail(code):
+            raise ProductionWorkspaceReconciliationError(code)
+        if (self.db.info.get("composition_guard") is not self or self._retention_closed
+                or common33.raw_owner is not None or common33.connection is not connection
+                or common33.budget is not self.header_budget
+                or self.db.sync_session.connection() is not connection):
+            fail("programme_original_selection_unavailable")
+        goals, issuers, runs, identities = _derive_programme_rows(connection, common33, fail=fail)
+        selection = _ProgrammeSelection(self, common33, MappingProxyType(goals), MappingProxyType(issuers),
+            MappingProxyType(runs), identities)
+        object.__setattr__(selection, "issued_id", id(selection))
+        self._selection = selection
+        self._programme_snapshot_owner = (asyncio.current_task(), threading.get_ident())
+        self._validate_programme_selection(selection)
+        return selection
+
+    def _programme_snapshot(self, connection, certificate, expected):
+        from src.memory.composition_headers import preflight_programme_identity_component, snapshot_reads
+        _validate_programme_envelope(expected)
+        selection = self._select_programmes(connection, certificate)
+        identity = (preflight_programme_identity_component(certificate, original_selection=selection)
+            if selection.identity_ids else None)
+        with snapshot_reads(certificate):
+            native, members = composition_closure(connection, verify_files=native_composition_files,
+                programme_selection=selection)
+        self._programme_current_leaves = {}
+        programme = _programme_component_on_connection(connection, certificate, selection, identity,
+            root=self.workspace.host_root, original_owner=self, _leaf_sink=self._programme_current_leaves)
+        return _programme_envelope(native, programme, expected["transition_ref"]), members | set(self._programme_current_leaves)
 
     def _native_writer_fields(self, connection, budget, owner):
         import asyncio
@@ -2039,7 +2500,7 @@ class CompositionSessionGuard:
         return True
 
     def _touch(self, connection, table, key, *, creating=False):
-        key = _composition_address(table, key)
+        key = self._address(table, key)
         if (table, key) in self.touched:
             return
         if len(self.touched) >= 128:
@@ -2047,7 +2508,8 @@ class CompositionSessionGuard:
         owner = self.db.info.get("composition_writer_owner")
         if owner not in {"durable_jobs", "native_ingress", "composition_maintenance", "finite_service"}:
             raise ProductionWorkspaceReconciliationError("composition_unhooked_writer")
-        before = None if creating else composition_row_digest(table, key, _composition_row(connection, table, key))
+        self._ensure_programme_writer(connection)
+        before = None if creating else self._leaf(connection, table, key, original=True)
         self.touched[(table, key)] = before
 
     def _check_private_journal(self, before, after, *, run_id, statement=None):
@@ -2153,28 +2615,28 @@ class CompositionSessionGuard:
             if isinstance(state.statement, TextClause):
                 self._deny_budgeted_schema_mutation(state.statement.text)
                 source = state.statement.text.lower().lstrip()
-                if not source.startswith(("select", "begin", "pragma")) and any(table in source for table in RETAINED_FIELDS):
+                if not source.startswith(("select", "begin", "pragma")) and any(table in source for table in self._protected_tables()):
                     raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
             if not (state.is_update or state.is_delete):
                 return
             statement = state.statement
             table = getattr(statement, "table", None)
             name = getattr(table, "name", None)
-            if name not in RETAINED_FIELDS:
+            if name not in self._protected_tables():
                 return
             values = getattr(statement, "_values", {}) or {}
             if name == "workflow_run_states" and any(
                 getattr(column, "name", column) in {"composition_binding_json", "source_task_id"} for column in values
             ):
                 raise ProductionWorkspaceReconciliationError("composition_binding_retrofit_denied")
-            key = COMPOSITION_KEYS[name]
+            key = COMPOSITION_KEYS.get(name, "id")
             lookup = select(table.c[key])
             if statement.whereclause is not None:
                 lookup = lookup.where(statement.whereclause)
             records = state.session.execute(lookup).scalars()
             connection = state.session.connection()
             for identity in records:
-                identity = _composition_address(name, identity)
+                identity = self._address(name, identity)
                 if name == "sessions" and identity in self._legacy_continuity_metadata:
                     raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
                 if name == "workflow_run_states":
@@ -2211,9 +2673,9 @@ class CompositionSessionGuard:
                 if compiled is None or isinstance(operation, TextClause):
                     source = statement.lower().lstrip()
                     dml = not source.startswith(("select", "begin", "pragma", "savepoint", "release", "rollback"))
-                    protected = dml and any(name in source for name in RETAINED_FIELDS)
+                    protected = dml and any(name in source for name in self._protected_tables())
                 else:
-                    protected = dml and table in RETAINED_FIELDS
+                    protected = dml and table in self._protected_tables()
                 if protected and not (session._flushing or context.execution_options.get("_composition_tracked_writer") is self):
                     raise ProductionWorkspaceReconciliationError("composition_unhooked_connection_sql")
             guarded = poison(before_cursor_execute)
@@ -2223,13 +2685,13 @@ class CompositionSessionGuard:
             connection = session.connection()
             for value in (*session.new, *session.dirty, *session.deleted):
                 table = getattr(value, "__tablename__", None)
-                if table not in RETAINED_FIELDS:
+                if table not in self._protected_tables():
                     continue
-                key = getattr(value, COMPOSITION_KEYS[table])
+                key = getattr(value, COMPOSITION_KEYS.get(table, "id"))
                 if table == "work_board_events" and value in session.new and key is None:
                     self._pending_events.append(value)
                 else:
-                    key = _composition_address(table, key)
+                    key = self._address(table, key)
                 related = (table, key) in self.members or table == "runtime_composition_states"
                 if table == "workflow_run_states":
                     if value not in session.new:
@@ -2310,9 +2772,13 @@ class CompositionSessionGuard:
         connection = await self.db.connection()
         def checked_snapshot(conn):
             if self.header_budget is None:
+                if type(self.base) is dict and self.base.get("schema_version") == 2:
+                    raise ProductionWorkspaceReconciliationError("programme_original_budget_required")
                 return composition_closure(conn, verify_files=native_composition_files)
             from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
             certificate = _certify_current_memory_snapshot_on_connection(conn, self.header_budget)
+            if type(self.base) is dict and self.base.get("schema_version") == 2:
+                return self._programme_snapshot(conn, certificate, self.base)
             with snapshot_reads(certificate):
                 return composition_closure(conn, verify_files=native_composition_files)
         target, members = await connection.run_sync(checked_snapshot)
@@ -2326,13 +2792,13 @@ class CompositionSessionGuard:
             if (table, key) not in self.touched:
                 # Newly retained ancestors must be included in the shared delta.
                 self.touched[(table, key)] = None if (table, key) not in self.members else await connection.run_sync(
-                    lambda conn, table=table, key=key: composition_row_digest(table, key, _composition_row(conn, table, key)))
+                    lambda conn, table=table, key=key: self._leaf(conn, table, key, original=True))
         if not self.touched and target != self.base:
             raise ProductionWorkspaceReconciliationError("composition_unhooked_membership_writer")
         delta = []
         for (table, key), before in sorted(self.touched.items()):
             after = await connection.run_sync(lambda conn, table=table, key=key:
-                composition_row_digest(table, key, _composition_row(conn, table, key))) if (table, key) in members else None
+                self._leaf(conn, table, key)) if (table, key) in members else None
             delta.append({"table_id": table, "key": key, "before_digest": before, "after_digest": after})
         accounting = self.db.info.get("composition_accounting_payload")
         if accounting is None:
@@ -2413,6 +2879,15 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
     lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve(), header_budget=header_budget)
     workspace = lock.__enter__()
     try:
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
+        expected = receipt.get("runtime_composition")
+        programme_guard = None
+        if type(expected) is dict and expected.get("schema_version") == 2:
+            if header_budget is None:
+                raise ProductionWorkspaceReconciliationError("programme_original_budget_required")
+            _validate_programme_envelope(expected)
+            programme_guard = CompositionSessionGuard(db, workspace, lock, expected, set(), header_budget=header_budget)
+            db.info["composition_guard"] = programme_guard
         connection = await db.connection()
         def checked_snapshot(conn):
             if header_budget is None:
@@ -2421,11 +2896,11 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
             if not conn.connection.driver_connection.in_transaction:
                 conn.exec_driver_sql("BEGIN")
             certificate = _certify_current_memory_snapshot_on_connection(conn, header_budget)
+            if programme_guard is not None:
+                return programme_guard._programme_snapshot(conn, certificate, expected)
             with snapshot_reads(certificate):
                 return composition_closure(conn, verify_files=native_composition_files)
         base, members = await connection.run_sync(checked_snapshot)
-        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
-        expected = receipt.get("runtime_composition")
         if base != expected or (fresh and (base is not None or expected is not None)):
             raise ProductionWorkspaceReconciliationError("composition_continuity_unavailable")
         from src.workspace.production import read_accounting_checkpoint
@@ -2436,12 +2911,18 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         read_guard = db.info.pop("composition_read_guard", None)
         if read_guard is not None:
             read_guard.close()
-        guard = CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
+        guard = programme_guard or CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
+        guard.base, guard.members = base, members
+        if programme_guard is not None:
+            guard._programme_base_leaves = dict(guard._programme_current_leaves)
         db.info["composition_guard"] = guard
         db.info["composition_base_witness"] = base
         guard.install()
         return guard
     except BaseException:
+        if db.info.get("composition_guard") is locals().get("programme_guard") and programme_guard is not None:
+            db.info.pop("composition_guard", None)
+            _HELD_COMPOSITION_WORKSPACE.reset(programme_guard.token)
         lock.__exit__(None, None, None)
         raise
 

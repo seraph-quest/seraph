@@ -176,14 +176,24 @@ def discovery_prefix(programme_id):
     return f"goal-programmes/{programme_id}/"
 
 
-def read_discovery(reference, expected_digest, *, programme_id, max_bytes=OUTPUT_BYTES):
+def read_discovery(reference, expected_digest, *, programme_id, max_bytes=OUTPUT_BYTES,
+        root=None, expected_size=None, header_budget=None):
     """Exact programme namespace uses the same no-follow safe byte owner."""
     from src.work_board.input_artifacts import _open_input_artifact_parent, _safe_file_bytes
     prefix = discovery_prefix(programme_id)
     if (not isinstance(reference, str) or not reference.startswith(prefix)
             or any(part in {"", ".", ".."} for part in reference.split("/"))):
         raise ValueError("discovery artifact is outside its exact programme directory")
-    path = canonical_workspace_root(settings.workspace_dir) / reference
+    path = canonical_workspace_root(settings.workspace_dir if root is None else root) / reference
+    if expected_size is not None:
+        if type(expected_size) is not int or not 0 < expected_size <= max_bytes:
+            raise ValueError("discovery artifact exceeds its immutable byte allowance")
+        # Original owner already certified the exact retained size. The safe
+        # reader debits before opening/reading its one nonblocking descriptor.
+        return _safe_file_bytes(path, expected_digest=expected_digest,
+            expected_size=expected_size, header_budget=header_budget)
+    if header_budget is not None or root is not None:
+        raise ValueError("bounded discovery read requires its exact original size")
     parent_fd, leaf = _open_input_artifact_parent(path, create=False)
     try:
         fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)

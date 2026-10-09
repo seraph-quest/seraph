@@ -191,6 +191,37 @@ class HeaderReadBudget:
         self.debit(upper_bytes)
         self.future_references.add(ref)
 
+    def _reserve_programme_identity(self, raw_owner, identity, upper_bytes):
+        """Named original programme capacity only; no generic descriptor grant."""
+        from src.workspace.accounting_continuity import _RawRollbackConnection
+        if type(raw_owner) is not _RawRollbackConnection:
+            raise HeaderBoundsError("header_raw_owner_unavailable")
+        raw_owner._validate_budget(self)
+        raw_owner._state(raw_owner._db)
+        pair = raw_owner._pair
+        if pair is None or raw_owner is not pair.destination or pair._writer is None:
+            raise HeaderBoundsError("programme_copy_reservation_unavailable")
+        _source, _destination, selection, compared = pair._writer
+        source_identity, destination_identity, _source_rows, destination_rows = compared
+        raw_owner._validate_programme_selection(selection)
+        from src.memory.composition_headers import _validate
+        if source_identity is None or destination_identity is None:
+            raise HeaderBoundsError("programme_copy_reservation_unavailable")
+        _validate(source_identity.connection, source_identity)
+        _validate(destination_identity.connection, destination_identity)
+        if (identity not in destination_identity.absent or destination_rows.get(identity, ()) is not None
+                or upper_bytes != source_identity.rows.get(("operator_identities", identity), (None, None))[1]):
+            raise HeaderBoundsError("programme_copy_reservation_unavailable")
+        if type(identity) is not str or not 0 < len(identity.encode("utf-8")) <= 512:
+            raise HeaderBoundsError("header_request_bound")
+        ref = (raw_owner._namespace, "operator_identities", "id", identity)
+        if ref in self.future_references or ref in self.references:
+            raise HeaderBoundsError("header_future_reference_duplicate")
+        if len(self.physical_references) + len(self.future_references) + 1 > MAX_ROWS:
+            raise HeaderBoundsError("header_reference_bound")
+        self.debit(upper_bytes, appearance=("programme-identity-prospective", identity))
+        self.future_references.add(ref)
+
     def resolve_future(self, descriptor, identity, rowid, *, database_identity=None):
         ref=(descriptor.table,descriptor.key,identity)
         if database_identity is not None:

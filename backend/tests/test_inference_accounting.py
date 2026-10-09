@@ -355,46 +355,167 @@ async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(acc
 
 
 @pytest.mark.asyncio
-async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accounting_db):
+async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accounting_db, monkeypatch):
+    from sqlalchemy import event, text
+    import sys
     from src.model_fabric.configuration import read_model_fabric_configuration
+    root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
     await repository.configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started, release = asyncio.Event(), asyncio.Event()
+    changed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    requests = {
+        "active": request("active"),
+        "background": request("background", priority=RemoteInferencePriority.SCREENSHOT_BACKGROUND),
+        "foreground": request("foreground"),
+    }
+    # Convert the earliest original deadline once; preparation receives no extra time.
+    barrier_deadline = loop.time() + min(item.deadline_at for item in requests.values()) - time.time()
+    prepared, enqueued, failures, trace, tasks = {}, {}, [], [], []
+    def observe(phase, outcome, **details):
+        task = asyncio.current_task()
+        trace.append({"monotonic": loop.time(), "phase": phase, "outcome": outcome,
+                      "task": task.get_name() if task else None, **details})
+    def broker_observer(phase, original, completions):
+        async def observed(candidate, **kwargs):
+            if candidate.operation_id not in requests:
+                return await original(candidate, **kwargs)
+            observe(phase, "enter", operation_id=candidate.operation_id)
+            try:
+                actual = await original(candidate, **kwargs)
+            except BaseException as exc:
+                failures.append(exc)
+                observe(phase, "error", operation_id=candidate.operation_id, error=type(exc).__name__)
+                changed.set()
+                raise
+            # Retain the actual result solely as a completion notification.
+            completions[candidate.operation_id] = actual
+            observe(phase, "return", operation_id=candidate.operation_id)
+            changed.set()
+            return actual
+        return observed
+    monkeypatch.setattr(broker, "_prepare_accounting", broker_observer("prepare", broker._prepare_accounting, prepared))
+    monkeypatch.setattr(broker, "enqueue", broker_observer("enqueue", broker.enqueue, enqueued))
+    # Observe delegated original durable phases, without changing their inputs/results.
+    for phase in ("admit_job", "queue_job", "claim_job", "reserve_inference_cost"):
+        original = getattr(DurableJobRepository, phase)
+        def repository_observer(phase, original):
+            async def observed(self, *args, **kwargs):
+                observe(phase, "enter")
+                try:
+                    actual = await original(self, *args, **kwargs)
+                except BaseException as exc:
+                    observe(phase, "error", error=type(exc).__name__)
+                    raise
+                observe(phase, "return")
+                return actual
+            return observed
+        monkeypatch.setattr(DurableJobRepository, phase, repository_observer(phase, original))
+    def statement_observer(connection, cursor, statement, parameters, context, executemany):
+        verb = statement.split(None, 1)[0].upper() if statement.strip() else ""
+        if verb in {"BEGIN", "COMMIT", "ROLLBACK"}:
+            observe("sql", verb, connection=id(connection))
+    def commit_observer(connection):
+        observe("sql", "COMMIT", connection=id(connection))
+    def rollback_observer(connection):
+        observe("sql", "ROLLBACK", connection=id(connection))
+    listeners = (("before_cursor_execute", statement_observer), ("commit", commit_observer),
+                 ("rollback", rollback_observer))
+    for name, listener in listeners:
+        event.listen(engine.sync_engine, name, listener)
+    async def wait_for(predicate):
+        while not predicate():
+            changed.clear()
+            if failures:
+                raise failures[0]
+            await changed.wait()
+        if failures:
+            raise failures[0]
     order = []
     async def active():
         order.append("active")
         started.set()
+        changed.set()
         await release.wait()
         return {"usage": {"cost": "0.000001"}}
     async def queued(name):
         order.append(name)
         return {"usage": {"cost": "0.000001"}}
-    first = asyncio.create_task(broker.execute(request("active"), active))
-    await started.wait()
-    background = asyncio.create_task(broker.execute(request("background", priority=RemoteInferencePriority.SCREENSHOT_BACKGROUND), lambda: queued("background")))
-    foreground = asyncio.create_task(broker.execute(request("foreground"), lambda: queued("foreground")))
-    # Observe the canonical reservations rather than timing a scheduler race.
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 3:
-            break
-        await asyncio.sleep(0.01)
-    assert len(snapshot["operations"]) == 3
-    release.set()
-    await asyncio.gather(first, background, foreground)
-    assert order == ["active", "foreground", "background"]
-    assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
-    async def revoke_after_charge():
-        from src.model_fabric.accounting import capture_inference_usage
-        capture_inference_usage({"usage": {"cost": "0.000005"}})
-        configured = read_model_fabric_configuration()
-        write_model_fabric_configuration(replace(configured, egress_revoked=True, egress_revision=configured.egress_revision + 1))
-        return {"content": "must not adopt"}
-    with pytest.raises((PermissionError, InferenceAccountingError)):
-        await broker.execute(request("revoked-after-contact"), revoke_after_charge)
-    assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 8
+    succeeded = False
+    try:
+        async with asyncio.timeout_at(barrier_deadline):
+            tasks.append(asyncio.create_task(broker.execute(requests["active"], active), name="accounting-active"))
+            await wait_for(started.is_set)
+            tasks.append(asyncio.create_task(broker.execute(requests["background"], lambda: queued("background")), name="accounting-background"))
+            tasks.append(asyncio.create_task(broker.execute(requests["foreground"], lambda: queued("foreground")), name="accounting-foreground"))
+            await wait_for(lambda: {"background", "foreground"} <= prepared.keys())
+            await wait_for(lambda: {"background", "foreground"} <= enqueued.keys())
+            observe("canonical_snapshot", "enter")
+            snapshot = await repository.inference_accounting_snapshot()
+            observe("canonical_snapshot", "return", status=snapshot["status"],
+                    operations=[{"operation_id": row["operation_id"], "job_id": row["job_id"],
+                                 "state": row["state"]} for row in snapshot["operations"]])
+            assert snapshot["status"] == "ready"
+            assert len(snapshot["operations"]) == 3
+            assert {row["operation_id"]: row["job_id"] for row in snapshot["operations"]} == {
+                operation_id: prepared[operation_id].job_id for operation_id in requests}
+            assert {row["operation_id"]: row["state"] for row in snapshot["operations"]} == {
+                "active": "contact_started", "background": "reserved", "foreground": "reserved"}
+            release.set()
+            # Observer timeout must not cancel children before our single cleanup cancel.
+            await asyncio.wait(tasks)
+            for task in tasks:
+                task.result()
+        assert order == ["active", "foreground", "background"]
+        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
+        async def revoke_after_charge():
+            from src.model_fabric.accounting import capture_inference_usage
+            capture_inference_usage({"usage": {"cost": "0.000005"}})
+            configured = read_model_fabric_configuration()
+            write_model_fabric_configuration(replace(configured, egress_revoked=True, egress_revision=configured.egress_revision + 1))
+            return {"content": "must not adopt"}
+        with pytest.raises((PermissionError, InferenceAccountingError)):
+            await broker.execute(request("revoked-after-contact"), revoke_after_charge)
+        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 8
+        observe("assertions", "passed", order=order, committed_microusd=8)
+        succeeded = True
+    finally:
+        primary = sys.exception()
+        release.set()
+        for task in tasks:
+            if not succeeded and not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        observe("cleanup", "return", tasks=[{"name": task.get_name(), "done": task.done(),
+            "cancelled": task.cancelled(), "error": type(result).__name__ if isinstance(result, BaseException) else None}
+            for task, result in zip(tasks, results)])
+        if primary is not None:
+            for task, result in zip(tasks, results):
+                if isinstance(result, BaseException) and result is not primary:
+                    primary.add_note(f"Accounting owned task {task.get_name()}: {type(result).__name__}: {result}")
+        # Partial preparation rows are diagnostic only; cleanup never transitions them.
+        if not succeeded:
+            try:
+                async with engine.connect() as connection:
+                    rows = (await connection.execute(text("SELECT operation_id, state FROM inference_cost_reservations"))).all()
+                    jobs = (await connection.execute(text("SELECT id, status FROM workflow_run_states"))).all()
+                    observe("failure_rows", "read", operations=[list(row) for row in rows],
+                            jobs=[list(row) for row in jobs])
+            except Exception as exc:
+                observe("failure_rows", "error", error=type(exc).__name__)
+                if primary is not None:
+                    primary.add_note(f"Accounting cleanup readback failed: {type(exc).__name__}: {exc}")
+        for name, listener in listeners:
+            event.remove(engine.sync_engine, name, listener)
+        try:
+            (root.parent / "accounting-observation-trace.json").write_text(json.dumps(trace, indent=2) + "\n")
+        except Exception as exc:
+            if primary is None:
+                raise
+            primary.add_note(f"Accounting trace write failed: {type(exc).__name__}: {exc}")
 
 
 @pytest.mark.asyncio

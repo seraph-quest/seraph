@@ -21,8 +21,9 @@ an Unknown transition erases lease fields needed to verify an earlier immutable
 Stop snapshot; accepting a freshly recomputed whole-Root hash would conceal drift.
 
 This decision adopts the reviewed R207R6 durable-producer target together with
-the final R212R3 predecessor projection. Earlier R160 drafting evidence is
-historical and grants no authority. Architecture acceptance does not establish
+the final R212R3 predecessor projection and the reviewed R31 existing-artifact
+and committed-Unknown verification refinements below. Earlier R160 drafting
+evidence is historical and grants no authority. Architecture acceptance does not establish
 implementation or enable recovery. Ordinary executor, publication and cutover
 contracts remain in force outside the explicit mode below.
 
@@ -190,9 +191,73 @@ Unknown-before-Stop retains exact original Stop/current equality without
 inventing a successor. A genuine cleanup commit advances revision ONCE and
 binds closed before/post revision and row proof in existing cleanup/readback
 `source_completion_cas` metadata, not a new inventory ID. After commit re-stage
-Stop context under the same fence before terminal CAS. Restart may verify that
-exact committed post_revision using fresh authentic producer evidence; later
-unknown revision advancement denies. v2's reader is never relaxed.
+Stop context under the same fence before terminal CAS. v2's reader and the
+ordinary Unknown current==to rule are never relaxed.
+
+### Existing cleanup artifact and committed-Unknown verification
+
+For future originally registered v3 publication, the existing deterministic
+cleanup artifact has EXACTLY `physical_projection`, `source_completion_cas`
+and `source_append_metadata`. The physical projection remains exact. CAS keeps
+its eight keys: before_revision, post_revision, iteration_id,
+producer_registration_digest, producer_completion_digest, stop_digest,
+unknown_projection_digest and rows_digest. Append metadata is EXACTLY two
+objects in cleanup-then-readback order, each containing only checkpoint_id,
+safe=true and created_at. IDs are `repository:cleanup:<original iteration>` and
+`repository:readback:<same iteration>`, the existing reserved identities. No new
+path, inventory ID, CAS key, full-row preimage or public input is introduced.
+Keep the existing 1-MiB artifact, 16-KiB record and 50-record bounds. Historical
+raw/two-key artifacts cannot enter this path or be upgraded.
+
+Source privately constructs and registers both exact metadata values before
+writing the artifact. created_at is the actual original Source pending-record
+constructor time, not producer finish or SQL commit time. Retry reuses those
+literal values, never caller timestamps or newly chosen replacements. Bind
+exact payload, original journal prefix, ordinal, actual task/fence/physical and
+row epoch. Keep complete wrappers and state_digest out of their own artifact
+to avoid a self-hash cycle; compare their complete metadata and payload digests
+to the resulting journal. Ordinary append constructors remain unchanged.
+
+rows_digest is the immutable audit commitment to the FIRST actual Source
+staging's ordered full context identities/JSON, original proposal and approval,
+and complete reservation vector ordered by operation identity. No field or
+timestamp is removed or normalized. A legitimate auth touch can change current
+session bytes; this receipt neither asserts historical/current row equality nor
+grants current permission, and cannot reconstruct erased session history. A
+same-receipt retry must independently stage fresh genuine physical evidence and
+the complete current owner/session/Root/Task/Goal/native/Source/profile/TTL/
+cutoff/proposal/approval/accounting/reservation vector, then compare that full
+vector exactly against the actual IMMEDIATE-writer rows under the same fence.
+Original group/Root membership, reservation status/cost bounds and full held
+liability remain mandatory. No lease, budget, deadline or approval is renewed.
+
+A DISTINCT hash-only verifier recognizes only the exact committed Unknown
+successor: current revision = CAS.post_revision = CAS.before_revision+1 =
+Unknown.to_revision+1. Preserve Root.updated_at literally. Its only accepted
+Root changes are the exact final two cleanup/readback wrappers and that one
+revision increment. Remove ONLY those bound wrappers and decrement revision
+once in a local verification dictionary. Revalidate the complete existing
+Unknown evidence shape (root_json, successor_json, stop_digest,
+predecessor_digest, current_digest, revision, fencing_token); its digest must
+equal unknown_projection_digest. Revalidate the full R212 grammar, original
+revision pair, Stop/authority/fence and seven-field predecessor/Unknown semantics;
+original Stop Root predecessor hash, reconstructed Unknown successor hash,
+literal Stop snapshot and every non-Root static hash still match exactly.
+Never restore an ORM row, fabricate a precontext or admit current>to through
+the ordinary validator. R+3, a third append, changed prefix/metadata/payload,
+updated_at or unrelated Root bytes deny.
+
+Only fresh authentic signed producer/physical proof and literal artifact
+verification may issue the separately registered weak-identity current-context
+stage. Bind actual service/jobs, task/thread, owner/fence, active physical scope, original
+registration, envelope/CAS and exact current Root/rows; copies, DTOs, digests,
+serialized stages and metadata cannot register it. Perform file/source checks
+before SQL and registry checks in memory inside SQL. Recheck the complete
+current Source/proposal/approval/reservation vector in IMMEDIATE and read back
+under the same fence/guard. This branch recovers only the original signed
+completion/readback disposition: no new append, proposal delta, revision,
+dispatch, release or finalization grant. Typed context cannot outlive the active
+registered stage; scope exit revokes its witness.
 
 ### Stop ordering and startup protection
 
@@ -292,6 +357,13 @@ without manufacturing process ownership. Exact read-only Unknown metadata
 preserves immutable Stop linkage but cannot substitute for physical proof.
 New v3 admission cannot improve old historical authority. Status and Guide
 describe this capability as Planned until its implementation and receipts land.
+The adopted same-receipt rollback retry must survive a legitimate auth touch
+with all fresh current checks. The isolated committed-Unknown refinement does
+not resolve the Running orphan retry when its original mixed audit digest
+changes; that case remains an acceptance gap, not a narrowed target or successful
+fallback. Public Source recovery actions remain fail-closed 503 until acceptance.
+Actual same-database managed backend kill/restart and API/UI recovery are still
+unproved; branch-local mechanical receipts do not enable these actions.
 
 ## Verification
 
@@ -305,8 +377,13 @@ liabilities, unrelated recovery unchanged, malformed provenance and rollback.
 Exercise exact seven-field predecessor/current revision/nonstatus drift,
 registered producer versus copied evidence, completion/Stop race and writer
 rollback, exact post-revision retry, continuous Settings fence/no deadlock and
-expiry Stop commit/readback-before-cleanup. Verify typed authenticated API/UI
-states, actual accounting/physical-release readback and historical v1/v2 denial
+expiry Stop commit/readback-before-cleanup. Prove actual rollback then
+due-auth-touch same-receipt retry for Running and Unknown, exact original
+constructor metadata reuse, complete current reservation
+membership/status/cost negatives, DB-only CAS/wrapper rewrite against unchanged
+artifact, updated_at/suffix/prefix/R+3 tamper and copied/revoked/task/fence stage
+rejection. Verify typed authenticated API/UI states, actual accounting/physical-
+release readback and historical v1/v2 denial
 of new authority. Native-host boot proof must distinguish actual trusted boot
 from namespace/fixture changes without treating a test as an authorized reboot.
 Provider-free ordinary checks and fresh independent cumulative review are

@@ -286,6 +286,16 @@ def repository_original_stop_completion_result(witness, *, iteration_id):
     return data["results"][iteration_id]
 
 
+def repository_original_stop_completion_cleanup_envelope(witness, *, iteration_id):
+    data = _STOP_COMPLETIONS.get(witness) if type(witness) is _OriginalRepositoryStopCompletionWitness else None
+    if data is None:
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_required")
+    assert_repository_original_stop_completion(witness, service=data["service"], jobs=data["jobs"])
+    if iteration_id not in data["cleanup_envelopes"]:
+        raise RepositorySourceRecoveryError("original_repository_stop_completion_iteration_changed")
+    return json.loads(data["cleanup_envelopes"][iteration_id])
+
+
 @asynccontextmanager
 async def stage_repository_original_stop_completion(service, jobs, *, context, owner, fence):
     """Already-committed full Running v3 cleanup under one active guard.
@@ -358,7 +368,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 physical[identity] = stage_original_producer_related_completion(primary, registration)
             except (ValueError, OSError) as exc:
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
-        results, digests, bindings = {}, {}, {}
+        results, digests, bindings, cleanup_envelopes = {}, {}, {}, {}
         for identity, registration, cleanup, readback in entries:
             try:
                 result = original_producer_completion_result(physical[identity])
@@ -380,6 +390,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
             cleanup_body = json.loads(service._read_private_artifact(cleanup["artifact_ref"], expected_digest=cleanup["artifact_digest"]))
             manifest_raw = service._read_private_artifact(readback["artifact_ref"], expected_digest=readback["artifact_digest"])
+            cleanup_envelopes[identity] = _canonical(cleanup_body)
             if "physical_projection" in cleanup_body:
                 if (set(cleanup_body) != {"physical_projection", "source_completion_cas", "source_append_metadata"}
                         or cleanup_body["source_completion_cas"] != cas):
@@ -404,7 +415,8 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
         witness = _OriginalRepositoryStopCompletionWitness()
         _STOP_COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
             "owner": owner, "fence": fence, "task": asyncio.current_task(), "job_id": run.run_identity,
-            "physical": physical, "results": results, "digests": digests, "bindings": bindings}
+            "physical": physical, "results": results, "digests": digests, "bindings": bindings,
+            "cleanup_envelopes": cleanup_envelopes}
         try:
             assert_repository_original_stop_completion(witness, service=service, jobs=jobs, context=context, fence=fence)
             yield witness
@@ -728,8 +740,10 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
     import os
     import stat
     from pathlib import PurePosixPath
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = -1
+    parent_fd = -1
+    opened = False
     try:
         fd = os.open(service._workspace(), flags | os.O_DIRECTORY)
         for component in PurePosixPath(relative_path).parts[:-1]:
@@ -739,17 +753,28 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
             metadata = os.fstat(fd)
             if metadata.st_mode & 0o077 or metadata.st_uid != os.getuid():
                 raise RepositorySourceRecoveryError("original_producer_artifact_changed")
-        child = os.open(PurePosixPath(relative_path).name, flags, dir_fd=fd)
-        os.close(fd)
+        parent_fd = fd
+        child = os.open(PurePosixPath(relative_path).name, flags, dir_fd=parent_fd)
         fd = child
+        opened = True
         metadata = os.fstat(fd)
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077
                 or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
                 or metadata.st_size > 1048576):
             raise RepositorySourceRecoveryError("original_producer_artifact_changed")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
+        before_named = os.stat(PurePosixPath(relative_path).name, dir_fd=parent_fd, follow_symlinks=False)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if identity(before_named) != identity(metadata):
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             raw = handle.read(1048577)
+        after_fd = os.fstat(fd)
+        after_named = os.stat(PurePosixPath(relative_path).name, dir_fd=parent_fd, follow_symlinks=False)
+        if (identity(after_fd) != identity(metadata) or identity(after_named) != identity(metadata)
+                or len(raw) != metadata.st_size):
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
         if len(raw) > 1048576:
             raise RepositorySourceRecoveryError("original_producer_artifact_changed")
         from src.workflows.job_runtime import _canonical
@@ -759,13 +784,17 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
                 or _canonical(envelope).encode() != raw):
             raise RepositorySourceRecoveryError("original_producer_artifact_changed")
         return envelope
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if opened:
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed") from exc
         return None
     except (OSError, ValueError, TypeError) as exc:
         raise RepositorySourceRecoveryError("original_producer_artifact_changed") from exc
     finally:
         if fd >= 0:
             os.close(fd)
+        if parent_fd >= 0 and parent_fd != fd:
+            os.close(parent_fd)
 
 
 async def publish_original_repository_completion(service, jobs, *, job_id, owner, iteration_index,
@@ -788,14 +817,66 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
     source = _source()
     async def accounting_rows_for_original(db, context):
         from src.workflows.inference_group_lookup import group_reservation_rows
+        from src.workflows.inference_accounting import InferenceAccountingError
         group = context["group"]
-        rows = await group_reservation_rows(db, owner_id=group.owner_principal_id,
-            group_id=group.group_id, group_digest=source._source_digest(group.model_dump(mode="json")),
-            original_root_id=group.owner_session_id, original_deadline_at=group.original_deadline_at, group=group)
+        try:
+            rows = await group_reservation_rows(db, owner_id=group.owner_principal_id,
+                group_id=group.group_id, group_digest=source._source_digest(group.model_dump(mode="json")),
+                original_root_id=group.owner_session_id, original_deadline_at=group.original_deadline_at, group=group)
+        except InferenceAccountingError as exc:
+            raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
         root_rows = list((await db.scalars(select(InferenceCostReservation).where(
             InferenceCostReservation.job_id == job_id).limit(13))).all())
-        if len(root_rows) > 12 or any(row.operation_id not in {item.operation_id for item in rows} for row in root_rows):
+        from src.workflows.general_task_accounting import entry_for, reservation_liability
+        from src.workflows.inference_accounting import InferenceAccountingError
+        try:
+            group_cost = sum(reservation_liability(row) for row in rows)
+            root_cost = sum(reservation_liability(row) for row in root_rows)
+        except InferenceAccountingError as exc:
+            raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
+        if (len(rows) > group.max_inference_calls or len(root_rows) > context["work"].limits.max_iterations
+                or group_cost > group.max_cost_microusd or root_cost > context["work"].limits.max_cost_microusd
+                or any(row.operation_id not in {item.operation_id for item in rows} for row in root_rows)):
             raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+        expected_operations = {}
+        for index in range(1, context["work"].limits.max_iterations + 1):
+            iteration = source.iteration_identity(job_id, context["original"]["repository_attempt_id"],
+                source._source_digest(context["original"]["original_input"]), index)
+            prepared = source._repository_record(context["run"], "repository:prepared:" + iteration)
+            response = source._repository_record(context["run"], "repository:response:" + iteration)
+            accounting_record = source._repository_record(context["run"], "repository:accounting:" + iteration)
+            if prepared is not None:
+                expected_operations["remote:repo-work:" + iteration] = (iteration, prepared, response, accounting_record)
+            if response is not None and not any(row.operation_id == response["operation_id"] for row in root_rows):
+                raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+        for row in root_rows:
+            entry = entry_for(row)
+            expected = expected_operations.get(row.operation_id)
+            member = entry.get("repository_binding") if entry else None
+            if (expected is None or entry["role"] != "repository_iteration" or type(member) is not dict
+                    or member.get("repository_job_id") != job_id
+                    or member.get("repository_attempt_id") != context["original"]["repository_attempt_id"]
+                    or member.get("source_checkpoint_digest") != source._source_digest(context["original"])
+                    or member.get("iteration_id") != expected[0]
+                    or member.get("repository_fence") != context["run"].fencing_token
+                    or member.get("parent_task_id") != context["binding"].task_id
+                    or member.get("parent_attempt_id") != context["binding"].attempt_id
+                    or member.get("native_invocation_id") != context["binding"].invocation_id
+                    or member.get("iteration_index") != expected[1]["iteration_index"]
+                    or member.get("operation_id") != row.operation_id
+                    or member.get("original_max_cost_microusd") != context["work"].limits.max_cost_microusd
+                    or row.payload_digest != expected[1]["request_body_digest"]):
+                raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+            _, _, response, accounting_record = expected
+            if response is not None:
+                if (accounting_record is None or row.state != "settled" or row.contact_started_at is None
+                        or source._source_digest(row.model_dump(mode="json")) != response["accounting_digest"]
+                        or accounting_record["accounting_digest"] != response["accounting_digest"]
+                        or accounting_record["operation_id"] != row.operation_id
+                        or accounting_record["state"] != row.state
+                        or accounting_record["actual_cost_microusd"] != row.actual_cost_microusd
+                        or accounting_record["bound_microusd"] != row.bound_microusd):
+                    raise RepositorySourceRecoveryError("original_producer_accounting_changed")
         return rows
     if (producer_owner is None) != (actual_result is None):
         raise RepositorySourceRecoveryError("original_repository_completion_owner_required")

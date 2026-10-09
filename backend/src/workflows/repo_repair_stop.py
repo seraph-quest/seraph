@@ -439,10 +439,21 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
             transport = manifest.get("supervisor_transport", {})
             if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
                 from src.workflows.repo_repair_source_recovery import (
-                    assert_repository_original_stop_completion, repository_original_stop_completion_result)
+                    assert_repository_original_stop_completion, repository_original_stop_completion_result,
+                    repository_original_stop_completion_cleanup_envelope)
                 assert_repository_original_stop_completion(original_completion,
                     service=service, jobs=jobs, context=context, fence=fence)
                 actual = repository_original_stop_completion_result(original_completion, iteration_id=identity)
+                authenticated_cleanup = repository_original_stop_completion_cleanup_envelope(
+                    original_completion, iteration_id=identity)
+                if cleanup_body != authenticated_cleanup:
+                    raise DurableJobLeaseError("literal original cleanup envelope changed")
+                if "physical_projection" in authenticated_cleanup:
+                    if (set(authenticated_cleanup) != {"physical_projection", "source_completion_cas", "source_append_metadata"}
+                            or authenticated_cleanup["source_completion_cas"] != cleanup.get("source_completion_cas")
+                            or authenticated_cleanup["source_completion_cas"] != readback.get("source_completion_cas")):
+                        raise DurableJobLeaseError("literal original cleanup envelope changed")
+                    cleanup_body = authenticated_cleanup["physical_projection"]
                 transport_proven = (actual["manifest"] == manifest
                     and actual["outputs"]["readback.json"] == service._read_private_artifact(
                         readback["artifact_ref"], expected_digest=readback["artifact_digest"]))

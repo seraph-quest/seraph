@@ -35,6 +35,7 @@ async def test_original_completion_pending_appends_are_exact_source_tickets(
     import asyncio
     import copy
     import json
+    from datetime import timedelta
     from contextlib import asynccontextmanager
     from src.workflows import repo_repair_source as source
     from src.workflows import repo_repair_source_recovery as recovery
@@ -119,6 +120,13 @@ async def test_original_completion_pending_appends_are_exact_source_tickets(
             foreign = run.model_copy(update={"run_identity": "foreign-original-root"})
             with pytest.raises(DurableJobTransitionError):
                 original_append(foreign, identity, payload, inventory=inventory, _completion_append=pending[0])
+            for fields in ({"revision": run.revision + 1},
+                    {"updated_at": run.updated_at + timedelta(microseconds=1)},
+                    {"failure_reason": "caller changed noncleanup Root field"}):
+                changed_root = run.model_copy(update=fields)
+                with pytest.raises(DurableJobTransitionError):
+                    original_append(changed_root, identity, payload, inventory=inventory,
+                        _completion_append=pending[0])
             changed_prefix = run.model_copy(update={"checkpoint_receipts_json": _canonical([])})
             with pytest.raises(DurableJobTransitionError):
                 original_append(changed_prefix, identity, payload, inventory=inventory, _completion_append=pending[0])
@@ -134,6 +142,10 @@ async def test_original_completion_pending_appends_are_exact_source_tickets(
             changed = original_append(run, identity, payload, inventory=inventory, _completion_append=_completion_append)
         with pytest.raises(DurableJobTransitionError):
             original_append(run, identity, payload, inventory=inventory, _completion_append=_completion_append)
+        if _completion_append is pending[1]:
+            with pytest.raises(DurableJobTransitionError):
+                original_append(run, "repository:physical-cleanup:v1", {"third_append": True},
+                    inventory=inventory, _completion_append=pending[0])
         return changed
 
     monkeypatch.setattr(source, "stage_repository_completion_appends", actual_stage)

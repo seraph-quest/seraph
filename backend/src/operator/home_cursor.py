@@ -18,7 +18,7 @@ EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 NULL_DUE = (1 << 63) - 1
 HEADER = struct.Struct(">BqqB8s16s16sBqqqBH")
 KINDS = ("active_goal", "programme", "task_next_action", "prepared_output", "approval",
-    "blocked_task", "blocked_approval", "blocked_programme")
+    "blocked_task", "blocked_approval", "blocked_programme", "inbox_decision")
 DESC_BANDS = {0, 1, 7}
 
 
@@ -57,6 +57,25 @@ def programme_key(goal_id: str, programme_id: str, revision: int) -> bytes:
             or type(revision) is not int or not 0 < revision < 1 << 64):
         raise HomeCursorError("unsupported_source")
     return struct.pack(">H", len(goal)) + goal + programme_id.encode("ascii") + struct.pack(">Q", revision)
+
+
+def inbox_key(identifier, revision, commitment):
+    raw=source_id(identifier)
+    if type(revision) is not int or not 0<revision<1<<63 or not isinstance(commitment,bytes) or len(commitment)!=32:
+        raise HomeCursorError("unsupported_source")
+    return struct.pack(">H",len(raw))+raw+struct.pack(">Q",revision)+commitment
+
+
+def decode_inbox_key(key):
+    try:
+        size=struct.unpack(">H",key[:2])[0]
+        if len(key)!=2+size+8+32: raise ValueError()
+        identifier=key[2:2+size].decode("utf-8")
+        revision=struct.unpack(">Q",key[2+size:2+size+8])[0]
+        if inbox_key(identifier,revision,key[-32:])!=key: raise ValueError()
+        return identifier,revision,key[-32:]
+    except (ValueError,UnicodeError,struct.error):
+        raise HomeCursorError() from None
 
 
 @dataclass(frozen=True)
@@ -127,7 +146,9 @@ class CursorCodec:
             if due != NULL_DUE:
                 timestamp(due)
             key = raw[HEADER.size:-32]
-            if kind in {1, 7}:
+            if kind==8:
+                decode_inbox_key(key)
+            elif kind in {1, 7}:
                 length = struct.unpack(">H", key[:2])[0]
                 goal = key[2:2+length].decode("utf-8")
                 programme = key[2+length:2+length+32].decode("ascii")

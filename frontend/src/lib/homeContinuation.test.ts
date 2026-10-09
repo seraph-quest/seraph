@@ -7,7 +7,7 @@ describe("closed Home continuation", () => {
   it("accepts historical rollback and Unknown without claiming execution eligibility", () => { expect(decodeHomeContinuation(homeFixture())).toEqual(homeFixture()); });
   it.each([
     (p: any) => { p.body = "private"; },
-    (p: any) => { p.active_goals.items[0].title = "private"; },
+    (p: any) => { p.active_goals.items[0].title = "x".repeat(513); },
     (p: any) => { p.active_goals.items[0].target.href = "https://arbitrary"; },
     (p: any) => { p.active_goals.items[0].target.goal_id = "foreign"; },
     (p: any) => { p.active_goals.items[0].status = "completed"; },
@@ -29,4 +29,11 @@ describe("closed Home continuation", () => {
   it("preserves full UTF-8 Goal identity without normalization", () => { const p = homeFixture(); const row = p.active_goals.items[0]; if (row.kind !== "active_goal") throw Error(); row.goal_id = "💡".repeat(128); row.target.goal_id = row.goal_id; expect(decodeHomeContinuation(p).active_goals.items[0]).toEqual(row); row.goal_id += "x"; row.target.goal_id = row.goal_id; expect(() => decodeHomeContinuation(p)).toThrow(); });
   it("uses one authenticated GET and passes the original cursor unchanged", async () => { const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(homeFixture()), { headers: { "X-Continuation-Cursor": "opaque-original" } })); vi.stubGlobal("fetch", fetch); const result = await fetchHomeContinuation(new AbortController().signal, "previous-original"); expect(fetch).toHaveBeenCalledTimes(1); expect(String(fetch.mock.calls[0][0])).toContain("limit=20&cursor=previous-original"); expect(fetch.mock.calls[0][1]).toMatchObject({ credentials: "include" }); expect(result.nextCursor).toBe("opaque-original"); });
   it("rejects an invalid cursor header without presenting a fresh snapshot", async () => { vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(homeFixture()), { headers: { "X-Continuation-Cursor": "private/unsupported" } }))); await expect(fetchHomeContinuation(new AbortController().signal)).rejects.toThrow(/cursor/); });
+  it.each(["target","kind","state","label","body","recovered"])("denies closed Inbox mismatch %s", change=>{
+    const p:any=homeFixture();const row:any={kind:"inbox_decision",inbox_id:"decision",inbox_revision:1,source_kind:"mail_notice",state:"pending",title:"New message in watched mailbox",source_availability:"present",goal_id:"goal-1",goal_revision:1,snoozed_until:null,expires_at:p.as_of,source_at:p.as_of,ownership_access:"current",target:{kind:"inbox",inbox_id:"decision",inbox_revision:1}};
+    p.task_next_actions.items=[row];
+    if(change==="target")row.target.inbox_id="foreign";if(change==="kind")row.source_kind="private_packet";if(change==="state")row.state="queued";if(change==="label")row.title="Verified private message subject";if(change==="body")row.body="PRIVATE_BODY";if(change==="recovered")row.ownership_access="recovered_read_only";
+    expect(()=>decodeHomeContinuation(p)).toThrow();
+  });
+
 });

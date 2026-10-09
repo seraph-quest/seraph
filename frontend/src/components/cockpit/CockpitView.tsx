@@ -16540,6 +16540,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             if (target.kind === "task" || target.kind === "output") {
               attentionNavigation.fromHome({ id: focusId, kind: "task", taskId: target.task_id, title: target.task_id, reason: "Inspect owning metadata", updatedAt: item.source_at, goalId: "goal_id" in item ? item.goal_id : null, threadId: null, recoveryAction: null, readOnly: item.ownership_access === "recovered_read_only", metadataConfirmed: true, priority: 0 });
               setFocusTaskId(target.task_id); selectCockpitSection("work");
+            } else if (target.kind === "inbox") {
+              setSelectedGuardianCandidate(null);
+              attentionNavigation.focusInbox(target.inbox_id);
+              selectCockpitSection("inbox");
             } else if (target.kind === "approval") openApprovalsPane(target.approval_id);
             else if (target.kind === "method") selectCockpitSection("library");
             else { selectCockpitSection("goals"); appEventBus.emit("attention:inspect-goal", { ...attentionOwner, goalId: target.goal_id, goalRevision: target.goal_revision, programmeId: target.kind === "programme" ? target.programme_id : null }); }
@@ -16557,9 +16561,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           onOpenSection={selectCockpitSection}
           onOpenApprovals={openApprovalsPane}
           goalSummary={currentGoal ? {
+            goalId: currentGoal.id,
+            goalRevision: currentGoal.revision ?? 0,
+            ownerSessionId: currentGoal.owner_session_id ?? "",
             title: currentGoal.title,
             status: currentGoal.status,
-            criterion: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+            criterion: currentGoalLoop?.goal.id===currentGoal.id && currentGoalLoop.goal.revision===currentGoal.revision
+              ? currentGoalLoop.criterion?.description ?? null : currentGoal.success_criterion?.description ?? null,
           } : null}
           onOpenTask={(taskId) => {
             setFocusTaskId(taskId);

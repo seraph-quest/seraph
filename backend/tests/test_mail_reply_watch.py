@@ -124,7 +124,7 @@ def _request(body: dict[str, object], operator: AuthenticatedOperator) -> Reques
     return request
 
 
-async def _seed(async_db, monkeypatch):
+async def _seed(async_db, monkeypatch, existing_operator=None):
     monkeypatch.setattr(mail_api, "get_session", async_db)
     now = datetime.now(timezone.utc)
     budget = GoalAdmissionBudget(
@@ -139,14 +139,15 @@ async def _seed(async_db, monkeypatch):
         timezone="UTC",
     )
     async with async_db() as db:
-        db.add(
+        if existing_operator is None:
+            db.add(
             OperatorSession(
                 id=SESSION,
                 token_hash="mail-watch-session-hash",
                 idle_expires_at=now + timedelta(hours=1),
                 absolute_expires_at=now + timedelta(hours=2),
             )
-        )
+            )
         db.add(
             Goal(
                 id=GOAL,
@@ -325,9 +326,9 @@ async def test_reply_task_admission_replay_is_owner_bound_and_body_free(async_db
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("malformed_period", [None, "missing_expiry", "future_start"])
-async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, monkeypatch, malformed_period):
-    await _seed(async_db, monkeypatch)
-    operator = _operator()
+async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, monkeypatch, malformed_period, existing_operator=None, home_observer=None, leaf_adapter=None):
+    await _seed(async_db, monkeypatch, existing_operator)
+    operator = existing_operator or _operator()
     create_body = {
         "schema_version": 1,
         "connection_id": CONNECTION,
@@ -353,9 +354,15 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     assert recovery["input_digest"]
     assert recovery["goal_id"] == GOAL
 
-    foreign = await mail_api.recover_mail_watch(_request({}, _foreign_operator()), create_body["idempotency_key"])
-    assert foreign["status"] == "not_found"
-    assert foreign["watch_id"] is None
+    if existing_operator is None:
+        foreign = await mail_api.recover_mail_watch(_request({}, _foreign_operator()), create_body["idempotency_key"])
+        assert foreign["status"] == "not_found"
+        assert foreign["watch_id"] is None
+    else:
+        # Genuine session mode denies the deliberately nonexistent foreign Root.
+        from src.integrations.gmail_read import GmailReadError
+        with pytest.raises(GmailReadError,match="operator session"):
+            await mail_api.recover_mail_watch(_request({}, _foreign_operator()), create_body["idempotency_key"])
 
     async with async_db() as db:
         binding = (await db.execute(select(mail_api.GovernedScheduleBinding))).scalar_one()
@@ -419,7 +426,8 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     fake = FakeAdapter(None)
     monkeypatch.setattr(scheduled_jobs, "GoogleGmailReadonlyAdapter", FakeAdapter, raising=False)
     # The handler imports the adapter at call time, so patch the source module.
-    monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", lambda *args, **kwargs: fake)
+    monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter",
+        lambda *args, **kwargs: leaf_adapter(fake,*args,**kwargs) if leaf_adapter else fake)
     first = await scheduled_jobs._run_governed_mail_metadata_scan(
         job_payload,
         scheduled_slot_utc=now.replace(minute=0, second=0, microsecond=0),
@@ -476,6 +484,9 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     notice = page["items"][0]
     assert notice["source_kind"] == "mail_notice"
     assert notice["allowed_actions"] == ["accept_followup", "snooze", "dismiss"]
+    if home_observer is not None:
+        await home_observer(notices)
+        return
     if malformed_period is not None:
         async with async_db() as db:
             goal = await db.get(Goal, GOAL)

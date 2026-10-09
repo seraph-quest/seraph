@@ -137,7 +137,7 @@ async def test_actual_home_goal_pagination_is_bounded_and_readonly(accounting_db
             assert set(body) == {*home_module.SECTIONS, "as_of"}
             assert sum(len(body[name]["items"]) for name in home_module.SECTIONS) == 20
             assert len(body["active_goals"]["items"]) == 20
-            assert "Private goal title" not in result.text
+            assert all(row["title"].startswith("Private goal title") for row in body["active_goals"]["items"])
             assert result.headers.get("x-continuation-cursor")
             selects = [s for s in statements if s.lstrip().upper().startswith(("SELECT", "WITH"))]
             assert len(selects) <= 18
@@ -244,7 +244,7 @@ async def test_public_priority_provenance_and_actual_mixed_inspector_wire(accoun
             assert result.headers.get("x-continuation-cursor")
             tasks = result.json()["task_next_actions"]["items"]
             assert tasks[0]["task_id"] == explicit_id
-            assert "Private task title" not in result.text and "Private priority goal" not in result.text
+            assert "Private task title" not in result.text and "Private priority goal" in result.text
             inspector = await client.get(f"/api/work-board/tasks/{explicit_id}")
             assert inspector.status_code == 200, inspector.text
             assert inspector.json()["task"]["task_id"] == explicit_id
@@ -293,7 +293,8 @@ async def test_corrupt_programme_metadata_blocks_section_without_private_reads(a
             assert result.status_code == 200,result.text
             assert result.json()["programme_status"]["state"] == "blocked"
             assert result.json()["programme_status"]["items"] == []
-            assert "Private corrupt" not in result.text
+            assert result.json()['active_goals']['items'][0]['title']=='Private corrupt programme goal'
+            assert 'unexpected' not in result.text and 'generations' not in result.text
     finally:
         home_projection.stop()
 

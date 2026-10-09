@@ -44,6 +44,12 @@ class GoalTarget(Closed):
     goal_revision: int
 
 
+class InboxTarget(Closed):
+    kind: Literal["inbox"] = "inbox"
+    inbox_id: str
+    inbox_revision: int
+
+
 class TaskTarget(Closed):
     kind: Literal["task"] = "task"
     task_id: str
@@ -100,7 +106,40 @@ class ActiveGoal(Row):
     status: Literal["active"] = "active"
     sort_order: int
     due_at: datetime | None
+    title: str | None
     target: GoalTarget
+
+    @field_validator("title")
+    @classmethod
+    def title_bound(cls, value):
+        if value is not None and (not value.strip() or len(value)>256 or len(value.encode())>512
+                or any(ord(c)<32 or ord(c)==127 for c in value)):
+            raise ValueError("unsupported Goal title")
+        return value
+
+
+class InboxDecision(Row):
+    kind: Literal["inbox_decision"] = "inbox_decision"
+    ownership_access: Literal["current"] = "current"
+    inbox_id: str
+    inbox_revision: int
+    source_kind: Literal["source_packet", "mail_notice", "guardian_opportunity"]
+    state: Literal["pending", "snoozed"]
+    title: Literal["Watched source changed", "New message in watched mailbox", "Public evidence opportunity"]
+    source_availability: Literal["present", "unavailable"]
+    goal_id: str
+    goal_revision: int
+    snoozed_until: datetime | None
+    expires_at: datetime
+    target: InboxTarget
+
+    @model_validator(mode="after")
+    def exact_source(self):
+        titles={"source_packet":"Watched source changed", "mail_notice":"New message in watched mailbox",
+            "guardian_opportunity":"Public evidence opportunity"}
+        if self.title!=titles[self.source_kind] or (self.inbox_id,self.inbox_revision)!=(self.target.inbox_id,self.target.inbox_revision):
+            raise ValueError("Inbox metadata identity mismatch")
+        return self
 
 
 class Programme(Row):
@@ -176,7 +215,7 @@ class BlockedProgramme(Row):
 
 
 Item = Annotated[ActiveGoal | Programme | TaskNextAction | PreparedOutput | Approval |
-    BlockedTask | BlockedApproval | BlockedProgramme, Field(discriminator="kind")]
+    BlockedTask | BlockedApproval | BlockedProgramme | InboxDecision, Field(discriminator="kind")]
 
 
 class Section(Closed):
@@ -197,7 +236,7 @@ class HomeContinuation(Closed):
     @model_validator(mode="after")
     def bounded_sections(self):
         kinds = {"active_goals":{"active_goal"}, "programme_status":{"programme"},
-            "task_next_actions":{"task_next_action"}, "prepared_outputs":{"prepared_output"},
+            "task_next_actions":{"task_next_action","inbox_decision"}, "prepared_outputs":{"prepared_output"},
             "approvals":{"approval"}, "blocked_items":{"blocked_task", "blocked_approval", "blocked_programme"}}
         if sum(len(getattr(self, name).items) for name in kinds) > 20:
             raise ValueError("aggregate item bound exceeded")

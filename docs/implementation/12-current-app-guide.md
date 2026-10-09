@@ -2518,13 +2518,17 @@ window layout. Home uses one authenticated local metadata snapshot with six
 sections: next steps, pending approvals, recovery and Unknown work, active Goals,
 programme progress, and prepared results. Each page contains at most 20 items in
 aggregate. Pending approvals are separate from prepared results. Exact Goal,
-Task, output Attempt, programme, approval and original-method identities open
-existing owning inspectors; the metadata snapshot releases no private bodies.
+Task, output Attempt, programme, approval, Inbox decision and original-method identities open
+existing owning inspectors; the metadata snapshot releases no private bodies. Pending
+or snoozed Inbox decisions use safe source labels; only proposed opportunities
+count as decisions. Active Goals show bounded titles, and exact current selected
+Goal context retains its existing status and criterion.
 
 Home preserves server order within each section. Explicit pagination retains the
 original as_of and opaque continuation, which expires after five minutes or
-the original operator-session cutoff. Changed or expired authority requires an
-explicit fresh snapshot. Failed or degraded refreshes retain confirmed rows and
+the original operator-session cutoff. Each page rechecks current metadata and
+excludes newly created work; an existing decision may become eligible. Original
+anchor changes or expired authority require an explicit fresh snapshot. Failed or degraded refreshes retain confirmed rows and
 timestamps as historical metadata; a confirmed blocked source displays its
 current state. Missing metadata does not establish empty work or readiness.
 Current Root metadata remains available without stable-identity enrollment,

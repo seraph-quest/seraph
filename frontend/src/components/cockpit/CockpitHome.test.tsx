@@ -21,4 +21,24 @@ describe("single-source Home continuation", () => {
 
   it("keeps current Task metadata refresh usable while optional programme identity is confirmed blocked", async () => { const first = homeFixture(); first.programme_status = { items: [], state: "blocked", source_as_of: null }; fetch.mockResolvedValue(response(first)); const open = vi.fn(); render(<CockpitHome onOpenSection={vi.fn()} onOpenContinuation={open} />); await screen.findByText(/Task task-1 · todo/); const second = homeFixture(); second.programme_status = first.programme_status; const task = second.task_next_actions.items[0]; if (task.kind !== "task_next_action") throw Error(); task.task_revision = 2; task.target.task_revision = 2; fetch.mockResolvedValue(response(second)); fireEvent.click(screen.getByRole("button", { name: "Refresh Home" })); await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2)); await waitFor(() => expect(screen.getByRole("button", { name: "Refresh Home" })).toBeEnabled()); fireEvent.click(screen.getByRole("button", { name: /Task task-1.*Inspect task/ })); expect(open.mock.calls[0][0].task_revision).toBe(2); expect(screen.getByRole("article", { name: "Programme progress" })).toHaveTextContent("Metadata blocked"); });
 
+  it("shows bounded Goal labels and the exact existing selected criterion only", async () => {
+    const summary={goalId:"goal-1",goalRevision:1,ownerSessionId:"root",title:"Current selected Goal",status:"active",criterion:"Finish the reviewed outcome"};
+    const props={onOpenSection:vi.fn(),owner:{principalId:"operator",sessionId:"root"}};
+    const view=render(<CockpitHome {...props} goalSummary={summary}/>);
+    await screen.findByRole("article",{name:"Selected Goal context"});
+    expect(screen.getByText(/Criterion · Finish the reviewed outcome/)).toBeInTheDocument();
+    expect(screen.getByRole("button",{name:/Current Goal.*Goal goal-1.*Inspect goal/})).toBeInTheDocument();
+    view.rerender(<CockpitHome {...props} goalSummary={{...summary,goalRevision:2,criterion:"STALE_PRIVATE_CRITERION"}}/>);
+    expect(screen.queryByText(/STALE_PRIVATE_CRITERION/)).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("keeps two decisions for one Goal distinct and restores exact opened focus", async () => {
+    const p=homeFixture(); p.task_next_actions.items=["one","two"].map(inbox_id=>({kind:"inbox_decision",inbox_id,inbox_revision:1,source_kind:"source_packet",state:"pending",title:"Watched source changed",source_availability:"present",goal_id:"goal-1",goal_revision:1,snoozed_until:null,expires_at:p.as_of,source_at:p.as_of,ownership_access:"current",target:{kind:"inbox",inbox_id,inbox_revision:1}}));
+    fetch.mockResolvedValue(response(p)); const open=vi.fn(); const props={onOpenSection:vi.fn(),onOpenContinuation:open};
+    const view=render(<CockpitHome {...props}/>);const buttons=await screen.findAllByRole("button",{name:/Watched source changed.*Inspect inbox/});
+    fireEvent.click(buttons[1]);expect(open.mock.calls[0][0]).toEqual({kind:"inbox",inbox_id:"two",inbox_revision:1});
+    view.rerender(<CockpitHome {...props} active={false}/>);view.rerender(<CockpitHome {...props} active focusAttentionId="inbox_decision:two:1"/>);
+    await waitFor(()=>expect(buttons[1]).toHaveFocus());expect(buttons[0]).not.toHaveFocus();expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
 });

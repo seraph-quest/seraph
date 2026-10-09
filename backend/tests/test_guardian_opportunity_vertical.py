@@ -65,7 +65,7 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
 
 @pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
     "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted", "startup_recovery"])
-async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario):
+async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario, home_observer=None):
     from config.settings import settings
     # The current feedback source witness requires actual active membership.
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
@@ -160,6 +160,8 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         material = await service.run_watch(watch["id"], occurrence_id="actual-opportunity-material",
             expected_plan_revision=1, expected_owner_session_id=owner["session_id"])
         assert material["status"] == "succeeded", material
+        if home_observer is not None:
+            await home_observer(client, owner, "queued")
         async with factory.accounting_sessions() as db:
             row = (await db.execute(select(GuardianOpportunity))).scalar_one()
             current_goal = await db.get(Goal, goal["id"])
@@ -359,6 +361,8 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         native = await durable_job_repository.get_job(final.job_id)
         assert native["status"] == "succeeded"
         assert "no learning" in native["result"]["summary"]
+        if home_observer is not None:
+            await home_observer(client, owner, "proposed")
         detail = await inbox.get_owned_item(owner_principal_id=owner["principal_id"],
             owner_session_id=owner["session_id"], item_id=row.id)
         assert detail["source_kind"] == "guardian_opportunity" and detail["verification_status"] == "passed"
@@ -394,6 +398,8 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             idempotency_key="actual-opportunity-snooze", until=datetime.now(timezone.utc)+timedelta(minutes=20))
         snoozed = await inbox.apply_action(**snooze_request)
         assert snoozed["state"] == "snoozed"
+        if home_observer is not None:
+            await home_observer(client, owner, "snoozed")
         assert await inbox.apply_action(**snooze_request) == snoozed
         detail = await inbox.get_owned_item(owner_principal_id=owner["principal_id"],
             owner_session_id=owner["session_id"], item_id=row.id)

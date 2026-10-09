@@ -211,6 +211,72 @@ async def stage_repository_completion_post_context(service, jobs, *, witness, ow
         owner=owner, completion_witness=witness)
 
 
+async def _validate_repository_knownpost_context_sql(db, service, jobs, *, stage, context):
+    """Recheck one registered committed Unknown successor using actual rows."""
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_knownpost_stage, repository_knownpost_stage,
+        _verify_repository_knownpost_root)
+    from src.workflows.repo_repair_stop import _static
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    assert_repository_knownpost_stage(stage, service=service, jobs=jobs)
+    binding = repository_knownpost_stage(stage)
+    run = context["run"]
+    if (context["owner"] is not binding["owner"]
+            or run.run_identity != binding["job_id"]
+            or _canonical(run.model_dump(mode="json")) != binding["root_json"]):
+        raise DurableJobLeaseError("actual repository knownpost context changed")
+    actual = await jobs._fetch(db, binding["job_id"])
+    if _canonical(actual.model_dump(mode="json")) != binding["root_json"]:
+        raise DurableJobLeaseError("actual repository knownpost Root changed")
+    # This codec verifies only local JSON mappings and original SQL metadata.
+    # It removes the exact two bound wrappers and decrements revision once;
+    # no previous ORM row is constructed or restored.
+    proof = _verify_repository_knownpost_root(actual, binding["registration"],
+        binding["result"], binding["cleanup_envelope"])
+    if proof != {key: binding[key] for key in (
+            "root_key", "current_static_digest", "unknown_projection")}:
+        raise DurableJobLeaseError("actual repository knownpost projection changed")
+    stop = _repository_record(actual, "repository:stop-intent:v1")
+    if stop is None or _source_digest(stop) != binding["stop_digest"]:
+        raise DurableJobLeaseError("actual repository knownpost Stop changed")
+    current = {}
+    root_count = 0
+    for model, key, expected in context["rows"]:
+        row = await db.get(model, key, populate_existing=True)
+        if row is None or _canonical(row.model_dump(mode="json")) != expected:
+            raise DurableJobLeaseError("actual repository knownpost row changed")
+        row_key = model.__tablename__ + ":" + str(key)
+        if row_key in current:
+            raise DurableJobLeaseError("actual repository knownpost row duplicated")
+        current[row_key] = _static(row, context)
+        if row_key == binding["root_key"]:
+            root_count += 1
+            if _canonical(row.model_dump(mode="json")) != binding["root_json"]:
+                raise DurableJobLeaseError("actual repository knownpost Root row changed")
+    expected = dict(stop["static_rows"])
+    if binding["root_key"] not in expected or root_count != 1:
+        raise DurableJobLeaseError("actual repository knownpost Root key changed")
+    expected[binding["root_key"]] = proof["current_static_digest"]
+    return current == context["static_rows"] == expected
+
+
+async def stage_repository_knownpost_context(service, jobs, *, stage, owner, fence):
+    """Stage current Source context only inside an authentic knownpost scope."""
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_knownpost_stage, repository_knownpost_stage,
+        assert_repository_recovery_fence)
+    from src.workflows.repo_repair_stop import _context
+    from src.workflows.job_runtime import DurableJobLeaseError
+    assert_repository_knownpost_stage(stage, service=service, jobs=jobs, fence=fence)
+    binding = repository_knownpost_stage(stage)
+    if binding["owner"] is not owner or binding["fence"] is not fence:
+        raise DurableJobLeaseError("actual repository knownpost owner fence required")
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=binding["job_id"], owner=owner)
+    return await _context(service, jobs, job_id=binding["job_id"], owner=owner,
+        _knownpost_stage=stage)
+
+
 @dataclass(frozen=True, slots=True)
 class _RepositoryUnknownRootProjection:
     """Immutable SQL evidence, carrying no cleanup or publication authority."""
@@ -2528,9 +2594,9 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
                 and cleanup_record.get("source_completion_cas") == cas
                 and readback.get("source_completion_cas") == cas
                 and actual_result["manifest"] == manifest
-                and recorded_projection == actual_envelope
+                and _canonical(recorded_projection) == _canonical(actual_envelope)
                 and set(actual_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
-                and actual_envelope["physical_projection"] == actual_projection
+                and _canonical(actual_envelope["physical_projection"]) == _canonical(actual_projection)
                 and actual_envelope["source_completion_cas"] == cas
                 and len(metadata) == 2 and [item.get("checkpoint_id") for item in metadata] == expected_ids
                 and actual_wrappers == expected_wrappers)

@@ -33,6 +33,10 @@ def assert_repository_stop_context(context, *, service, jobs=None):
     if (type(context) is not _RepositoryStopContext or _STAGED.get(context) is not service
             or (jobs is not None and service.jobs is not jobs)):
         raise DurableJobLeaseError("actual Source-staged repository Stop context required")
+    stage = context.data.get("_knownpost_stage")
+    if stage is not None:
+        from src.workflows.repo_repair_source_recovery import assert_repository_knownpost_stage
+        assert_repository_knownpost_stage(stage, service=service, jobs=service.jobs)
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
@@ -131,7 +135,8 @@ def _static(row, context):
     return source._source_digest({key: value for key, value in values.items() if key not in mutable})
 
 
-async def _context(service, jobs, *, job_id, owner, limit_reason=None, completion_witness=None):
+async def _context(service, jobs, *, job_id, owner, limit_reason=None, completion_witness=None,
+        _knownpost_stage=None):
     """Cleanup-only metadata first, then current original physical source."""
     from src.workflows.repo_repair import RepoRepairService
     from src.workflows.general_task_guard import _cancel_original, child_binding
@@ -141,6 +146,14 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
     source = _source()
     if type(service) is not RepoRepairService or service.jobs is not jobs:
         raise DurableJobLeaseError("actual current repository stop Source and job owner required")
+    if _knownpost_stage is not None:
+        from src.workflows.repo_repair_source_recovery import (
+            assert_repository_knownpost_stage, repository_knownpost_stage)
+        assert_repository_knownpost_stage(_knownpost_stage, service=service, jobs=jobs)
+        knownpost = repository_knownpost_stage(_knownpost_stage)
+        if (completion_witness is not None or knownpost["job_id"] != job_id
+                or knownpost["owner"] is not owner):
+            raise DurableJobLeaseError("actual separate repository knownpost scope required")
     async with jobs._session() as db:
         run = await jobs._fetch(db, job_id)
         original, work, compiled, group, binding, task_source = source.read_repository_original(run)
@@ -210,8 +223,13 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
         if limit_reason is not None:
             context["limit_evidence"] = await _limit_evidence(db, context, reason=limit_reason)
         stop = source._repository_record(run, STOP_ID)
+        if _knownpost_stage is not None and stop is None:
+            raise DurableJobLeaseError("actual repository knownpost Stop required")
         if stop is not None:
-            if completion_witness is None:
+            if _knownpost_stage is not None:
+                matches = await source._validate_repository_knownpost_context_sql(db,
+                    service, jobs, stage=_knownpost_stage, context=context)
+            elif completion_witness is None:
                 matches = source._stop_static_rows_match(run, stop, context["static_rows"])
             else:
                 matches = await source._validate_repository_completion_post_context_sql(db,
@@ -267,6 +285,9 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
             expected_digest=task_source.source_artifact_digest))
         if service.recheck_task_source_snapshot(work, source_facts) != compiled:
             raise DurableJobLeaseError("original physical repository stop source changed")
+        if _knownpost_stage is not None:
+            assert_repository_knownpost_stage(_knownpost_stage, service=service, jobs=jobs)
+            context["_knownpost_stage"] = _knownpost_stage
         staged = _RepositoryStopContext(MappingProxyType(context))
         _STAGED[staged] = service
         return staged
@@ -446,7 +467,7 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
                 actual = repository_original_stop_completion_result(original_completion, iteration_id=identity)
                 authenticated_cleanup = repository_original_stop_completion_cleanup_envelope(
                     original_completion, iteration_id=identity)
-                if cleanup_body != authenticated_cleanup:
+                if _canonical(cleanup_body) != _canonical(authenticated_cleanup):
                     raise DurableJobLeaseError("literal original cleanup envelope changed")
                 if "physical_projection" in authenticated_cleanup:
                     if (set(authenticated_cleanup) != {"physical_projection", "source_completion_cas", "source_append_metadata"}

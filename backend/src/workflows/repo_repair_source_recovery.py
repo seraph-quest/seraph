@@ -25,6 +25,7 @@ _FENCE_SEAL = object()
 _COMPLETIONS = weakref.WeakKeyDictionary()
 _STOP_COMPLETIONS = weakref.WeakKeyDictionary()
 _APPEND_STAGES = weakref.WeakKeyDictionary()
+_KNOWNPOST_STAGES = weakref.WeakKeyDictionary()
 _REGISTRATION_KEYS = frozenset({"schema", "job_id", "iteration_id", "iteration_index",
     "repository_attempt_id", "owner_principal_id", "owner_session_id", "root_fence",
     "root_authority_digest", "original_source_digest", "native_binding", "execution_digest",
@@ -33,6 +34,9 @@ _REGISTRATION_KEYS = frozenset({"schema", "job_id", "iteration_id", "iteration_i
     "guard_path", "native_host_binding", "original_deadline_at", "execution_deadline_at",
     "monotonic_deadline", "producer_sources", "stage_identity", "fixed_admission_plan_digest",
     "source_artifact_digest", "executor_posture_digest"})
+_COMPLETION_CAS_KEYS = frozenset({"before_revision", "post_revision", "iteration_id",
+    "producer_registration_digest", "producer_completion_digest", "stop_digest",
+    "unknown_projection_digest", "rows_digest"})
 
 
 def read_registered_repository_producer(run, *, iteration_index):
@@ -157,6 +161,255 @@ class _OriginalRepositoryProducerCompletionWitness:
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class _RepositoryCompletionAppendStage:
     """Actual active publication inputs; never a deserialized row grant."""
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _RepositoryKnownPostCompletionStage:
+    """One active signed-physical, literal-artifact verification scope."""
+
+
+def assert_repository_knownpost_stage(stage, *, service, jobs, fence=None):
+    import threading
+    data = _KNOWNPOST_STAGES.get(stage) if type(stage) is _RepositoryKnownPostCompletionStage else None
+    if (data is None or data["service"] is not service or data["jobs"] is not jobs
+            or data["thread"] != threading.get_ident()
+            or data["task"] is not asyncio.current_task()
+            or fence is not None and data["fence"] is not fence):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_required")
+    from src.execution.repo_original_producer import assert_original_producer_completion_scope
+    from src.workflows.job_runtime import _canonical
+    assert_repository_recovery_fence(data["fence"], service=service, jobs=jobs,
+        job_id=data["job_id"], owner=data["owner"])
+    assert_original_producer_completion_scope(data["physical"])
+    result = data["result"]
+    if (_canonical(data["root"].model_dump(mode="json")) != data["root_json"]
+            or result["status"] != data["result_status"]
+            or _source()._source_digest(result["original_producer_completion"]) != data["completion_digest"]
+            or result["manifest"] != result["original_producer_completion"]["manifest"]
+            or result["readback"] != result["manifest"]
+            or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}
+                != data["output_digests"]):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_changed")
+
+
+def repository_knownpost_stage(stage):
+    data = _KNOWNPOST_STAGES.get(stage) if type(stage) is _RepositoryKnownPostCompletionStage else None
+    if data is None:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_required")
+    assert_repository_knownpost_stage(stage, service=data["service"], jobs=data["jobs"])
+    values = {key: data[key] for key in ("root_json", "job_id", "owner", "fence", "stop_digest",
+        "root_key", "current_static_digest", "result", "context_rows")}
+    for key in ("cas", "registration", "unknown_projection", "cleanup_envelope"):
+        values[key] = json.loads(data[key])
+    return MappingProxyType(values)
+
+
+def _original_repository_cleanup_projection(registration, result):
+    """Exact existing native bytes; deriving a mapping issues no authority."""
+    from src.workflows.job_runtime import _canonical
+    binding, manifest = registration["process_binding"], result["manifest"]
+    if _canonical(manifest["iteration_binding"]) != _canonical(binding):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_physical_changed")
+    return {"schema": "RepoWorkIterationCleanup.v1",
+        "job_id": binding["repository_job_id"], "attempt_id": binding["repository_attempt_id"],
+        "fencing_token": binding["repository_fence"], "iteration_binding": binding,
+        "process_cleanup": manifest["process_cleanup"], "supervisor_identity": manifest["supervisor_identity"],
+        "supervisor_transport": manifest["supervisor_transport"], "stage_removed": manifest["stage_removed"],
+        "status": "iteration_failed_quiescent" if result["status"] == "failed" else result["status"],
+        "artifact_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}}
+
+
+def _knownpost_original_payloads(run, registration, result, envelope):
+    """Expected literal payload bytes only; this function issues no witness."""
+    from src.workflows.job_runtime import _canonical
+    source = _source()
+    identity = registration["iteration_id"]
+    execution = source._repository_record(run, "repository:execution:" + identity)
+    _, work, *_ = source.read_repository_original(run)
+    outputs, manifest = result["outputs"], result["manifest"]
+    complete = result["original_producer_completion"]["outcome"] in {
+        "completed_requested_checks", "completed_requested_check_failure"}
+    status = result["status"] if complete else "held_partial"
+    prefix = "workspace-json:artifacts/repo-repair/model/iteration-" + identity
+    diagnostics = {"iteration_id": identity,
+        "stdout": outputs["pytest.stdout"].decode("utf-8", errors="replace"),
+        "stderr": outputs["pytest.stderr"].decode("utf-8", errors="replace"),
+        "stdout_raw_sha256": hashlib.sha256(outputs["pytest.stdout"]).hexdigest(),
+        "stderr_raw_sha256": hashlib.sha256(outputs["pytest.stderr"]).hexdigest(),
+        "cumulative_diff": outputs["diff.patch"].decode("utf-8", errors="strict"),
+        "cumulative_diff_sha256": hashlib.sha256(outputs["diff.patch"]).hexdigest()}
+    return ({"artifact_ref": prefix + "-cleanup.json",
+        "artifact_digest": hashlib.sha256(_canonical(envelope).encode()).hexdigest(),
+        "cleanup_proven": True, "iteration_id": identity, "status": status,
+        "source_completion_cas": envelope["source_completion_cas"]},
+        {"artifact_ref": prefix + "-readback.json",
+        "artifact_digest": hashlib.sha256(outputs["readback.json"]).hexdigest(), "status": status,
+        "manifest_digest": source._source_digest(manifest), "patch_sha256": execution["patch_sha256"],
+        "diagnostics_artifact_ref": prefix + "-diagnostics.json",
+        "diagnostics_artifact_digest": hashlib.sha256(_canonical(diagnostics).encode()).hexdigest(),
+        "command_results": source._repository_command_results(manifest,
+            node=work.language_profile == "test_node") if complete else [],
+        "source_completion_cas": envelope["source_completion_cas"]})
+
+
+def _verify_repository_knownpost_root(run, registration, result, envelope):
+    """Hash-only prior Unknown check; a returned mapping is never authority."""
+    from src.workflows.job_runtime import _canonical, _digest
+    from src.work_board.contracts import TaskProposalGroupV1
+    source = _source()
+    if (run.status != "unknown_external_effect"
+            or source.read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3"
+            or type(envelope) is not dict or set(envelope) != {
+                "physical_projection", "source_completion_cas", "source_append_metadata"}):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+    cas = envelope["source_completion_cas"]
+    stop = source._repository_record(run, "repository:stop-intent:v1")
+    successor = source._repository_record(run, "repository:stop-uncertainty-successor:v1")
+    if (type(cas) is not dict or set(cas) != _COMPLETION_CAS_KEYS
+            or type(cas["before_revision"]) is not int or cas["before_revision"] < 0
+            or type(cas["post_revision"]) is not int or cas["post_revision"] != cas["before_revision"] + 1
+            or type(run.revision) is not int or run.revision != cas["post_revision"]
+            or cas["iteration_id"] != registration["iteration_id"]
+            or cas["producer_registration_digest"] != source._source_digest(registration)
+            or cas["producer_completion_digest"] != source._source_digest(result["original_producer_completion"])
+            or stop is None or cas["stop_digest"] != source._source_digest(stop)
+            or any(type(cas[key]) is not str or not source._SHA.fullmatch(cas[key])
+                for key in ("unknown_projection_digest", "rows_digest"))):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+    identity = registration["iteration_id"]
+    metadata = envelope["source_append_metadata"]
+    _assert_source_completion_append_metadata(run, identity, metadata)
+    history = json.loads(run.checkpoint_receipts_json)
+    expected_payloads = _knownpost_original_payloads(run, registration, result, envelope)
+    for ordinal, (role, item, payload) in enumerate(zip(("cleanup", "readback"), metadata, expected_payloads)):
+        try:
+            valid_time = TaskProposalGroupV1.utc_timestamp(item["created_at"]).isoformat() == item["created_at"]
+        except (ValueError, TypeError, KeyError):
+            valid_time = False
+        expected = {**item, "payload": payload, "state_digest": _digest(payload)}
+        if (not valid_time or item["checkpoint_id"] != "repository:" + role + ":" + identity
+                or len(history) < 2 or history[-2 + ordinal] != expected
+                or len(_canonical(payload).encode()) > 16384):
+            raise RepositorySourceRecoveryError("original_repository_knownpost_suffix_changed")
+    manifest, outputs = result["manifest"], result["outputs"]
+    projection = envelope["physical_projection"]
+    if (type(projection) is not dict or _canonical(projection) != _canonical(_original_repository_cleanup_projection(registration, result))
+            or _canonical(manifest.get("iteration_binding")) != _canonical(registration["process_binding"])
+            or projection.get("process_cleanup") != manifest["process_cleanup"]
+            or projection.get("artifact_digests") != {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()}
+            or manifest.get("stage_removed") is not True
+            or manifest.get("process_cleanup", {}).get("cleanup_proven") is not True
+            or manifest.get("process_cleanup", {}).get("oracle") != "linux_subreaper_waitpid_echild"
+            or any(manifest.get("supervisor_transport", {}).get(key) is not True for key in (
+                "command_output_drained", "command_descriptors_closed", "original_children_waited", "no_spawn"))
+            or manifest.get("supervisor_transport", {}).get("transport_kind") != "original_producer_durable_v1"):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_physical_changed")
+    current = run.model_dump(mode="json")
+    candidate = dict(current)
+    candidate["revision"] = cas["before_revision"]
+    candidate["checkpoint_receipts_json"] = _canonical(history[:-2])
+    root_key = type(run).__tablename__ + ":" + str(run.id)
+    successor_keys = {"schema", "job_id", "stop_digest", "root_key", "predecessor_digest",
+        "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision",
+        "predecessor_projection", "successor_projection"}
+    if (type(successor) is not dict or set(successor) != successor_keys
+            or successor["schema"] != "repository.stop_uncertainty_successor.v1"
+            or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
+            or successor["stop_digest"] != cas["stop_digest"]
+            or successor["authority_digest"] != run.authority_digest
+            or type(successor["fencing_token"]) is not int or successor["fencing_token"] != run.fencing_token
+            or type(successor["from_revision"]) is not int or successor["from_revision"] < 0
+            or type(successor["to_revision"]) is not int
+            or successor["to_revision"] != successor["from_revision"] + 1
+            or candidate["revision"] != successor["to_revision"]):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_projection_changed")
+    predecessor, following = successor["predecessor_projection"], successor["successor_projection"]
+    source._checked_uncertainty_columns(predecessor)
+    source._checked_uncertainty_columns(following)
+    reasons = {"repository_callback_closure_unproven": "reconcile_original_callback",
+        "repository_process_closure_unproven": "reconcile_original_process"}
+    if (predecessor["status"] != "running" or type(predecessor["lease_owner"]) is not str
+            or not predecessor["lease_owner"] or predecessor["lease_expires_at"] is None
+            or following["status"] != "unknown_external_effect" or following["failure_reason"] not in reasons
+            or following["finished_at"] is not None or following["lease_owner"] is not None
+            or following["lease_expires_at"] is not None or following["result_summary"] != "result recorded"
+            or {key: candidate[key] for key in source._UNCERTAINTY_COLUMNS} != following):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_projection_changed")
+    original, work, *_ = source.read_repository_original(run)
+    matching = [index for index in range(1, work.limits.max_iterations + 1)
+        if following["result_digest"] == _digest({"no_learning": True,
+            "operator_action": reasons[following["failure_reason"]],
+            "iteration_id": source.iteration_identity(run.run_identity, original["repository_attempt_id"],
+                source._source_digest(original["original_input"]), index)})]
+    predecessor_candidate = {**candidate, **predecessor}
+    predecessor_digest = source._source_digest({key: value for key, value in predecessor_candidate.items()
+        if key not in source._ROOT_BOOKKEEPING})
+    current_digest = source._source_digest({key: value for key, value in candidate.items()
+        if key not in source._ROOT_BOOKKEEPING})
+    if (len(matching) != 1 or predecessor_digest != successor["predecessor_digest"]
+            or type(stop.get("static_rows")) is not dict
+            or predecessor_digest != stop["static_rows"].get(root_key)
+            or current_digest != successor["successor_digest"]):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_projection_changed")
+    proof = {"root_json": _canonical(candidate), "successor_json": _canonical(successor),
+        "stop_digest": cas["stop_digest"], "predecessor_digest": predecessor_digest,
+        "current_digest": current_digest, "revision": candidate["revision"], "fencing_token": run.fencing_token}
+    if source._source_digest(proof) != cas["unknown_projection_digest"]:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_root_changed")
+    return {"root_key": root_key, "current_static_digest": current_digest, "unknown_projection": proof}
+
+
+@asynccontextmanager
+async def _stage_repository_knownpost_identity(service, jobs, *, root, owner, fence, physical,
+        registration, result, envelope, proof):
+    """Only the original scoped verifier can register a known-post stage."""
+    import threading
+    from src.workflows.job_runtime import _canonical
+    from src.execution.repo_original_producer import original_producer_completion_result
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=root.run_identity, owner=owner)
+    if original_producer_completion_result(physical) is not result:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_changed")
+    async with jobs._session() as db:
+        actual = await jobs._fetch(db, root.run_identity)
+        if (_canonical(actual.model_dump(mode="json")) != _canonical(root.model_dump(mode="json"))
+                or read_registered_repository_producer(actual,
+                    iteration_index=registration["iteration_index"]) != registration
+                or (actual.owner_principal_id, actual.operator_session_id) != (owner.principal_id, owner.session_id)):
+            raise RepositorySourceRecoveryError("original_repository_knownpost_stage_changed")
+    root = actual
+    literal = _read_original_cleanup_envelope_if_present(service,
+        "artifacts/repo-repair/model/iteration-" + registration["iteration_id"] + "-cleanup.json")
+    if literal != envelope:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_changed")
+    source = _source()
+    stop = source._repository_record(root, "repository:stop-intent:v1")
+    original, *_ = source.read_repository_original(root)
+    snapshot = json.loads(service._read_private_artifact(stop["snapshot_artifact_ref"],
+        expected_digest=stop["snapshot_artifact_digest"]))
+    if snapshot != {"schema": "repository.stop_snapshot.v1", "static_rows": stop["static_rows"],
+            "repository_job_id": root.run_identity, "source_checkpoint_digest": source._source_digest(original)}:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stop_changed")
+    # Recompute from the actual row/result/literal envelope at issuance; a
+    # caller-provided proof dictionary cannot register its own interpretation.
+    if _verify_repository_knownpost_root(root, registration, result, envelope) != proof:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_changed")
+    stage = _RepositoryKnownPostCompletionStage()
+    data = {"service": service, "jobs": jobs, "owner": owner, "fence": fence,
+        "task": asyncio.current_task(), "thread": threading.get_ident(), "physical": physical,
+        "root": root, "root_json": _canonical(root.model_dump(mode="json")), "job_id": root.run_identity,
+        "root_key": proof["root_key"], "current_static_digest": proof["current_static_digest"],
+        "stop_digest": envelope["source_completion_cas"]["stop_digest"], "context_rows": None,
+        "result": result, "result_status": result["status"],
+        "completion_digest": _source()._source_digest(result["original_producer_completion"]),
+        "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()},
+        "cas": _canonical(envelope["source_completion_cas"]), "registration": _canonical(registration),
+        "unknown_projection": _canonical(proof["unknown_projection"]), "cleanup_envelope": _canonical(envelope)}
+    _KNOWNPOST_STAGES[stage] = data
+    try:
+        assert_repository_knownpost_stage(stage, service=service, jobs=jobs, fence=fence)
+        yield stage
+    finally:
+        _KNOWNPOST_STAGES.pop(stage, None)
 
 
 def assert_repository_completion_append_stage(stage, *, service=None, jobs=None, fence=None):
@@ -400,6 +653,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
             if (body["outcome"] not in {"completed_requested_checks", "completed_requested_check_failure"}
                     or result["status"] != cleanup["status"] or manifest_raw != outputs["readback.json"]
                     or json.loads(manifest_raw) != manifest or source._source_digest(manifest) != readback["manifest_digest"]
+                    or _canonical(cleanup_body) != _canonical(_original_repository_cleanup_projection(registration, result))
                     or cleanup_body.get("iteration_binding") != registration["process_binding"]
                     or cleanup_body.get("process_cleanup") != manifest["process_cleanup"]
                     or cleanup_body.get("artifact_digests") != {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()}
@@ -429,6 +683,8 @@ def assert_repository_completion_witness(witness, *, service=None, jobs=None):
     if (data is None or service is not None and data["service"] is not service
             or jobs is not None and data["jobs"] is not jobs):
         raise RepositorySourceRecoveryError("original_repository_completion_witness_required")
+    if data.get("knownpost_stage") is not None:
+        assert_repository_knownpost_stage(data["knownpost_stage"], service=data["service"], jobs=data["jobs"])
     result = data["result"]
     if (_source()._source_digest(result["original_producer_completion"]) != data["completion_digest"]
             or result["status"] != data["result_status"]
@@ -797,6 +1053,224 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
             os.close(parent_fd)
 
 
+async def _repository_original_accounting_rows(db, context, *, job_id):
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation
+    source = _source()
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
+    group = context["group"]
+    try:
+        rows = await group_reservation_rows(db, owner_id=group.owner_principal_id,
+            group_id=group.group_id, group_digest=source._source_digest(group.model_dump(mode="json")),
+            original_root_id=group.owner_session_id, original_deadline_at=group.original_deadline_at, group=group)
+    except InferenceAccountingError as exc:
+        raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
+    root_rows = list((await db.scalars(select(InferenceCostReservation).where(
+        InferenceCostReservation.job_id == job_id).limit(13))).all())
+    from src.workflows.general_task_accounting import entry_for, reservation_liability
+    from src.workflows.inference_accounting import InferenceAccountingError
+    try:
+        group_cost = sum(reservation_liability(row) for row in rows)
+        root_cost = sum(reservation_liability(row) for row in root_rows)
+    except InferenceAccountingError as exc:
+        raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
+    if (len(rows) > group.max_inference_calls or len(root_rows) > context["work"].limits.max_iterations
+            or group_cost > group.max_cost_microusd or root_cost > context["work"].limits.max_cost_microusd
+            or any(row.operation_id not in {item.operation_id for item in rows} for row in root_rows)):
+        raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+    expected_operations = {}
+    for index in range(1, context["work"].limits.max_iterations + 1):
+        iteration = source.iteration_identity(job_id, context["original"]["repository_attempt_id"],
+            source._source_digest(context["original"]["original_input"]), index)
+        prepared = source._repository_record(context["run"], "repository:prepared:" + iteration)
+        response = source._repository_record(context["run"], "repository:response:" + iteration)
+        accounting_record = source._repository_record(context["run"], "repository:accounting:" + iteration)
+        if prepared is not None:
+            expected_operations["remote:repo-work:" + iteration] = (iteration, prepared, response, accounting_record)
+        if response is not None and not any(row.operation_id == response["operation_id"] for row in root_rows):
+            raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+    for row in root_rows:
+        entry = entry_for(row)
+        expected = expected_operations.get(row.operation_id)
+        member = entry.get("repository_binding") if entry else None
+        if (expected is None or entry["role"] != "repository_iteration" or type(member) is not dict
+                or member.get("repository_job_id") != job_id
+                or member.get("repository_attempt_id") != context["original"]["repository_attempt_id"]
+                or member.get("source_checkpoint_digest") != source._source_digest(context["original"])
+                or member.get("iteration_id") != expected[0]
+                or member.get("repository_fence") != context["run"].fencing_token
+                or member.get("parent_task_id") != context["binding"].task_id
+                or member.get("parent_attempt_id") != context["binding"].attempt_id
+                or member.get("native_invocation_id") != context["binding"].invocation_id
+                or member.get("iteration_index") != expected[1]["iteration_index"]
+                or member.get("operation_id") != row.operation_id
+                or member.get("original_max_cost_microusd") != context["work"].limits.max_cost_microusd
+                or row.payload_digest != expected[1]["request_body_digest"]):
+            raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+        _, _, response, accounting_record = expected
+        if response is not None:
+            if (accounting_record is None or row.state != "settled" or row.contact_started_at is None
+                    or source._source_digest(row.model_dump(mode="json")) != response["accounting_digest"]
+                    or accounting_record["accounting_digest"] != response["accounting_digest"]
+                    or accounting_record["operation_id"] != row.operation_id
+                    or accounting_record["state"] != row.state
+                    or accounting_record["actual_cost_microusd"] != row.actual_cost_microusd
+                    or accounting_record["bound_microusd"] != row.bound_microusd):
+                raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+    return rows
+
+@asynccontextmanager
+async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner, iteration_index,
+        expected_job_revision=None):
+    """Verify the one committed Unknown successor without changing any row.
+
+    Every yielded authority expires with this physical guard and Source fence.
+    The immutable first-staging rows digest remains an audit receipt.
+    """
+    from contextlib import ExitStack
+    from src.db.models import (RepoRepairProposal, ApprovalRequest, OperatorSession,
+        InferenceCostReservation, WorkBoardInputArtifact)
+    from src.workflows.job_runtime import _canonical, _as_utc, _utc_now
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.workflows import repo_repair_stop as stop_owner
+    from src.execution.repo_original_producer import (original_producer_live_owner,
+        stage_original_producer_completion, original_producer_completion_result)
+    source = _source()
+    async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
+        async with jobs._session() as db:
+            root = await jobs._fetch(db, job_id)
+            revision = root.revision if expected_job_revision is None else expected_job_revision
+            if type(revision) is not int or revision < 0:
+                raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+        original_context = await _load_recovery_original(service, jobs, job_id=job_id,
+            owner=owner, expected_job_revision=revision, fence=fence)
+        root = original_context["run"]
+        registration = read_registered_repository_producer(root, iteration_index=iteration_index)
+        identity = registration["iteration_id"]
+        if root.status != "unknown_external_effect":
+            raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+        stop = source._repository_record(root, stop_owner.STOP_ID)
+        cleanup = source._repository_record(root, "repository:cleanup:" + identity)
+        readback = source._repository_record(root, "repository:readback:" + identity)
+        if (stop is None or source._repository_record(root, "repository:stop-uncertainty-successor:v1") is None
+                or cleanup is None or readback is None or cleanup.get("cleanup_proven") is not True
+                or cleanup.get("source_completion_cas") != readback.get("source_completion_cas")):
+            raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+        async with jobs._session() as db:
+            session = await db.get(OperatorSession, owner.session_id)
+            if (session is None or session.principal_id != owner.principal_id or session.revoked_at is not None
+                    or session.replaced_by_id or session.is_bearer_tombstone
+                    or _as_utc(session.idle_expires_at) <= _utc_now()
+                    or _as_utc(session.absolute_expires_at) <= _utc_now()):
+                raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+        callback = service._iterative_process_callbacks.get(identity)
+        live_owner = live_result = None
+        if callback is not None:
+            if not callback.done() or callback.cancelled() or callback.exception() is not None:
+                raise RepositorySourceRecoveryError("original_repository_knownpost_pending")
+            live_result = callback.result()
+            try:
+                live_owner = original_producer_live_owner(service, jobs, live_result)
+            except (ValueError, OSError) as exc:
+                raise RepositorySourceRecoveryError("original_repository_knownpost_pending") from exc
+        with ExitStack() as scopes:
+            try:
+                physical = scopes.enter_context(stage_original_producer_completion(registration,
+                    owner=live_owner, result=live_result))
+                result = original_producer_completion_result(physical)
+            except (ValueError, OSError) as exc:
+                raise RepositorySourceRecoveryError("original_repository_knownpost_pending") from exc
+            envelope = _read_original_cleanup_envelope_if_present(service,
+                "artifacts/repo-repair/model/iteration-" + identity + "-cleanup.json")
+            if live_owner is not None and (envelope is None
+                    or _canonical(envelope["physical_projection"]) != _canonical(result["iteration_cleanup_witness"].projection())):
+                raise RepositorySourceRecoveryError("original_repository_knownpost_physical_changed")
+            proof = _verify_repository_knownpost_root(root, registration, result, envelope)
+            payloads = _knownpost_original_payloads(root, registration, result, envelope)
+            # Literal readback/diagnostics are independently read before SQL.
+            for payload, ref_key, digest_key in ((payloads[0], "artifact_ref", "artifact_digest"),
+                    (payloads[1], "artifact_ref", "artifact_digest"),
+                    (payloads[1], "diagnostics_artifact_ref", "diagnostics_artifact_digest")):
+                raw = service._read_private_artifact(payload[ref_key], expected_digest=payload[digest_key])
+                if hashlib.sha256(raw).hexdigest() != payload[digest_key]:
+                    raise RepositorySourceRecoveryError("original_repository_knownpost_artifact_changed")
+                if ref_key == "artifact_ref" and payload is payloads[1] and raw != result["outputs"]["readback.json"]:
+                    raise RepositorySourceRecoveryError("original_repository_knownpost_artifact_changed")
+            async with _stage_repository_knownpost_identity(service, jobs, root=root, owner=owner,
+                    fence=fence, physical=physical, registration=registration, result=result,
+                    envelope=envelope, proof=proof) as stage:
+                staged = await source.stage_repository_knownpost_context(service, jobs,
+                    stage=stage, owner=owner, fence=fence)
+                stop_owner.assert_repository_stop_context(staged, service=service, jobs=jobs)
+                context = staged.data
+                execution = source._repository_record(context["run"], "repository:execution:" + identity)
+                async with jobs._session() as db:
+                    proposal = await db.get(RepoRepairProposal, execution["proposal_id"])
+                    approval = await db.get(ApprovalRequest, execution["approval_id"])
+                    if proposal is None or approval is None:
+                        raise RepositorySourceRecoveryError("original_producer_approval_changed")
+                    proposal_json, approval_json = proposal.model_dump(mode="json"), approval.model_dump(mode="json")
+                    predecessor = {**proposal_json, **registration["proposal_predecessor"]}
+                    complete = result["original_producer_completion"]["outcome"] in {
+                        "completed_requested_checks", "completed_requested_check_failure"}
+                    if (source._source_digest(predecessor) != registration["proposal_digest"]
+                            or source._source_digest(approval_json) != registration["approval_digest"]
+                            or proposal_json["revision"] != registration["proposal_predecessor"]["revision"] + 1
+                            or proposal_json["status"] != ("execution_verified" if complete else "execution_partial")
+                            or proposal_json["last_receipt_id"] != "repository:readback:" + identity):
+                        raise RepositorySourceRecoveryError("original_producer_approval_changed")
+                    accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
+                    accounting_rows = {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting}
+                rows = tuple(context["rows"]) + (
+                    (RepoRepairProposal, execution["proposal_id"], _canonical(proposal_json)),
+                    (ApprovalRequest, execution["approval_id"], _canonical(approval_json))) + tuple(
+                    (InferenceCostReservation, key, raw) for key, raw in sorted(accounting_rows.items()))
+                _KNOWNPOST_STAGES[stage]["context_rows"] = rows
+                # Finish physical checks before the read-only IMMEDIATE fence.
+                if original_producer_completion_result(physical) is not result:
+                    raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+                source._assert_task_publication_configuration(service)
+                async with jobs._session() as db:
+                    await _begin_sqlite_immediate(db)
+                    assert_repository_knownpost_stage(stage, service=service, jobs=jobs, fence=fence)
+                    if not await source._validate_repository_knownpost_context_sql(db, service, jobs,
+                            stage=stage, context=context):
+                        raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
+                    for model, key, expected in rows:
+                        actual = await db.get(model, key, populate_existing=True)
+                        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                            raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
+                        if isinstance(actual, OperatorSession) and (actual.revoked_at is not None
+                                or _as_utc(actual.idle_expires_at) <= _utc_now()
+                                or _as_utc(actual.absolute_expires_at) <= _utc_now()):
+                            raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+                        if isinstance(actual, WorkBoardInputArtifact) and _as_utc(actual.expires_at) <= _utc_now():
+                            raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
+                    current_accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
+                    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
+                        raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+                    await db.commit()
+                    for model, key, expected in rows:
+                        actual = await db.get(model, key, populate_existing=True)
+                        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                            raise RepositorySourceRecoveryError("original_repository_knownpost_readback_changed")
+                witness = _OriginalRepositoryProducerCompletionWitness()
+                _COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
+                    "knownpost_stage": stage, "result": result, "post_cas": envelope["source_completion_cas"],
+                    "status": result["status"] if complete else "held_partial", "committed_rows": rows,
+                    "cleanup_envelope": _canonical(envelope),
+                    "completion_digest": source._source_digest(result["original_producer_completion"]),
+                    "result_status": result["status"], "output_digests": {
+                        name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()},
+                    "readback": {"artifact_ref": payloads[1]["artifact_ref"], "artifact_digest": payloads[1]["artifact_digest"]}}
+                try:
+                    assert_repository_completion_witness(witness, service=service, jobs=jobs)
+                    yield witness
+                finally:
+                    _COMPLETIONS.pop(witness, None)
+
+
 async def publish_original_repository_completion(service, jobs, *, job_id, owner, iteration_index,
         producer_owner=None, actual_result=None, expected_job_revision=None):
     """One Source-owned publication for live and authentic original restart.
@@ -815,69 +1289,6 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
         stage_original_producer_completion, original_producer_completion_result,
     )
     source = _source()
-    async def accounting_rows_for_original(db, context):
-        from src.workflows.inference_group_lookup import group_reservation_rows
-        from src.workflows.inference_accounting import InferenceAccountingError
-        group = context["group"]
-        try:
-            rows = await group_reservation_rows(db, owner_id=group.owner_principal_id,
-                group_id=group.group_id, group_digest=source._source_digest(group.model_dump(mode="json")),
-                original_root_id=group.owner_session_id, original_deadline_at=group.original_deadline_at, group=group)
-        except InferenceAccountingError as exc:
-            raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
-        root_rows = list((await db.scalars(select(InferenceCostReservation).where(
-            InferenceCostReservation.job_id == job_id).limit(13))).all())
-        from src.workflows.general_task_accounting import entry_for, reservation_liability
-        from src.workflows.inference_accounting import InferenceAccountingError
-        try:
-            group_cost = sum(reservation_liability(row) for row in rows)
-            root_cost = sum(reservation_liability(row) for row in root_rows)
-        except InferenceAccountingError as exc:
-            raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
-        if (len(rows) > group.max_inference_calls or len(root_rows) > context["work"].limits.max_iterations
-                or group_cost > group.max_cost_microusd or root_cost > context["work"].limits.max_cost_microusd
-                or any(row.operation_id not in {item.operation_id for item in rows} for row in root_rows)):
-            raise RepositorySourceRecoveryError("original_producer_accounting_changed")
-        expected_operations = {}
-        for index in range(1, context["work"].limits.max_iterations + 1):
-            iteration = source.iteration_identity(job_id, context["original"]["repository_attempt_id"],
-                source._source_digest(context["original"]["original_input"]), index)
-            prepared = source._repository_record(context["run"], "repository:prepared:" + iteration)
-            response = source._repository_record(context["run"], "repository:response:" + iteration)
-            accounting_record = source._repository_record(context["run"], "repository:accounting:" + iteration)
-            if prepared is not None:
-                expected_operations["remote:repo-work:" + iteration] = (iteration, prepared, response, accounting_record)
-            if response is not None and not any(row.operation_id == response["operation_id"] for row in root_rows):
-                raise RepositorySourceRecoveryError("original_producer_accounting_changed")
-        for row in root_rows:
-            entry = entry_for(row)
-            expected = expected_operations.get(row.operation_id)
-            member = entry.get("repository_binding") if entry else None
-            if (expected is None or entry["role"] != "repository_iteration" or type(member) is not dict
-                    or member.get("repository_job_id") != job_id
-                    or member.get("repository_attempt_id") != context["original"]["repository_attempt_id"]
-                    or member.get("source_checkpoint_digest") != source._source_digest(context["original"])
-                    or member.get("iteration_id") != expected[0]
-                    or member.get("repository_fence") != context["run"].fencing_token
-                    or member.get("parent_task_id") != context["binding"].task_id
-                    or member.get("parent_attempt_id") != context["binding"].attempt_id
-                    or member.get("native_invocation_id") != context["binding"].invocation_id
-                    or member.get("iteration_index") != expected[1]["iteration_index"]
-                    or member.get("operation_id") != row.operation_id
-                    or member.get("original_max_cost_microusd") != context["work"].limits.max_cost_microusd
-                    or row.payload_digest != expected[1]["request_body_digest"]):
-                raise RepositorySourceRecoveryError("original_producer_accounting_changed")
-            _, _, response, accounting_record = expected
-            if response is not None:
-                if (accounting_record is None or row.state != "settled" or row.contact_started_at is None
-                        or source._source_digest(row.model_dump(mode="json")) != response["accounting_digest"]
-                        or accounting_record["accounting_digest"] != response["accounting_digest"]
-                        or accounting_record["operation_id"] != row.operation_id
-                        or accounting_record["state"] != row.state
-                        or accounting_record["actual_cost_microusd"] != row.actual_cost_microusd
-                        or accounting_record["bound_microusd"] != row.bound_microusd):
-                    raise RepositorySourceRecoveryError("original_producer_accounting_changed")
-        return rows
     if (producer_owner is None) != (actual_result is None):
         raise RepositorySourceRecoveryError("original_repository_completion_owner_required")
     async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
@@ -916,7 +1327,7 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
             if (source._source_digest(proposal_json) != registration["proposal_digest"]
                     or source._source_digest(approval_json) != registration["approval_digest"]):
                 raise RepositorySourceRecoveryError("original_producer_approval_changed")
-            accounting = await accounting_rows_for_original(db, context)
+            accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
             accounting_rows = {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting}
         # This owner context remains active across literal artifact staging and
         # the exact writer. Restart guard freedom is not an unheld observation.
@@ -924,7 +1335,7 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
             result = original_producer_completion_result(physical)
             manifest, outputs = result["manifest"], result["outputs"]
             body = result["original_producer_completion"]
-            if (manifest.get("iteration_binding") != registration["process_binding"]
+            if (_canonical(manifest.get("iteration_binding")) != _canonical(registration["process_binding"])
                     or manifest.get("stage_removed") is not True
                     or manifest.get("supervisor_transport", {}).get("transport_kind") != "original_producer_durable_v1"
                     or any(manifest.get("supervisor_transport", {}).get(key) is not True for key in (
@@ -956,24 +1367,27 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
                     "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
                     "reservations": [[InferenceCostReservation.__tablename__, key, raw]
                         for key, raw in sorted(accounting_rows.items())]})}
-            projection = {"iteration_binding": registration["process_binding"],
-                "process_cleanup": manifest["process_cleanup"], "artifact_digests": {
-                    name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()},
-                }
+            projection = _original_repository_cleanup_projection(registration, result)
             if producer_owner is not None:
                 # Preserve the actual original live witness bytes required by
                 # the existing final writer, rather than inventing its shape.
-                projection = result["iteration_cleanup_witness"].projection()
+                if _canonical(projection) != _canonical(result["iteration_cleanup_witness"].projection()):
+                    raise RepositorySourceRecoveryError("original_producer_cleanup_changed")
             prefix = "artifacts/repo-repair/model/iteration-" + identity
             existing_envelope = _read_original_cleanup_envelope_if_present(service, prefix + "-cleanup.json")
             retry_metadata = None
             if existing_envelope is not None:
                 original_cas = existing_envelope["source_completion_cas"]
                 if (type(original_cas) is not dict or set(original_cas) != set(cas)
-                        or any(original_cas[key] != value for key, value in cas.items() if key != "rows_digest")
+                        or type(original_cas["before_revision"]) is not int
+                        or original_cas["before_revision"] < 0
+                        or type(original_cas["post_revision"]) is not int
+                        or original_cas["post_revision"] != original_cas["before_revision"] + 1
+                        or any(_canonical(original_cas[key]) != _canonical(value)
+                            for key, value in cas.items() if key != "rows_digest")
                         or type(original_cas["rows_digest"]) is not str
                         or not source._SHA.fullmatch(original_cas["rows_digest"])
-                        or existing_envelope["physical_projection"] != projection
+                        or _canonical(existing_envelope["physical_projection"]) != _canonical(projection)
                         or unknown is None and original_cas["rows_digest"] != cas["rows_digest"]):
                     raise RepositorySourceRecoveryError("original_producer_orphan_epoch_changed")
                 # Rows digest is the first staging audit receipt, never a current
@@ -1029,7 +1443,7 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
                         if (current.revision != before or read_registered_repository_producer(current,
                                 iteration_index=iteration_index) != registration or current_unknown != unknown):
                             raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
-                        current_accounting = await accounting_rows_for_original(db, context)
+                        current_accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
                         if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
                             raise RepositorySourceRecoveryError("original_producer_accounting_changed")
                         live_proposal = await db.get(RepoRepairProposal, execution["proposal_id"], populate_existing=True)

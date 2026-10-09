@@ -9,6 +9,176 @@ from src.workflows.repo_repair_source_recovery import read_registered_repository
 
 
 @pytest.mark.asyncio
+async def test_knownpost_dtos_deny_before_current_source_or_sql_reads(monkeypatch):
+    from src.workflows import repo_repair_source as source
+    from src.workflows import repo_repair_source_recovery as recovery
+
+    class NoSql:
+        async def _fetch(self, *args, **kwargs):
+            raise AssertionError("Unregistered knownpost stage cannot read SQL")
+
+    for stage in (object(), {"root_json": "{}", "post_revision": 2},
+            recovery._RepositoryKnownPostCompletionStage()):
+        with pytest.raises(recovery.RepositorySourceRecoveryError,
+                match="original_repository_knownpost_stage_required"):
+            await source.stage_repository_knownpost_context(object(), NoSql(),
+                stage=stage, owner=object(), fence=object())
+        with pytest.raises(recovery.RepositorySourceRecoveryError,
+                match="original_repository_knownpost_stage_required"):
+            await source._validate_repository_knownpost_context_sql(object(), object(), NoSql(),
+                stage=stage, context={})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["test_python", "test_node"])
+async def test_actual_knownpost_context_requires_current_source_and_active_scope(
+        accounting_db, monkeypatch, language, repository_admission_signer):
+    import asyncio
+    import copy
+    import json
+    from datetime import timedelta
+    from sqlalchemy import text, update
+    from src.db.models import WorkflowRunState
+    from src.execution import repo_original_producer as physical
+    from src.workflows import repo_repair_source as source
+    from src.workflows import repo_repair_source_recovery as recovery
+    from src.workflows import repo_repair_stop as stop
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    captured, scopes = {}, []
+    real_publish = recovery.publish_original_repository_completion
+    real_stage = source.stage_repository_knownpost_context
+
+    class OriginalCommitted(Exception):
+        pass
+
+    async def commit_actual_unknown(service, jobs, **kwargs):
+        captured.update(service=service, jobs=jobs, kwargs=kwargs)
+        async with jobs._session() as db:
+            root = await jobs._fetch(db, kwargs["job_id"])
+            registration = read_registered_repository_producer(root, iteration_index=1)
+            lease_owner, fence = root.lease_owner, root.fencing_token
+        async with recovery._repository_recovery_fence(service, jobs,
+                job_id=kwargs["job_id"], owner=kwargs["owner"]) as held:
+            context = await stop._context(service, jobs, job_id=kwargs["job_id"], owner=kwargs["owner"])
+            await stop._persist_repository_stop_intent_locked(service, jobs, context=context,
+                owner=kwargs["owner"], reason="operator_cancelled", fence=held)
+        await source._quarantine_original_uncertainty(service, jobs, job_id=kwargs["job_id"],
+            owner=kwargs["owner"], lease_owner=lease_owner, fencing_token=fence,
+            reason="repository_process_closure_unproven", result={"no_learning": True,
+                "operator_action": "reconcile_original_process", "iteration_id": registration["iteration_id"]})
+        await real_publish(service, jobs, **kwargs)
+        raise OriginalCommitted()
+
+    async def inspect_actual_context(service, jobs, *, stage, owner, fence):
+        binding = recovery.repository_knownpost_stage(stage)
+        for altered in (copy.copy(stage), object(), dict(binding)):
+            with pytest.raises(recovery.RepositorySourceRecoveryError):
+                await real_stage(service, jobs, stage=altered, owner=owner, fence=fence)
+        for fields in ({"service": object()}, {"jobs": object()}, {"fence": object()}):
+            args = {"service": service, "jobs": jobs, "stage": stage, "owner": owner, "fence": fence}
+            args.update(fields)
+            with pytest.raises(recovery.RepositorySourceRecoveryError):
+                await real_stage(**args)
+        with pytest.raises(DurableJobLeaseError):
+            await real_stage(service, jobs, stage=stage, owner=copy.copy(owner), fence=fence)
+
+        async def inherited():
+            with pytest.raises(recovery.RepositorySourceRecoveryError):
+                await real_stage(service, jobs, stage=stage, owner=owner, fence=fence)
+        await asyncio.create_task(inherited())
+        def another_thread():
+            with pytest.raises(recovery.RepositorySourceRecoveryError):
+                recovery.assert_repository_knownpost_stage(stage, service=service, jobs=jobs, fence=fence)
+        await asyncio.to_thread(another_thread)
+        context = await real_stage(service, jobs, stage=stage, owner=owner, fence=fence)
+        stop.assert_repository_stop_context(context, service=service, jobs=jobs)
+        with pytest.raises(DurableJobLeaseError):
+            stop.assert_repository_stop_context(copy.copy(context), service=service, jobs=jobs)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("Knownpost SQL assertion cannot perform physical reads")
+        async with jobs._session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            with monkeypatch.context() as writer:
+                writer.setattr(physical, "original_producer_completion_result", forbidden)
+                writer.setattr(physical.os, "fstat", forbidden)
+                writer.setattr(service, "_read_private_artifact", forbidden)
+                assert await source._validate_repository_knownpost_context_sql(db, service, jobs,
+                    stage=stage, context=context)
+            await db.rollback()
+        root = context["run"]
+        history = json.loads(root.checkpoint_receipts_json)
+        changed_time = json.loads(root.checkpoint_receipts_json)
+        changed_time[-1]["created_at"] = "2000-01-01T00:00:00+00:00"
+        mutations = [(root.id, {"revision": root.revision + 1}),
+            (root.id, {"updated_at": root.updated_at + timedelta(microseconds=1)}),
+            (root.id, {"failure_reason": "changed noncleanup Root field"}),
+            (root.id, {"checkpoint_receipts_json": _canonical(history + [history[-1]])}),
+            (root.id, {"checkpoint_receipts_json": _canonical(changed_time)}),
+            (context["parent"].id, {"failure_reason": "changed nonRoot static field"})]
+        for row_id, values in mutations:
+            async with jobs._session() as db:
+                await db.execute(text("BEGIN IMMEDIATE"))
+                await db.execute(update(WorkflowRunState).where(WorkflowRunState.id == row_id).values(**values))
+                with pytest.raises((DurableJobLeaseError, recovery.RepositorySourceRecoveryError)):
+                    await source._validate_repository_knownpost_context_sql(db, service, jobs,
+                        stage=stage, context=context)
+                await db.rollback()
+        scopes.append((stage, context, service, jobs))
+        return context
+
+    monkeypatch.setattr(recovery, "publish_original_repository_completion", commit_actual_unknown)
+    with pytest.raises(OriginalCommitted):
+        await _actual_source_callback_journey(accounting_db, monkeypatch, False, language)
+    service, jobs, kwargs = captured["service"], captured["jobs"], captured["kwargs"]
+    monkeypatch.setattr(recovery, "publish_original_repository_completion", real_publish)
+    monkeypatch.setattr(source, "stage_repository_knownpost_context", inspect_actual_context)
+    async with jobs._session() as db:
+        before = (await jobs._fetch(db, kwargs["job_id"])).model_dump(mode="json")
+    for _ in range(2):
+        async with recovery.stage_repository_knownpost_completion(service, jobs,
+                job_id=kwargs["job_id"], owner=kwargs["owner"], iteration_index=1,
+                expected_job_revision=before["revision"]) as witness:
+            assert recovery.repository_completion_outcome(witness)["cleanup_proven"] is True
+        with pytest.raises(recovery.RepositorySourceRecoveryError):
+            recovery.repository_completion_outcome(witness)
+        stage, context, _, _ = scopes[-1]
+        with pytest.raises(recovery.RepositorySourceRecoveryError):
+            recovery.repository_knownpost_stage(stage)
+        with pytest.raises(recovery.RepositorySourceRecoveryError):
+            stop.assert_repository_stop_context(context, service=service, jobs=jobs)
+    # Corrupt only the retained actual context's static map after its original
+    # Source reader. The real final SQL validator must return False, and the
+    # completion owner must consume that verdict before issuing any witness.
+    false_verdicts = []
+    real_sql = source._validate_repository_knownpost_context_sql
+
+    async def changed_actual_static(service, jobs, *, stage, owner, fence):
+        context = await real_stage(service, jobs, stage=stage, owner=owner, fence=fence)
+        binding = recovery.repository_knownpost_stage(stage)
+        context["static_rows"][binding["root_key"]] = "0" * 64
+        return context
+
+    async def observe_real_verdict(*args, **kwargs):
+        verdict = await real_sql(*args, **kwargs)
+        if verdict is False:
+            false_verdicts.append(True)
+        return verdict
+
+    monkeypatch.setattr(source, "stage_repository_knownpost_context", changed_actual_static)
+    monkeypatch.setattr(source, "_validate_repository_knownpost_context_sql", observe_real_verdict)
+    with pytest.raises(recovery.RepositorySourceRecoveryError):
+        async with recovery.stage_repository_knownpost_completion(service, jobs,
+                job_id=kwargs["job_id"], owner=kwargs["owner"], iteration_index=1,
+                expected_job_revision=before["revision"]):
+            pytest.fail("A real False Source verdict cannot issue a completion witness")
+    assert false_verdicts == [True]
+    async with jobs._session() as db:
+        assert (await jobs._fetch(db, kwargs["job_id"])).model_dump(mode="json") == before
+    assert len(scopes) == 2
+
+
+@pytest.mark.asyncio
 async def test_completion_append_dtos_deny_before_optional_stage_dependency(monkeypatch):
     from src.workflows import repo_repair_source as source
     from src.workflows import repo_repair_source_recovery as recovery

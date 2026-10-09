@@ -11,6 +11,7 @@ function receipt() {
   return { programmes: [{ id: "programme-one", goal_id: "goal-one", grant_revision: 2, state: "active", reason_code: null as string | null,
     last_run: "2026-10-09T06:00:00Z" as string | null, sources_checked: 3, output: "actual-brief" as string | null, next_run: null as string | null,
     current_run_status: "succeeded" as string | null, current_admitted_at: "2026-10-09T05:55:00Z" as string | null,
+    next_source_state: "scheduled", next_source_eligible_at: "2026-10-10T00:00:00Z" as string | null, next_source_reason: null as string | null,
     next_digest_at: "2026-10-10T06:00:00Z", remaining_allowance_microusd: 400, recovery: null }],
   notifications: { enabled: false, deadline_categories: [], digest_slots_remaining: 1, deadline_slots_remaining: 1, quiet_hours_active: true, delivery_debt: false },
   digests: [{ id: "daily-one", created_at: "2026-10-09T06:00:00Z", digest: { schema_version: "ProgrammeDigest.v1", local_date: "2026-10-09", timezone: "Europe/Warsaw", programme_ids: ["programme-one"], finding_ids: ["finding-one"], prepared_outputs: [], blocked_reasons: [] },
@@ -145,6 +146,7 @@ describe("Programme digest binding", () => {
     await screen.findByText(/sources checked 3/);
     expect(screen.getByText(/output · actual-brief/)).toBeInTheDocument();
     expect(screen.getByText(/Next digest/)).toBeInTheDocument();
+    expect(screen.getByText(/Next source eligibility · scheduled/)).toHaveTextContent(new Date("2026-10-10T00:00:00Z").toLocaleString());
     expect(screen.queryByText(/Next source run/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open daily digest in Inbox" }));
     expect(section).toHaveBeenCalledWith("inbox");
@@ -179,6 +181,32 @@ describe("Programme digest binding", () => {
     expect(screen.getByText(/output · No output recorded/)).toBeInTheDocument();
     expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, current_run_status: "invented_activity" }] })).toBe(false);
     expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, current_admitted_at: null }] })).toBe(false);
+  });
+
+  it.each(["held", "unavailable"])("always shows explicit %s source eligibility without promising execution", async (state) => {
+    const data = receipt(); const programme = data.programmes[0];
+    programme.next_source_state = state;
+    programme.next_source_eligible_at = null;
+    programme.next_source_reason = state === "held" ? "programme_outstanding_occurrence_requires_recovery" : "scheduler_disabled";
+    fetchMock.mockResolvedValue(reply(data));
+    render(<ProgrammeDigestContent ownerKey="operator:root" summaryOnly />);
+    const eligibility = await screen.findByText(new RegExp(`Next source eligibility · ${state}`));
+    expect(eligibility).toHaveTextContent(programme.next_source_reason.replace(/_/g, " "));
+    expect(eligibility).not.toHaveTextContent(new Date(data.programmes[0].next_digest_at).toLocaleString());
+    expect(screen.getByText(/Source execution depends on scheduler admission/)).toBeInTheDocument();
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, next_source_eligible_at: "2026-10-10T00:00:00Z" }] })).toBe(false);
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, next_source_reason: null }] })).toBe(false);
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, next_source_reason: "x".repeat(129) }] })).toBe(false);
+  });
+
+  it("shows proven source eligibility separately from the next local digest", async () => {
+    const data = receipt(); data.programmes[0].next_source_state = "eligible";
+    data.programmes[0].next_source_eligible_at = "2026-10-09T06:00:00Z";
+    fetchMock.mockResolvedValue(reply(data));
+    render(<ProgrammeDigestContent ownerKey="operator:root" summaryOnly />);
+    expect(await screen.findByText(/Next source eligibility · eligible/)).toHaveTextContent(new Date("2026-10-09T06:00:00Z").toLocaleString());
+    expect(screen.getByText(/Next digest/)).toHaveTextContent(new Date(data.programmes[0].next_digest_at).toLocaleString());
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...data.programmes[0], next_source_eligible_at: null }] })).toBe(false);
   });
 
   it("reads original source and output through authenticated discovery readback without fetching source URLs", async () => {

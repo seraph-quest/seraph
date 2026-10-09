@@ -19,6 +19,8 @@ export interface ProgrammeStatus {
   goal_id: string; id: string; grant_revision: number; state: string; reason_code: string | null;
   last_run: string | null; sources_checked: number; output: string | null; next_run: string | null;
   current_run_status: string | null; current_admitted_at: string | null;
+  next_source_state: "eligible" | "scheduled" | "held" | "unavailable";
+  next_source_eligible_at: string | null; next_source_reason: string | null;
   next_digest_at?: string | null;
   remaining_allowance_microusd: number | null; recovery: string | null;
 }
@@ -53,6 +55,12 @@ export function isProgrammeDigestSnapshot(value: unknown): value is ProgrammeDig
     && timestamp(p.last_run) && timestamp(p.next_run) && nullableText(p.output) && nullableText(p.reason_code) && nullableText(p.recovery)
     && (p.current_run_status === null || ["accepted", "queued", "running", "awaiting_approval", "paused", "blocked", "unknown_external_effect", "cost_liability", "failed", "degraded", "succeeded", "cancelled"].includes(p.current_run_status))
     && timestamp(p.current_admitted_at) && ((p.current_run_status === null) === (p.current_admitted_at === null))
+    && ["eligible", "scheduled", "held", "unavailable"].includes(p.next_source_state)
+    && timestamp(p.next_source_eligible_at)
+    && ((["eligible", "scheduled"].includes(p.next_source_state) && p.next_source_eligible_at !== null)
+      || (["held", "unavailable"].includes(p.next_source_state) && p.next_source_eligible_at === null))
+    && (p.next_source_reason === null || (typeof p.next_source_reason === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(p.next_source_reason)))
+    && (!["held", "unavailable"].includes(p.next_source_state) || p.next_source_reason !== null)
     && (p.next_digest_at === undefined || timestamp(p.next_digest_at))
     && (p.remaining_allowance_microusd === null || (Number.isSafeInteger(p.remaining_allowance_microusd) && p.remaining_allowance_microusd >= 0)))
     && Array.isArray(snapshot.digests) && snapshot.digests.every((entry) => entry && typeof entry.id === "string"

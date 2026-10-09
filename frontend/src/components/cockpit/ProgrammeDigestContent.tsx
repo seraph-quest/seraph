@@ -118,7 +118,8 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
         <div>Last completed source run · {time(p.last_run)} · sources checked {p.sources_checked}</div>
         <div>output · {p.output ?? "No output recorded"}</div>
         {p.next_digest_at ? <div>Next digest · {time(p.next_digest_at)}</div> : null}
-        {p.next_run ? <div>Next source run · {time(p.next_run)}</div> : null}
+        <div>Next source eligibility · {p.next_source_state}{p.next_source_eligible_at ? ` · ${time(p.next_source_eligible_at)}` : ""}{p.next_source_reason ? ` · ${p.next_source_reason.replace(/_/g, " ")}` : ""}</div>
+        <div className="text-xs">Source execution depends on scheduler admission and current authority.</div>
         <div>remaining finite allowance · {p.remaining_allowance_microusd === null ? "Unavailable" : `${p.remaining_allowance_microusd} microUSD`}</div>
         {p.recovery ? <div>Passive recovery · {p.recovery}</div> : null}
         <button type="button" disabled={busy || !confirmed || p.state !== "active"} onClick={() => void pause(p)}>Pause programme</button>

@@ -12,6 +12,76 @@ from src.guardian import programme_digest as digest
 from src.db.models import ProgrammeDigestReceipt, ProgrammeFindingAction, NativeNotificationOutbox, Goal
 
 
+@pytest.mark.parametrize("age,accepted", [(timedelta(hours=48), True),
+    (timedelta(hours=48, microseconds=1), False), (timedelta(microseconds=-1), False)])
+def test_source_age_inclusive_boundary_and_future_denial(age, accepted):
+    from src.guardian.goal_programmes import GoalProgrammeError
+    observed = datetime(2026, 10, 9, 8, tzinfo=timezone.utc)
+    witness = SimpleNamespace(artifacts={"source": {"kind": "snapshot",
+        "parsed": SimpleNamespace(fetched_at=observed - age)}})
+    if accepted:
+        digest.assert_fresh_sources(witness, observed)
+    else:
+        with pytest.raises(GoalProgrammeError, match="programme_finding_refresh_required"):
+            digest.assert_fresh_sources(witness, observed)
+    with pytest.raises(GoalProgrammeError, match="programme_finding_refresh_required"):
+        digest.assert_fresh_sources(SimpleNamespace(artifacts={}), observed)
+
+
+@pytest.mark.asyncio
+async def test_source_eligibility_uses_real_scheduler_daily_occurrence_and_native_hold(monkeypatch):
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+    from src.guardian.goal_discovery import run_goal_discovery_tick
+    from src.scheduler import engine
+    now = datetime(2026, 10, 9, 23, 59, tzinfo=timezone.utc)
+    programme = {"id": "original", "state": "active", "reason_code": None,
+        "cadence": "daily", "expires_at": (now + timedelta(days=2)).isoformat()}
+    monkeypatch.setattr(digest.settings, "scheduler_enabled", True)
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(run_goal_discovery_tick, IntervalTrigger(seconds=60), id="goal_public_discovery",
+        next_run_time=datetime.now(timezone.utc) + timedelta(days=1))
+    monkeypatch.setattr(engine, "get_scheduler", lambda: scheduler)
+    scheduler.start(paused=True)
+    try:
+        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_paused"
+        scheduler.resume()
+        eligible = digest.source_schedule(programme, [], 10, now)
+        assert eligible.next_source_state == "eligible" and eligible.next_source_eligible_at == now
+        completed = {"programme_id": "original", "occurrence_day": "2026-10-09",
+            "status": "succeeded", "outstanding_held": False, "external_effect_state": "resolved",
+            "accounting_liability": False}
+        # Source cadence is UTC even when digest timezone crosses midnight/DST.
+        for zone in ("Europe/Warsaw", "Pacific/Kiritimati", "America/New_York"):
+            monkeypatch.setattr(digest.settings, "user_timezone", zone)
+            scheduled = digest.source_schedule(programme, [completed], 10, now)
+            assert scheduled.next_source_state == "scheduled"
+            assert scheduled.next_source_eligible_at == datetime(2026, 10, 10, tzinfo=timezone.utc)
+        held = {**completed, "programme_id": "prior-generation", "status": "queued", "outstanding_held": True}
+        assert digest.source_schedule(programme, [held], 10, now).next_source_reason == "source_run_in_progress"
+        for change in ({"external_effect_state": "unknown"}, {"accounting_liability": True}, {"status": "failed"}):
+            blocked = digest.source_schedule(programme, [{**held, **change}], 10, now)
+            assert blocked.next_source_state == "held" and blocked.next_source_eligible_at is None
+            assert blocked.next_source_reason == "programme_outstanding_occurrence_requires_recovery"
+        exhausted = digest.source_schedule(programme, [], 0, now)
+        assert exhausted.next_source_reason == "programme_allowance_exhausted" and exhausted.next_source_eligible_at is None
+        expired = digest.source_schedule({**programme, "expires_at": "2026-10-10T00:00:00+00:00"}, [completed], 10, now)
+        assert expired.next_source_reason == "programme_window_expires_before_next_occurrence"
+        assert digest.source_schedule({**programme, "state": "paused"}, [], 10, now).next_source_reason == "programme_inactive"
+        assert digest.source_schedule({**programme, "state": "blocked", "reason_code": "programme_route_changed"}, [], 10, now).next_source_reason == "programme_authority_blocked"
+        scheduler.pause_job("goal_public_discovery")
+        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_job_unavailable"
+        scheduler.remove_job("goal_public_discovery")
+        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_job_unavailable"
+        monkeypatch.setattr(engine, "get_scheduler", lambda: None)
+        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_unavailable"
+        monkeypatch.setattr(digest.settings, "scheduler_enabled", False)
+        disabled = digest.source_schedule(programme, [], 10, now)
+        assert disabled.next_source_state == "unavailable" and disabled.next_source_reason == "scheduler_disabled"
+    finally:
+        scheduler.shutdown(wait=False)
+
+
 @pytest.fixture
 async def digest_owner(programme_setup, async_db, monkeypatch):
     service, operator, goal, request, clock = programme_setup

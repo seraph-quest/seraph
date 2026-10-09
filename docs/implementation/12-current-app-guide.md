@@ -302,7 +302,10 @@ operator-declared category. Model urgency and finding prose supply no authority.
 Use the same finding card to reopen its original brief/checklist, prepare a local
 follow-through proposal, defer until a date, or dismiss it. Preparation checks the
 original Goal revision, programme generation, artifact readback, current Root
-and source age (at most 48 hours). It creates an inert existing C1 general-task
+and source age (at most 48 hours), including the final C1 publication writer
+after physical staging. Expiry there creates no Task or bound proposal artifact;
+private unbound staging remains subject to the existing input size bound and expiry
+cleanup. It creates an inert existing C1 general-task
 Triage card with a fixed local checklist plan, zero inference calls and no
 external mutation. `FollowThroughIntent.task_proposal_id` names that canonical
 Work task card; it is not a second proposal row or a new allowance. Review and
@@ -319,9 +322,14 @@ evicting history to manufacture capacity.
 
 Home reports actual native run/source/output receipts and remaining finite
 allowance, including unresolved accounting reservations. **Next digest** is the
-local 08:00 schedule. A source run time is left unset when the existing native
-queue and outstanding holds do not prove it; digest timing is not presented as a
-source execution time. Pause/review uses existing programme controls. No activity
+local 08:00 schedule. **Next source eligibility** shows current eligibility or
+the next UTC daily occurrence when the active grant, allowance and running
+discovery scheduler support it. Native outstanding work and unresolved costs
+show a hold; inactive authority, an unavailable or paused scheduler, exhausted
+allowance and expiry before the next occurrence show an explicit reason.
+Eligibility is not an execution time: the existing scheduler, native admission
+and current authority determine whether execution proceeds. Pause/review uses
+existing programme controls. No activity
 is invented when a source or programme is blocked.
 
 Isolated Linux checks cover SQLite clock/DST/restart and cross-programme caps,

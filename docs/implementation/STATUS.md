@@ -249,8 +249,13 @@ owners and leaves discovery's UTC occurrence and original clocks unchanged.
 Optional native delivery uses the existing outbox, recipient-bound opt-in,
 owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
 ambiguous display consumes the slot without automatic retry. Home distinguishes
-actual run/source/output evidence from the next digest timer and an unproven
-source run time. See the
+actual run/source/output evidence from the next digest timer and source
+eligibility under the existing UTC cadence, scheduler, finite allowance and
+native holds. Unavailable or blocked eligibility has an explicit reason; it
+does not promise execution. Source freshness is rechecked in the final C1
+publication writer, so expiry after staging cannot publish a Task or bind its
+proposal artifact. Existing private unbound staging retains its size bound/expiry
+cleanup. See the
 [operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
 Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
 file journey and two-programme cited-deadline/native-slot readbacks prove these

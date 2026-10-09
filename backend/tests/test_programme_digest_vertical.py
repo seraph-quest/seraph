@@ -20,7 +20,8 @@ from tests.test_research_native_vertical import real_auth, ResponseBytes
 
 
 @pytest.mark.asyncio
-async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, monkeypatch):
+@pytest.mark.parametrize("expire_during_publication", [False, True], ids=["complete", "publication-freshness-race"])
+async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, monkeypatch, expire_during_publication):
     from config.settings import settings
     from src.api import auth, goals, guardian_inbox, model_fabric_settings, work_board
     from src.auth.middleware import OperatorAuthMiddleware
@@ -143,6 +144,9 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             snapshot = projected.json()
             assert snapshot["notifications"]["enabled"] is False
             assert snapshot["programmes"][0]["sources_checked"] == 1
+            assert snapshot["programmes"][0]["next_source_state"] == "unavailable"
+            assert snapshot["programmes"][0]["next_source_eligible_at"] is None
+            assert snapshot["programmes"][0]["next_source_reason"] is not None
             entry = snapshot["digests"][0]
             finding = entry["findings"][0]
             assert finding["job_id"] == job["job_id"] and finding["actionable"] is True
@@ -151,7 +155,47 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             assert original_brief.status_code == 200 and original_brief.json()["physical_readback"] is True
             action_path = f"/api/guardian/inbox/programme-findings/{finding['id']}/actions"
             body = {"action": "accept_followup", "desired_outcome": "Prepare a cited local checklist", "idempotency_key": "actual-digest-followthrough"}
+            if expire_during_publication:
+                from types import SimpleNamespace
+                import src.work_board.input_artifacts as actual_inputs
+                original_prepare = actual_inputs.prepare_input_artifact
+                original_monotonic = digest.time.monotonic
+                elapsed = [0]
+                monkeypatch.setattr(digest, "time", SimpleNamespace(monotonic=lambda: original_monotonic() + elapsed[0]))
+                async def expire_after_actual_staging(*args, **kwargs):
+                    artifact = await original_prepare(*args, **kwargs)
+                    elapsed[0] = 48 * 3600 + 1
+                    return artifact
+                monkeypatch.setattr(actual_inputs, "prepare_input_artifact", expire_after_actual_staging)
             prepared = await client.post(action_path, json=body)
+            if expire_during_publication:
+                assert prepared.status_code == 409 and prepared.json()["detail"]["code"] == "programme_finding_refresh_required", prepared.text
+                from src.db.models import WorkBoardTask, WorkBoardProposal, WorkBoardEvent, WorkBoardInputArtifact, ProgrammeFollowThrough
+                async with factory.accounting_sessions() as db:
+                    assert list((await db.execute(select(WorkBoardTask))).scalars()) == []
+                    assert list((await db.execute(select(WorkBoardProposal))).scalars()) == []
+                    assert list((await db.execute(select(WorkBoardEvent))).scalars()) == []
+                    assert list((await db.execute(select(ProgrammeFollowThrough))).scalars()) == []
+                    retained_inputs = list((await db.execute(select(WorkBoardInputArtifact).where(WorkBoardInputArtifact.capability_id == "agent.task.v1"))).scalars())
+                    assert len(retained_inputs) == 1
+                    retained_input = retained_inputs[0]
+                    assert retained_input.bound_task_id is None and retained_input.state == "pending"
+                    actual_payload = actual_inputs._safe_file_bytes(actual_inputs._payload_path(retained_input),
+                        expected_digest=retained_input.payload_sha256, expected_size=retained_input.size_bytes)
+                    assert 0 < len(actual_payload) == retained_input.size_bytes <= 65536
+                    assert hashlib.sha256(actual_payload).hexdigest() == retained_input.payload_sha256
+                    assert timedelta(0) < retained_input.expires_at.replace(tzinfo=timezone.utc) - retained_input.created_at.replace(tzinfo=timezone.utc) <= timedelta(hours=24)
+                reread = await client.get(endpoint)
+                assert reread.status_code == 200, reread.text
+                retained_finding = next(f for d in reread.json()["digests"] for f in d["findings"] if f["id"] == finding["id"])
+                assert retained_finding["task_id"] is None and retained_finding["follow_through"] is None
+                assert not (workspace / "programme-followthrough" / f"{finding['id']}.md").exists()
+                assert len(calls) == 3 and len(physical_contacts) == 2
+                print(json.dumps({"flow": "actual_source_freshness_expired_during_c1_publication", "finding_id": finding["id"],
+                    "published_tasks": 0, "published_proposals": 0, "bound_inputs": 0, "retained_unbound_private_inputs": 1,
+                    "retained_input_sha256": retained_input.payload_sha256, "physical_public_http_contacts": 2,
+                    "scripted_final_inference_requests": 3, "real_provider_contacts": 0, "real_spend": 0}, sort_keys=True))
+                return
             assert prepared.status_code == 200, prepared.text
             task_id = prepared.json()["task_id"]
             detail = await client.get(f"/api/work-board/tasks/{task_id}")
@@ -449,6 +493,9 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             pending_status = next(p for p in pending_read.json()["programmes"] if p["id"] == bindings[0][1])
             completed_status = next(p for p in receipt["programmes"] if p["id"] == bindings[0][1])
             assert pending_status["current_run_status"] == held["status"]
+            assert pending_status["next_source_state"] == "held"
+            assert pending_status["next_source_eligible_at"] is None
+            assert pending_status["next_source_reason"] == "source_run_in_progress"
             assert pending_status["current_admitted_at"] is not None
             assert pending_status["last_run"] == completed_status["last_run"] is not None
             assert pending_status["current_admitted_at"] != pending_status["last_run"]

@@ -58,6 +58,16 @@ class FollowThroughIntent(Closed):
     status: Literal["pending", "prepared", "deferred", "dismissed", "completed", "blocked"]
 
 
+class SourceSchedule(Closed):
+    next_source_state: Literal["eligible", "scheduled", "held", "unavailable"]
+    next_source_eligible_at: datetime | None = None
+    next_source_reason: Literal["programme_inactive", "programme_authority_blocked",
+        "programme_allowance_exhausted", "programme_window_expires_before_next_occurrence",
+        "programme_cadence_unavailable", "source_run_in_progress",
+        "programme_outstanding_occurrence_requires_recovery", "scheduler_disabled",
+        "scheduler_unavailable", "scheduler_paused", "scheduler_job_unavailable"] | None = None
+
+
 class FindingAction(Closed):
     action: Literal["accept_followup", "snooze", "dismiss"]
     desired_outcome: str | None = Field(default=None, min_length=1, max_length=2000)
@@ -469,6 +479,43 @@ async def list_digests(operator, now=None):
     return {"digests": digests, "programmes": programmes, "notifications": await notification_status(operator, now)}
 
 
+def source_schedule(programme, history, remaining_allowance, now):
+    """Project eligibility only; the existing scheduler still owns execution."""
+    from apscheduler.schedulers.base import STATE_RUNNING
+    from src.scheduler.engine import get_scheduler
+    def unavailable(reason):
+        return SourceSchedule(next_source_state="unavailable", next_source_reason=reason)
+    if programme["state"] != "active":
+        return unavailable("programme_authority_blocked" if programme["reason_code"] else "programme_inactive")
+    if programme["cadence"] != "daily":
+        return unavailable("programme_cadence_unavailable")
+    held = [run for run in history if run["outstanding_held"]]
+    if held:
+        ordinary = all(run["status"] in {"accepted", "queued", "running"}
+            and run["external_effect_state"] != "unknown" and not run["accounting_liability"] for run in held)
+        return SourceSchedule(next_source_state="held", next_source_reason="source_run_in_progress" if ordinary
+            else "programme_outstanding_occurrence_requires_recovery")
+    if remaining_allowance <= 0:
+        return unavailable("programme_allowance_exhausted")
+    if not settings.scheduler_enabled:
+        return unavailable("scheduler_disabled")
+    scheduler = get_scheduler()
+    if scheduler is None or not scheduler.running:
+        return unavailable("scheduler_unavailable")
+    if scheduler.state != STATE_RUNNING:
+        return unavailable("scheduler_paused")
+    job = scheduler.get_job("goal_public_discovery")
+    if job is None or job.next_run_time is None:
+        return unavailable("scheduler_job_unavailable")
+    current = _aware(now)
+    occurred = any(run["programme_id"] == programme["id"]
+        and run["occurrence_day"] == current.date().isoformat() for run in history)
+    eligible = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0) if occurred else current
+    if eligible >= _aware(datetime.fromisoformat(programme["expires_at"])):
+        return unavailable("programme_window_expires_before_next_occurrence")
+    return SourceSchedule(next_source_state="scheduled" if occurred else "eligible", next_source_eligible_at=eligible)
+
+
 async def programme_status(operator, now):
     from src.guardian.goal_discovery import goal_discovery_service
     async with database.get_session() as db:
@@ -517,6 +564,9 @@ async def programme_status(operator, now):
                     await authorize_goal_read(db, operator, goal.id)
                 except GoalProgrammeError:
                     continue
+            remaining_allowance = max(0, programme["budget"]["max_inference_microusd"] - sum(
+                (r.actual_cost_microusd or 0 if r.state == "settled" else r.bound_microusd if r.state != "released" else 0) for r in reservations))
+            schedule = source_schedule(programme, history["runs"], remaining_allowance, now)
             result.append({"goal_id": goal.id, "id": programme["id"], "grant_revision": programme["grant_revision"],
                 "state": programme["state"], "reason_code": programme["reason_code"],
                 "last_run": last_run,
@@ -527,9 +577,9 @@ async def programme_status(operator, now):
                 # Existing discovery admission has a UTC occurrence and native
                 # outstanding hold; a guessed timer is not execution truth.
                 "next_run": None,
+                **schedule.model_dump(mode="json"),
                 "next_digest_at": next_at.isoformat() if programme["state"] == "active" and next_at < datetime.fromisoformat(programme["expires_at"]) else None,
-                "remaining_allowance_microusd": max(0, programme["budget"]["max_inference_microusd"] - sum(
-                    (r.actual_cost_microusd or 0 if r.state == "settled" else r.bound_microusd if r.state != "released" else 0) for r in reservations)),
+                "remaining_allowance_microusd": remaining_allowance,
                 "recovery": recovery})
     return result
 
@@ -902,9 +952,7 @@ async def action(operator, identifier, request, now=None):
             raise GoalProgrammeError("programme_finding_refresh_required")
         await assert_discovery_authority(db, run.declared_authority_json, run=run)
         observed = now + timedelta(seconds=time.monotonic() - staged_at)
-        snapshots = [a["parsed"] for a in witness.artifacts.values() if a["kind"] == "snapshot"]
-        if not snapshots or any(not timedelta(0) <= observed - _aware(s.fetched_at) <= timedelta(hours=48) for s in snapshots):
-            raise GoalProgrammeError("programme_finding_refresh_required")
+        assert_fresh_sources(witness, observed)
         current_follow = await db.scalar(select(ProgrammeFollowThrough).where(
             ProgrammeFollowThrough.owner_identity_id == identity.id,
             ProgrammeFollowThrough.finding_id == identifier))
@@ -947,7 +995,8 @@ async def action(operator, identifier, request, now=None):
     if request.action == "accept_followup":
         if not finding["actionable"] and not existing_task_id:
             raise GoalProgrammeError("programme_finding_refresh_required")
-        task_id = existing_task_id or await prepare_task(operator, finding, request)
+        task_id = existing_task_id or await prepare_task(operator, finding, request,
+            now=now + timedelta(seconds=time.monotonic() - staged_at))
     async with discovery_writer_scope(witness=witness), database.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         _, identity = await owner_identity(db, operator)
@@ -981,7 +1030,15 @@ async def action(operator, identifier, request, now=None):
         return result
 
 
-async def prepare_task(operator, finding, request):
+def assert_fresh_sources(witness, observed):
+    snapshots = [a["parsed"] for a in witness.artifacts.values() if a["kind"] == "snapshot"]
+    if not snapshots or any(not timedelta(0) <= observed - _aware(s.fetched_at) <= timedelta(hours=48) for s in snapshots):
+        raise GoalProgrammeError("programme_finding_refresh_required")
+
+
+async def prepare_task(operator, finding, request, *, now=None):
+    now = _aware(now or datetime.now(timezone.utc))
+    staged_at = time.monotonic()
     from src.work_board.dispatcher import _dispatcher
     from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec, PlanStep, TaskLimits, WorkBoardOwner
     service = _dispatcher.general_tasks
@@ -999,9 +1056,12 @@ async def prepare_task(operator, finding, request):
         raise GoalProgrammeError("programme_finding_original_binding_changed")
     async def publication_check(db):
         run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == finding["job_id"]))
+        if run is None:
+            raise GoalProgrammeError("programme_finding_refresh_required")
         await assert_discovery_authority(db, run.declared_authority_json, run=run)
         goal = await db.get(Goal, finding["goal_id"], populate_existing=True)
         await goal_programme_service._issuer(db, operator, goal)
+        assert_fresh_sources(witness, now + timedelta(seconds=time.monotonic() - staged_at))
     # No content supplies paths, tool identities or new authority. The server
     # selects a private local output; the operator separately accepts this plan.
     content = "# Public finding follow-through\n\n" + (request.desired_outcome or "Review cited public evidence.") + "\n\nUntrusted finding:\n" + finding["text"] + "\n\nOriginal finding: " + finding["id"] + "\nCitations: " + json.dumps(finding["citations"], sort_keys=True) + "\n\n- [ ] Verify the original cited evidence.\n- [ ] Decide the next action separately.\n"

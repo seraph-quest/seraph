@@ -22,6 +22,16 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+**Bounded iterative repository work and original-producer recovery: Planned.**
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md) accepts a
+branch-local target with original v3 producer registration before dispatch,
+authenticated durable cleanup, exact Source/current-row CAS and protected
+startup lineage. Architecture acceptance supplies no implementation or recovery
+activation proof. Same-boot producer loss remains held Unknown; a separately
+gated actual same-host boot can settle only physical cleanup, preserving
+task/result uncertainty and contacted cost debt under `isolation_claim=none`.
+Historical v1/v2 authority and ordinary executor/publication behavior remain.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

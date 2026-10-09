@@ -82,11 +82,15 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
             or hold["execution_deadline_at"] != original["original_deadline_at"]):
         raise DurableJobLeaseError("original uncertainty held reservation changed")
     successor = run.model_copy(update={**values, "revision": run.revision + 1})
+    predecessor_json, successor_json = run.model_dump(mode="json"), successor.model_dump(mode="json")
     payload = {"schema": "repository.stop_uncertainty_successor.v1", "job_id": run.run_identity,
         "stop_digest": stop_digest, "root_key": type(run).__tablename__ + ":" + str(_key(run)),
         "predecessor_digest": _static(run, context), "successor_digest": _static(successor, context),
         "authority_digest": run.authority_digest, "fencing_token": run.fencing_token,
-        "from_revision": run.revision, "to_revision": run.revision + 1}
+        "from_revision": run.revision, "to_revision": run.revision + 1,
+        "predecessor_projection": {key: predecessor_json[key] for key in source._UNCERTAINTY_COLUMNS},
+        "successor_projection": {key: successor_json[key] for key in source._UNCERTAINTY_COLUMNS}}
+    source._validate_repository_unknown_root_projection(successor, stop, payload)
     source._append_repository_record(run, "repository:stop-uncertainty-successor:v1", payload,
         inventory=source.repository_checkpoint_inventory(run, work))
     values["checkpoint_receipts_json"] = run.checkpoint_receipts_json

@@ -164,6 +164,7 @@ The following architecture decisions are normative:
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
 28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
+30. [ADR-030: Bounded iterative repository work and original-producer recovery](./decisions/030-bounded-iterative-repository-work.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines

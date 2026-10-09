@@ -1785,6 +1785,15 @@ validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
+Bounded iterative repository work and original-producer recovery are **Planned**
+branch-local targets under [ADR-030](./decisions/030-bounded-iterative-repository-work.md).
+Only new originally registered v3 producers can authorize its bounded cleanup
+mode; read-only Unknown projections and historical inventories cannot.
+Same-boot producer loss retains visible held debt. Separately gated actual
+same-host boot settlement changes only the physical hold, preserving Unknown
+task/result and contacted costs. This accepted target does not enable recovery
+or establish implementation receipts; ordinary repair behavior below is unchanged.
+
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
 owns its accepted contract; availability requires the installed reviewed program revision.

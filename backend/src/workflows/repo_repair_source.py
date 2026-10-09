@@ -20,6 +20,112 @@ from src.work_board.contracts import (TaskProposalGroupV1,
 _SEAL = object()
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _task_publication = ContextVar("repository_task_publication", default=None)
+_UNCERTAINTY_COLUMNS = frozenset({"status", "failure_reason", "finished_at", "lease_owner",
+    "lease_expires_at", "result_digest", "result_summary"})
+_ROOT_BOOKKEEPING = frozenset({"updated_at", "revision", "checkpoint_receipts_json", "heartbeat_at"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RepositoryUnknownRootProjection:
+    """Immutable SQL evidence, carrying no cleanup or publication authority."""
+    root_json: str = field(repr=False)
+    successor_json: str = field(repr=False)
+    stop_digest: str
+    predecessor_digest: str
+    current_digest: str
+    revision: int
+    fencing_token: int
+
+
+def _checked_uncertainty_columns(value):
+    from pydantic import TypeAdapter
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if type(value) is not dict or set(value) != _UNCERTAINTY_COLUMNS:
+        raise DurableJobLeaseError("original uncertainty column projection required")
+    for name, bound in (("lease_owner", 1024), ("failure_reason", 4096), ("result_summary", 4096)):
+        item = value[name]
+        if item is not None:
+            try:
+                if type(item) is not str or len(item.encode("utf-8")) > bound:
+                    raise ValueError()
+            except (ValueError, UnicodeError):
+                raise DurableJobLeaseError("original uncertainty text projection changed")
+    digest = value["result_digest"]
+    if digest is not None and (type(digest) is not str or not _SHA.fullmatch(digest)):
+        raise DurableJobLeaseError("original uncertainty result digest changed")
+    for name in ("finished_at", "lease_expires_at"):
+        item = value[name]
+        if item is not None:
+            try:
+                adapter = TypeAdapter(datetime)
+                if type(item) is not str or adapter.dump_python(adapter.validate_python(item), mode="json") != item:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise DurableJobLeaseError("original uncertainty timestamp projection changed")
+
+
+def _validate_repository_unknown_root_projection(run, stop, successor):
+    """Verify recorded pre-erasure values against the immutable original hash."""
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest
+    inventory = read_repository_inventory(run)
+    keys = {"schema", "job_id", "stop_digest", "root_key", "predecessor_digest",
+        "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision",
+        "predecessor_projection", "successor_projection"}
+    root_key = type(run).__tablename__ + ":" + str(run.id)
+    if (type(stop) is not dict or type(stop.get("static_rows")) is not dict
+            or type(successor) is not dict or set(successor) != keys
+            or successor["schema"] != "repository.stop_uncertainty_successor.v1"
+            or inventory["schema"] != "repository.checkpoint_inventory.v2"
+            or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
+            or successor["stop_digest"] != _source_digest(stop)
+            or successor["authority_digest"] != run.authority_digest
+            or type(successor["fencing_token"]) is not int or successor["fencing_token"] != run.fencing_token
+            or type(successor["from_revision"]) is not int or successor["from_revision"] < 0
+            or type(successor["to_revision"]) is not int or successor["to_revision"] < 0
+            or successor["to_revision"] != successor["from_revision"] + 1
+            or type(run.revision) is not int or run.revision != successor["to_revision"]):
+        raise DurableJobLeaseError("original repository uncertainty successor changed")
+    predecessor, following = successor["predecessor_projection"], successor["successor_projection"]
+    _checked_uncertainty_columns(predecessor)
+    _checked_uncertainty_columns(following)
+    reasons = {"repository_callback_closure_unproven": "reconcile_original_callback",
+        "repository_process_closure_unproven": "reconcile_original_process"}
+    if (predecessor["status"] != "running" or type(predecessor["lease_owner"]) is not str
+            or not predecessor["lease_owner"] or predecessor["lease_expires_at"] is None
+            or following["status"] != "unknown_external_effect" or following["failure_reason"] not in reasons
+            or following["finished_at"] is not None or following["lease_owner"] is not None
+            or following["lease_expires_at"] is not None or following["result_summary"] != "result recorded"):
+        raise DurableJobLeaseError("original uncertainty transition write set changed")
+    original, work, *_ = read_repository_original(run)
+    matching = [index for index in range(1, work.limits.max_iterations + 1)
+        if following["result_digest"] == _digest({"no_learning": True,
+            "operator_action": reasons[following["failure_reason"]],
+            "iteration_id": iteration_identity(run.run_identity, original["repository_attempt_id"],
+                _source_digest(original["original_input"]), index)})]
+    if len(matching) != 1:
+        raise DurableJobLeaseError("original uncertainty result projection changed")
+    current = run.model_dump(mode="json")
+    if {key: current[key] for key in _UNCERTAINTY_COLUMNS} != following:
+        raise DurableJobLeaseError("current original uncertainty projection changed")
+    old_candidate = {**current, **predecessor}
+    predecessor_digest = _source_digest({key: item for key, item in old_candidate.items() if key not in _ROOT_BOOKKEEPING})
+    current_digest = _source_digest({key: item for key, item in current.items() if key not in _ROOT_BOOKKEEPING})
+    if (predecessor_digest != successor["predecessor_digest"]
+            or predecessor_digest != stop["static_rows"].get(root_key)
+            or current_digest != successor["successor_digest"]):
+        raise DurableJobLeaseError("original uncertainty immutable Root changed")
+    return _RepositoryUnknownRootProjection(_canonical(current), _canonical(successor),
+        _source_digest(stop), predecessor_digest, current_digest, run.revision, run.fencing_token)
+
+
+def _repository_unknown_root_projection(run):
+    """Source-owned pure seam; actual rows only, no caller evidence or I/O."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    stop = _repository_record(run, "repository:stop-intent:v1")
+    successor = _repository_record(run, "repository:stop-uncertainty-successor:v1")
+    if stop is None or successor is None:
+        raise DurableJobLeaseError("original Stop and uncertainty successor required")
+    return _validate_repository_unknown_root_projection(run, stop, successor)
 
 
 def _stop_static_rows_match(run, stop, current):
@@ -28,25 +134,12 @@ def _stop_static_rows_match(run, stop, current):
     successor = _repository_record(run, "repository:stop-uncertainty-successor:v1")
     if successor is None:
         return stop.get("static_rows") == current
-    inventory = read_repository_inventory(run)
-    keys = {"schema", "job_id", "stop_digest", "root_key", "predecessor_digest",
-        "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision"}
+    projection = _repository_unknown_root_projection(run)
     root_key = type(run).__tablename__ + ":" + str(run.id)
-    if (set(successor) != keys or successor["schema"] != "repository.stop_uncertainty_successor.v1"
-            or inventory["schema"] != "repository.checkpoint_inventory.v2"
-            or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
-            or successor["stop_digest"] != _source_digest(stop)
-            or successor["authority_digest"] != run.authority_digest
-            or type(successor["fencing_token"]) is not int
-            or successor["fencing_token"] != run.fencing_token
-            or type(successor["from_revision"]) is not int or type(successor["to_revision"]) is not int
-            or successor["to_revision"] != successor["from_revision"] + 1
-            or run.revision < successor["to_revision"] or run.status != "unknown_external_effect"
-            or successor["predecessor_digest"] != stop["static_rows"].get(root_key)
-            or successor["successor_digest"] != current.get(root_key)):
+    if projection.stop_digest != _source_digest(stop) or projection.current_digest != current.get(root_key):
         raise DurableJobLeaseError("original repository uncertainty successor changed")
     expected = dict(stop["static_rows"])
-    expected[root_key] = successor["successor_digest"]
+    expected[root_key] = projection.current_digest
     return current == expected
 
 

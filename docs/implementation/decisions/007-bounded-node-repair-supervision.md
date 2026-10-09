@@ -8,7 +8,7 @@ title: "ADR-007: Bounded Node repair and Linux process supervision"
 
 **Decision class:** Target architecture
 
-**Owning work:** [#912](https://github.com/seraph-quest/seraph/issues/912)
+**Owning work:** [#912](https://github.com/seraph-quest/seraph/issues/912); bounded original-producer recovery amendment [#1009](https://github.com/seraph-quest/seraph/issues/1009)
 
 ## Context
 
@@ -118,6 +118,36 @@ supervision, not security isolation: same-user code can attack same-user files
 or processes, or arrange work through an unrelated service. Abnormal supervisor
 death may leave detached code running; the unknown receipt prevents adoption
 and slot release, not hostile host-user effects.
+
+### Branch-local original-producer recovery amendment
+
+[ADR-030](./030-bounded-iterative-repository-work.md) accepts a separate Planned
+mode for NEW originally sealed v3 iterative repository Roots. Before command
+ACK, the original trusted supervisor registers its public verification identity
+through the original process/control handshake and canonical writer. Its
+Ed25519 key stays only in producer memory and never reaches staged children.
+The producer owns irreversible no-spawn, child EOF/descriptor close/direct wait/
+ECHILD, fixed finalizer and stage removal within the original cutoff. Outputs
+and their directory are fsynced before signed envelope installation; the envelope
+directory is fsynced afterward. Failed/incomplete durability retains Unknown.
+
+Only this explicit `original_producer_durable_v1` transport replaces the lost
+backend-parent pipe/wait predicate after restart. Authenticated originally
+registered producer proof and exact current Source CAS replace that predicate;
+reconstructed Popen, PID absence, free guard, copied marker or read-only Unknown
+projection cannot. Ordinary executors keep their original ownership predicates.
+The same configuration fence orders expiry Stop intent commit/readback before
+cleanup staging and publication. Startup protects only exact original Root/
+native/explicit-parent lineage before accounting and stale-job mutation.
+
+Destroyed same-boot producer without authentic closure remains held Unknown.
+ADR-030 separately permits gated actual same-host boot physical-only settlement,
+without terminal task/result proof or cost forgiveness. This supersedes the
+physical-release predicate ONLY for that originally registered v3 variant; no
+historical v1/v2 upgrade, deadline/lease renewal or replay is allowed. It retains
+`isolation_claim=none` and explicit same-host-user trust, not hostile-code
+attestation. Unsupported host proof blocks visibly. These accepted branch-local
+constraints neither enable the mode nor establish implementation or Shipped truth.
 
 ## Consequences
 

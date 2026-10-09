@@ -218,6 +218,7 @@ def _protected_composition_checkpoint(checkpoint_id):
     return (value == "runtime-service-invocation" or value.startswith(_RUNTIME_SERVICE_CLAIM_PREFIX)
             or value in {"conversation:assistant-message", "conversation:controlled-outcome", "conversation:operation-family",
                 "conversation:cancel", "conversation:callback-closure",
+                "memory:original-reference.v2", "memory:current-reference.v2",
                 "inference:owned-output-intent.v1", "inference:owned-output.v1", "inference:original-candidate.v1"})
 
 

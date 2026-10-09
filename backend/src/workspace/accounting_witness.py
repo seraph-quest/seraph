@@ -62,6 +62,310 @@ COMPOSITION_KEYS["work_board_tasks"] = "task_id"
 COMPOSITION_KEYS["workflow_run_states"] = "run_identity"
 _HELD_COMPOSITION_WORKSPACE = ContextVar("held_composition_workspace", default=None)
 
+MEMORY_REFERENCE_PROFILE = "native-composition-memory-reference.v2"
+MEMORY_ORIGINAL_CHECKPOINT = "memory:original-reference.v2"
+MEMORY_CURRENT_CHECKPOINT = "memory:current-reference.v2"
+_MEMORY_ORIGINAL_FIELDS = frozenset(("schema_version", "profile", "invocation_ref", "claim_ref",
+    "candidate_digest", "composition_binding_digest", "method", "owner_principal_id",
+    "operator_session_id", "original_deadline", "source_binding_digest", "original_effect_digest",
+    "original_audit", "refs", "rows_digest", "encoded_bytes"))
+_MEMORY_CURRENT_FIELDS = frozenset(("schema_version", "profile", "original_checkpoint_digest",
+    "projection_revision", "state", "reason_code", "refs", "absences", "rows", "rows_digest",
+    "encoded_bytes", "owner_operation_kind", "owner_events", "selected_delta_digest"))
+_MEMORY_UNKNOWN_REASONS = frozenset(("canonical_body_over_limit", "canonical_bound_not_certified",
+    "canonical_body_unavailable", "current_source_unavailable", "current_mac_unavailable",
+    "selected_goal_deleted", "original_projection_unavailable", "original_projection_invalid"))
+_MEMORY_NATIVE_OPERATIONS = frozenset(("memory.propose", "memory.applyReviewed", "memory.forget"))
+
+
+def preflight_native_memory_reference_payload(payload, *, current=False):
+    """Closed byte-shape parser only; no source, row, MAC or effect authority.
+
+    Actual owner publication and current-row validation remain mandatory and
+    unavailable until the complete source-issued contract is installed.
+    """
+    import re
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, MAX_ROWS, MEMORY_DESCRIPTORS
+    def denied():
+        raise HeaderBoundsError("memory_reference_payload_invalid")
+    def sha(value):
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            denied()
+    def key(value):
+        try:
+            valid = type(value) is str and bool(value) and len(value.encode("utf-8")) <= 512
+        except UnicodeEncodeError:
+            valid = False
+        if not valid:
+            denied()
+    def bounded_integer(value, upper):
+        if type(value) is not int or not 0 <= value <= upper:
+            denied()
+    def reference(value):
+        if (type(value) is not dict or set(value) != {"table", "key"}
+                or type(value["table"]) is not str
+                or value["table"] not in {*RETAINED_FIELDS, *MEMORY_DESCRIPTORS}):
+            denied()
+        key(value["key"])
+        return value["table"], value["key"]
+    def reference_list(values):
+        if type(values) is not list or len(values) > MAX_ROWS:
+            denied()
+        result = [reference(item) for item in values]
+        if result != sorted(set(result)):
+            denied()
+        return result
+    fields = _MEMORY_CURRENT_FIELDS if current else _MEMORY_ORIGINAL_FIELDS
+    if (type(current) is not bool or type(payload) is not dict or set(payload) != fields
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != 2
+            or payload["profile"] != MEMORY_REFERENCE_PROFILE):
+        denied()
+    refs = reference_list(payload["refs"])
+    bounded_integer(payload["encoded_bytes"], MAX_BYTES)
+    if current:
+        bounded_integer(payload["projection_revision"], 2**63 - 1)
+        if (payload["projection_revision"] < 1 or type(payload["owner_operation_kind"]) is not str
+                or payload["owner_operation_kind"] not in _MEMORY_NATIVE_OPERATIONS):
+            denied()
+        sha(payload["selected_delta_digest"])
+        events = reference_list(payload["owner_events"])
+        if len(events) > 2 or any(table not in {"audit_events", "work_board_events"} for table, _ in events):
+            denied()
+        if type(payload["absences"]) is not list or len(payload["absences"]) > MAX_ROWS:
+            denied()
+        absent = []
+        for item in payload["absences"]:
+            if type(item) is not dict or set(item) != {"ref", "reason", "original_binding_digest"}:
+                denied()
+            ref = reference(item["ref"])
+            if (type(item["reason"]) is not str
+                    or (ref[0], item["reason"]) not in {("goals", "goal_deleted"), ("memories", "memory_deleted")}
+                    or ref not in refs):
+                denied()
+            sha(item["original_binding_digest"])
+            absent.append(ref)
+        if absent != sorted(set(absent)) or len(set((*refs, *events))) > MAX_ROWS:
+            denied()
+        if payload["original_checkpoint_digest"] is None:
+            if payload["state"] != "unknown" or type(payload["reason_code"]) is not str or payload["reason_code"] not in {
+                    "original_projection_unavailable", "original_projection_invalid"}:
+                denied()
+        else:
+            sha(payload["original_checkpoint_digest"])
+        if payload["state"] == "unknown":
+            if (type(payload["reason_code"]) is not str or payload["reason_code"] not in _MEMORY_UNKNOWN_REASONS
+                    or payload["rows"] != [] or type(payload["rows"]) is not list
+                    or payload["rows_digest"] is not None):
+                denied()
+        elif payload["state"] == "validated":
+            if (payload["reason_code"] is not None or absent or type(payload["rows"]) is not list
+                    or len(payload["rows"]) > MAX_ROWS):
+                denied()
+            sha(payload["rows_digest"])
+            row_refs = []
+            for row in payload["rows"]:
+                if type(row) is not dict or set(row) != {"ref", "tuple_digest", "encoded_bytes"}:
+                    denied()
+                row_refs.append(reference(row["ref"]))
+                sha(row["tuple_digest"])
+                bounded_integer(row["encoded_bytes"], MAX_BYTES)
+            if (row_refs != sorted(set((*refs, *events)))
+                    or sum(row["encoded_bytes"] for row in payload["rows"]) != payload["encoded_bytes"]):
+                denied()
+        else:
+            denied()
+    else:
+        for name in ("invocation_ref", "claim_ref", "owner_principal_id", "operator_session_id"):
+            key(payload[name])
+        if ("workflow_run_states", payload["invocation_ref"]) not in refs:
+            denied()
+        for name in ("candidate_digest", "composition_binding_digest", "source_binding_digest",
+                     "original_effect_digest", "rows_digest"):
+            sha(payload[name])
+        if type(payload["method"]) is not str or payload["method"] not in _MEMORY_NATIVE_OPERATIONS:
+            denied()
+        audit = payload["original_audit"]
+        if type(audit) is not dict or set(audit) != {"ref", "tuple_digest"}:
+            denied()
+        audit_ref = reference(audit["ref"])
+        if audit_ref[0] != "audit_events" or audit_ref not in refs:
+            denied()
+        sha(audit["tuple_digest"])
+        try:
+            deadline = datetime.fromisoformat(payload["original_deadline"])
+            if deadline.tzinfo is None or deadline.astimezone(timezone.utc).isoformat() != payload["original_deadline"]:
+                denied()
+        except (TypeError, ValueError):
+            denied()
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError):
+        denied()
+    if len(encoded) > 262_144:
+        raise HeaderBoundsError("memory_reference_envelope_bound")
+    return len(encoded)
+
+
+def _native_memory_unknown_replacement_upper_bytes(refs, *, original_checkpoint_digest,
+                                                   owner_operation_kind, owner_events):
+    """Structural upper bound for one Current checkpoint, not owner permission.
+
+    Charge this for each affected job before effects, plus immutable Original,
+    other current body/envelope appearances and the containing run/recovery
+    encoding. Actual identities are mandatory; no guessed future reference.
+    """
+    reasons = (_MEMORY_UNKNOWN_REASONS if original_checkpoint_digest is not None else
+               {"original_projection_unavailable", "original_projection_invalid"})
+    payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+        "original_checkpoint_digest": original_checkpoint_digest,
+        "projection_revision": 2**63 - 1, "state": "unknown",
+        "reason_code": max(reasons, key=lambda value: len(value.encode("utf-8"))),
+        "refs": refs, "absences": [], "rows": [], "rows_digest": None,
+        "encoded_bytes": 0, "owner_operation_kind": owner_operation_kind,
+        "owner_events": owner_events, "selected_delta_digest": "f" * 64}
+    # First certify all caller shapes and finite references, before traversing
+    # optional absence candidates. No original source/binding grant follows.
+    preflight_native_memory_reference_payload(payload, current=True)
+    payload["absences"] = [{"ref": ref,
+        "reason": "goal_deleted" if ref["table"] == "goals" else "memory_deleted",
+        "original_binding_digest": "f" * 64} for ref in refs if ref["table"] in {"goals", "memories"}]
+    # Unknown's own metadata byte count is self-describing. Integer decimal
+    # width reaches a fixed point monotonically within this envelope ceiling.
+    for _ in range(8):
+        measured = preflight_native_memory_reference_payload(payload, current=True)
+        if payload["encoded_bytes"] == measured:
+            break
+        payload["encoded_bytes"] = measured
+    else:
+        raise ProductionWorkspaceReconciliationError("memory_unknown_reserve_unavailable")
+    checkpoint = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "state_digest": "f" * 64,
+                  "safe": True, "payload": payload}
+    return len(json.dumps(checkpoint, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def preflight_native_memory_reference_journal(raw):
+    """Bounded closed checkpoint parser, never a mint/copy/adoption permission.
+
+    Invalid Original is reported to the actual reduction owner; it cannot be
+    replaced with an invented Original. This helper only parses valid shapes.
+    The original owner must first certify this raw column's whole-row header.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
+    from src.workflows.job_runtime import _digest
+    records = strict_json_loads(raw)
+    if type(records) is not list:
+        raise HeaderBoundsError("memory_reference_journal_invalid")
+    found = {}
+    for record in records:
+        if type(record) is not dict:
+            raise HeaderBoundsError("memory_reference_journal_invalid")
+        identifier = record.get("checkpoint_id")
+        if identifier not in (MEMORY_ORIGINAL_CHECKPOINT, MEMORY_CURRENT_CHECKPOINT):
+            continue
+        if (identifier in found or set(record) != {"checkpoint_id", "state_digest", "safe", "payload"}
+                or record["safe"] is not True):
+            raise HeaderBoundsError("memory_reference_journal_invalid")
+        preflight_native_memory_reference_payload(record["payload"], current=identifier == MEMORY_CURRENT_CHECKPOINT)
+        if record["state_digest"] != _digest(record["payload"]):
+            raise HeaderBoundsError("memory_reference_journal_invalid")
+        found[identifier] = record
+    return found.get(MEMORY_ORIGINAL_CHECKPOINT), found.get(MEMORY_CURRENT_CHECKPOINT)
+
+
+def _native_memory_transient_sql_row(instance):
+    """Closed deterministic SQLite binding of a real transient constructor row.
+
+    This byte projection does not enroll the instance or issue source authority.
+    Its actual owner still binds exact instance identity, complete reservation
+    and postflush raw tuple equality before capture/publication.
+    """
+    from sqlalchemy import Boolean, DateTime, Enum, Float, Integer, String, inspect
+    from sqlalchemy.dialects.sqlite import dialect
+    from sqlmodel.sql.sqltypes import AutoString
+    from src.db.models import AuditEvent
+    from src.memory.header_bounds import HeaderBoundsError, MEMORY_DESCRIPTORS, _MEMORY_MODELS, AUDIT_EVENT
+    table = getattr(type(instance), "__tablename__", None)
+    model = AuditEvent if table == "audit_events" else _MEMORY_MODELS.get(table)
+    if model is None or type(instance) is not model or not inspect(instance).transient:
+        raise HeaderBoundsError("memory_transient_row_unavailable")
+    descriptor = AUDIT_EVENT if table == "audit_events" else MEMORY_DESCRIPTORS[table]
+    selected_dialect = dialect()
+    row = {}
+    allowed_types = {String, Integer, Boolean, Float, DateTime, Enum, AutoString}
+    for name, kind, nullable in zip(descriptor.columns, descriptor.kinds, descriptor.nullable):
+        column = model.__table__.columns[name]
+        if type(column.type) not in allowed_types:
+            raise HeaderBoundsError("memory_transient_bind_type_unsupported")
+        value = getattr(instance, name)
+        try:
+            processor = column.type.dialect_impl(selected_dialect).bind_processor(selected_dialect)
+            value = processor(value) if processor is not None else value
+        except (TypeError, ValueError, OverflowError):
+            raise HeaderBoundsError("memory_transient_bind_value_invalid") from None
+        if value is None:
+            if not nullable:
+                raise HeaderBoundsError("memory_transient_bind_value_invalid")
+        elif ((kind == "text" and type(value) is not str)
+              or (kind == "integer" and (type(value) is not int or not -(2**63) <= value < 2**63))
+              or (kind == "real" and (type(value) is not float or not math.isfinite(value)))):
+            raise HeaderBoundsError("memory_transient_bind_value_invalid")
+        row[name] = value
+    return row
+
+
+async def _preflight_native_memory_journal_headers(db, *, existing_references=(),
+                                                  reserved_bytes=0, incoming_identity=None):
+    """Bound the complete retained Memory job set before private journal reads.
+
+    This is byte evidence only. The original admission/current owner must also
+    certify core/v3, selected Memory rows, duplicate envelopes, actual upcoming
+    effects and every Unknown replacement against the same remainder. Nothing
+    here issues owner authority, mints a journal, or activates native Memory.
+    ``reserved_bytes`` charges that owner's already established whole-closure
+    reserve; a caller cannot use this helper as a publication permission.
+    """
+    from src.memory.header_bounds import (HeaderBoundsError, MAX_BYTES, MAX_ROWS,
+        MEMORY_DESCRIPTORS, WRS_BY_RUN, preflight_exact_rows)
+    from src.memory.universe import native_memory_universe
+    if (type(existing_references) is not tuple or len(existing_references) > MAX_ROWS
+            or type(reserved_bytes) is not int or not 0 <= reserved_bytes <= MAX_BYTES):
+        raise HeaderBoundsError("memory_journal_reserve_invalid")
+    references = set()
+    for ref in existing_references:
+        if (type(ref) is not tuple or len(ref) != 2 or type(ref[0]) is not str
+                or ref[0] not in {*RETAINED_FIELDS, *MEMORY_DESCRIPTORS}
+                or type(ref[1]) is not str or not ref[1]):
+            raise HeaderBoundsError("memory_journal_reserve_invalid")
+        try:
+            bounded = len(ref[1].encode("utf-8")) <= 512
+        except UnicodeEncodeError:
+            bounded = False
+        if not bounded:
+            raise HeaderBoundsError("memory_journal_reserve_invalid")
+        references.add(ref)
+    if incoming_identity is not None:
+        try:
+            bounded = (type(incoming_identity) is str and bool(incoming_identity)
+                       and len(incoming_identity.encode("utf-8")) <= 512)
+        except UnicodeEncodeError:
+            bounded = False
+        if not bounded:
+            raise HeaderBoundsError("memory_journal_reserve_invalid")
+    identities = await native_memory_universe(db)
+    references.update(("workflow_run_states", identity) for identity in identities)
+    if incoming_identity is not None:
+        references.add(("workflow_run_states", incoming_identity))
+    if len(references) > MAX_ROWS:
+        raise HeaderBoundsError("memory_closure_reference_bound")
+    # One complete certificate is issued only after every existing job header
+    # fits. Even a later oversized/foreign/unsealed/terminal row prevents an
+    # earlier journal body from being fetched. New-row bytes are part of the
+    # actual owner's prospective reserve, not guessed from an invented row.
+    return await preflight_exact_rows(db, WRS_BY_RUN, identities,
+                                      MAX_BYTES - reserved_bytes)
+
 
 def _sql(connection, query, parameters=()):
     if hasattr(connection, "exec_driver_sql"):
@@ -229,6 +533,14 @@ def composition_closure(connection, *, verify_files=None):
         CompositionDependency(*row[:4])
         if row[4] not in {"ready", "draining", "blocked"}:
             raise ProductionWorkspaceReconciliationError("composition_inventory_invalid")
+    # The full genuine Memory Original/Current/copy owner contract is not
+    # installed yet. Discover even unbound, foreign, unsealed and terminal
+    # members before any private tuple. Binding-only traversal must not omit
+    # them and publish a seemingly complete source/destination/stopped closure.
+    if _sql(connection, "SELECT 1 FROM workflow_run_states "
+            "INDEXED BY ix_workflow_run_states_job_kind WHERE job_kind=? LIMIT 1",
+            ("runtime_service_memory_v1",)).fetchone() is not None:
+        raise ProductionWorkspaceReconciliationError("composition_native_memory_retention_unavailable")
     for table, fields in RETAINED_FIELDS.items():
         if table not in tables:
             raise ProductionWorkspaceReconciliationError("composition_projection_schema_changed")
@@ -763,6 +1075,12 @@ class CompositionSessionGuard:
                     selected[identifier] = item
             return selected
         previous, current = protected(before), protected(after)
+        memory_ids = {"memory:original-reference.v2", "memory:current-reference.v2"}
+        if any(previous.get(key) != current.get(key) for key in memory_ids):
+            # The complete actual Memory source/reserve/current/copy contract
+            # is not installed yet. Generic claim/turn db.info receipts cannot
+            # grant authority to mint or reduce these private journals.
+            raise ProductionWorkspaceReconciliationError("composition_memory_retention_unavailable")
         task_ids = {"runtime-service-invocation:task-capability:" + phase
             for phase in ("admission", "source", "invoke", "outcome", "cleanup")}
         if task_ids.intersection(current):

@@ -246,6 +246,9 @@ class TaskStrategyBinding(ClosedTaskModel):
 class StrategyResolver(Protocol):
     def resolve(self, owner: "WorkBoardOwner", goal_ref: str, task_family: str,
                 programme_grant: Any | None = None) -> TaskStrategyBinding: ...
+    def validate_pinned(self, owner: "WorkBoardOwner", goal_ref: str,
+                        binding: TaskStrategyBinding, programme_grant: Any | None = None,
+                        db: Any | None = None) -> TaskStrategyBinding: ...
 
 
 class GeneralTaskCreate(ClosedTaskModel):

@@ -32,7 +32,8 @@ export interface GeneralToolDescriptor {
 export interface GeneralTaskPlanRead {
   task_id: string; task_revision: number; accepted: boolean;
   task_input: GeneralTaskInput; plan: TaskPlan | null; descriptors: GeneralToolDescriptor[]; proposal_error?: string;
-  strategy: { status: string; reason: string | null }; no_learning: true;
+  strategy: { status: "none" | "active" | "blocked"; reason: string | null; method_id?: string | null;
+    version?: string | null; digest?: string | null; typed_data?: Record<string, unknown> | null }; no_learning: true;
   approval_pause?: GeneralTaskApprovalPause | null;
   native_execution?: GeneralTaskNativeExecution;
 }
@@ -110,6 +111,15 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || (value.plan === null ? (value.accepted !== false || typeof value.proposal_error !== "string")
       : (!record(value.plan) || value.plan.schema_version !== 1 || !Number.isSafeInteger(value.plan.revision) || !Array.isArray(value.plan.steps) || !value.plan.steps.length || !value.descriptors.length))) {
     throw new Error("Plan readback did not match the current task revision. Refresh Work before reviewing.");
+  }
+  const strategy = value.strategy;
+  if (!["none", "active", "blocked"].includes(String(strategy.status))
+    || (strategy.status === "active" && (typeof strategy.method_id !== "string" || !strategy.method_id
+      || typeof strategy.version !== "string" || !strategy.version || typeof strategy.digest !== "string"
+      || !/^[a-f0-9]{64}$/.test(strategy.digest) || !record(strategy.typed_data)
+      || !["TaskMethod.v1", "ResearchStrategy.v1"].includes(String(strategy.typed_data.schema_version))))
+    || (strategy.status === "none" && [strategy.method_id, strategy.version, strategy.digest, strategy.typed_data].some(v => v != null))) {
+    throw new Error("Original task method binding is unavailable. Refresh the exact plan.");
   }
   const descriptors = value.descriptors;
   const native = value.native_execution;

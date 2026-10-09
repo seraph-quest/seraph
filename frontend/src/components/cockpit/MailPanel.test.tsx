@@ -180,7 +180,8 @@ describe("MailPanel", () => {
       throw new Error(`Unexpected Mail request: ${url}`);
     });
 
-    render(<MailPanel taskId="triage-task-1" ownerPrincipalId="operator:single" ownerSessionId="session-1" mailOrigin={mailOrigin} goalId="goal-1" goalRevision={4} />);
+    const prepared = vi.fn();
+    render(<MailPanel taskId="triage-task-1" ownerPrincipalId="operator:single" ownerSessionId="session-1" mailOrigin={mailOrigin} goalId="goal-1" goalRevision={4} onPrepareCommunication={prepared} />);
     await screen.findByText(/accepted task origin/i);
     const readButton = await screen.findByRole("button", { name: "Read selected private message" });
     expect(screen.queryByText("Private source body")).not.toBeInTheDocument();
@@ -193,6 +194,13 @@ describe("MailPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Request local reply draft" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Acknowledge the exact local related references");
     fireEvent.click(screen.getByLabelText(/I acknowledge these exact references/));
+    const beforeHandoff = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByText("Add this reviewed reply source to communication preparation"));
+    expect(prepared).toHaveBeenCalledTimes(1);
+    expect(prepared.mock.calls[0][0]).toMatchObject({ message_binding_id: "message-binding-1", expected_model_consent_revision: 6, expected_source_consent_revision: 5, goal_id: "goal-1", expected_goal_revision: 4 });
+    expect(JSON.stringify(prepared.mock.calls[0][0])).not.toContain("Private source body");
+    expect(prepared.mock.calls[0][0].idempotency_key).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBe(beforeHandoff);
     fireEvent.click(screen.getByRole("button", { name: "Request local reply draft" }));
     await screen.findByDisplayValue("A private draft body");
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true);

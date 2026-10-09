@@ -339,8 +339,8 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
     from src.work_board.dispatcher import _dispatcher
     current_service = _dispatcher.goal_discovery
     if current_service is not None:
-        if not current_service.started or await current_service._strategy(binding) != plan.strategy_binding:
-            raise ValueError("programme accepted strategy binding changed")
+        async with jobs._session() as db:
+            await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db)
     elif plan.strategy_binding.status != "none":
         raise ValueError("programme active strategy requires its current native lifecycle owner")
     if (plan.programme_id.hex != binding.programme_id or plan.goal_id != binding.goal_id

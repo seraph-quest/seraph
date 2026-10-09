@@ -357,6 +357,7 @@ async def lifespan(app: FastAPI):
     from src.integrations.connection_sync import ConnectionSyncService
     from src.work_board.dispatcher import _dispatcher
     from src.guardian.goal_programmes import goal_programme_service
+    from src.memory.task_methods import current_method
     continuity = None
     connection_sync_runtime = None
     try:
@@ -485,6 +486,11 @@ async def lifespan(app: FastAPI):
             manifest_roots=manifest_roots,
         )
         await goal_programme_service.start()
+        await current_method.start()
+        from src.work_board.historical_method import historical_method_service
+        await historical_method_service.start()
+        from src.operator.home_projection import home_projection
+        home_projection.start()
         with current_task_service():
             from src.guardian.goal_discovery import current_goal_discovery
             async with current_goal_discovery():
@@ -511,13 +517,20 @@ async def lifespan(app: FastAPI):
                     finally:
                         await profiled_interaction_sessions.stop()
     finally:
+        from src.operator.home_projection import home_projection
+        home_projection.stop()
+        from src.work_board.historical_method import historical_method_service
+        await historical_method_service.stop()
         session_manager.bind_task_continuity(None)
         try:
             if continuity is not None:
                 await continuity.stop()
         finally:
             try:
-                await goal_programme_service.stop()
+                try:
+                    await current_method.stop()
+                finally:
+                    await goal_programme_service.stop()
             finally:
                 try:
                     if connection_sync_runtime is not None:
@@ -586,6 +599,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Continuation-Cursor"],
     )
 
     @app.get("/health")

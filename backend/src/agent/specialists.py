@@ -54,6 +54,25 @@ DOMAIN_TOOLS: dict[str, list[str]] = {}
 for _tool, _domain in TOOL_DOMAINS.items():
     DOMAIN_TOOLS.setdefault(_domain, []).append(_tool)
 
+
+def durable_specialist_tools(role, descriptors, allowed_tool_ids):
+    """Intersect a fixed specialist role with the original registered grant.
+
+    This selects data contracts only. It does not construct smolagents models,
+    add tools, or confer permission to execute a selected descriptor.
+    """
+    from src.work_board.repository import BoardError
+    domains = {"research": {"web_search", "browse_webpage"},
+        "files": {"read_file", "write_file", "document_prepare"},
+        "engineering": {"read_file", "write_file"}}
+    selected = [item for item in descriptors if item.tool_id in allowed_tool_ids]
+    accepted = (all(item.tool_id.startswith("mcp:") for item in selected)
+        if role == "connected_work" else all(item.tool_id in domains.get(role, set()) for item in selected))
+    if (not accepted or len(selected) != len(allowed_tool_ids)
+        or any(item.tool_id == "delegate_task" for item in selected)):
+        raise BoardError("specialist_role_scope_denied", "Tools exceed the fixed specialist role", status_code=409)
+    return selected
+
 # --- Specialist configurations ---
 
 SPECIALIST_CONFIGS: dict[str, dict] = {

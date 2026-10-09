@@ -12,12 +12,13 @@ from src.workflows.general_task_guard import read_manifest, _current, read_gener
 from src.workflows.job_runtime import DurableJobLeaseError, DurableJobTransitionError, _utc_now
 from tests.test_general_task_native_guard import running_task
 from tests.test_general_task_persistence import task_runtime
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('expired', [False, True])
-async def test_zero_claim_cancel_fences_without_invented_closure_or_clock(task_runtime, monkeypatch, expired):
+async def test_zero_claim_cancel_fences_without_invented_closure_or_clock(task_runtime, monkeypatch, expired, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     jobs = dispatcher.jobs
     step = envelope.plan.steps[0]
@@ -65,7 +66,7 @@ async def test_zero_claim_cancel_fences_without_invented_closure_or_clock(task_r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('capacity', ['count', 'bytes', 'witness'])
-async def test_capacity_rejects_child_before_claim_or_callback(task_runtime, capacity):
+async def test_capacity_rejects_child_before_claim_or_callback(task_runtime, capacity, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     jobs = dispatcher.jobs
     parent_id = original['job']['job_id']
@@ -107,7 +108,7 @@ async def test_capacity_rejects_child_before_claim_or_callback(task_runtime, cap
 
 
 @pytest.mark.asyncio
-async def test_full_reserved_count_cannot_disable_cancel(task_runtime):
+async def test_full_reserved_count_cannot_disable_cancel(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     jobs = dispatcher.jobs
     parent_id = original['job']['job_id']
@@ -133,7 +134,7 @@ async def test_full_reserved_count_cannot_disable_cancel(task_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['owner', 'revision', 'input_ref', 'root_revoked', 'unclaimed_effect'])
-async def test_cancel_denies_foreign_or_changed_original_scope_without_fences(task_runtime, drift):
+async def test_cancel_denies_foreign_or_changed_original_scope_without_fences(task_runtime, drift, native_admission_lifecycle):
     from src.db.models import OperatorSession
     from src.workflows.job_runtime import _canonical
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
@@ -166,7 +167,7 @@ async def test_cancel_denies_foreign_or_changed_original_scope_without_fences(ta
 
 
 @pytest.mark.asyncio
-async def test_late_child_journal_change_rolls_back_entire_paired_cancel(task_runtime, monkeypatch):
+async def test_late_child_journal_change_rolls_back_entire_paired_cancel(task_runtime, monkeypatch, native_admission_lifecycle):
     from sqlalchemy import update
     from src.workflows import general_task_guard as guard
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
@@ -201,7 +202,7 @@ async def test_late_child_journal_change_rolls_back_entire_paired_cancel(task_ru
 @pytest.mark.parametrize('evidence', ['verified', 'verified_original_root', 'missing_output',
     'tampered_output', 'missing_readback', 'foreign_artifact', 'foreign_intent',
     'missing_source_witness', 'foreign_source_witness'])
-async def test_original_readback_before_closure_cancel_is_observational(task_runtime, monkeypatch, evidence):
+async def test_original_readback_before_closure_cancel_is_observational(task_runtime, monkeypatch, evidence, native_admission_lifecycle):
     """Real filesystem callback/readback; cancellation wins closure publication."""
     import asyncio
     from config.settings import settings

@@ -1,0 +1,5 @@
+.cockpit-home-continuation-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-top: 1px solid var(--cockpit-border); overflow-wrap: anywhere; }
+.cockpit-home-continuation-item > button { text-align: left; }
+.cockpit-home-continuation-item p { margin: 0; }
+.cockpit-home nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.cockpit-home-continuation-item button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }

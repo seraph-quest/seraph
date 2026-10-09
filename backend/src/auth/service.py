@@ -505,6 +505,27 @@ async def _touch_token(token_hash: str) -> AuthenticatedOperator:
         return operator
 
 
+async def authenticate_home_token_readonly(token: str | None) -> AuthenticatedOperator:
+    """Authenticate the exact passive Home GET without expiry or idle writes."""
+    if not token:
+        raise AuthFailure("authentication_required")
+    token_hash = _token_hash(token)
+    now = datetime.now(timezone.utc)
+    async with get_session() as db:
+        from sqlalchemy import text
+        await db.execute(text("BEGIN"))
+        record = (await db.execute(select(OperatorSession).where(
+            OperatorSession.token_hash == token_hash))).scalar_one_or_none()
+        if record is None:
+            raise AuthFailure("authentication_required")
+        if (record.is_bearer_tombstone is not False or record.revoked_at is not None
+                or record.replaced_by_id is not None):
+            raise AuthFailure("session_revoked")
+        if now >= _aware(record.idle_expires_at) or now >= _aware(record.absolute_expires_at):
+            raise AuthFailure("session_expired")
+        return await _operator_from_record(db, record, token_hash=token_hash)
+
+
 async def authenticate_token(token: str | None, *, touch: bool = True) -> AuthenticatedOperator:
     if not token:
         raise AuthFailure("authentication_required")

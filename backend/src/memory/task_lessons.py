@@ -23,6 +23,7 @@ from src.db import engine as db_engine
 from src.db.models import Goal, MemoryProposal, MemoryProposalStatus, WorkBoardAttempt, WorkBoardTask, WorkflowRunState, WorkflowStepState, WorkBoardEvent, OperatorSession
 from src.memory.procedure_recommendations import assert_current_root, canonical, digest, read_private_proof
 from src.work_board.repository import BoardError, _begin_sqlite_immediate
+from src.workflows.procedure_contracts import ProcedureCandidateV3, ProcedureSaveRequest
 
 PROPOSAL_SCHEMA = "task_method_proposal.v1"
 _STAGE_SEAL = object()
@@ -33,6 +34,24 @@ _IO_FINISHED = "task_lesson.automatic_io.finished.v1"
 _IO_CANCELLED = "task_lesson.automatic_io.cancelled.v1"
 _MAX_LESSON_BYTES = 64 * 1024
 _PROCESS_INSTANCE = str(uuid4())
+
+
+async def sanitize_procedure_candidate(candidate: ProcedureCandidateV3) -> str:
+    """Check a closed typed artifact, without changing M5 prose limits."""
+    from src.memory.m5 import _SECRET_ASSIGNMENT, _AUTHORITY_TEXT, vault_redaction
+    from src.workflows.procedure_contracts import procedure_v3_digest
+    if type(candidate) is not ProcedureCandidateV3:
+        raise ValueError("exact typed procedure candidate required")
+    typed = ProcedureCandidateV3.model_validate(candidate.model_dump(mode="json"))
+    payload = typed.model_dump(mode="json")
+    procedure_v3_digest(payload)
+    text = canonical(payload)
+    if len(text.encode("utf-8")) > _MAX_LESSON_BYTES:
+        raise ValueError("procedure artifact exceeds 64KiB")
+    redacted = await vault_redaction.redact_secrets_in_text(text, fail_closed=True)
+    if redacted != text or _SECRET_ASSIGNMENT.search(text) or _AUTHORITY_TEXT.search(text):
+        raise ValueError("procedure artifact contains secrets or authority text")
+    return text
 
 
 def _host_platform():
@@ -218,8 +237,9 @@ def _write_lesson(relative, raw, sha):
 class _SourceStage:
     seal: object
     token: dict
-    method: TaskMethod | None
+    method: TaskMethod | ProcedureCandidateV3 | None
     method_token: dict | None
+    procedure_source: object | None = None
 BoundedText = Annotated[str, Field(min_length=1, max_length=1000)]
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")]
 
@@ -350,7 +370,7 @@ class TaskMethod(ClosedModel):
         return values
 
 
-Candidate = Annotated[ResearchStrategy | TaskMethod, Field(discriminator="schema_version")]
+Candidate = Annotated[ResearchStrategy | TaskMethod | ProcedureCandidateV3, Field(discriminator="schema_version")]
 
 
 class LessonScope(ClosedModel):
@@ -373,6 +393,22 @@ class LessonRequest(ClosedModel):
         if len(values) != len(set(values)):
             raise ValueError("Source references must be unique")
         return values
+
+
+class ResearchMethodRequest(ClosedModel):
+    task_id: Identifier
+    attempt_id: Identifier
+    source_refs: list[Annotated[str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")]] = Field(min_length=1, max_length=16)
+    scope: LessonScope
+    expected_revision: int = Field(ge=1)
+    strategy: ResearchStrategy
+
+    @field_validator("scope")
+    @classmethod
+    def research_scope(cls, value):
+        if value.family != "research":
+            raise ValueError("Structured research methods require the research family")
+        return value
 
 
 class LessonAutoPolicyRequest(ClosedModel):
@@ -506,8 +542,18 @@ async def _source(db, operator, request: LessonRequest, *, automatic=False, stag
     return task, attempt, run, token
 
 
-async def _observed_method(db, task, run, family):
+async def _observed_method(db, task, run, family, *, structured_research=False):
     """Project only recorded tool identities, never source bodies or arguments."""
+    if task.capability_id == "agent.task.v1":
+        from src.memory.task_lesson_native import project_completed_native_method
+        return await project_completed_native_method(db, task, run, family)
+    if structured_research and task.capability_id == "work.research-dossier.v1":
+        if family != "research" or run.capability_version != "1" or run.status != "succeeded":
+            return None, None
+        return None, {"research_capability": "work.research-dossier.v1", "capability_version": "1",
+            "typed_input_digest": task.typed_input_digest, "run_input_digest": run.input_digest,
+            "artifact_receipts_digest": digest(run.artifact_receipts_json),
+            "effect_receipts_digest": digest(run.effect_receipts_json)}
     if task.capability_id == "work.json-format.v1":
         from src.work_board.dispatcher import REGISTERED_CAPABILITIES
         from src.work_board.tool_package_contracts import JsonFormatInput
@@ -547,6 +593,21 @@ async def _observed_method(db, task, run, family):
     return method, {"step_refs": [row.id for row in rows], "steps_digest": digest(steps)}
 
 
+async def _observed_method_after_stage(db, task, run, family, staged, *, structured_research=False):
+    """Final original-source metadata check; never perform physical I/O."""
+    if staged.procedure_source is not None:
+        from src.memory.task_lesson_native import recheck_procedure_source
+        audit = await recheck_procedure_source(db, staged.procedure_source)
+        return staged.method, audit
+    if task.capability_id == "agent.task.v1":
+        from src.memory.task_lesson_native import native_source_metadata
+        _, _, audit = await native_source_metadata(db, task, run)
+        return staged.method, audit
+    if task.capability_id == "work.json-format.v1":
+        return staged.method, staged.method_token
+    return await _observed_method(db, task, run, family, structured_research=structured_research)
+
+
 def _correct_method(old: TaskMethod | None, correction: str):
     """Finite deterministic lesson grammar; arbitrary prose remains evidence only."""
     if old is None or not correction.strip():
@@ -566,7 +627,16 @@ def _correct_method(old: TaskMethod | None, correction: str):
         else [*[step.model_dump() for step in old.steps], added.model_dump()]})
 
 
-async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bool = False):
+async def create_research_method(operator, request: ResearchMethodRequest):
+    source = LessonRequest(task_id=request.task_id, attempt_id=request.attempt_id, correction="",
+        source_refs=request.source_refs, scope=request.scope, expected_revision=request.expected_revision)
+    return await create_task_lesson(operator, source, _structured_strategy=request.strategy)
+
+
+async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bool = False,
+                             _structured_strategy: ResearchStrategy | None = None,
+                             _procedure_candidate: ProcedureCandidateV3 | None = None,
+                             _procedure_witness=None, _procedure_request: ProcedureSaveRequest | None = None):
     """Draft locally from an explicit correction; never contact any provider."""
     from src.memory.m5 import sanitize_m5_memory_text_async
     # Vault-aware sanitization is staged before the SQLite writer lock.
@@ -584,12 +654,47 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         policy = await _automatic_policy(db, operator, task) if _automatic else None
         if _automatic and not policy["enabled"]:
             return {"status": "blocked", "reason_code": "automatic_lessons_not_opted_in", "result": "no_change", "behavior_changed": False}
-        old, audit_token = await _observed_method(db, task, run, request.scope.family)
+        if _procedure_candidate is not None:
+            from src.memory.task_lesson_native import recheck_procedure_source, build_procedure_candidate
+            if (_automatic or _procedure_request is None or request.scope.family != "general"
+                or token["observed"]["status"] != "completed"):
+                raise BoardError("procedure_source_unsupported", "Use an explicitly selected completed general task")
+            audit_token = await recheck_procedure_source(db, _procedure_witness)
+            if build_procedure_candidate(_procedure_witness, _procedure_request.parameter_selections) != _procedure_candidate:
+                raise BoardError("procedure_candidate_changed", "Use only original producer-offered parameter fields")
+            old = _procedure_candidate
+            try:
+                await sanitize_procedure_candidate(_procedure_candidate)
+            except ValueError as error:
+                raise BoardError("procedure_candidate_unsafe", "Remove secrets or unsafe fixed input from the source task", status_code=422) from error
+        else:
+            old, audit_token = await _observed_method(db, task, run, request.scope.family,
+                structured_research=_structured_strategy is not None)
+        if _structured_strategy is not None:
+            if (_automatic or task.capability_id != "work.research-dossier.v1" or run.capability_version != "1"
+                or token["observed"]["status"] != "completed" or request.scope.family != "research" or audit_token is None):
+                raise BoardError("research_method_source_unsupported", "Use the completed native research dossier and its verified source references")
+            candidate_text = canonical(_structured_strategy.model_dump(mode="json"))
+            if await sanitize_m5_memory_text_async(candidate_text) != candidate_text:
+                raise BoardError("research_method_candidate_unsafe", "Remove private secrets from the typed strategy", status_code=422)
         token["method_receipt"] = audit_token
-        staged = _SourceStage(_STAGE_SEAL, token, old, audit_token)
-        binding = digest({"owner": task.owner_principal_id, "root": task.owner_session_id,
+        staged = _SourceStage(_STAGE_SEAL, token, old, audit_token, _procedure_witness)
+        binding_data = {"owner": task.owner_principal_id, "root": task.owner_session_id,
             "request": request.model_dump(), "correction_digest": digest(correction), "source": token,
-            "automatic_policy": policy})
+            "automatic_policy": policy}
+        if _structured_strategy is not None:
+            binding_data["structured_strategy"] = _structured_strategy.model_dump(mode="json")
+        procedure_key = None
+        if _procedure_request is not None:
+            binding_data["procedure_request"] = _procedure_request.model_dump(mode="json")
+            binding_data["procedure_candidate"] = _procedure_candidate.model_dump(mode="json")
+            procedure_key = "procedure:" + digest([task.owner_principal_id, task.owner_session_id,
+                task.task_id, _procedure_request.idempotency_key])
+        binding = digest(binding_data)
+        if procedure_key is not None:
+            prior_key = await db.scalar(select(MemoryProposal).where(MemoryProposal.request_idempotency_key == procedure_key))
+            if prior_key is not None and prior_key.request_binding_digest != binding:
+                raise BoardError("procedure_save_idempotency_conflict", "The original save key identifies different source or parameters")
         previous = (await db.execute(select(MemoryProposal).where(
             MemoryProposal.schema_version == PROPOSAL_SCHEMA,
             MemoryProposal.owner_principal_id == task.owner_principal_id,
@@ -600,7 +705,7 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             if not _automatic:
                 mirror = await _repair_lesson_mirror(previous)
             return {**proposal_projection(previous), "idempotent_replay": True, "mirror": mirror}
-        candidate = _correct_method(old, correction)
+        candidate = _procedure_candidate if _procedure_candidate is not None else _structured_strategy if _structured_strategy is not None else _correct_method(old, correction)
         reason = ("observed_failure_candidate" if _automatic else "explicit_correction") if candidate else "insufficient_method_evidence" if old is None else "no_explicit_correction" if not correction else "unsupported_correction_no_change"
         envelope = {"schema_version": PROPOSAL_SCHEMA, "old_method": old.model_dump() if old else None,
             "new_method": candidate.model_dump() if candidate else None, "correction": correction,
@@ -609,6 +714,16 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             "observed": token["observed"], "source_token": token, "source_refs": request.source_refs,
             "scope": request.scope.model_dump(), "behavior_changed": False, "positive_preference_vote": False,
             "reflection": {"mode": "local_projection", "provider_contacts": 0, "spend_microusd": 0}}
+        if _structured_strategy is not None:
+            reason = "explicit_structured_research_method"
+            envelope["correction_provenance"] = "explicit_operator_structured_data"
+            envelope["lesson_provenance"] = "verified_completed_research_strategy"
+        if _procedure_candidate is not None:
+            reason = "explicit_completed_procedure_method"
+            envelope["old_method"] = None
+            envelope["correction_provenance"] = "explicit_operator_parameter_selection"
+            envelope["lesson_provenance"] = "verified_completed_general_journey"
+            envelope["procedure_parameter_selections"] = [item.model_dump(mode="json") for item in _procedure_request.parameter_selections]
         raw = canonical(envelope).encode()
         sha = hashlib.sha256(raw).hexdigest()
         relative = f"artifacts/memory/task-lessons/{binding}.json"
@@ -665,13 +780,15 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
     async with db_engine.get_session() as db:
         await _begin_sqlite_immediate(db)
         task, attempt, run, current = await _source(db, operator, request, automatic=_automatic, staged=staged)
-        if task.capability_id == "work.json-format.v1":
-            current_method, current_audit = staged.method, staged.method_token
-        else:
-            current_method, current_audit = await _observed_method(db, task, run, request.scope.family)
+        current_method, current_audit = await _observed_method_after_stage(db, task, run, request.scope.family,
+            staged, structured_research=_structured_strategy is not None)
         current["method_receipt"] = current_audit
         if current != token or task.task_revision != staged_task_revision:
             raise BoardError("lesson_source_changed", "The exact ordinary task evidence changed; request a new lesson")
+        if procedure_key is not None:
+            prior_key = await db.scalar(select(MemoryProposal).where(MemoryProposal.request_idempotency_key == procedure_key))
+            if prior_key is not None and prior_key.request_binding_digest != binding:
+                raise BoardError("procedure_save_idempotency_conflict", "The original save key identifies different source or parameters")
         previous = (await db.execute(select(MemoryProposal).where(
             MemoryProposal.schema_version == PROPOSAL_SCHEMA,
             MemoryProposal.owner_principal_id == task.owner_principal_id,
@@ -705,7 +822,7 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             capability_id=task.capability_id or "legacy-workflow", capability_version=run.capability_version,
             typed_input_digest=task.typed_input_digest or "", source_context_digest=digest(token),
             evidence_digest=digest(token), artifact_ref=relative, artifact_digest=sha,
-            proposal_job_id=f"task-lesson:{binding}", request_idempotency_key=binding,
+            proposal_job_id=f"task-lesson:{binding}", request_idempotency_key=procedure_key or binding,
             request_binding_digest=binding, memory_scope_json=canonical(request.scope.model_dump()),
             source_refs_json=canonical(request.source_refs), provenance_json=canonical({"source_token": token,
                 "correction_digest": digest(correction), "positive_preference_vote": False,
@@ -841,16 +958,31 @@ async def _record_automatic_outcome(operator, original_task, outcome, attempt_id
             metadata_json=canonical({**payload, "outcome_binding": binding})))
 
 
-async def inspect_task_lesson(operator, proposal_id):
+async def _visible_lesson_for_inspection(operator, proposal_id):
+    """Read current canonical privacy authority before private disclosure."""
+    from src.db.models import MemoryProposalPrivacyState, MemoryTombstone
     async with db_engine.get_session() as db:
         await assert_current_root(db, operator)
         row = await db.get(MemoryProposal, proposal_id, populate_existing=True)
         if (row is None or row.schema_version != PROPOSAL_SCHEMA or
             (row.owner_principal_id, row.owner_session_id) != (operator.principal.principal_id, operator.session_id)):
             raise BoardError("lesson_owner_mismatch", "The lesson belongs to another operator", status_code=403)
-        payload = proposal_projection(row)
-        ref, sha = row.artifact_ref, row.artifact_digest
+        if (row.privacy_state == MemoryProposalPrivacyState.redacted
+            or (row.accepted_memory_id and await db.scalar(select(MemoryTombstone.id).where(
+                MemoryTombstone.memory_id == row.accepted_memory_id)))):
+            raise BoardError("lesson_private_content_unavailable",
+                "The lesson's canonical private content was deleted", status_code=410)
+        return row
+
+
+async def inspect_task_lesson(operator, proposal_id):
+    row = await _visible_lesson_for_inspection(operator, proposal_id)
+    payload = proposal_projection(row)
+    ref, sha = row.artifact_ref, row.artifact_digest
     raw = await asyncio.to_thread(read_private_proof, ref, sha)
+    # Staging reads do not hold a SQL writer. Re-read canonical state before
+    # mirror repair, then again before returning the staged private envelope.
+    row = await _visible_lesson_for_inspection(operator, proposal_id)
     mirror = await _repair_lesson_mirror(row)
     envelope = json.loads(raw)
     request = LessonRequest(task_id=payload["task_id"], attempt_id=payload["attempt_id"],
@@ -859,22 +991,37 @@ async def inspect_task_lesson(operator, proposal_id):
     async with db_engine.get_session() as db:
         try:
             task, attempt, run, token = await _source(db, operator, request)
-            _, audit_token = await _observed_method(db, task, run, request.scope.family)
+            candidate = TypeAdapter(Candidate).validate_python(envelope["new_method"]) if envelope.get("new_method") is not None else None
+            structured = isinstance(candidate, ResearchStrategy) and task.capability_id == "work.research-dossier.v1"
+            if isinstance(candidate, ProcedureCandidateV3):
+                from src.memory.task_lesson_native import stage_completed_procedure_source, build_procedure_candidate
+                witness = await stage_completed_procedure_source(db, task, run)
+                if build_procedure_candidate(witness, envelope["procedure_parameter_selections"]) != candidate:
+                    raise BoardError("procedure_candidate_changed", "Restore the original immutable producer candidate")
+                audit_token = witness.audit
+            else:
+                _, audit_token = await _observed_method(db, task, run, request.scope.family, structured_research=structured)
             token["method_receipt"] = audit_token
             current = token == envelope["source_token"]
         except BoardError:
             current = False
+    await _visible_lesson_for_inspection(operator, proposal_id)
     return {**envelope, **payload, "mirror": mirror, "source_current": current, "status": payload["status"] if current else "blocked",
         "reason_code": payload["reason_code"] if current else "lesson_source_changed"}
 
 
 def proposal_projection(row):
+    stored_scope = json.loads(row.memory_scope_json or "{}")
+    if stored_scope.get("schema_version") == "task_method_scope.v1":
+        scope = {key: stored_scope[key] for key in ("goal_id", "goal_revision", "family")}
+    else:
+        scope = stored_scope
     return {"proposal_id": row.proposal_id, "schema_version": row.schema_version,
         "task_id": row.source_task_id, "attempt_id": row.source_attempt_id,
         "revision": row.revision, "status": row.status.value, "reason_code": row.reason_code,
-        "source_refs": json.loads(row.source_refs_json), "scope": json.loads(row.memory_scope_json or "{}"),
+        "source_refs": json.loads(row.source_refs_json), "scope": scope,
         "candidate_digest": row.artifact_digest, "behavior_changed": False,
-        "result": "candidate_inert" if row.reason_code in {"explicit_correction", "observed_failure_candidate"} else "no_change",
+        "result": "candidate_inert" if row.reason_code in {"explicit_correction", "observed_failure_candidate", "explicit_structured_research_method", "explicit_completed_procedure_method"} else "no_change",
         "provider_contact_count": row.provider_contact_count, "quality_evidence": "unmeasured"}
 
 
@@ -891,7 +1038,8 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
             "attempt_id": attempt.attempt_id if attempt else None, "source_refs": [],
             "scope": {"goal_id": task.goal_id, "goal_revision": task.goal_revision,
                 "family": "research" if "research" in (task.capability_id or "") else "general"},
-            "eligible": False, "reason_code": "lesson_attempt_unverified", "behavior_changed": False}
+            "eligible": False, "reason_code": "lesson_attempt_unverified", "behavior_changed": False,
+            "supported_candidate_kind": None, "source_current": False}
         payload["automatic_policy"] = await _automatic_policy(db, operator, task)
         latest_outcome = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == task.owner_principal_id,
@@ -928,9 +1076,74 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
             source_refs=refs, scope=LessonScope.model_validate(payload["scope"]), expected_revision=task.task_revision)
         try:
             _, _, run, token = await _source(db, operator, request, automatic=_automatic)
-            method, _ = await _observed_method(db, task, run, request.scope.family)
+            structured = not _automatic and task.capability_id == "work.research-dossier.v1" and request.scope.family == "research"
+            method, audit = await _observed_method(db, task, run, request.scope.family, structured_research=structured)
         except BoardError as exc:
             return {**payload, "reason_code": exc.code}
-        return {**payload, "source_refs": refs, "eligible": method is not None,
-            "reason_code": "verified_ordinary_task" if method else "insufficient_method_evidence",
+        research = structured and audit is not None and token["observed"]["status"] == "completed"
+        return {**payload, "source_refs": refs, "eligible": research or method is not None,
+            "supported_candidate_kind": "research_strategy" if research else "task_method" if method is not None else None,
+            "source_current": True,
+            "reason_code": "verified_completed_research_strategy_source" if research else "verified_ordinary_task" if method else "insufficient_method_evidence",
             "observed": token["observed"], "supported_guards": ["source_exists", "verified_readback", "preserve_source_attribution"]}
+
+
+async def _procedure_source_request(db, operator, task_id):
+    await _assert_owner(db, operator)
+    task = await _task(db, task_id)
+    if task is None or (task.owner_principal_id, task.owner_session_id) != (operator.principal.principal_id, operator.session_id):
+        raise BoardError("lesson_owner_mismatch", "The task belongs to another operator", status_code=403)
+    if task.capability_id != "agent.task.v1" or task.status.value != "done":
+        raise BoardError("procedure_source_not_completed", "Complete and review the original general task first")
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    if attempt is None or attempt.ended_at is None:
+        raise BoardError("lesson_attempt_unverified", "Use the latest ended native task attempt")
+    from src.memory.m5 import _verified_source, _source_refs
+    try:
+        proof = await _verified_source(db, task, requested_attempt_id=attempt.attempt_id)
+    except ValueError as error:
+        raise BoardError("procedure_source_unverified", "Restore the original verified physical task output") from error
+    return LessonRequest(task_id=task_id, attempt_id=attempt.attempt_id, correction="",
+        source_refs=_source_refs(proof.readback), scope=LessonScope(goal_id=task.goal_id,
+            goal_revision=task.goal_revision, family="general"), expected_revision=task.task_revision)
+
+
+async def eligible_procedure_source(operator, task_id):
+    """Read-only source and producer offers; never contact or adopt."""
+    async with db_engine.get_session() as db:
+        await _assert_owner(db, operator)
+        task = await _task(db, task_id)
+        if task is None or (task.owner_principal_id, task.owner_session_id) != (operator.principal.principal_id, operator.session_id):
+            raise BoardError("lesson_owner_mismatch", "The task belongs to another operator", status_code=403)
+        payload = {"task_id": task_id, "expected_revision": task.task_revision, "eligible": False,
+            "reason_code": "procedure_source_not_completed", "source_attempt": None,
+            "parameter_offers": [], "behavior_changed": False, "quality_evidence": "unmeasured"}
+        try:
+            request = await _procedure_source_request(db, operator, task_id)
+            task, attempt, run, token = await _source(db, operator, request)
+            from src.memory.task_lesson_native import stage_completed_procedure_source
+            witness = await stage_completed_procedure_source(db, task, run)
+        except BoardError as error:
+            return {**payload, "reason_code": error.code}
+        return {**payload, "eligible": True, "reason_code": "verified_completed_procedure_source",
+            "source_attempt": attempt.attempt_id, "scope": request.scope.model_dump(mode="json"),
+            "source_refs": request.source_refs, "parameter_offers": list(witness.offers),
+            "source_receipt": witness.audit, "source_current": True}
+
+
+async def save_procedure_method(operator, task_id, request: ProcedureSaveRequest):
+    """Publish a private immutable inert candidate from original native receipts."""
+    async with db_engine.get_session() as db:
+        source = await _procedure_source_request(db, operator, task_id)
+        if (request.source_attempt, request.expected_revision) != (source.attempt_id, source.expected_revision):
+            raise BoardError("procedure_source_changed", "Refresh the exact latest source attempt and task revision")
+        task, attempt, run, token = await _source(db, operator, source)
+        from src.memory.task_lesson_native import stage_completed_procedure_source, build_procedure_candidate
+        witness = await stage_completed_procedure_source(db, task, run)
+        try:
+            candidate = build_procedure_candidate(witness, request.parameter_selections)
+        except (ValueError, KeyError, TypeError) as error:
+            raise BoardError("procedure_parameter_selection_invalid", "Select only unique server-offered ordinary fields", status_code=422) from error
+    return await create_task_lesson(operator, source, _procedure_candidate=candidate,
+        _procedure_witness=witness, _procedure_request=request)

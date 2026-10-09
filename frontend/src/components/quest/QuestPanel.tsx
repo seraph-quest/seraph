@@ -1,3 +1,4 @@
+import { GoalProgrammePanel } from "./GoalProgrammePanel";
 import { useEffect, useMemo, useState } from "react";
 import { useQuestStore } from "../../stores/questStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -57,9 +58,10 @@ export function QuestPanel() {
   const [search, setSearch] = useState("");
   const [filterLevel, setFilterLevel] = useState("");
   const [filterDomain, setFilterDomain] = useState("");
+  const [focusProgrammeId, setFocusProgrammeId] = useState<string | null>(null);
   const attentionGoalStatus = useAttentionGoalFocus(setSelectedGoalId, () => {
     setSearch(""); setFilterLevel(""); setFilterDomain(""); setEditingGoal(null);
-  });
+  }, setFocusProgrammeId);
 
   useEffect(() => {
     if (questPanelOpen) refresh();
@@ -151,6 +153,7 @@ export function QuestPanel() {
           />
         )}
 
+        {focusProgrammeId && selectedGoal ? <GoalProgrammePanel key={`${selectedGoal.id}:${focusProgrammeId}`} goal={selectedGoal} focusProgrammeId={focusProgrammeId} /> : null}
         <GoalLoopPanel
           goal={selectedGoal}
           onEdit={(goal) => setEditingGoal(goal)}

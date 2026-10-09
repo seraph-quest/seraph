@@ -324,6 +324,11 @@ async def test_restore_carries_latest_ledger_and_missing_witness_refuses(account
     # DB into the same descriptor-owned root; witness stays outside it.
     assert retain_inference_accounting(active=root, target=restored, database_path="seraph.db") == receipt
     shutil.copy2(restored / "seraph.db", root / "seraph.db")
+    assert (await repository.inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["committed_microusd"] == 13 and snapshot["remaining_microusd"] == 987
     assert snapshot["operations"][0]["owner_id"] == "service:accounting"
@@ -426,6 +431,13 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
     with maintenance_fence(workspace):
         receipt = reconcile_accounting_checkpoint(root=root, registry=registry)
     assert receipt["status"] == "reconciled" and receipt["execution_authority_changed"] is False
+    # Dependency-free maintenance does not classify the private projection.
+    # Canonical startup must backfill it before accounting/group use resumes.
+    assert (await repository.inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     after = await repository.inference_accounting_snapshot()
     assert after["status"] == "ready" and after["unknown_microusd"] == 100
     assert after["operations"][0]["state"] == "contact_started"

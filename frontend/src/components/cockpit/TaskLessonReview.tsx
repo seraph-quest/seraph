@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import type { WorkBoardTask } from "../../types";
+import type { GoalInfo, WorkBoardTask } from "../../types";
+import { TaskMethodReview } from "./TaskMethodReview";
+import { ResearchMethodProposalForm } from "./ResearchMethodProposalForm";
+import { validateProvenance, validSourceRefs, validObservation, validateResearchSource, validateResearchStrategy } from "../../lib/researchMethods";
+import type { Observation, ResearchStrategy, ResearchSource } from "../../lib/researchMethods";
 
 interface Policy { enabled: boolean; policy_revision: number | null; daily_cap: number; inference_egress: "not_permitted"; adoption: "requires_separate_review" }
 interface AutomaticOutcome { status: string; result: "candidate_inert" | "no_change"; reason_code: string;
@@ -10,7 +14,7 @@ interface AutomaticOutcome { status: string; result: "candidate_inert" | "no_cha
   source_digest?: string; candidate_digest?: string; error_type?: string }
 interface Source { task_id: string; expected_revision: number; attempt_id: string | null; source_refs: string[];
   scope: { goal_id: string; goal_revision: number; family: "general" | "research" | "software" | "knowledge" };
-  eligible: boolean; reason_code: string; automatic_policy?: Policy; automatic_outcome?: AutomaticOutcome | null; restart_witness_unknown?: boolean }
+  eligible: boolean; reason_code: string; supported_candidate_kind: "task_method" | "research_strategy" | null; source_current: boolean; observed?: Observation; automatic_policy?: Policy; automatic_outcome?: AutomaticOutcome | null; restart_witness_unknown?: boolean }
 interface Method { schema_version: "TaskMethod.v1"; family: string;
   steps: ({ kind: "registered_tool"; tool_id: string } | { kind: "guard"; check: string } | {
     kind: "registered_capability"; capability_id: "work.json-format.v1"; capability_version: "1";
@@ -19,7 +23,7 @@ interface Method { schema_version: "TaskMethod.v1"; family: string;
   registered_tool_ids: string[]; input_parameters: Record<string, unknown>; output_contract: Record<string, unknown> }
 interface Lesson { schema_version: "task_method_proposal.v1"; proposal_id: string; task_id: string; attempt_id: string;
   revision: number; status: string; result: "candidate_inert" | "no_change"; reason_code: string;
-  behavior_changed: false; source_current: boolean; correction: string; old_method: Method | null; new_method: Method | null;
+  behavior_changed: false; source_current: boolean; correction: string; old_method: Method | ResearchStrategy | null; new_method: Method | ResearchStrategy | null; observed: Observation;
   source_refs: string[]; scope: Source["scope"]; mirror?: Mirror }
 interface Mirror { status: "reconciled" | "degraded" | "not_requested"; reason_code: string; recovery_action?: string }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
@@ -30,9 +34,12 @@ async function request(path: string, body?: unknown): Promise<unknown> {
 }
 function sourceRead(value: unknown, task: WorkBoardTask): Source {
   if (!record(value) || value.task_id !== task.task_id || value.expected_revision !== task.task_revision || typeof value.eligible !== "boolean"
-    || !Array.isArray(value.source_refs) || !value.source_refs.every(v => typeof v === "string") || !record(value.scope)
+    || !Array.isArray(value.source_refs) || value.source_refs.length > 16 || (value.source_refs.length > 0 && !validSourceRefs(value.source_refs)) || !record(value.scope)
     || value.scope.goal_id !== task.goal_id || value.scope.goal_revision !== task.goal_revision || typeof value.reason_code !== "string"
-    || (value.eligible && (typeof value.attempt_id !== "string" || !value.source_refs.length))) throw Error("Source readback does not match this exact Work card. Refresh Work before learning.");
+    || typeof value.source_current !== "boolean" || ![null, "task_method", "research_strategy"].includes(value.supported_candidate_kind as null | string)
+    || (value.eligible && (typeof value.attempt_id !== "string" || !value.source_refs.length || !value.source_current || value.supported_candidate_kind === null || !validObservation(value.observed)))) throw Error("Source readback does not match this exact Work card. Refresh Work before learning.");
+  if (value.eligible) validateProvenance(value, task);
+  if (value.supported_candidate_kind === "research_strategy") validateResearchSource(value, task);
   if (value.automatic_policy != null && (!record(value.automatic_policy)
     || typeof value.automatic_policy.enabled !== "boolean"
     || !(value.automatic_policy.policy_revision === null || (Number.isInteger(value.automatic_policy.policy_revision) && Number(value.automatic_policy.policy_revision) > 0)))) throw Error("Automatic policy revision is unconfirmed. Inspect the current policy again.");
@@ -46,7 +53,20 @@ function sourceRead(value: unknown, task: WorkBoardTask): Source {
   }
   return value as unknown as Source;
 }
-export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposalId }: { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null; proposalId?: string | null }) {
+function lessonRead(result: unknown, task: WorkBoardTask, proposalId: string, source?: Source | null): Lesson {
+  if (!record(result) || result.schema_version !== "task_method_proposal.v1" || result.proposal_id !== proposalId
+    || result.behavior_changed !== false || typeof result.source_current !== "boolean" || typeof result.correction !== "string" || [...result.correction].length > 1000
+    || !["candidate_inert", "no_change"].includes(String(result.result)) || !record(result.scope) || result.scope.goal_id !== task.goal_id || result.scope.goal_revision !== task.goal_revision
+    || !Number.isInteger(result.revision) || Number(result.revision) < 1) throw Error("Private lesson readback did not match this exact Work card.");
+  validateProvenance(result, task, source?.attempt_id ?? undefined, source?.source_refs);
+  if (record(result.new_method) && result.new_method.schema_version === "ResearchStrategy.v1") validateResearchStrategy(result.new_method);
+  return result as unknown as Lesson;
+}
+interface Props { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null; proposalId?: string | null; goals?: GoalInfo[]; onCreated?: (id: string) => Promise<void> }
+export function TaskLessonReview(props: Props) {
+  return <OwnedTaskLessonReview key={`${props.task.task_id}:${props.task.task_revision}:${props.ownerPrincipalId}:${props.ownerSessionId}`} {...props} />;
+}
+function OwnedTaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposalId, goals, onCreated }: Props) {
   const [source, setSource] = useState<Source | null>(null), [lesson, setLesson] = useState<Lesson | null>(null);
   const [correction, setCorrection] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
@@ -58,10 +78,8 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
     if (!proposalId || !owned) return;
     const version = ++generation.current; setBusy(true); setError(null); setLesson(null);
     void request(`/${encodeURIComponent(proposalId)}`).then(result => {
-      if (!record(result) || result.schema_version !== "task_method_proposal.v1" || result.proposal_id !== proposalId || result.task_id !== task.task_id
-        || result.behavior_changed !== false || typeof result.source_current !== "boolean" || typeof result.correction !== "string"
-        || !["candidate_inert", "no_change"].includes(String(result.result)) || !record(result.scope) || result.scope.goal_id !== task.goal_id) throw Error("Private lesson readback did not match this exact Work card.");
-      if (version === generation.current) setLesson(result as unknown as Lesson);
+      const parsed = lessonRead(result, task, proposalId);
+      if (version === generation.current) setLesson(parsed);
     }).catch(e => { if (version === generation.current) setError((e as Error).message); })
       .finally(() => { if (version === generation.current) setBusy(false); });
     return () => { ++generation.current; };
@@ -82,11 +100,8 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
       if (!record(created) || typeof created.proposal_id !== "string") throw Error("Lesson receipt is unconfirmed. Inspect Work before proposing again.");
       if (version !== generation.current) return;
       const result = await request(`/${encodeURIComponent(created.proposal_id)}`);
-      if (!record(result) || result.schema_version !== "task_method_proposal.v1" || result.task_id !== source.task_id || result.attempt_id !== source.attempt_id
-        || result.proposal_id !== created.proposal_id || result.behavior_changed !== false || typeof result.source_current !== "boolean"
-        || !["candidate_inert", "no_change"].includes(String(result.result)) || typeof result.correction !== "string"
-        || !record(result.scope) || result.scope.goal_id !== source.scope.goal_id || result.scope.goal_revision !== source.scope.goal_revision) throw Error("Private lesson readback did not match the exact source. Inspect again.");
-      if (version === generation.current) setLesson(result as unknown as Lesson);
+      const parsed = lessonRead(result, task, created.proposal_id, source);
+      if (version === generation.current) setLesson(parsed);
     } catch (e) { if (version === generation.current) { setSource(null); setError((e as Error).message); } }
     finally { if (version === generation.current) setBusy(false); }
   }
@@ -117,7 +132,9 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
         {source.automatic_outcome.error_type && <p>Proposal preparation error: {source.automatic_outcome.error_type}. Restore the learning service and inspect the task again; execution results and method adoption are separate.</p>}
       </div>}
       {source.restart_witness_unknown === true && <p role="status">Automatic staging retains its original capacity: restart process termination is unverified. Manual lesson review remains available.</p>}
-      {source.eligible && <><label>Private task correction<textarea aria-label="Private task correction" className="cockpit-input w-full" rows={3} maxLength={4000} disabled={busy} value={correction} onChange={e => { setCorrection(e.target.value); setLesson(null); }} /></label>
+      {owned && source.eligible && source.supported_candidate_kind === "research_strategy" && <ResearchMethodProposalForm task={task} source={source as ResearchSource} owned={owned}
+        onStale={() => { setSource(null); setLesson(null); }} onCandidate={candidate => { const parsed = lessonRead(candidate, task, String((candidate as Lesson).proposal_id), source); setLesson(parsed); setSource(null); }} />}
+      {source.eligible && source.supported_candidate_kind === "task_method" && <><label>Private task correction<textarea aria-label="Private task correction" className="cockpit-input w-full" rows={3} maxLength={4000} disabled={busy} value={correction} onChange={e => { setCorrection(e.target.value); setLesson(null); }} /></label>
         <p>Supported corrections: check source existence; verify readback; preserve source attribution. Other corrections are retained privately with an explicit no-change result.</p>
         <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void propose()}>Prepare private lesson candidate</button></>}
       {source.automatic_policy && <div className="mt-2">
@@ -128,11 +145,13 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
     {lesson && <div role="region" aria-label="Exact private lesson change" className="mt-3">
       <p role="status">{lesson.result === "no_change" ? "No change" : "Inert method candidate"} · {lesson.reason_code} · behavior unchanged · {lesson.source_current ? "source current" : "source changed; inspect again"}</p>
       <p>Proposal {lesson.proposal_id} · revision {lesson.revision} · Goal {lesson.scope.goal_id} revision {lesson.scope.goal_revision}</p>
+      <section aria-label="Private candidate source provenance"><p>Source Task {lesson.task_id} · Attempt {lesson.attempt_id} · observation {lesson.observed.status}</p><p className="break-all">{"readback_digest" in lesson.observed ? `Verified readback ${lesson.observed.readback_digest}` : `Failure receipt ${lesson.observed.failure_reason_digest}`}</p><ul>{lesson.source_refs.map(ref => <li className="font-mono break-all" key={ref}>{ref}</li>)}</ul></section>
       <p className="whitespace-pre-wrap">Correction: {lesson.correction}</p>
       {lesson.mirror?.status === "degraded" && <p role="status">Evolution receipt mirror degraded. The canonical private candidate remains inspectable. {typeof lesson.mirror.recovery_action === "string" ? lesson.mirror.recovery_action : "Repair the evolution state using its existing owner, then inspect again."}</p>}
       <h4>Old method</h4><pre aria-label="Old task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.old_method, null, 2)}</pre>
       <h4>Proposed method</h4><pre aria-label="Proposed task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.new_method, null, 2)}</pre>
-      <p>No method adoption or quality improvement is established by this candidate.</p>
+      <p>This candidate alone establishes no method adoption or measured quality improvement.</p>
+      {lesson.new_method && lesson.source_current && <TaskMethodReview key={`${ownerSessionId}:${lesson.proposal_id}`} task={task} proposalId={lesson.proposal_id} owned={owned} attemptId={lesson.attempt_id} sourceRefs={lesson.source_refs} goals={goals} onCreated={onCreated} />}
     </div>}
   </section>;
 }

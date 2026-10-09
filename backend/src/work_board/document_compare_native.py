@@ -218,6 +218,56 @@ async def stage_current(jobs,task,attempt,inputs,*,physical=True):
     return staged
 
 
+async def record_child(jobs,task,attempt,inputs,spec,capacity,process,packet,runner,fence):
+    """Publish only this invocation's ready child before delivering source bytes."""
+    from src.work_board.document_capacity import _records, _held
+    from src.workflows.job_runtime import _digest, _bounded_checkpoint_receipts, _safe_durable_inputs
+    wire={key:capacity[key] for key in ("job_id","input_digest","generation","nonce")}
+    if (packet.get("state")!="ready" or packet.get("binding")!=wire
+        or type(process.pid) is not int or process.pid<=0 or packet.get("supervisor_pid")!=process.pid
+        or type(packet.get("parser_pid")) is not int or packet["parser_pid"]<=0):
+        raise BoardError("document_resource_self_check_failed","The original ready process identity is required")
+    child={**capacity,"supervisor_pid":process.pid,"parser_pid":packet["parser_pid"]}
+    # Private source/root readback is fallible and must precede the SQL writer.
+    staged=await stage_current(jobs,task,attempt,inputs)
+    async with jobs._session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        run=await jobs._fetch(db,spec.identity.job_id)
+        await current(db,task,attempt,run,staged)
+        stamp=now()
+        if (run.job_kind!=JOB_KIND or run.owner_kind!="user"
+            or run.owner_principal_id!=task.owner_principal_id
+            or run.session_id!=task.owner_session_id or run.operator_session_id!=task.owner_session_id
+            or run.goal_id!=task.goal_id or run.goal_revision!=task.goal_revision
+            or run.capability_version!="1" or run.input_digest!=_digest(spec.inputs)
+            or json.loads(run.arguments_json)!=_safe_durable_inputs(spec.inputs)[1]
+            or json.loads(run.declared_authority_json)!=spec.declared_authority
+            or run.authority_digest!=_digest(spec.declared_authority) or run.run_fingerprint!=spec.run_fingerprint
+            or utc(run.deadline_at)!=utc(spec.deadline_at) or run.max_attempts!=2
+            or run.attempt_count!=capacity["generation"]
+            or run.status!="running" or run.lease_owner!=runner or run.fencing_token!=fence
+            or not run.lease_expires_at or utc(run.lease_expires_at)<=stamp):
+            raise BoardError("document_child_fence_changed","The original native process lease or authority changed")
+        records=_records(run)
+        if (records.get("document-capacity")!=capacity
+            or "document-child" in records or "document-reaped" in records or not _held(run)):
+            raise BoardError("document_child_capacity_changed","The exact original process reservation is required")
+        original=run.checkpoint_receipts_json
+        history=json.loads(original)
+        history.append({"checkpoint_id":"document-child","payload":child,"safe":True})
+        history=_bounded_checkpoint_receipts(history)
+        changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+            WorkflowRunState.run_identity==run.run_identity,WorkflowRunState.revision==run.revision,
+            WorkflowRunState.checkpoint_receipts_json==original,WorkflowRunState.status=="running",
+            WorkflowRunState.lease_owner==runner,WorkflowRunState.fencing_token==fence,
+            WorkflowRunState.lease_expires_at>stamp,WorkflowRunState.deadline_at>stamp)
+            .values(checkpoint_receipts_json=canonical(history).decode(),revision=run.revision+1,updated_at=stamp))
+        if changed.rowcount!=1:
+            raise BoardError("document_child_fence_changed","The original process history changed before publication")
+        await db.commit()
+    return child
+
+
 def cleanup_proven(task,attempt,projection):
     state=checkpoints(projection); binding=state.get("document-child") or state.get("document-capacity")
     if binding is None:return projection.get("status") in {"accepted","queued","cancelled"}
@@ -299,17 +349,12 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
     binding={"job_id":spec.identity.job_id,"input_digest":spec.inputs["typed_input_digest"],
         "input_artifact_id":task.input_artifact_id,
         "generation":prior.get("document-parser-retry",{}).get("generation",1),"nonce":uuid.uuid4().hex}
+    from src.work_board.document_capacity import stage_capacity, assert_capacity
+    async with jobs._session() as db:
+        capacity_snapshot = await stage_capacity(db)
     async def claim(db,run):
         await current(db,task,attempt,run,staged)
-        rows=list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind==JOB_KIND).limit(4097))).all())
-        if len(rows)>4096:raise BoardError("document_capacity_history_full","Parser capacity needs reconciliation")
-        for other in rows:
-            if other.run_identity==run.run_identity:continue
-            history=checkpoints(other)
-            if "document-capacity" in history and "document-reaped" not in history:
-                raise BoardError("document_parser_capacity_held","A prior parser requires actual quiescence proof")
-            if other.status=="queued" and (other.priority,other.started_at,other.run_identity)<(run.priority,run.started_at,run.run_identity):
-                raise BoardError("document_higher_priority_ready","A higher priority ready comparison owns the next turn")
+        await assert_capacity(db, snapshot=capacity_snapshot, run=run)
         history=json.loads(run.checkpoint_receipts_json)
         history.append({"checkpoint_id":"document-capacity","payload":binding,"safe":True})
         run.checkpoint_receipts_json=canonical(history).decode();await db.flush()
@@ -345,9 +390,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         if (len(ready)>4096 or packet.get("state")!="ready" or packet.get("binding")!=child_binding
             or packet.get("supervisor_pid")!=process.pid or type(packet.get("parser_pid")) is not int or packet["parser_pid"]<=0):
             raise BoardError("document_resource_self_check_failed","The supported resource host self-check failed before source")
-        binding.update({"supervisor_pid":process.pid,"parser_pid":packet["parser_pid"]})
-        await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-child",state=binding,
-            checkpoint_payload=binding,owner=runner,fencing_token=fence)
+        binding=await record_child(jobs,task,attempt,inputs,spec,binding,process,packet,runner,fence)
         await stage_current(jobs,task,attempt,inputs)
         async with jobs._session() as db: pdf,csv_source=await source_pair(db,task,inputs)
         await stage_current(jobs,task,attempt,inputs,physical=False)
@@ -361,8 +404,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         actual,witness_sha=witness(binding)
         if process.returncode!=0 or actual["parser_exit"]!=0 or len(raw)>512*1024:
             raise BoardError("document_parser_resource_exit","The bounded parser did not complete")
-        await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-reaped",state={"witness_sha256":witness_sha},
-            checkpoint_payload={"binding":binding,"witness_sha256":witness_sha,"wait_reaped":True},owner=runner,fencing_token=fence)
+        await reconcile_reap(jobs, task, attempt)
         result=json.loads(raw)
         if result.get("status")!="succeeded":
             raise BoardError(str(result.get("reason") or "document_parser_blocked"),"The selected document grammar is unsupported")

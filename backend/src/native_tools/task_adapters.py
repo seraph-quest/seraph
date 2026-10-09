@@ -15,6 +15,7 @@ from smolagents import Tool
 from src.approval.exceptions import ApprovalRequired
 
 from src.work_board.contracts import ToolDescriptor
+from src.workflows.procedure_contracts import procedure_execution_descriptor_matches
 
 
 def _digest(value):
@@ -283,11 +284,33 @@ _NATIVE = {
 }
 
 
+def _native_procedure_contract(tool_name, input_schema):
+    """The actual bundled producer declares ordinary fields before contact."""
+    from src.workflows.procedure_contracts import ProcedureInputContractV1, procedure_v3_digest
+    classification = {
+        "read_file": {"file_path": "ordinary_parameter"},
+        "write_file": {"file_path": "ordinary_parameter", "content": "typed_dependency"},
+        "web_search": {"query": "ordinary_parameter", "max_results": "ordinary_parameter"},
+        "browse_webpage": {"url": "ordinary_parameter", "action": "ordinary_fixed"},
+    }[tool_name]
+    return ProcedureInputContractV1(producer_id="seraph.native." + tool_name + ".v1",
+        producer_version="1", input_schema_digest=procedure_v3_digest(input_schema),
+        classifications=[{"input_pointer": "/" + name, "kind": kind,
+            "schema": input_schema["properties"][name]} for name, kind in classification.items()])
+
+
 class ToolRegistry:
     def __init__(self, *, mcp_runtime=None, extension_registry=None):
         self.mcp_runtime = mcp_runtime
         self.extension_registry = extension_registry
+        self.communication_dispatcher = None
         self.started = False
+        self.delegation_service = None
+
+    def bind_delegation_service(self, service):
+        if self.delegation_service is not None and self.delegation_service is not service:
+            raise RuntimeError("specialist delegation lifecycle already owned")
+        self.delegation_service = service
 
     def start(self):
         self.started = True
@@ -295,7 +318,7 @@ class ToolRegistry:
     def compile_capacity(self, descriptor):
         from src.tools.approval import ApprovalTool
         entry = self._entries().get(descriptor.tool_id)
-        if entry is None or entry[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if entry is None or not procedure_execution_descriptor_matches(entry[0], descriptor):
             raise PermissionError("task tool capacity contract changed")
         producer = getattr(self._invoke_sync, "__func__", None)
         begin = getattr(self.begin_invocation, "__func__", None)
@@ -307,8 +330,13 @@ class ToolRegistry:
             and closure is _STOCK_CLOSURE_PRODUCER and closure.__code__ is _STOCK_CLOSURE_CODE):
             if entry[1] is None:
                 possible = True
-                if (getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
+                if (descriptor.tool_id in {"document_prepare", "document_build"}
+                    and getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
                     and self._invoke_document_with_closure.__func__.__code__ is _STOCK_DOCUMENT_CODE):
+                    possible = False
+                if (descriptor.tool_id == "communication_prepare"
+                    and getattr(self._invoke_communication_with_closure, "__func__", None) is _STOCK_COMMUNICATION_PRODUCER
+                    and self._invoke_communication_with_closure.__func__.__code__ is _STOCK_COMMUNICATION_CODE):
                     possible = False
             else:
                 wrapper, _ = _current_approval_wrapper(entry[1], is_mcp=entry[2])
@@ -321,12 +349,15 @@ class ToolRegistry:
             "begin": _producer_digest(begin), "closure": _producer_digest(closure),
             "document": _producer_digest(getattr(self._invoke_document_with_closure, "__func__", None))
                 if entry[1] is None else None,
+            "communication": _producer_digest(getattr(self._invoke_communication_with_closure, "__func__", None))
+                if descriptor.tool_id == "communication_prepare" else None,
             "wrapper_selector": _producer_digest(_current_approval_wrapper)})
         return TaskToolCapacityWitness(self, descriptor.model_copy(deep=True),
             _digest(descriptor.model_dump(mode="json")), possible, producer, classifier_digest, _CAPACITY_SEAL)
 
     def stop(self):
         self.started = False
+        self.delegation_service = None
 
     def _entries(self):
         if not self.started:
@@ -340,10 +371,25 @@ class ToolRegistry:
         mode = policy_snapshot["tool_mode"]
         mcp_mode = policy_snapshot["mcp_mode"]
         entries = {}
+        from config.settings import settings
+        if (settings.use_delegation and self.delegation_service is not None
+            and self.delegation_service.started and is_tool_allowed("delegate_task", mode)):
+            from src.workflows.specialist_delegation import delegation_descriptor
+            delegated = delegation_descriptor()
+            entries[delegated.tool_id] = (delegated, None, False)
         from src.work_board.document_preparation import descriptor as document_descriptor
         local_document = document_descriptor()
         if is_tool_allowed(local_document.tool_id, mode):
             entries[local_document.tool_id] = (local_document, None, False)
+        if self.communication_dispatcher is not None:
+            from src.work_board.communication_preparation import descriptor as communication_descriptor
+            communication = communication_descriptor()
+            if is_tool_allowed(communication.tool_id, mode):
+                entries[communication.tool_id] = (communication, None, False)
+        from src.work_board.document_build_native import descriptor as build_descriptor
+        local_build = build_descriptor()
+        if is_tool_allowed(local_build.tool_id, mode):
+            entries[local_build.tool_id] = (local_build, None, False)
         for tool in (read_file, write_file, web_search, browse_webpage):
             if not is_tool_allowed(tool.name, mode):
                 continue
@@ -354,7 +400,8 @@ class ToolRegistry:
                 policy["workspace"] = str(settings.workspace_dir)
             descriptor = ToolDescriptor(tool_id=tool.name, version="1", input_schema=input_schema,
                 output_schema=output_schema, effects=effects, permissions=["capability_execute"],
-                deadline=60, verifier=verifier, policy_digest=_digest(policy))
+                deadline=60, verifier=verifier, policy_digest=_digest(policy),
+                procedure_inputs=_native_procedure_contract(tool.name, input_schema))
             entries[tool.name] = (descriptor, tool, False)
         if self.mcp_runtime is not None and self.extension_registry is not None and mcp_mode != "disabled":
             for descriptor, tool in self.mcp_runtime.task_tool_entries(self.extension_registry, mcp_mode):
@@ -400,7 +447,7 @@ class ToolRegistry:
         encoded_inputs = canonical(inputs)
         validate_data(inputs, dependencies=set())
         current = self._entries().get(descriptor.tool_id)
-        if current is None or current[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if current is None or not procedure_execution_descriptor_matches(current[0], descriptor):
             raise PermissionError("task tool contract changed or unavailable")
         validate_schema(descriptor.input_schema, inputs)
         _, tool, _ = current
@@ -413,7 +460,7 @@ class ToolRegistry:
         context.setdefault("workflow_run_identity", job_id.strip())
         context = json.loads(canonical(context))
         after = self._entries().get(descriptor.tool_id)
-        if after is None or after[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if after is None or not procedure_execution_descriptor_matches(after[0], descriptor):
             raise PermissionError("task tool contract changed during approval metadata read")
         return {"tool_name": tool.name, "approval_context": context,
                 "fingerprint": fingerprint_tool_call(tool.name, inputs, approval_context=context)}
@@ -432,16 +479,26 @@ class ToolRegistry:
         canonical(inputs)
         validate_data(inputs, dependencies=set())
         entry = self._entries().get(descriptor.tool_id)
-        if entry is None or entry[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if entry is None or not procedure_execution_descriptor_matches(entry[0], descriptor):
             raise PermissionError("task tool contract changed or unavailable")
         validate_schema(descriptor.input_schema, inputs)
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
-        if descriptor.tool_id == "document_prepare":
+        if descriptor.tool_id in {"document_prepare", "document_build", "delegate_task"}:
             from src.security.trust_contract import AuthorityGrant
             if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants:
                 raise PermissionError("current capability execution permission is required")
+        if descriptor.tool_id in {"document_prepare", "document_build"}:
             return TaskToolInvocation(asyncio.create_task(self._invoke_document_with_closure(
+                descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
+        if descriptor.tool_id == "delegate_task":
+            return TaskToolInvocation(asyncio.create_task(self._invoke_delegation_with_closure(
+                descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
+        if descriptor.tool_id == "communication_prepare":
+            from src.security.trust_contract import AuthorityGrant
+            if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants or self.communication_dispatcher is None:
+                raise PermissionError("current communications execution owner required")
+            return TaskToolInvocation(asyncio.create_task(self._invoke_communication_with_closure(
                 descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token)))
         # ContextVars are copied by to_thread. Existing wrappers remain the
         # last authority/approval/audit/secret boundary, including MCP calls.
@@ -450,6 +507,25 @@ class ToolRegistry:
         future = asyncio.create_task(asyncio.to_thread(self._invoke_with_closure,
             descriptor, json.loads(canonical(inputs)), principal, job_id, fencing_token))
         return TaskToolInvocation(future)
+
+    async def _invoke_delegation_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            service = self.delegation_service
+            if service is None or not service.started or service.delegation_jobs is None:
+                raise PermissionError("current specialist delegation owner unavailable")
+            from src.workflows.specialist_delegation import execute_specialist
+            output = await execute_specialist(service.delegation_jobs, service=service,
+                invocation_id=job_id, fencing_token=fencing_token, principal=principal,durable_wait=True)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            from src.workflows.specialist_lifecycle import SpecialistWaitRequired
+            if type(error) is SpecialistWaitRequired:
+                return _InvocationCompletion(None,error,error.witness)
+            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
 
     async def _invoke_document_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
         binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
@@ -462,17 +538,35 @@ class ToolRegistry:
             witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
             return _InvocationCompletion(None, error, witness)
 
+    async def _invoke_communication_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):
+        from src.work_board.communication_preparation import invoke
+        binding = TaskToolApprovalBinding(_digest(descriptor.model_dump(mode="json")),
+            _digest(inputs), job_id, fencing_token)
+        try:
+            output = await invoke(principal, job_id, fencing_token, inputs,
+                dispatcher=self.communication_dispatcher)
+            witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
+            return _InvocationCompletion(output, None, witness)
+        except BaseException as error:
+            # invoke retains/awaits every original producer before returning.
+            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            return _InvocationCompletion(None, error, witness)
+
     async def _invoke_document(self, descriptor, inputs, principal, job_id, fencing_token):
-        from src.work_board.document_preparation import invoke
+        if descriptor.tool_id == "document_build":
+            from src.work_board.document_build_native import invoke
+        else:
+            from src.work_board.document_preparation import invoke
         from src.audit.repository import audit_repository
         # This one async native owner accepts only a hexadecimal digest,
         # has no credential fields and uses task-bound local consent. Keep
         # the existing audit owner without moving async SQL to a thread.
         async def audit(event_type, details):
             await audit_repository.log_event(session_id=principal.session_id,
-                actor="agent", event_type=event_type, tool_name="document_prepare",
+                actor="agent", event_type=event_type, tool_name=descriptor.tool_id,
                 risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
-                summary="Local document preparation " + event_type,
+                summary=("Local document build " if descriptor.tool_id == "document_build"
+                    else "Local document preparation ") + event_type,
                 details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
         from src.tools.policy import get_task_policy_snapshot
         await audit("tool_call", {"input_digest": _digest(inputs)})
@@ -509,7 +603,7 @@ class ToolRegistry:
         from src.tools.policy import get_current_mcp_policy_mode
         from src.work_board.general_task import canonical, validate_schema
         current = self._entries().get(descriptor.tool_id)
-        if current is None or current[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
+        if current is None or not procedure_execution_descriptor_matches(current[0], descriptor):
             raise PermissionError("task tool contract changed before execution")
         _, tool, is_mcp = current
         wrapper, marker = _current_approval_wrapper(tool, is_mcp=is_mcp)
@@ -593,10 +687,12 @@ class ToolRegistry:
 
 _STOCK_SYNC_PRODUCER = ToolRegistry._invoke_sync
 _STOCK_DOCUMENT_PRODUCER = ToolRegistry._invoke_document_with_closure
+_STOCK_COMMUNICATION_PRODUCER = ToolRegistry._invoke_communication_with_closure
 _STOCK_BEGIN_PRODUCER = ToolRegistry.begin_invocation
 _STOCK_CLOSURE_PRODUCER = ToolRegistry._invoke_with_closure
 _STOCK_SYNC_CODE = _STOCK_SYNC_PRODUCER.__code__
 _STOCK_DOCUMENT_CODE = _STOCK_DOCUMENT_PRODUCER.__code__
+_STOCK_COMMUNICATION_CODE = _STOCK_COMMUNICATION_PRODUCER.__code__
 _STOCK_BEGIN_CODE = _STOCK_BEGIN_PRODUCER.__code__
 _STOCK_CLOSURE_CODE = _STOCK_CLOSURE_PRODUCER.__code__
 _CAPACITY_COMPILER = ToolRegistry.compile_capacity

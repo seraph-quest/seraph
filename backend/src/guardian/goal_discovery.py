@@ -69,6 +69,7 @@ class GoalDiscoveryService:
             raise RuntimeError("goal_discovery_service_unavailable")
 
     async def _strategy(self, binding):
+        """Select the current method only for a new occurrence admission."""
         result = TaskStrategyBinding(status="none", reason="baseline")
         if self.strategy_resolver is not None:
             # Service context identifies this exact delegated programme; it
@@ -80,6 +81,31 @@ class GoalDiscoveryService:
             result = TaskStrategyBinding.model_validate(result)
         if result.status == "blocked":
             raise ValueError("programme_strategy_blocked")
+        await validated_discovery_strategy(result)
+        return result
+
+    async def _validate_pinned_strategy(self, binding, original, *, db=None):
+        """Validate the immutable admitted version, never the current pointer.
+
+        The delegated programme supplies authority; its issuer Root remains
+        provenance. Rollback eligibility and revocation belong to the canonical
+        method owner rather than a fresh selection or local status fallback.
+        """
+        self._ready()
+        original = TaskStrategyBinding.model_validate(original)
+        validator = getattr(self.strategy_resolver, "validate_pinned", None)
+        if validator is None:
+            if self.strategy_resolver is not None or original.status != "none":
+                raise ValueError("programme_pinned_strategy_validator_unavailable")
+            result = original
+        else:
+            result = validator(WorkBoardOwner(principal_id=DISCOVERY_SERVICE,
+                session_id=""), binding.goal_id, original, programme_grant=binding, db=db)
+            if inspect.isawaitable(result):
+                result = await result
+            result = TaskStrategyBinding.model_validate(result)
+            if result != original:
+                raise ValueError("programme accepted strategy binding changed")
         await validated_discovery_strategy(result)
         return result
 

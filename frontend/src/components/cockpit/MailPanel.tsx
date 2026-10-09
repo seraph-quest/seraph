@@ -1,3 +1,4 @@
+import type { CommunicationReplyInput } from "../../lib/communications";
 import { ConnectionSyncPanel, RelatedSourcesReview } from "./ConnectionSyncPanel";
 import { connectedTaskInput } from "../../lib/connectionSync";
 import type { RelatedSelection } from "../../lib/connectionSync";
@@ -26,6 +27,7 @@ import type {
 import type { GuardianInboxMailOrigin } from "../../types";
 
 export interface MailPanelProps {
+  onPrepareCommunication?: (input: CommunicationReplyInput) => void;
   taskId: string | null;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
@@ -243,6 +245,7 @@ function DraftPanel({ taskId, ownerPrincipalId, ownerSessionId, goalId, goalRevi
 }
 
 interface PrivateMailReviewProps {
+  onPrepareCommunication?: (input: CommunicationReplyInput) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
   origin: GuardianInboxMailOrigin;
@@ -250,7 +253,7 @@ interface PrivateMailReviewProps {
   goalRevision?: number | null;
 }
 
-function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, goalRevision }: PrivateMailReviewProps) {
+function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, goalRevision, onPrepareCommunication }: PrivateMailReviewProps) {
   const ownerScope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}\u0000${ownerSessionId}` : null;
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -514,6 +517,17 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
       {context && !message && <div className="mt-2 rounded border border-amber-500/30 p-2 text-[10px]"><div>Message metadata is private and remains unread until you acknowledge one bounded body read.</div><label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={readAcknowledged} onChange={(event) => setReadAcknowledged(event.currentTarget.checked)} />I acknowledge this selected message may be read once within the current owner-scoped Mail consent.</label>{readError && <div className="mt-2 text-amber-300" role="alert">{readError}</div>}<button type="button" className="cockpit-feedback-button mt-2" disabled={readBusy || !readAcknowledged} onClick={() => void readPrivateMessage()}>{readBusy ? "Reading one message…" : "Read selected private message"}</button></div>}
       {message && <article className="mt-2 rounded border border-emerald-500/30 p-2" aria-label="Selected private Mail message"><div className="font-semibold">{message.subject}</div><div className="mt-2 whitespace-pre-wrap break-words">{message.plain_text}</div>{message.truncated && <div className="mt-2 text-amber-300">The bounded body was truncated by the server.</div>}<div className="mt-2 text-[9px] text-retro-text/50">Explicit local read · no learning · attachments and links were not fetched.</div></article>}
       {message && !replyTaskId && <div className="mt-2 rounded border border-white/10 p-2"><div className="font-semibold text-[10px]">Request a local reply draft</div>{!context?.consent.model_egress_allowed ? <div className="mt-1 text-[10px] text-amber-200">Model consent is not active. Use Mail settings to grant the exact subject/plainbody/replyintent fields before this action becomes available.</div> : <><label className="mt-2 block text-[10px]">Reply intent<textarea className="cockpit-input mt-1 w-full" rows={3} maxLength={2000} value={replyIntent} onChange={(event) => setReplyIntent(event.currentTarget.value)} placeholder="Describe the reply you want drafted; this is sent only through the governed local draft task." /></label><label className="mt-2 block text-[10px]">Style<select className="cockpit-input mt-1 w-full" value={replyStyle} onChange={(event) => setReplyStyle(event.currentTarget.value as "brief" | "formal")}><option value="brief">Brief</option><option value="formal">Formal</option></select></label>{!pendingReply && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy} onClick={() => void submitReply()}>{replyBusy ? "Admitting local draft…" : "Request local reply draft"}</button>}</>}</div>}
+      {onPrepareCommunication && !pendingReply && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy || !context || !message || !replyIntent.trim() || !context.consent.model_egress_allowed || context.watch.state !== "active" || Date.parse(context.watch.expires_at) <= Date.now() || context.consent.state !== "active" || Date.parse(context.consent.expires_at) <= Date.now()} onClick={() => {
+        if (!context || !message || !goalId || !goalRevision || !context.consent.model_egress_allowed
+          || context.consent.state !== "active" || context.watch.state !== "active" || Date.parse(context.consent.expires_at) <= Date.now()
+          || Date.parse(context.watch.expires_at) <= Date.now() || message.message_revision !== origin.message_revision) return;
+        try { onPrepareCommunication({ ...connectedTaskInput(relatedSelection), schema_version: 1, connection_id: context.connection.connection_id,
+          expected_connection_revision: context.connection.revision, message_binding_id: origin.message_binding_id,
+          expected_message_revision: origin.message_revision, mail_consent_id: context.consent.consent_id,
+          expected_source_consent_revision: context.consent.source_revision, expected_model_consent_revision: context.consent.model_revision,
+          goal_id: goalId, expected_goal_revision: goalRevision, reply_intent: replyIntent.trim().slice(0, 2000), style: replyStyle }); }
+        catch (error) { setReplyError((error as Error).message); }
+      }}>Add this reviewed reply source to communication preparation</button>}
       {replyError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{replyError}</div>}
       {pendingReply && <div className="mt-2 text-[10px] text-amber-200" role="status">A reply admission is pending reconciliation. The original opaque request key is retained; no replacement task will be created.</div>}
       {pendingReply && !replyTaskId && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy} onClick={() => void reconcileReply()}>{replyBusy ? "Reconciling original draft…" : "Reconcile original draft"}</button>}
@@ -522,9 +536,9 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
   );
 }
 
-export function MailPanel({ taskId, ownerPrincipalId, ownerSessionId, mailOrigin, goalId, goalRevision }: MailPanelProps) {
+export function MailPanel({ taskId, ownerPrincipalId, ownerSessionId, mailOrigin, goalId, goalRevision, onPrepareCommunication }: MailPanelProps) {
   if (mailOrigin) {
-    return <PrivateMailReview origin={mailOrigin} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
+    return <PrivateMailReview onPrepareCommunication={onPrepareCommunication} origin={mailOrigin} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
   }
   return <DraftPanel taskId={taskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
 }

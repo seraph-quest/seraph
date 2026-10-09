@@ -28,8 +28,8 @@ async def seal_proposal_publication(db, owner, envelope, *, goal_revision):
 
 
 async def recheck_proposal_publication(db, owner, witness):
-    from sqlalchemy import select
-    from src.db.models import InferenceCostReservation
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task import digest
     from src.workflows.general_task_accounting import validate_group_owner
@@ -46,8 +46,13 @@ async def recheck_proposal_publication(db, owner, witness):
     await validate_group_owner(db, group)
     from src.workflows.specialist_evidence import validate_handoff_publication
     await validate_handoff_publication(db, owner, envelope)
-    operations = (await db.execute(select(InferenceCostReservation).where(
-        InferenceCostReservation.owner_id == owner.principal_id))).scalars().all()
+    try:
+        operations = await group_reservation_rows(db, owner_id=owner.principal_id,
+            group_id=group.group_id, group_digest=digest(group.model_dump(mode="json")),
+            original_root_id=owner.session_id,
+            original_deadline_at=group.original_deadline_at, group=group)
+    except InferenceAccountingError as exc:
+        raise BoardError("general_task_provenance_changed", "Original proposal accounting binding changed", status_code=409) from exc
     if envelope.proposal_provenance is not None:
         original = next((row for row in operations if row.operation_id == envelope.proposal_provenance.initial_operation_id), None)
         if original is None or proposal_provenance(original.model_dump(mode="json"), group) != envelope.proposal_provenance:

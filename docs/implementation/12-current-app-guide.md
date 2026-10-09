@@ -1202,8 +1202,9 @@ not regain an arbitrary source path or inherit credentials. Changed source or
 Vault metadata, missing or altered copied artifacts and unrelated pointers
 block the governed use.
 
-Specialist planning, stop compilation and partial-review cost readback use three
-private indexed queries: one-row checks for missing or invalid classification,
+Proposal publication, specialist planning, stop compilation and partial-review
+cost readback each use three private indexed queries: one-row checks for missing
+or invalid classification,
 then at most thirteen original-group rows to detect overflow beyond twelve.
 Released, settled and Unknown history remains included; original evidence,
 group, owner, Root, ordinal and deadline bindings still determine authority.

@@ -219,8 +219,8 @@ reviewed-method journey completes the original source and operator review, then
 brings both next-task children to Done and their parent to Review, awaiting its
 separate operator completion.
 
-The three specialist accounting readers use private indexed owner/classification
-checks and at most thirteen group rows, preserving all original liabilities and
+The four proposal and specialist accounting readers use private indexed
+owner/classification checks and at most thirteen group rows, preserving all original liabilities and
 detecting overflow beyond twelve. Startup strictly classifies legacy rows in
 batches of at most 128. Historical financial seals retain their original typed
 defaults and field presence without resealing. The private hint grants no

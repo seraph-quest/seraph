@@ -344,7 +344,7 @@ function normalizeProcessCleanup(
   };
 }
 
-interface RepositoryReview {
+interface PreparedRepositoryReview {
   native_child_id: string;
   repository_job_id: string;
   iteration_index: number;
@@ -354,11 +354,44 @@ interface RepositoryReview {
   source_preview_path: string;
 }
 
+type RepositoryReview = PreparedRepositoryReview | {
+  native_child_id: string;
+  repository_job_id: string;
+  iteration_index: null;
+  iteration_id: null;
+  preparation_digest: null;
+  contact_state: "not_prepared";
+  source_preview_path: null;
+};
+
+interface RepositoryLimitEvidence {
+  schema_version: "repository.native_limit_evidence.v1";
+  original_limits_digest: string;
+  original_deadline_at: string;
+  original_server_bound_microusd: number;
+  root_liability_microusd: number;
+  group_liability_microusd: number;
+  group_calls: number;
+  original_root_max_cost_microusd: number;
+  original_group_max_cost_microusd: number;
+  original_group_max_calls: number;
+  goal_cutoff_at: string | null;
+  cause: string;
+}
+
+interface RepositoryStop {
+  reason: string;
+  pending: boolean;
+  limit_evidence: RepositoryLimitEvidence | null;
+  limit_evidence_digest: string | null;
+}
+
 interface RepositorySourceStatus {
   job_id: string;
   status: string;
   revision: number;
   repository_review: RepositoryReview;
+  repository_stop?: RepositoryStop;
   patch_proposal: null | { proposal_id: string; revision: number; approval_id: string; status: string; summary: string; patch_artifact_ref: string; patch_sha256: string; expires_at: string; allowed_paths: string[]; test_args: string[] };
   approval: null | { id: string; status: string; fingerprint: string; expires_at: string };
   iterations: { index: number; input_tree_digest: string; patch_digest: string; command_refs: string[]; result_artifacts: string[] }[];
@@ -390,8 +423,12 @@ function safeArtifactRef(value: unknown): value is string {
 
 function validateRepositoryReview(value: unknown, jobId: string): RepositoryReview {
   if (!isRecord(value) || !exactKeys(value, ["native_child_id", "repository_job_id", "iteration_index", "iteration_id", "preparation_digest", "contact_state", "source_preview_path"])
-    || !isBoundedString(value.native_child_id, 128) || value.repository_job_id !== jobId
-    || !Number.isSafeInteger(value.iteration_index) || Number(value.iteration_index) < 1 || Number(value.iteration_index) > 3
+    || !isBoundedString(value.native_child_id, 128) || value.repository_job_id !== jobId) throw new Error("The repository iteration binding is malformed.");
+  if (value.contact_state === "not_prepared") {
+    if (["iteration_index", "iteration_id", "preparation_digest", "source_preview_path"].some((key) => value[key] !== null)) throw new Error("The unprepared repository binding is malformed.");
+    return value as unknown as RepositoryReview;
+  }
+  if (!Number.isSafeInteger(value.iteration_index) || Number(value.iteration_index) < 1 || Number(value.iteration_index) > 3
     || !isSha256Digest(value.iteration_id) || !isSha256Digest(value.preparation_digest)
     || !["not_started", "started", "unknown", "closed"].includes(String(value.contact_state))
     || value.source_preview_path !== `/api/workflows/repo-repair/${jobId}/source-preview`) throw new Error("The repository iteration binding is malformed.");
@@ -400,11 +437,37 @@ function validateRepositoryReview(value: unknown, jobId: string): RepositoryRevi
 
 function validateRepositoryStatus(value: unknown, jobId: string): RepositorySourceStatus {
   const reject = (): never => { throw new Error("The repository Source status is malformed or belongs to another job."); };
-  if (!isRecord(value) || !exactKeys(value, ["job_id", "status", "revision", "repository_review", "patch_proposal", "approval", "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"])
+  const keys = ["job_id", "status", "revision", "repository_review", "patch_proposal", "approval", "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"];
+  if (isRecord(value) && Object.prototype.hasOwnProperty.call(value, "repository_stop")) keys.push("repository_stop");
+  if (!isRecord(value) || !exactKeys(value, keys)
     || value.job_id !== jobId || !isBoundedString(value.status, 64) || !isSafeNonNegativeInteger(value.revision, Number.MAX_SAFE_INTEGER)
     || !isBoundedString(value.recovery_action, 128) || typeof value.provider_contacted !== "boolean" || value.no_learning !== true || value.operator_visible !== true
     || !Array.isArray(value.iterations) || value.iterations.length > 3 || !Array.isArray(value.iteration_states) || value.iteration_states.length !== value.iterations.length) return reject();
   const review = validateRepositoryReview(value.repository_review, jobId);
+  const stop = value.repository_stop;
+  const automaticReasons = ["deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"];
+  if (Object.prototype.hasOwnProperty.call(value, "repository_stop")) {
+    if (!isRecord(stop) || !exactKeys(stop, ["reason", "pending", "limit_evidence", "limit_evidence_digest"])
+      || !["operator_cancelled", "iterations_exhausted", ...automaticReasons].includes(String(stop.reason)) || typeof stop.pending !== "boolean"
+      || (stop.pending ? value.status !== "running" || value.recovery_action !== "repository_stop_pending"
+        : value.status !== (stop.reason === "operator_cancelled" ? "cancelled" : "failed")
+          || value.recovery_action !== (stop.reason === "operator_cancelled" ? "repository_stopped" : `original_${stop.reason}`))) return reject();
+    const evidence = stop.limit_evidence;
+    if (automaticReasons.includes(String(stop.reason))) {
+      const timestamps = (item: unknown): item is string => typeof item === "string" && item.length <= 64
+        && /(?:Z|\+00:00)$/.test(item) && Number.isFinite(Date.parse(item));
+      if (!isRecord(evidence) || !exactKeys(evidence, ["schema_version", "original_limits_digest", "original_deadline_at", "original_server_bound_microusd", "root_liability_microusd", "group_liability_microusd", "group_calls", "original_root_max_cost_microusd", "original_group_max_cost_microusd", "original_group_max_calls", "goal_cutoff_at", "cause"])
+        || evidence.schema_version !== "repository.native_limit_evidence.v1" || !isSha256Digest(evidence.original_limits_digest)
+        || !isSha256Digest(stop.limit_evidence_digest) || evidence.cause !== stop.reason || !timestamps(evidence.original_deadline_at)
+        || (evidence.goal_cutoff_at !== null && !timestamps(evidence.goal_cutoff_at))
+        || ["original_server_bound_microusd", "root_liability_microusd", "group_liability_microusd", "group_calls", "original_root_max_cost_microusd", "original_group_max_cost_microusd", "original_group_max_calls"].some((key) => !isSafeNonNegativeInteger(evidence[key], Number.MAX_SAFE_INTEGER))
+        || Number(evidence.original_server_bound_microusd) === 0 || Number(evidence.original_group_max_calls) > 12
+        || (stop.reason === "goal_limit_exhausted" && (evidence.goal_cutoff_at === null || Date.parse(String(evidence.goal_cutoff_at)) !== Date.parse(String(evidence.original_deadline_at))))) return reject();
+    } else if (evidence !== null || stop.limit_evidence_digest !== null) return reject();
+  }
+  if (review.contact_state === "not_prepared" && (!isRecord(stop) || !automaticReasons.includes(String(stop.reason))
+    || value.patch_proposal !== null || value.approval !== null || value.provider_contacted !== false
+    || value.iterations.length !== 0 || value.iteration_states.length !== 0)) return reject();
   const opaqueRefs = (refs: unknown, max: number): refs is string[] => Array.isArray(refs) && refs.length >= 1 && refs.length <= max
     && new Set(refs).size === refs.length && refs.every((ref) => typeof ref === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(ref));
   for (const [position, item] of value.iterations.entries()) {
@@ -672,6 +735,8 @@ export function RepoRepairInspector({
     const payload = await requestJson(endpoint, {}, generation);
     if (isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, "repository_review")) {
       const next = validateRepositoryStatus(payload, jobId);
+      if (repositoryStatus && (next.repository_review.native_child_id !== repositoryStatus.repository_review.native_child_id
+        || next.revision < repositoryStatus.revision)) throw new Error("The repository Source status changed the original binding.");
       if (isCurrent(generation)) {
         setRepositoryStatus(next);
         setSourceMutationUncertain(false);
@@ -697,6 +762,10 @@ export function RepoRepairInspector({
       return next;
     } catch (cause) {
       if (isCurrent(generation) && !(cause instanceof StaleRepairRequest)) {
+        setRepositoryStatus(null);
+        setRepositoryPreview(null);
+        setAcknowledgedSource(false);
+        setAcknowledgedDiagnostics(false);
         setError(cause instanceof Error ? cause.message : "The repair status could not be read.");
       }
     } finally {
@@ -886,7 +955,7 @@ export function RepoRepairInspector({
   async function inspectRepositorySource() {
     const current = repositoryStatus;
     const generation = generationRef.current;
-    if (loading || busy || sourceMutationUncertain || !current || current.status !== "running" || current.recovery_action !== "review_code_egress" || current.repository_review.contact_state !== "not_started") return;
+    if (loading || busy || sourceMutationUncertain || !current || current.repository_stop || current.status !== "running" || current.recovery_action !== "review_code_egress" || current.repository_review.contact_state !== "not_started") return;
     setSourceLoading(true);
     setSourceError(null);
     setRepositoryPreview(null);
@@ -949,7 +1018,7 @@ export function RepoRepairInspector({
     const current = repositoryStatus;
     const preview = repositoryPreview;
     const generation = generationRef.current;
-    if (loading || busy || sourceMutationUncertain || !current || current.status !== "running") return;
+    if (loading || busy || sourceMutationUncertain || !current || current.repository_stop || current.repository_review.contact_state === "not_prepared" || current.status !== "running") return;
     if (kind === "consent" && (!preview || !acknowledgedSource || !acknowledgedDiagnostics || !isFiniteFutureTimestamp(preview.egress.original_deadline_at)
       || current.recovery_action !== "review_code_egress" || current.repository_review.contact_state !== "not_started")) return;
     const proposal = current.patch_proposal;
@@ -992,7 +1061,7 @@ export function RepoRepairInspector({
       }
       const next = validateRepositoryStatus(await requestJson(endpoint, {}, generation), jobId);
       if (next.repository_review.native_child_id !== iteration.native_child_id || next.revision < current.revision
-        || next.repository_review.iteration_index < iteration.iteration_index) throw new Error("The continuation readback changed the original repository binding.");
+        || next.repository_review.iteration_index === null || next.repository_review.iteration_index < iteration.iteration_index) throw new Error("The continuation readback changed the original repository binding.");
       if (kind === "resume") {
         if (!safeArtifactRef(receipt.manifest_artifact_ref) || !isSha256Digest(receipt.manifest_artifact_digest)
           || receipt.cleanup_proven !== true || !["failed", "succeeded"].includes(String(receipt.status))) throw new Error("Physical execution readback remains unverified.");
@@ -1194,13 +1263,25 @@ export function RepoRepairInspector({
     const current = repositoryForRender;
     const review = current.repository_review;
     const preview = repositoryPreview;
-    const canInspect = !sourceMutationUncertain && current.status === "running" && current.recovery_action === "review_code_egress" && review.contact_state === "not_started";
-    const canExecute = !sourceMutationUncertain && current.status === "running" && current.recovery_action === "execute_approved_patch" && current.patch_proposal?.status === "awaiting_approval"
+    const effectsBlocked = Boolean(current.repository_stop) || review.contact_state === "not_prepared";
+    const canInspect = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "review_code_egress" && review.contact_state === "not_started";
+    const canExecute = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "execute_approved_patch" && current.patch_proposal?.status === "awaiting_approval"
       && current.approval?.status === "approved" && isFiniteFutureTimestamp(current.approval.expires_at) && isFiniteFutureTimestamp(current.patch_proposal.expires_at);
     return <section className="rounded border border-cyan-400/30 p-3" aria-label="Repository repair execution">
       <div className="font-semibold">Repository repair</div>
-      <div>{statusLabel(current.status)} · iteration {review.iteration_index} of at most 3</div>
+      <div>{statusLabel(current.status)}{review.contact_state !== "not_prepared" && <> · iteration {review.iteration_index} of at most 3</>}</div>
       <div>Provider contact: {current.provider_contacted ? "recorded" : "not recorded"} · no learning</div>
+      {current.repository_stop && <div>
+        <div>Stop reason: {current.repository_stop.reason}</div>
+        <div role="status">{current.repository_stop.pending ? "Stop pending. Original durable and physical capacities remain retained." : "Original repository stop recorded."}</div>
+        {current.repository_stop.limit_evidence && <div>
+          <div>Recorded Root cost: {current.repository_stop.limit_evidence.root_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_root_max_cost_microusd} microusd</div>
+          <div>Recorded group cost: {current.repository_stop.limit_evidence.group_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_group_max_cost_microusd} microusd</div>
+          <div>Recorded group calls: {current.repository_stop.limit_evidence.group_calls} · original limit {current.repository_stop.limit_evidence.original_group_max_calls}</div>
+          <div>Original cutoff: {current.repository_stop.limit_evidence.original_deadline_at}</div>
+          {current.repository_stop.limit_evidence.goal_cutoff_at && <div>Original Goal cutoff: {current.repository_stop.limit_evidence.goal_cutoff_at}</div>}
+        </div>}
+      </div>}
       <button type="button" disabled={busy || loading} onClick={() => void refresh()}>Refresh repair status</button>
       {sourceMutationUncertain && <div role="status">Continuation outcome is uncertain. Refresh the original repair before another action.</div>}
       {error && <div role="alert">{error}</div>}{sourceError && <div role="alert">{sourceError}</div>}{notice && <div role="status">{notice}</div>}
@@ -1221,7 +1302,7 @@ export function RepoRepairInspector({
         <div>Approval: {statusLabel(current.approval?.status)} · {current.approval?.id ?? "unavailable"}</div>
         <div>Patch artifact: {current.patch_proposal.patch_artifact_ref} · {safeDigest(current.patch_proposal.patch_sha256)}</div>
         <div>Selected paths: {current.patch_proposal.allowed_paths.join(", ")} · named check arguments: {current.patch_proposal.test_args.join(" ")}</div>
-        {current.status === "running" && current.approval?.status === "pending" && onOpenApprovals && <button type="button" disabled={busy} onClick={onOpenApprovals}>Review exact patch approval</button>}
+        {!effectsBlocked && current.status === "running" && current.approval?.status === "pending" && onOpenApprovals && <button type="button" disabled={busy || loading} onClick={onOpenApprovals}>Review exact patch approval</button>}
         {canExecute && <button type="button" disabled={busy || loading} onClick={() => void continueRepository("resume")}>Execute this approved patch</button>}
       </div>}
       {current.iterations.map((iteration, position) => {

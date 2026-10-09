@@ -12,6 +12,7 @@ from src.workflows.repo_repair_source import (
     read_repository_original, stage_repository_publication_witness,
     assert_repository_publication_witness,
 )
+from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 from tests.test_repo_work_source_publication import selected_publisher
@@ -21,7 +22,7 @@ from tests.test_repo_work_source_publication import selected_publisher
 @pytest.mark.parametrize("drift", ["missing_task_result", "missing_board_readback",
     "reopened_attempt", "corrupt_final_artifact", "missing_plan_receipt", "corrupt_plan_receipt"])
 async def test_actual_source_publication_requires_complete_terminal_c1_evidence(
-        accounting_db, monkeypatch, drift):
+        accounting_db, monkeypatch, drift, repository_admission_signer):
     flow = await _actual_source_callback_journey(accounting_db, monkeypatch,
         False, "test_python", publication_profile=True)
     _publisher, _adapter, _connection, transport = await selected_publisher(flow, monkeypatch)

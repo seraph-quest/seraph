@@ -18,6 +18,7 @@ from src.extensions.github_consent import GitHubConsentRequest, PUBLICATION_ACTI
 from src.extensions.github_followthrough import GitHubFollowthroughService
 from src.vault.repository import vault_repository
 from src.workflows.repo_publication import PrepareRequest, ReconcileRequest, RepoPublicationService
+from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.repo_publication_support import GitDataTransport
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
@@ -77,7 +78,7 @@ def test_publication_supervisor_wrong_unix_socket_type_rejects_without_command(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
 @pytest.mark.parametrize("three_iterations", [False, True])
-async def test_actual_source_final_patch_separate_publication_approval_and_readback(accounting_db, monkeypatch, unknown, three_iterations):
+async def test_actual_source_final_patch_separate_publication_approval_and_readback(accounting_db, monkeypatch, unknown, three_iterations, repository_admission_signer):
     flow = await _actual_source_callback_journey(accounting_db, monkeypatch,
         three_iterations, "test_python", publication_profile=True)
     owner, jobs, source = flow["owner"], flow["jobs"], flow["service"].repository_source_service
@@ -232,7 +233,7 @@ async def test_actual_source_final_patch_separate_publication_approval_and_readb
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
-async def test_ordinary_source_profiles_keep_actual_local_patch_when_publication_blocked(accounting_db, monkeypatch, language):
+async def test_ordinary_source_profiles_keep_actual_local_patch_when_publication_blocked(accounting_db, monkeypatch, language, repository_admission_signer):
     from src.workflows.repo_repair_source import stage_repository_publication_witness
     from src.workflows.job_runtime import DurableJobLeaseError
     flow = await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)

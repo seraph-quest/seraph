@@ -650,6 +650,29 @@ class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
     no_learning: Literal[True] = True
 
 
+class RepositoryReview(ClosedTaskModel):
+    """Grantless discovery metadata, never an execution authority."""
+    native_child_id: NativeInvocationIdentity
+    repository_job_id: TaskIdentity
+    iteration_index: int | None = Field(ge=1, le=3)
+    iteration_id: TaskDigest | None
+    preparation_digest: TaskDigest | None
+    contact_state: Literal["not_started", "started", "unknown", "closed", "not_prepared"]
+    source_preview_path: str | None = Field(max_length=512)
+
+    @model_validator(mode="after")
+    def exact_preparation_discriminant(self):
+        fields = (self.iteration_index, self.iteration_id, self.preparation_digest, self.source_preview_path)
+        if self.contact_state == "not_prepared":
+            if any(value is not None for value in fields):
+                raise ValueError("not-prepared discovery contains no preparation")
+        elif any(value is None for value in fields):
+            raise ValueError("prepared discovery requires every original preparation field")
+        elif self.source_preview_path != "/api/workflows/repo-repair/" + self.repository_job_id + "/source-preview":
+            raise ValueError("original repository preview identity changed")
+        return self
+
+
 class RepositoryNativeLimitEvidenceV1(ClosedTaskModel):
     schema_version: Literal["repository.native_limit_evidence.v1"] = "repository.native_limit_evidence.v1"
     original_limits_digest: TaskDigest

@@ -241,7 +241,7 @@ async def _limit_evidence(db, context, *, reason):
     now, bound = _utc_now(), limits["original_server_bound_microusd"]
     causes = {
         "deadline_exhausted": now >= cutoff,
-        "goal_limit_exhausted": now >= goal_cutoff and cutoff <= goal_cutoff,
+        "goal_limit_exhausted": now >= goal_cutoff and cutoff == goal_cutoff,
         "cost_exhausted": work.limits.max_cost_microusd - root_cost < bound,
         "shared_group_exhausted": len(members) >= group.max_inference_calls or group.max_cost_microusd - group_cost < bound
             or now >= group.original_deadline_at,

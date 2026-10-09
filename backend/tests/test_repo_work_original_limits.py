@@ -15,6 +15,7 @@ from src.workflows.repo_repair_source import (
     read_repository_inventory, read_repository_original,
 )
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
+from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import actual_native_source, _actual_source_callback_journey
 
 
@@ -30,7 +31,7 @@ async def actual_original_limits(accounting_db, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["goal_budget", "goal_revision", "goal_owner", "goal_revoked",
     "policy_bound_lowered", "inventory_missing_limits", "inventory_digest", "inventory_unknown_field"])
-async def test_actual_original_limits_drift_blocks_before_private_read(accounting_db, monkeypatch, drift):
+async def test_actual_original_limits_drift_blocks_before_private_read(accounting_db, monkeypatch, repository_admission_signer, drift):
     factory, owner, source, jobs, root_id = await actual_original_limits(accounting_db, monkeypatch)
     async with factory() as db:
         root = await jobs._fetch(db, root_id)
@@ -91,7 +92,7 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
 @pytest.mark.parametrize("cause", ["cost_exhausted", "shared_group_exhausted"])
-async def test_actual_original_limit_after_failed_patch_releases_only_terminal(accounting_db, monkeypatch, language, cause):
+async def test_actual_original_limit_after_failed_patch_releases_only_terminal(accounting_db, monkeypatch, repository_admission_signer, language, cause):
     from src.work_board.contracts import TaskLimits
     task_limits = TaskLimits(max_inference_calls=1 if cause == "shared_group_exhausted" else 5,
         max_cost_microusd=500, wall_seconds=900)
@@ -104,7 +105,7 @@ async def test_actual_original_limit_after_failed_patch_releases_only_terminal(a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", [False, True])
-async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer(accounting_db, monkeypatch, rollback):
+async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer(accounting_db, monkeypatch, repository_admission_signer, rollback):
     from types import SimpleNamespace
     from src.workflows import repo_repair_source as source_module
     from src.model_fabric import effective_policy
@@ -162,7 +163,7 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cutoff_kind", ["repository_wall", "c1_wall", "goal_runtime", "goal_due", "goal_period"])
-async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_db, monkeypatch, cutoff_kind):
+async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_db, monkeypatch, repository_admission_signer, cutoff_kind):
     from datetime import datetime, timedelta, timezone
     from src.work_board.contracts import TaskLimits
     from src.workflows.repo_repair_source import _repository_record
@@ -208,8 +209,50 @@ async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_
 
 
 @pytest.mark.asyncio
+async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(accounting_db, monkeypatch, repository_admission_signer):
+    from datetime import datetime, timedelta, timezone
+    from src.workflows.repo_repair_stop import stop_repository_root
+    now = datetime.now(timezone.utc)
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False,
+        work_limits={"max_iterations": 3, "max_total_seconds": 10, "max_cost_usd": 0.0010019},
+        goal_limits={"due_date": now + timedelta(seconds=15)})
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner="actual-later-goal-worker", principal=operator.principal)
+    root_id, source = prepared["repository_job_id"], service.repository_source_service
+    async with factory() as db:
+        root = await jobs._fetch(db, root_id)
+        original = read_repository_original(root)[0]
+        limits = read_repository_inventory(root)["original_limits"]
+        cutoff = datetime.fromisoformat(original["original_deadline_at"])
+        goal_cutoff = datetime.fromisoformat(limits["original_goal_limits"]["due_date"])
+        assert cutoff < goal_cutoff
+    await asyncio.sleep(max(0, (goal_cutoff - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+    reads = []
+    original_read = source._read_private_artifact
+    def forbidden_read(*args, **kwargs):
+        reads.append(args)
+        raise AssertionError("Wrong governing Goal cause cannot reopen private Source")
+    monkeypatch.setattr(source, "_read_private_artifact", forbidden_read)
+    with pytest.raises(DurableJobLeaseError, match="limit cause is unproven"):
+        await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
+            general_task_service=service, reason="goal_limit_exhausted")
+    assert reads == []
+    async with factory() as db:
+        root = await jobs._fetch(db, root_id)
+        assert root.status == "running" and jobs._repo_repair_reservation_state(root)["status"] == "held"
+        assert read_repository_original(root)[0] == original
+        assert list((await db.scalars(select(InferenceCostReservation))).all()) == []
+    monkeypatch.setattr(source, "_read_private_artifact", original_read)
+    stopped = await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
+        general_task_service=service, reason="deadline_exhausted")
+    assert stopped["pending"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("zero_limit", ["root_cost", "group_cost", "group_calls"])
-async def test_actual_original_zero_allowance_stops_before_contact(accounting_db, monkeypatch, zero_limit):
+async def test_actual_original_zero_allowance_stops_before_contact(accounting_db, monkeypatch, repository_admission_signer, zero_limit):
     from src.work_board.contracts import TaskLimits
     task_limits = TaskLimits(max_inference_calls=0 if zero_limit == "group_calls" else 5,
         max_cost_microusd=0 if zero_limit == "group_cost" else 500, wall_seconds=900)
@@ -232,7 +275,7 @@ async def test_actual_original_zero_allowance_stops_before_contact(accounting_db
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["artifact_metadata", "artifact_ttl", "envelope_group", "envelope_source",
     "wrong_actor", "no_automatic_cause"])
-async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accounting_db, monkeypatch, drift):
+async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accounting_db, monkeypatch, repository_admission_signer, drift):
     from datetime import datetime, timedelta, timezone
     from src.db.models import WorkBoardTask, WorkBoardInputArtifact
     from src.work_board.contracts import TaskLimits, WorkBoardOwner

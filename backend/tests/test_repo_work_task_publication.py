@@ -17,6 +17,7 @@ from src.work_board.contracts import (GeneralTaskCreate, GeneralTaskInput,
 from src.work_board.general_task import GeneralTaskService, digest
 from src.work_board.repository import BoardError
 from src.workflows.repo_repair import RepoRepairService, RepoWorkInput
+from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, prepare, forbid_external_inference
 from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
@@ -116,6 +117,9 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
                 'output_contract': prior_descriptor.output_schema}, repair])})
     service = GeneralTaskService(registry, repository_source_service=source)
     service.start()
+    signer = getattr(factory, "_repository_admission_signer", None)
+    if signer is not None:
+        await signer.start()
     return factory, workspace, owner, service, request
 
 
@@ -310,12 +314,12 @@ async def admit_existing_source_request(factory, owner, service, request, *, cla
 
 
 @pytest.mark.asyncio
-async def test_actual_source_task_original_native_child_binding(accounting_db, monkeypatch):
+async def test_actual_source_task_original_native_child_binding(accounting_db, monkeypatch, repository_admission_signer):
     await actual_native_source(accounting_db, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_actual_precontact_owner_prepares_original_child_once(accounting_db, monkeypatch):
+async def test_actual_precontact_owner_prepares_original_child_once(accounting_db, monkeypatch, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
         repository_review_projection, repository_source_preview, read_repository_original)
@@ -356,7 +360,7 @@ async def test_actual_precontact_owner_prepares_original_child_once(accounting_d
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
 @pytest.mark.parametrize('entry', ['source', 'parent_task', 'repository_task'])
-async def test_actual_source_stop_before_contact_atomic_original(accounting_db, monkeypatch, language, entry):
+async def test_actual_source_stop_before_contact_atomic_original(accounting_db, monkeypatch, language, entry, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source
     from src.workflows.repo_repair_stop import stop_repository_root
@@ -411,7 +415,7 @@ async def test_actual_source_stop_before_contact_atomic_original(accounting_db, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_terminal_release_admits_distinct_successor(accounting_db, monkeypatch, language):
+async def test_actual_source_terminal_release_admits_distinct_successor(accounting_db, monkeypatch, language, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source, read_repository_original, _repository_record
     from src.workflows.repo_repair_stop import stop_repository_root
@@ -447,7 +451,7 @@ async def test_actual_source_terminal_release_admits_distinct_successor(accounti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['second_cas', 'event'])
-async def test_actual_source_stop_writer_failure_retains_original(accounting_db, monkeypatch, failure):
+async def test_actual_source_stop_writer_failure_retains_original(accounting_db, monkeypatch, failure, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source
     from src.workflows import repo_repair_stop as stop
@@ -527,7 +531,7 @@ async def test_actual_source_stop_writer_failure_retains_original(accounting_db,
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
 @pytest.mark.parametrize('drift', ['unchanged', 'unknown_task_field'])
-async def test_actual_source_stop_restart_rebinds_only_original_physical_owner(accounting_db, monkeypatch, language, drift):
+async def test_actual_source_stop_restart_rebinds_only_original_physical_owner(accounting_db, monkeypatch, language, drift, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source
     from src.workflows.repo_repair_stop import stop_repository_root
@@ -582,7 +586,7 @@ async def test_actual_source_stop_restart_rebinds_only_original_physical_owner(a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('ordinary_closure', ['positive', 'missing'])
-async def test_actual_source_stop_preserves_prior_ordinary_closure_requirement(accounting_db, monkeypatch, ordinary_closure):
+async def test_actual_source_stop_preserves_prior_ordinary_closure_requirement(accounting_db, monkeypatch, ordinary_closure, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source
     from src.workflows.repo_repair_stop import stop_repository_root
@@ -625,7 +629,7 @@ async def test_actual_source_stop_preserves_prior_ordinary_closure_requirement(a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_unknown_model_cost_retains_original_capacity(accounting_db, monkeypatch, language):
+async def test_actual_source_unknown_model_cost_retains_original_capacity(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
         unknown_model_cost=True)
 
@@ -1101,13 +1105,13 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
 @pytest.mark.asyncio
 @pytest.mark.parametrize('three_iterations', [False, True])
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_consent_callback_and_settled_c1_wait(accounting_db, monkeypatch, three_iterations, language):
+async def test_actual_source_consent_callback_and_settled_c1_wait(accounting_db, monkeypatch, three_iterations, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_success_release_admits_explicit_successor(accounting_db, monkeypatch, language):
+async def test_actual_source_success_release_admits_explicit_successor(accounting_db, monkeypatch, language, repository_admission_signer):
     from src.auth.service import authenticate_session
     from src.workflows.repo_repair_source import prepare_repository_native_source, read_repository_original
     finished = await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
@@ -1135,54 +1139,54 @@ async def test_actual_source_success_release_admits_explicit_successor(accountin
 
 
 @pytest.mark.asyncio
-async def test_actual_node_source_three_iterations_build_and_test(accounting_db, monkeypatch):
+async def test_actual_node_source_three_iterations_build_and_test(accounting_db, monkeypatch, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, True, 'test_node', node_build=True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_stop_contacted_wait_settles_original(accounting_db, monkeypatch, language):
+async def test_actual_source_stop_contacted_wait_settles_original(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
         stop_at='contacted_wait')
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_stop_failed_process_full_readback(accounting_db, monkeypatch, language):
+async def test_actual_source_stop_failed_process_full_readback(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
         stop_at='failed_process')
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_stop_active_supervisor_keeps_original_until_reaped(accounting_db, monkeypatch, language):
+async def test_actual_source_stop_active_supervisor_keeps_original_until_reaped(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
         stop_at='active_process')
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_three_failed_iterations_terminal_original(accounting_db, monkeypatch, language):
+async def test_actual_source_three_failed_iterations_terminal_original(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
         stop_at='iterations_exhausted')
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['missing', 'tampered', 'body_hash'])
-async def test_actual_node_build_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift):
+async def test_actual_node_build_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, 'test_node',
         node_readback_drift=drift, node_build=True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['missing', 'tampered', 'copied'])
-async def test_actual_node_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift):
+async def test_actual_node_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, 'test_node', node_readback_drift=drift)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('goal_capacity', [None, 1, 2])
-async def test_actual_original_repository_admission_mints_protected_source(accounting_db, monkeypatch, goal_capacity):
+async def test_actual_original_repository_admission_mints_protected_source(accounting_db, monkeypatch, goal_capacity, repository_admission_signer):
     factory, owner, service, jobs, binding, request = await actual_native_source(accounting_db, monkeypatch,
         goal_capacity=goal_capacity)
     from datetime import datetime, timedelta, timezone

@@ -721,6 +721,168 @@ async def _prepared_repository_projection(db, run, *, owner):
         "verified": False, "no_learning": True}
 
 
+async def _repository_discovery_metadata(db, run, *, owner, service=None):
+    """One SQL-only stop/discovery projection; grants no action or private read."""
+    from sqlalchemy import select
+    from src.db.models import (WorkflowRunState, WorkBoardTask, WorkBoardAttempt,
+        WorkBoardInputArtifact, OperatorSession, Goal, RepoRepairProposal, InferenceCostReservation)
+    from src.work_board.contracts import RepositoryReview, RepositoryNativeLimitEvidenceV1, RepositoryNativeStopClosureV1
+    from src.workflows.general_task_guard import child_binding, read_general_task_native_cancel
+    from src.workflows.job_runtime import DurableJobRepository, DurableJobLeaseError, _binding, _as_utc, _utc_now
+    from src.workflows.repo_repair_stop import AUTOMATIC_REASONS, _static, _key, _accounting
+    original, work, _, group, binding, task_source = read_repository_original(run)
+    if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
+        raise DurableJobLeaseError("original repository discovery owner changed")
+    stop = _repository_record(run, "repository:stop-intent:v1")
+    if stop is None:
+        projection = await _prepared_repository_projection(db, run, owner=owner)
+        RepositoryReview.model_validate({key: projection[key] for key in RepositoryReview.model_fields})
+        return projection, None
+    inventory = read_repository_inventory(run)
+    reason = stop.get("stop_reason")
+    automatic = reason in AUTOMATIC_REASONS
+    expected_stop = {"schema", "stop_reason", "native_binding_digest", "static_rows",
+        "snapshot_artifact_ref", "snapshot_artifact_digest", "no_learning"}
+    if automatic:
+        expected_stop |= {"limit_evidence", "limit_evidence_digest"}
+    if (set(stop) != expected_stop or stop.get("schema") != "repository.stop_intent.v1"
+            or reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS
+            or stop.get("native_binding_digest") != _source_digest(binding.model_dump(mode="json"))
+            or stop.get("no_learning") is not True or not isinstance(stop.get("static_rows"), dict)
+            or stop.get("snapshot_artifact_ref") != "workspace-json:artifacts/repo-repair/stop-" + _source_digest(run.run_identity) + ".json"
+            or stop.get("snapshot_artifact_digest") != _source_digest({"schema": "repository.stop_snapshot.v1",
+                "static_rows": stop["static_rows"], "repository_job_id": run.run_identity,
+                "source_checkpoint_digest": _source_digest(original)})):
+        raise DurableJobLeaseError("original repository stop discovery binding changed")
+    evidence = None
+    if automatic:
+        try:
+            evidence_model = RepositoryNativeLimitEvidenceV1.model_validate(stop["limit_evidence"])
+            evidence = evidence_model.model_dump(mode="json")
+        except (ValueError, TypeError) as exc:
+            raise DurableJobLeaseError("original repository stop limit metadata changed") from exc
+        limits = inventory["original_limits"]
+        goal_cutoff = _repository_goal_cutoff(limits, group)
+        if (evidence != stop["limit_evidence"] or _source_digest(evidence) != stop["limit_evidence_digest"]
+                or evidence["cause"] != reason or evidence["original_limits_digest"] != inventory["original_limits_digest"]
+                or evidence["original_server_bound_microusd"] != limits["original_server_bound_microusd"]
+                or evidence_model.original_deadline_at != _as_utc(run.deadline_at)
+                or evidence["original_root_max_cost_microusd"] != work.limits.max_cost_microusd
+                or evidence["original_group_max_cost_microusd"] != group.max_cost_microusd
+                or evidence["original_group_max_calls"] != group.max_inference_calls
+                or evidence_model.goal_cutoff_at != goal_cutoff
+                or (reason == "goal_limit_exhausted" and evidence_model.original_deadline_at != evidence_model.goal_cutoff_at)):
+            raise DurableJobLeaseError("original repository recorded limit binding changed")
+    terminal = _repository_record(run, "repository:terminal:v1")
+    hold = DurableJobRepository._repo_repair_reservation_state(run)
+    # The repository terminal CAS retains its admitted fence. The original
+    # C1 child cancellation invalidates that separate child's fence.
+    fence = run.fencing_token
+    if (hold is None or not DurableJobRepository._repo_repair_reservation_matches(hold,
+            job_id=run.run_identity, attempt_id=original["repository_attempt_id"], fence=fence,
+            authority_digest=run.authority_digest)
+            or hold.get("execution_deadline_at") != original["original_deadline_at"]):
+        raise DurableJobLeaseError("original repository discovery reservation changed")
+    parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
+    child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.invocation_id))
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+    attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+    repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
+    repo_attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
+    session = await db.get(OperatorSession, owner.session_id)
+    goal = await db.get(Goal, binding.goal_id)
+    permanent = _binding(owner_principal_id=binding.owner_principal_id, goal_id=binding.goal_id,
+        goal_revision=binding.goal_revision, idempotency_scope="original-repository-child", dedupe_key=binding.invocation_id)
+    mapped = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.idempotency_binding == permanent))
+    if (any(row is None for row in (parent, child, task, attempt, repo_task, repo_attempt, session, goal))
+            or mapped is None or mapped.run_identity != run.run_identity or child_binding(child) != binding
+            or json.loads(child.arguments_json).get("tool_id") != "repository_work"
+            or session.principal_id != owner.principal_id or session.revoked_at is not None
+            or session.replaced_by_id or session.is_bearer_tombstone
+            or _as_utc(session.idle_expires_at) <= _utc_now() or _as_utc(session.absolute_expires_at) <= _utc_now()
+            or _source_digest(goal.model_dump(mode="json")) != inventory["original_limits"]["original_goal_row_digest"]
+            or (task.owner_principal_id, task.owner_session_id) != (owner.principal_id, owner.session_id)
+            or (repo_task.owner_principal_id, repo_task.owner_session_id) != (owner.principal_id, owner.session_id)
+            or attempt.task_id != task.task_id or attempt.workflow_run_id != parent.run_identity
+            or repo_attempt.task_id != repo_task.task_id or repo_attempt.workflow_run_id != run.run_identity):
+        raise DurableJobLeaseError("original repository stop discovery lineage changed")
+    if terminal is None:
+        if run.status not in {"running", "unknown_external_effect"} or hold["status"] != "held":
+            raise DurableJobLeaseError("original repository Pending discovery state changed")
+        if service is not None:
+            lane = service._iterative_lanes.get(run.run_identity)
+            if lane is not None and not lane.acquired:
+                raise DurableJobLeaseError("original repository Pending physical handle changed")
+        artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+        repo_artifact = await db.get(WorkBoardInputArtifact, repo_task.input_artifact_id)
+        context = {"run": run, "binding": binding}
+        rows = [run, parent, child, task, attempt, artifact, goal, session, repo_task, repo_attempt, repo_artifact]
+        if (artifact is None or repo_artifact is None or attempt.ended_at is not None
+                or attempt.cancel_requested_at is not None or repo_attempt.ended_at is not None
+                or repo_attempt.cancel_requested_at is not None
+                or stop["static_rows"] != {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows}):
+            raise DurableJobLeaseError("original repository Pending static snapshot changed")
+    else:
+        try:
+            closure = RepositoryNativeStopClosureV1.model_validate(terminal["closure"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise DurableJobLeaseError("original repository terminal discovery closure changed") from exc
+        artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+        repo_artifact = await db.get(WorkBoardInputArtifact, repo_task.input_artifact_id)
+        artifact_context = {"run": run, "binding": binding}
+        artifacts_unchanged = all(row is not None and stop["static_rows"].get(
+            type(row).__tablename__ + ":" + str(_key(row))) == _static(row, artifact_context)
+            for row in (artifact, repo_artifact))
+        accounting_digest = await _accounting(db, {"group": group, "run": run, "work": work, "original": original})
+        if (set(terminal) != {"schema", "closure", "no_learning"}
+                or terminal["schema"] != "repository.stop_terminal.v1" or terminal["no_learning"] is not True
+                or closure.original_binding != binding or closure.repository_job_id != run.run_identity
+                or closure.repository_attempt_id != original["repository_attempt_id"] or closure.repository_fence != fence
+                or closure.stop_reason != reason or closure.stop_intent_digest != _source_digest(stop)
+                or closure.source_checkpoint_digest != _source_digest(original)
+                or closure.original_input_digest != _source_digest(original["original_input"])
+                or closure.original_group_digest != _source_digest(group.model_dump(mode="json"))
+                or closure.all_original_accounting_digest != accounting_digest
+                or closure.source_binding_digest != task_source.binding_digest
+                or closure.original_deadline_at.isoformat() != original["original_deadline_at"]
+                or (closure.limit_evidence.model_dump(mode="json") if closure.limit_evidence else None) != evidence
+                or closure.limit_evidence_digest != stop.get("limit_evidence_digest")
+                or run.status != ("cancelled" if reason == "operator_cancelled" else "failed")
+                or run.finished_at is None or run.lease_owner is not None or run.lease_expires_at is not None
+                or hold["status"] != "released" or hold.get("outcome_status") != run.status
+                or read_general_task_native_cancel(parent, task, attempt)["state"] != "fully_cancelled"
+                or child.status != "cancelled" or repo_attempt.ended_at is None
+                or repo_attempt.lease_owner is not None or repo_attempt.lease_expires_at is not None
+                or repo_attempt.outcome != "repository_" + reason or not artifacts_unchanged
+                or repo_task.status != "blocked" or repo_task.block_reason != "repository_" + reason):
+            raise DurableJobLeaseError("original repository terminal discovery evidence changed")
+    prepared_exists = False
+    other_exists = False
+    for index in range(1, work.limits.max_iterations + 1):
+        identity = iteration_identity(run.run_identity, original["repository_attempt_id"], _source_digest(original["original_input"]), index)
+        prepared_exists |= _repository_record(run, "repository:prepared:" + identity) is not None
+        other_exists |= any(_repository_record(run, "repository:" + kind + ":" + identity) is not None
+            for kind in ("callback-start", "request", "response", "proposal", "patch", "approval",
+                "execution", "cleanup", "readback", "accounting", "iteration"))
+    if prepared_exists:
+        projection = await _prepared_repository_projection(db, run, owner=owner)
+    else:
+        proposal = await db.scalar(select(RepoRepairProposal.proposal_id).where(
+            RepoRepairProposal.workflow_run_id == run.run_identity).limit(1))
+        accounting = await db.scalar(select(InferenceCostReservation.operation_id).where(
+            InferenceCostReservation.job_id == run.run_identity).limit(1))
+        if (not automatic or other_exists or proposal is not None or accounting is not None
+                or (terminal is None and run.status != "running")):
+            raise DurableJobLeaseError("original automatic not-prepared discovery is unproven")
+        projection = {"awaiting_repository_consent": False, "native_execution": True,
+            "native_child_id": binding.invocation_id, "repository_job_id": run.run_identity,
+            "iteration_index": None, "iteration_id": None, "preparation_digest": None,
+            "contact_state": "not_prepared", "source_preview_path": None, "verified": False, "no_learning": True}
+    RepositoryReview.model_validate({key: projection[key] for key in RepositoryReview.model_fields})
+    return projection, {"reason": reason, "pending": terminal is None, "limit_evidence": evidence,
+        "limit_evidence_digest": stop.get("limit_evidence_digest")}
+
+
 async def repository_review_projection(db, *, task, attempt, owner):
     from sqlalchemy import select
     from src.db.models import WorkflowRunState
@@ -747,7 +909,7 @@ async def repository_review_projection(db, *, task, attempt, owner):
         original, *_ = read_repository_original(run)
         if original["native_binding"] != binding.model_dump(mode="json") or binding.task_id != task.task_id:
             raise DurableJobLeaseError("original repository discovery binding changed")
-        projection = await _prepared_repository_projection(db, run, owner=owner)
+        projection, _ = await _repository_discovery_metadata(db, run, owner=owner)
         return {name: projection[name] for name in ("native_child_id", "repository_job_id",
             "iteration_index", "iteration_id", "preparation_digest", "contact_state", "source_preview_path")}
     return None
@@ -810,9 +972,9 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
             raise DurableJobLeaseError("original repository metadata owner changed")
         # This projection grants no contact, process, resume or private read.
         # Each corresponding action independently stages its current source.
-        projection = await _prepared_repository_projection(None, run, owner=owner)
+        projection, stop_metadata = await _repository_discovery_metadata(db, run, owner=owner, service=service)
         identity = projection["iteration_id"]
-        proposal = await db.get(RepoRepairProposal, "repository-proposal:" + identity)
+        proposal = await db.get(RepoRepairProposal, "repository-proposal:" + identity) if identity is not None else None
         approval = await db.get(ApprovalRequest, proposal.approval_id) if proposal is not None else None
         if proposal is not None and (proposal.workflow_run_id != job_id
                 or (proposal.owner_principal_id, proposal.owner_session_id) != (owner.principal_id, owner.session_id)):
@@ -879,7 +1041,8 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
                 "fingerprint": approval.fingerprint, "expires_at": _as_utc(approval.expires_at).isoformat()},
             "iterations": iterations, "iteration_states": iteration_states, "recovery_action": action,
             "provider_contacted": provider_contacted,
-            "no_learning": True, "operator_visible": True}
+            "no_learning": True, "operator_visible": True,
+            **({"repository_stop": stop_metadata} if stop_metadata is not None else {})}
 
 
 def _validate_repository_command_results(values):

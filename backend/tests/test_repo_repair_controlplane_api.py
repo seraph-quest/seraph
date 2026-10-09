@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from src.api import workflows as workflows_api
 from src.api.workflows import RepoRepairEgressConsentRequest
+from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_inference_accounting import accounting_db
 
 
@@ -211,8 +212,7 @@ async def test_corrupt_source_root_fails_closed_before_legacy_preview(monkeypatc
 
 @pytest.mark.asyncio
 async def test_authenticated_source_preview_and_consent_use_actual_source_services(
-    accounting_db, monkeypatch
-):
+    accounting_db, monkeypatch, repository_admission_signer):
     """Exercise the real GET -> exact POST -> one callback control-plane path."""
 
     import httpx
@@ -407,8 +407,7 @@ async def _true():
 @pytest.mark.parametrize("language,readback_drift", [("test_python", False),
     ("test_node", False), ("test_node", True)])
 async def test_authenticated_source_three_iteration_approval_execution_and_readback(
-    accounting_db, monkeypatch, language, readback_drift,
-):
+    accounting_db, monkeypatch, language, readback_drift, repository_admission_signer):
     """Real auth/API/SQLite/CPU execution; only final HTTP bytes are scripted."""
     import httpx
     from sqlalchemy import select

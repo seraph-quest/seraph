@@ -1213,11 +1213,9 @@ preserves its existing bytes for recovery through the evolution owner.
 Model reflection remains unavailable because no existing consent authorizes task-trace
 egress. No model call or spend is needed to draft a supported lesson.
 
-This section records the intended supported scope after merge; it makes no
-pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
-remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
-change task execution. Isolated local checks establish these mechanics, not
-learned quality or general usefulness.
+Generic memory acceptance rejects `task_method_proposal.v1`; a draft alone
+never changes task execution. Isolated local checks establish these mechanics,
+not learned quality or general usefulness.
 
 The actual authenticated formatter-to-lesson failure journey is verified on the
 implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
@@ -1225,6 +1223,60 @@ permitted`, process cleanup is proven, no formatted output is adopted, and an
 explicit correction creates an inspectable private inert method. The positive
 formatter journey remains blocked by that host sandbox limitation; this receipt
 does not establish successful formatter execution or lesson quality.
+
+### Reviewed task methods
+
+The [#1001](https://github.com/seraph-quest/seraph/issues/1001) capability is
+available on `develop` revisions containing its independently reviewed milestone
+merge. Earlier revisions require that merge; implementation-branch receipts do
+not establish their availability. [ADR-028](./decisions/028-reviewed-task-methods.md)
+defines the accepted boundary.
+
+In the existing Task Inspector, inspect the original source, observed method,
+explicit correction and exact typed candidate before accepting or rejecting it.
+Acceptance atomically writes a signed canonical pattern and a signed active
+selection for the stable operator, exact Goal revision and task family. Each
+scope admits at most 16 immutable accepted versions; exhaustion requires review
+and does not evict history. Current authority, source receipts, signatures and
+selection revision are checked again by the canonical writer. A recovered login
+can inspect an explicitly selected Goal but cannot adopt or roll back its method.
+Missing, stale, revoked or tampered state is visibly blocked; it cannot silently
+select baseline. A demonstrably never-selected scope retains ordinary baseline.
+
+A subsequent general task applies supported registered tool sequences and
+finite source-existence, verified-readback or attribution guards through its
+existing PlanSpec, approvals and native execution. Fixed formatter capability
+steps remain inspectable but unsupported for adoption by that consumer. An
+explicit structured research candidate requires a completed research-dossier
+task and verified original native output. When the server verifies that source,
+the existing Task Inspector offers bounded research fields for query templates,
+source preferences, evidence fields, draft sections and stop conditions. Review
+the original Task, Attempt, Goal revision, source references and observed receipt
+in both the private draft and canonical review; adoption requires an explicit
+acknowledgment. Preparing a candidate stays inert. Reopening a known candidate
+reads that original candidate, while an uncertain preparation requires explicit
+reconciliation of the same request. Public discovery applies its approved
+query templates, source preferences, evidence fields, draft sections and stop
+conditions within the original finite programme grant. Research dossier itself
+continues to use its explicit baseline. Candidate JSON cannot install tools,
+grant permissions or change providers, budgets, credentials or runtime limits;
+it is excluded from generic recall, prompts, semantic indexing and generic M5
+selection.
+
+**Rollback to baseline** changes future selection. An already admitted task or
+discovery retains its original immutable version while current authority and
+source remain valid. Tombstones, explicit revocation, changed Goal/source state
+or expired original grants block the next owned boundary. Rollback does not
+renew a contacted job, grant, deadline or allowance. The Inspector retains the
+literal previous version and source for review.
+
+Provider-free Linux receipts cover authenticated review, actual completed native
+general-task source and subsequent physical output, and actual research-dossier
+source followed by public discovery using its approved strategy. They also cover
+future baseline after rollback, original-pin continuation, read-only recovery,
+source/signature/selection tamper and revocation before contact. Scripted final
+transport proves these mechanics; learned quality, provider usefulness and
+native macOS execution remain unverified.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 

@@ -4417,7 +4417,8 @@ class WorkBoardDispatcher:
                     return "general_task_goal_binding_changed", "Task intent belongs to a different goal"
                 async with self.session_provider() as db:
                     await self.general_tasks.recheck_authority(db,
-                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), envelope)
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), envelope,
+                        require_current_strategy=True)
                 return None, None
             if capability == "work.document-compare.v1":
                 from src.work_board.document_pairs import source_pair

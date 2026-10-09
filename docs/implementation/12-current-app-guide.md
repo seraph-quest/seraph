@@ -1248,7 +1248,14 @@ finite source-existence, verified-readback or attribution guards through its
 existing PlanSpec, approvals and native execution. Fixed formatter capability
 steps remain inspectable but unsupported for adoption by that consumer. An
 explicit structured research candidate requires a completed research-dossier
-task and verified original native output. Public discovery applies its approved
+task and verified original native output. When the server verifies that source,
+the existing Task Inspector offers bounded research fields for query templates,
+source preferences, evidence fields, draft sections and stop conditions. Review
+the original Task, Attempt, Goal revision, source references and observed receipt
+in both the private draft and canonical review; adoption requires an explicit
+acknowledgment. Preparing a candidate stays inert. Reopening a known candidate
+reads that original candidate, while an uncertain preparation requires explicit
+reconciliation of the same request. Public discovery applies its approved
 query templates, source preferences, evidence fields, draft sections and stop
 conditions within the original finite programme grant. Research dossier itself
 continues to use its explicit baseline. Candidate JSON cannot install tools,

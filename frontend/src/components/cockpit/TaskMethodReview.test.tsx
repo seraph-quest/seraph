@@ -5,7 +5,7 @@ import type { WorkBoardTask } from "../../types";
 import { TaskMethodReview } from "./TaskMethodReview";
 vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
 const task = { task_id: "task", task_revision: 3, goal_id: "goal", goal_revision: 2, owner_session_id: "session" } as WorkBoardTask;
-const data = { proposal_id: "proposal", expected_revision: 4, artifact_digest: "a".repeat(64), scope_digest: "b".repeat(64),
+const data = { task_id: "task", attempt_id: "attempt", source_refs: ["artifact:verified"], observed: { status: "completed", readback_digest: "c".repeat(64) }, proposal_id: "proposal", expected_revision: 4, artifact_digest: "a".repeat(64), scope_digest: "b".repeat(64),
   scope: { goal_id: "goal", goal_revision: 2, family: "general" }, old_method: null,
   new_method: { schema_version: "TaskMethod.v1", family: "general", steps: [{ kind: "registered_tool", tool_id: "read_file" }] },
   active_binding: null, quality_evidence: "unmeasured", adoption_requires_current_owner: false, configured_baseline: false };
@@ -22,6 +22,7 @@ it("requires literal inspection then posts the exact seven-field scope review", 
   expect(screen.queryByRole("button", { name: "Adopt reviewed method" })).toBeNull();
   await inspect();
   expect(screen.getByText(/Quality is unmeasured/)).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText("I reviewed this exact method and verified source evidence."));
   fireEvent.click(screen.getByRole("button", { name: "Adopt reviewed method" }));
   await screen.findByText(/Review recorded/);
   expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toEqual({ proposal_id: "proposal", expected_revision: 4,
@@ -43,6 +44,21 @@ it("blocks changed Goal scope and unmeasured evidence mismatch", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Inspect canonical method and scope" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("does not match");
   expect(screen.queryByRole("button", { name: "Adopt reviewed method" })).toBeNull();
+});
+it.each([
+  ["missing references", { source_refs: [] }],
+  ["different task", { task_id: "other-task" }],
+  ["different attempt", { attempt_id: "other-attempt" }],
+  ["different references", { source_refs: ["artifact:other"] }],
+  ["invalid observed receipt", { observed: { status: "completed", readback_digest: "invalid" } }],
+])("blocks canonical inspection with %s", async (_name, changed) => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...data, ...changed }));
+  render(<TaskMethodReview task={task} proposalId="proposal" owned attemptId="attempt" sourceRefs={["artifact:verified"]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect canonical method and scope" }));
+  await screen.findByRole("alert");
+  expect(screen.queryByRole("button", { name: "Adopt reviewed method" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "Canonical method source provenance" })).toBeNull();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
 });
 it("denies recovered review and clears late private data on owner change", async () => {
   let resolve!: (value: Response) => void;

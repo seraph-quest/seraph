@@ -205,7 +205,13 @@ these methods. New general tasks apply supported registered tool sequences and
 finite guards through existing PlanSpec/native execution; public discovery
 applies approved research fields within its original finite programme grant.
 Structured research proposals require exact completed research-dossier sources
-and verified native output; dossier execution itself remains explicit baseline.
+and verified native output. The existing Inspector exposes bounded structured
+research fields only for that verified source, shows original Task/Attempt/Goal
+revision/references/observed receipts in private and canonical inspection, and
+requires explicit acknowledgment before adoption. Candidate preparation remains
+inert; known-candidate recovery reads the same draft and uncertain preparation
+requires explicit same-request reconciliation. Dossier execution itself remains
+explicit baseline.
 Unsupported formatter capability steps cannot activate a general-task method.
 Rollback selects baseline for future work while an admitted original immutable
 pin may continue under current source and authority; tombstones and revocation

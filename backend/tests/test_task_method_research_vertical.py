@@ -218,6 +218,16 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
                 assert completed.status_code == 200, completed.text
             source = await client.get("/api/memory/task-lessons/sources/" + task_id)
             assert source.status_code == 200 and source.json()["source_refs"], source.text
+            assert source.json()["eligible"] is True and source.json()["source_current"] is True
+            assert source.json()["supported_candidate_kind"] == "research_strategy"
+            assert source.json()["task_id"] == task_id and source.json()["attempt_id"] == attempt_id
+            assert source.json()["observed"]["status"] == "completed"
+            from src.auth.service import authenticate_token
+            from src.memory.task_lessons import eligible_lesson_source
+            actual_operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+            automatic_source = await eligible_lesson_source(actual_operator, task_id, _automatic=True)
+            assert automatic_source["eligible"] is False and automatic_source["supported_candidate_kind"] is None
+            assert automatic_source["automatic_policy"] == source.json()["automatic_policy"]
             strategy = ResearchStrategy(query_templates=["official dated release evidence"], source_preferences=["official", "dated"],
                 required_evidence_fields=["url", "date", "excerpt", "limitation"], draft_sections=["Evidence", "Limitations"],
                 stop_conditions=["Stop without attributed evidence"])
@@ -227,8 +237,18 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
                     "strategy": strategy.model_dump(mode="json")})
             assert candidate.status_code == 201, candidate.text
             proposal_id = candidate.json()["proposal_id"]
+            assert candidate.json()["result"] == "candidate_inert"
+            private = await client.get("/api/memory/task-lessons/" + proposal_id)
+            assert private.status_code == 200, private.text
+            assert private.json()["source_current"] is True and private.json()["result"] == "candidate_inert"
+            assert private.json()["task_id"] == task_id and private.json()["attempt_id"] == attempt_id
+            assert private.json()["source_refs"] == source_data["source_refs"]
+            assert private.json()["new_method"] == strategy.model_dump(mode="json")
             preview = await client.get("/api/memory/task-methods/" + proposal_id)
             assert preview.status_code == 200, preview.text
+            assert preview.json()["task_id"] == task_id and preview.json()["attempt_id"] == attempt_id
+            assert preview.json()["source_refs"] == source_data["source_refs"]
+            assert preview.json()["observed"] == source_data["observed"]
             accepted = await client.post("/api/memory/task-methods/actions", json=review(preview.json(), "accept", "actual-research-adopt").model_dump(mode="json"))
             assert accepted.status_code == 200, accepted.text
             binding = await current.resolve(owner, goal_id, "guardian.goal-discovery.v1")

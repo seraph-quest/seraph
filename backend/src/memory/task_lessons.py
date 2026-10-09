@@ -916,7 +916,9 @@ async def inspect_task_lesson(operator, proposal_id):
     async with db_engine.get_session() as db:
         try:
             task, attempt, run, token = await _source(db, operator, request)
-            _, audit_token = await _observed_method(db, task, run, request.scope.family)
+            candidate = TypeAdapter(Candidate).validate_python(envelope["new_method"]) if envelope.get("new_method") is not None else None
+            structured = isinstance(candidate, ResearchStrategy) and task.capability_id == "work.research-dossier.v1"
+            _, audit_token = await _observed_method(db, task, run, request.scope.family, structured_research=structured)
             token["method_receipt"] = audit_token
             current = token == envelope["source_token"]
         except BoardError:
@@ -936,7 +938,7 @@ def proposal_projection(row):
         "revision": row.revision, "status": row.status.value, "reason_code": row.reason_code,
         "source_refs": json.loads(row.source_refs_json), "scope": scope,
         "candidate_digest": row.artifact_digest, "behavior_changed": False,
-        "result": "candidate_inert" if row.reason_code in {"explicit_correction", "observed_failure_candidate"} else "no_change",
+        "result": "candidate_inert" if row.reason_code in {"explicit_correction", "observed_failure_candidate", "explicit_structured_research_method"} else "no_change",
         "provider_contact_count": row.provider_contact_count, "quality_evidence": "unmeasured"}
 
 
@@ -953,7 +955,8 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
             "attempt_id": attempt.attempt_id if attempt else None, "source_refs": [],
             "scope": {"goal_id": task.goal_id, "goal_revision": task.goal_revision,
                 "family": "research" if "research" in (task.capability_id or "") else "general"},
-            "eligible": False, "reason_code": "lesson_attempt_unverified", "behavior_changed": False}
+            "eligible": False, "reason_code": "lesson_attempt_unverified", "behavior_changed": False,
+            "supported_candidate_kind": None, "source_current": False}
         payload["automatic_policy"] = await _automatic_policy(db, operator, task)
         latest_outcome = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == task.owner_principal_id,
@@ -990,9 +993,13 @@ async def eligible_lesson_source(operator, task_id, *, _automatic=False):
             source_refs=refs, scope=LessonScope.model_validate(payload["scope"]), expected_revision=task.task_revision)
         try:
             _, _, run, token = await _source(db, operator, request, automatic=_automatic)
-            method, _ = await _observed_method(db, task, run, request.scope.family)
+            structured = not _automatic and task.capability_id == "work.research-dossier.v1" and request.scope.family == "research"
+            method, audit = await _observed_method(db, task, run, request.scope.family, structured_research=structured)
         except BoardError as exc:
             return {**payload, "reason_code": exc.code}
-        return {**payload, "source_refs": refs, "eligible": method is not None,
-            "reason_code": "verified_ordinary_task" if method else "insufficient_method_evidence",
+        research = structured and audit is not None and token["observed"]["status"] == "completed"
+        return {**payload, "source_refs": refs, "eligible": research or method is not None,
+            "supported_candidate_kind": "research_strategy" if research else "task_method" if method is not None else None,
+            "source_current": True,
+            "reason_code": "verified_completed_research_strategy_source" if research else "verified_ordinary_task" if method else "insufficient_method_evidence",
             "observed": token["observed"], "supported_guards": ["source_exists", "verified_readback", "preserve_source_attribution"]}

@@ -515,6 +515,7 @@ async def _inspect_method(operator, proposal_id):
         if pointer and not _pointer_valid(pointer, witness.key):
             _fail("method_pointer_invalid")
         return {"proposal_id": row.proposal_id, "status": row.status.value, "expected_revision": row.revision,
+            "task_id": row.source_task_id, "attempt_id": row.source_attempt_id,
             "artifact_digest": row.artifact_digest, "scope": witness.scope.model_dump(mode="json"),
             "scope_digest": _review_scope(owner, witness.scope, row, digest(witness.candidate.model_dump(mode="json")), pointer),
             "old_method": witness.envelope["old_method"], "new_method": witness.candidate.model_dump(mode="json"),

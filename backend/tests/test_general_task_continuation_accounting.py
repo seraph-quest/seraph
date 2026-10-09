@@ -16,12 +16,12 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.general_task_test_transport import prepare_literal_planner
 
 
-async def continuation_fixture(task_runtime, monkeypatch):
+async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2):
     creation = request()
     creation = creation.model_copy(update={"input": creation.input.model_copy(update={
         "inference_egress_acknowledged": True,
         "limits": creation.input.limits.model_copy(update={"wall_seconds": 600,
-            "max_inference_calls": 2, "max_cost_microusd": 1000})})})
+            "max_inference_calls": max_calls, "max_cost_microusd": 1000})})})
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime, creation_request=creation)
     owner = WorkBoardOwner(principal_id=current["manifest"]["owner_principal_id"],
         session_id=current["manifest"]["original_root_id"])

@@ -53,6 +53,10 @@ def immutable(path: str) -> bool:
 
 
 def read_regular(root: Path, name: str, limit: int = MAX_METADATA_BYTES) -> bytes:
+    return _read_regular_with_metadata(root, name, limit)[0]
+
+
+def _read_regular_with_metadata(root: Path, name: str, limit: int = MAX_METADATA_BYTES):
     descriptor, metadata = _open_source_regular_file(root, name)
     try:
         if metadata.st_size > limit or metadata.st_nlink != 1:
@@ -63,7 +67,7 @@ def read_regular(root: Path, name: str, limit: int = MAX_METADATA_BYTES) -> byte
             _assert_stable_file(metadata, os.fstat(handle.fileno()))
         if len(data) > limit:
             raise RepoSandboxError("Node input grew beyond its bound")
-        return data
+        return data, metadata
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -380,7 +384,8 @@ def execution_plan(root: Path, arguments: Any, allowed: Any, identity: Mapping[s
 class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
     """Selected local Node adapter; optional Node/Docker is explicitly blocked."""
 
-    def snapshot_repository(self, repository_path: str | Path, staging_root: str | Path) -> RepositorySnapshot:
+    def snapshot_repository(self, repository_path: str | Path, staging_root: str | Path,
+            *, preserve_source_modes: bool = False) -> RepositorySnapshot:
         source = self.validate_snapshot_root(repository_path)
         destination = Path(staging_root).absolute()
         if destination.exists() or destination.is_symlink():
@@ -428,13 +433,21 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1:
                     raise RepoSandboxError("Node snapshot requires regular unlinked files")
                 bound=MAX_DEP_FILE_BYTES if dependency else self.limits.max_file_bytes
-                data=read_regular(source,copied_name,bound)
+                if preserve_source_modes:
+                    data, opened_metadata = _read_regular_with_metadata(source, copied_name, bound)
+                else:
+                    data=read_regular(source,copied_name,bound)
                 total+=len(data)
                 dep_files+=int(dependency);source_files+=int(not dependency)
                 if total>self.limits.max_snapshot_bytes or dep_files>MAX_DEP_FILES or source_files>self.limits.max_files:
                     raise RepoSandboxError("Node source/dependency aggregate snapshot limit exceeded")
                 target=destination/relative_path;target.parent.mkdir(parents=True,exist_ok=True)
-                target.write_bytes(data);target.chmod(0o600)
+                if preserve_source_modes:
+                    with target.open("xb") as output:
+                        os.fchmod(output.fileno(), 0o700 if not dependency and opened_metadata.st_mode & 0o111 else 0o600)
+                        output.write(data)
+                else:
+                    target.write_bytes(data);target.chmod(0o600)
                 entries.append(SnapshotEntry(relative_path,len(data),hashlib.sha256(data).hexdigest(),alias_kind))
         return RepositorySnapshot(str(source),str(destination),_digest_entries(entries),tuple(entries),total)
 
@@ -471,7 +484,11 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
             return RepoSandboxPreflight(False,"blocked",str(exc)[:512],executor_kind=str(self.config.executor_kind),posture=posture)
 
     def execute_job(self, job: RepoSandboxJob, *, before_dispatch: Callable[[],None] | None=None) -> dict[str,Any]:
-        from src.execution.repo_supervisor import exact_signal, start_identity
+        from src.execution.repo_supervisor import exact_signal, start_identity, finish_supervisor
+        from src.execution.repo_sandbox import iteration_process_projection
+        if job.iteration_binding is not None:
+            from src.workflows.repo_repair_source import assert_repo_iteration_process_binding
+            assert_repo_iteration_process_binding(job.iteration_binding, job)
         if not 1<=job.deadline_seconds<=self.limits.max_wall_seconds:
             raise RepoSandboxError("Node wall deadline exceeds the selected profile")
         deadline=time.monotonic()+job.deadline_seconds
@@ -492,16 +509,30 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
         if time.monotonic()>=deadline:
             raise RepoSandboxError("Node deadline exhausted before dispatch")
         token=self._job_stage_token(job)
-        if self._read_job_marker(job.job_id) is not None:
+        existing = self._read_job_marker(job.job_id)
+        if existing is not None and job.iteration_binding is not None:
+            prior = existing.get("iteration_binding") or {}
+            if (existing.get("phase") != "iteration_cleanup_verified" or existing.get("status") != "iteration_failed_quiescent"
+                or existing.get("cleanup_proven") is not True or prior.get("repository_job_id") != job.job_id
+                or prior.get("repository_attempt_id") != job.attempt_id or prior.get("repository_fence") != job.fencing_token
+                or prior.get("iteration_index") != job.iteration_binding.iteration_index - 1
+                or prior.get("authority_digest") != existing.get("authority_digest")):
+                raise RepoSandboxError("Original Node iteration cleanup is unproven", terminal_status="unknown_external_effect")
+            existing = None
+        if existing is not None:
             raise RepoSandboxError("Node job already owns a marker; recovery required",terminal_status="unknown_external_effect")
         marker={"schema":"seraph.repo_repair_local_job.v1","job_id":job.job_id,"authority_digest":job.authority_digest,"profile":PROFILE,
                 "attempt_id":job.attempt_id or "legacy-attempt","fencing_token":job.fencing_token,"base_digest":job.base_digest,"posture_digest":preflight.posture_digest,
                 "stage_binding":{"executor_kind":"local","job_id":job.job_id,"attempt_id":job.attempt_id or "legacy-attempt","fencing_token":job.fencing_token,"authority_digest":job.authority_digest},
                 "supervisor_token":token,"phase":"admitted","status":"running","cleanup_proven":False}
+        if job.iteration_binding is not None:
+            marker["iteration_binding"] = iteration_process_projection(job.iteration_binding)
+            marker["stage_binding"]["iteration_id"] = job.iteration_binding.iteration_id
         self._write_job_marker(job.job_id,marker)
         with self._active_lock:
             self._active[job.job_id]={"process":None,"cancelled":False}
         process=None
+        transport_complete=False
         try:
             with self._job_staging_directory(token) as stage:
                 marker.update(stage_directory=str(stage.relative_to(self.workspace_dir)),stage_identity={"device":stage.stat().st_dev,"inode":stage.stat().st_ino})
@@ -515,6 +546,8 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 payload={"profile":PROFILE,"stage":str(stage),"plan":plan,"runtime":preflight.info["runtime_identity"],"deadline_at":deadline,
                          "allowed_paths":list(job.allowed_paths),"patch_paths":patch_paths,"job_id":job.job_id,"authority_digest":job.authority_digest,
                          "token":token,"environment":env,"limits":asdict(self.limits)}
+                if job.iteration_binding is not None:
+                    payload["iteration_binding"] = iteration_process_projection(job.iteration_binding)
                 request=stage/"supervisor.json";request.write_text(json.dumps(payload));request.chmod(0o600)
                 marker["phase"]="dispatch_fence_pending";self._write_job_marker(job.job_id,marker)
                 if before_dispatch:before_dispatch()
@@ -546,11 +579,14 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                     else:
                         process.stdin.write((token+"\n").encode());process.stdin.flush()
                 process.stdin.close()
-                process.wait(timeout=max(0,deadline-time.monotonic()))
+                transport = finish_supervisor(process, deadline=deadline, stream_limit=self.limits.max_stream_bytes)
+                transport_complete=True
                 result_path=stage/"out"/"supervisor-result.json"
                 result=json.loads(self._read_private_output(stage/"out","supervisor-result.json"))
                 if process.returncode!=0 or result.get("job_id")!=job.job_id or result.get("profile")!=PROFILE or result.get("token")!=token or result.get("supervisor_pid")!=process.pid or result.get("supervisor_start")!=pid_start or result.get("cleanup_proven") is not True:
                     raise RepoSandboxError("Node supervisor terminal cleanup is unproven",terminal_status="unknown_external_effect")
+                if job.iteration_binding is not None and result.get("iteration_binding") != iteration_process_projection(job.iteration_binding):
+                    raise RepoSandboxError("Original Node iteration readback changed", terminal_status="unknown_external_effect")
                 outputs={name:self._read_private_output(stage/"out",name) for name in ("diff.patch","pytest.stdout","pytest.stderr","build.stdout","build.stderr")}
                 if hashlib.sha256(outputs["diff.patch"]).hexdigest()!=result.get("diff_sha256"):
                     raise RepoSandboxError("Node exported diff readback hash changed",terminal_status="unknown_external_effect")
@@ -567,17 +603,29 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 manifest={**result,"schema":"seraph.repo_repair_execution.v1","status":status,"profile":PROFILE,"executor_kind":"local",
                           "authority_digest":job.authority_digest,"posture_digest":preflight.posture_digest,"execution_identity":preflight.info["runtime_identity"],
                           "execution_plan":plan,"source_original_unchanged":True,"isolation_claim":"none","network_isolation":"not_verified",
-                          "resource_enforcement":"admission_and_wall_timeout_only","learning":"no_learning"}
+                          "resource_enforcement":"admission_and_wall_timeout_only","learning":"no_learning",
+                          "supervisor_transport": transport,
+                          "supervisor_identity": {"pid": process.pid, "start_identity": pid_start,
+                              "source_sha256": preflight.posture["supervisor_source_sha256"], "token": token},
+                          **({"iteration_binding": iteration_process_projection(job.iteration_binding), "stage_removed": True} if job.iteration_binding is not None else {})}
                 encoded=json.dumps(manifest,sort_keys=True).encode()+b"\n"
                 if time.monotonic()>=deadline:
                     raise RepoSandboxError("Node cleanup/readback deadline exhausted",terminal_status="unknown_external_effect")
                 shutil.rmtree(stage)
-                marker.update(phase="cleanup_verified",status=status,cleanup_proven=True,process_cleanup=result,
+                if stage.exists():
+                    raise RepoSandboxError("Original Node stage cleanup unproven", terminal_status="unknown_external_effect")
+                marker.update(phase="iteration_cleanup_verified" if job.iteration_binding is not None else "cleanup_verified",
+                              status="iteration_failed_quiescent" if job.iteration_binding is not None and status == "failed" else status,cleanup_proven=True,process_cleanup=result,
                               terminal_receipt={"status":status,"manifest_sha256":hashlib.sha256(encoded).hexdigest(),"readback_sha256":hashlib.sha256(encoded).hexdigest(),"stage_binding":marker["stage_binding"]})
                 self._write_job_marker(job.job_id,marker)
-                return {"status":status,"failure_reason":result.get("reason"),"manifest":manifest,"readback":manifest,
+                terminal = {"status":status,"failure_reason":result.get("reason"),"manifest":manifest,"readback":manifest,
                         "outputs":{**outputs,"manifest.json":encoded,"readback.json":encoded},"effective_profile":preflight.posture,
                         "cleanup":{"status":"cleanup_verified","cleanup_proven":True},"checkpoint_phases":["admitted","input_loaded","worker_started","tests_finished","output_exported","readback_verified","cleanup_verified"],"learning":"no_learning","operator_visible":True}
+                if job.iteration_binding is not None:
+                    self._owned_iteration_terminal[(job.job_id, job.iteration_binding.iteration_id)] = terminal
+                    terminal["iteration_cleanup_witness"] = self._iteration_cleanup_witness(job, terminal)
+                    terminal["cleanup"] = {"status": "iteration_cleanup_verified", "cleanup_proven": True}
+                return terminal
         except (OSError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
             current=self._read_job_marker(job.job_id) or marker
             self._write_job_marker(job.job_id,{**current,"status":"unknown_external_effect","cleanup_proven":False,"reason":str(exc)[:512]})
@@ -587,8 +635,10 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 exact_signal(process.pid,str(marker.get("pid_start_identity") or ""),signal.SIGTERM)
             raise RepoSandboxError(str(exc),phase="cleanup",terminal_status="unknown_external_effect") from exc
         finally:
-            with self._active_lock:self._active.pop(job.job_id,None)
-            if process is not None:
+            current = self._read_job_marker(job.job_id) if job.iteration_binding is not None else None
+            if job.iteration_binding is None or (current and current.get("phase") == "iteration_cleanup_verified" and current.get("cleanup_proven") is True):
+                with self._active_lock:self._active.pop(job.job_id,None)
+            if process is not None and (transport_complete or job.iteration_binding is None):
                 for stream in (process.stdin,process.stdout,process.stderr):
                     if stream and not stream.closed:stream.close()
 

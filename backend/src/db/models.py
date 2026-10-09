@@ -1519,6 +1519,18 @@ class RepoRepairEgressConsent(SQLModel, table=True):
     effective_upstream: str = Field(default="", index=True, max_length=256)
     maximum_input_bytes: int = Field(default=64 * 1024)
     maximum_output_tokens: int = Field(default=4096)
+    # Legacy source-only consent cannot authorize later command diagnostics.
+    # Iterative consent requires every exact envelope binding plus a separate
+    # explicit acknowledgment; nullable fields retain historical row meaning.
+    iteration_id: Optional[str] = Field(default=None, max_length=64)
+    egress_envelope_schema: Optional[str] = Field(default=None, max_length=128)
+    egress_envelope_artifact_ref: Optional[str] = Field(default=None, max_length=512)
+    egress_envelope_sha256: Optional[str] = Field(default=None, max_length=64)
+    diagnostics_sha256: Optional[str] = Field(default=None, max_length=64)
+    redaction_version: Optional[str] = Field(default=None, max_length=128)
+    serialized_request_sha256: Optional[str] = Field(default=None, max_length=64)
+    combined_input_bytes: Optional[int] = Field(default=None)
+    diagnostics_acknowledged: bool = Field(default=False)
     expires_at: datetime = Field(index=True)
     state: str = Field(default="active", index=True)
     revision: int = Field(default=1, index=True)

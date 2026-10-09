@@ -3602,6 +3602,38 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_models = tuple(fallback_models)
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
+    def prepare_repository_iteration_transport(self, messages, *, response_format, max_tokens):
+        """Prepare the fixed primary strategist body without contacting a provider.
+
+        Preparation grants no dispatch authority. The capability's source
+        owner stages and consents these bytes; generate verifies its sealed
+        binding against the actual final body before broker admission.
+        """
+        if (self._runtime_path != "strategist_agent"
+                or str(self.api_base or "").rstrip("/") != "https://openrouter.ai/api/v1"
+                or type(max_tokens) is not int or not 1 <= max_tokens <= 4096):
+            raise PermissionError("fixed governed repository strategist route required")
+        controls = _openrouter_runtime_controls(self._runtime_profile)
+        if not controls:
+            raise PermissionError("current configured repository strategist profile required")
+        output_limit = min(max_tokens, int(controls["output_limit"]))
+        target = {"model_id": _profile_model_id(self._runtime_profile),
+            "api_base": self.api_base, "api_key": self.api_key,
+            "profile": self._runtime_profile, "source": "primary",
+            "options": dict(self._seraph_transport_options)}
+        reject_legacy_external_agent_model(target["model_id"])
+        target_messages = _messages_for_local_target(messages, target=target,
+            runtime_path="strategist_agent", reserved_output_tokens=output_limit)
+        body = finalized_openai_compatible_body(
+            model_id=_target_transport_model(target),
+            messages=[_openai_message_payload(message) for message in target_messages],
+            options=_transport_json_value(target["options"]),
+            temperature=float(controls["temperature"]), max_tokens=output_limit,
+            additional_fields={"response_format": _transport_json_value(response_format)},
+        )
+        from src.workflows.repo_repair_source import repository_transport_route_digest
+        return {"body": body, "route_digest": repository_transport_route_digest(target, "strategist_agent")}
+
     def generate(
         self,
         messages,
@@ -3796,6 +3828,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     max_tokens=reserved_output_tokens,
                     additional_fields=additional_fields,
                 )
+                from src.workflows.repo_repair_source import verify_repository_iteration_transport_body
+                verify_repository_iteration_transport_body(transport_body, target=target,
+                    runtime_path=runtime_path)
                 governed_context = request_context
                 if request_context is not None:
                     from src.model_fabric import bind_final_inference_payload
@@ -4027,6 +4062,15 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         decision=route_decision,
                         degradation_code="transport_failed",
                     )
+                from src.model_fabric.accounting import current_repository_iteration_accounting_witness
+                if current_repository_iteration_accounting_witness() is not None:
+                    if receipt_session is not None and governed_attempted:
+                        _finalize_route_receipt_sync(receipt_session, outcome="failed",
+                            request_id=request_id,
+                            degradation_codes=("repository_iteration_transport_blocked",))
+                    # The original capability iteration owns one exact body
+                    # and route; no second target inherits its source consent.
+                    raise
                 last_error = error
                 if is_primary:
                     primary_error = error

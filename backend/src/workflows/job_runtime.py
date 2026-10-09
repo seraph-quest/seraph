@@ -3162,9 +3162,32 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import admit_child
         return await admit_child(self, spec, **bindings)
 
-    async def publish_general_task_step_receipt(self, parent_id, **bindings):
+    async def publish_general_task_step_receipt(self, parent_id, *, staged_artifact,
+        child_id, owner, fencing_token, expected_parent_revision,
+        repository_final_witness=None, repository_final_authority_check=None,
+        repository_final_authority_scope=None):
         from src.workflows.general_task_guard import publish_step_receipt
-        return await publish_step_receipt(self, parent_id, **bindings)
+        return await publish_step_receipt(self, parent_id, staged_artifact=staged_artifact,
+            child_id=child_id, owner=owner, fencing_token=fencing_token,
+            expected_parent_revision=expected_parent_revision,
+            repository_final_witness=repository_final_witness,
+            repository_final_authority_check=repository_final_authority_check,
+            repository_final_authority_scope=repository_final_authority_scope)
+
+    async def publish_repository_child_wait(self, child_id, *, owner, fencing_token,
+        expected_parent_revision, producer_witness):
+        from src.workflows.general_task_guard import publish_repository_child_wait
+        return await publish_repository_child_wait(self, child_id, owner=owner,
+            fencing_token=fencing_token, expected_parent_revision=expected_parent_revision,
+            producer_witness=producer_witness)
+
+    async def resume_repository_child_wait(self, child_id, *, owner,
+        expected_parent_revision, expected_child_revision, producer_witness):
+        from src.workflows.general_task_guard import resume_repository_child_wait
+        return await resume_repository_child_wait(self, child_id, owner=owner,
+            expected_parent_revision=expected_parent_revision,
+            expected_child_revision=expected_child_revision,
+            producer_witness=producer_witness)
 
     async def publish_general_task_tool_closure(self, child_id, **bindings):
         from src.workflows.general_task_guard import publish_tool_closure
@@ -4982,6 +5005,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         opportunity_preference_witness=None,
         native_physical_reservation=None,
     ) -> dict[str, Any]:
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("repository:"):
+            raise DurableJobTransitionError("repository source checkpoints require their fixed capability writer")
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
         if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:", "general:cancel:")):
@@ -6126,6 +6151,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         independent external readback; it cannot claim, dispatch, or resume a
         job.
         """
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("repository:"):
+            raise DurableJobTransitionError("repository source checkpoints require their fixed capability writer")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         if not _text(owner_kind) or not _text(owner_principal_id):

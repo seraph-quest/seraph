@@ -564,6 +564,33 @@ class GeneralTaskToolInputV1(ClosedTaskModel):
         return self
 
 
+class RepositoryTaskSourceBinding(ClosedTaskModel):
+    """Metadata only; a parsed mapping is never repository authority."""
+    schema_version: Literal["RepositoryTaskSource.v1"] = "RepositoryTaskSource.v1"
+    original_input_digest: TaskDigest
+    source_artifact_ref: str = Field(min_length=1, max_length=512,
+        pattern=r"^workspace-json:artifacts/repo-repair/source/[A-Za-z0-9_.:/-]+$")
+    source_artifact_digest: TaskDigest
+    snapshot_ref: str = Field(pattern=r"^repository-snapshot:[a-f0-9]{64}$")
+    snapshot_digest: TaskDigest
+    executor_profile: Literal["repo-python-pytest-v1", "repo-python-pytest-publication-v1", "repo-node24-npm-v1"]
+    executor_profile_digest: TaskDigest
+    owner_principal_id: TaskIdentity
+    original_root_id: TaskIdentity
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    binding_digest: TaskDigest
+
+    @field_validator("source_artifact_ref")
+    @classmethod
+    def exact_private_reference(cls, value):
+        prefix = "workspace-json:artifacts/repo-repair/source/"
+        if (not value.startswith(prefix) or "\\" in value
+                or any(part in {"", ".", ".."} for part in value.removeprefix("workspace-json:").split("/"))):
+            raise ValueError("fixed private repository source reference required")
+        return value
+
+
 class GeneralTaskEnvelope(ClosedTaskModel):
     """Single immutable artifact holding intent and the accepted inert plan."""
     schema_version: Literal[1] = 1
@@ -575,6 +602,14 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     proposal_group: "TaskProposalGroupV1 | None" = None
     proposal_provenance: "TaskProposalProvenanceV1 | None" = None
+    repository_source: RepositoryTaskSourceBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_repository_absence(self, handler):
+        result = handler(self)
+        if self.repository_source is None:
+            result.pop("repository_source", None)
+        return result
 
     @model_validator(mode="after")
     def immutable_snapshot(self):
@@ -596,6 +631,18 @@ class GeneralTaskEnvelope(ClosedTaskModel):
                 or self.proposal_group.max_cost_microusd != limits.max_cost_microusd
                 or self.proposal_group.max_steps != limits.max_steps):
                 raise ValueError("proposal allowance cannot change")
+        if self.repository_source is not None:
+            source = self.repository_source
+            repository_steps = [step for step in self.plan.steps if step.tool_id == "repository_work"] if self.plan else []
+            from src.security.trust_contract import canonical_digest
+            if (len(repository_steps) != 1
+                    or canonical_digest(repository_steps[0].input) != source.original_input_digest
+                    or source.goal_id != self.task_input.goal_ref
+                    or self.proposal_group is None
+                    or source.owner_principal_id != self.proposal_group.owner_principal_id
+                    or source.original_root_id != self.proposal_group.owner_session_id
+                    or source.goal_revision != self.proposal_group.goal_revision):
+                raise ValueError("repository source requires its exact original owner/Goal and fixed plan")
         return self
 
 

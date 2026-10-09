@@ -9,6 +9,7 @@ fixed file or the loader's inert transfer mode.
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import hashlib
 import importlib.util
 import json
@@ -27,6 +28,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 
 PROFILE = "repo-python-pytest-v1"
+_supervised_commands: ContextVar[Any] = ContextVar("repo_worker_supervised_commands", default=None)
 MAX_FILES = 2_000
 MAX_DIRECTORIES = 500
 MAX_DEPTH = 16
@@ -550,6 +552,11 @@ def _run_fixed(
     # Keep the parameters for the fixed worker call shape and manifest, but
     # make wall deadline the only per-process enforcement performed here.
     _ = cpu_seconds, apply_cpu_limit
+    supervised = _supervised_commands.get()
+    if supervised is not None:
+        if before_spawn is not None:
+            before_spawn()
+        return supervised(argv, cwd=cwd, environment=env, deadline_at=deadline_at, timeout=timeout)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "env": env,
@@ -1113,6 +1120,17 @@ def run_local_job(
         expected_identity=expected_identity,
         publication_runtime=publication_runtime,
     )
+
+
+def run_supervised_local_job(job_file: Path, *, command_runner: Callable, **kwargs: Any) -> int:
+    """Dedicated supervisor-only wrapper; legacy/backend workers stay unchanged."""
+    from src.execution.repo_supervisor import require_subreaper
+    require_subreaper()
+    token = _supervised_commands.set(command_runner)
+    try:
+        return run_local_job(job_file, **kwargs)
+    finally:
+        _supervised_commands.reset(token)
 
 
 def main() -> int:

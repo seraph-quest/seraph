@@ -25,11 +25,13 @@ import tarfile
 import tempfile
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterable, Mapping, Protocol, Literal
+from typing import Any, Callable, Iterable, Mapping, Protocol, Literal, TYPE_CHECKING
 import uuid
 from urllib.parse import urlparse
 
 from config.settings import RepoSandboxSettings, settings
+if TYPE_CHECKING:
+    from src.workflows.repo_repair_source import RepoIterationProcessBinding
 
 
 PROFILE = "repo-python-pytest-v1"
@@ -705,6 +707,7 @@ class RepoSandboxJob:
     expected_interpreter_sha256: str = ""
     expected_pytest_executable_sha256: str = ""
     expected_pytest_package_sha256: str = ""
+    iteration_binding: RepoIterationProcessBinding | None = None
 
 
 def _safe_relative_path(value: object) -> str:
@@ -1887,7 +1890,8 @@ class RootlessDockerRepoSandbox:
             raise RepoSandboxError("repository root must be a real directory")
         return resolved
 
-    def snapshot_repository(self, repository_path: str | Path, staging_root: str | Path) -> RepositorySnapshot:
+    def snapshot_repository(self, repository_path: str | Path, staging_root: str | Path,
+            *, preserve_source_modes: bool = False) -> RepositorySnapshot:
         source = self.validate_snapshot_root(repository_path)
         destination = Path(staging_root).absolute()
         try:
@@ -1951,6 +1955,11 @@ class RootlessDockerRepoSandbox:
                 try:
                     with os.fdopen(descriptor, "rb") as source_handle:
                         with target.open("xb") as target_handle:
+                            if preserve_source_modes:
+                                # Only classify the already-open regular source;
+                                # never copy arbitrary permissions or ownership.
+                                os.fchmod(target_handle.fileno(),
+                                    0o700 if opened_stat.st_mode & 0o111 else 0o600)
                             shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
                         _assert_stable_file(opened_stat, os.fstat(source_handle.fileno()))
                 except OSError as exc:
@@ -2536,6 +2545,48 @@ def _local_remaining(deadline_at: float, *, phase: str) -> float:
     return remaining
 
 
+_ITERATION_CLEANUP_SEAL = object()
+
+
+@dataclass(frozen=True)
+class RepoIterationCleanupWitness:
+    job_id: str
+    attempt_id: str
+    fencing_token: int
+    iteration_id: str
+    iteration_index: int
+    authority_digest: str
+    manifest_sha256: str
+    readback_sha256: str
+    _projection_json: str
+    _seal: Any = field(repr=False, compare=False)
+
+    def projection(self) -> dict[str, Any]:
+        if self._seal is not _ITERATION_CLEANUP_SEAL:
+            raise RepoSandboxError("original iteration cleanup issuer required")
+        return json.loads(self._projection_json)
+
+
+def assert_repo_iteration_cleanup_witness(witness: RepoIterationCleanupWitness, job: RepoSandboxJob) -> None:
+    from src.workflows.repo_repair_source import assert_repo_iteration_process_binding
+    assert_repo_iteration_process_binding(job.iteration_binding, job, allow_expired_for_cleanup=True)
+    binding = job.iteration_binding
+    if (type(witness) is not RepoIterationCleanupWitness or witness._seal is not _ITERATION_CLEANUP_SEAL
+        or witness.job_id != job.job_id or witness.attempt_id != job.attempt_id
+        or witness.fencing_token != job.fencing_token or witness.authority_digest != job.authority_digest
+        or witness.iteration_id != binding.iteration_id or witness.iteration_index != binding.iteration_index):
+        raise RepoSandboxError("original iteration cleanup witness changed")
+    projection = witness.projection()
+    if (projection.get("iteration_binding") != iteration_process_projection(binding)
+        or projection.get("artifact_digests", {}).get("manifest.json") != witness.manifest_sha256
+        or projection.get("artifact_digests", {}).get("readback.json") != witness.readback_sha256):
+        raise RepoSandboxError("original iteration cleanup witness digests changed")
+
+
+def iteration_process_projection(binding) -> dict[str, Any]:
+    return binding.projection()
+
+
 class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
     """Trusted local staged executor for CPU-host repository repairs.
 
@@ -2557,6 +2608,41 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         self.workspace_dir = Path(workspace_dir or settings.workspace_dir).expanduser().absolute()
         self._active: dict[str, dict[str, Any]] = {}
         self._active_lock = threading.RLock()
+        self._owned_iteration_terminal: dict[tuple[str, str], object] = {}
+
+    def _iteration_cleanup_witness(self, job: RepoSandboxJob, result: dict[str, Any]) -> RepoIterationCleanupWitness:
+        from src.workflows.repo_repair_source import assert_repo_iteration_process_binding
+        assert_repo_iteration_process_binding(job.iteration_binding, job, allow_expired_for_cleanup=True)
+        binding = job.iteration_binding
+        key = (job.job_id, binding.iteration_id)
+        if self._owned_iteration_terminal.pop(key, None) is not result:
+            raise RepoSandboxError("Original physical iteration producer required")
+        manifest = result["manifest"]
+        proof = manifest.get("process_cleanup") or {}
+        transport = manifest.get("supervisor_transport") or {}
+        marker = self._read_job_marker(job.job_id)
+        if (manifest.get("cleanup_proven") is not True or manifest.get("stage_removed") is not True
+            or manifest.get("iteration_binding") != iteration_process_projection(binding)
+            or proof.get("oracle") != "linux_subreaper_waitpid_echild" or proof.get("cleanup_proven") is not True
+            or any(transport.get(name) is not True for name in ("stdin_closed", "stdout_eof", "stderr_eof", "stdout_closed", "stderr_closed", "waited"))
+            or marker is None or marker.get("phase") != "iteration_cleanup_verified"
+            or marker.get("iteration_binding") != manifest["iteration_binding"]
+            or marker.get("cleanup_proven") is not True
+            or result["readback"] != manifest):
+            raise RepoSandboxError("Original physical iteration closure unproven")
+        outputs = result["outputs"]
+        projection = {"schema": "RepoWorkIterationCleanup.v1", "job_id": job.job_id,
+            "attempt_id": job.attempt_id, "fencing_token": job.fencing_token,
+            "iteration_binding": manifest["iteration_binding"], "process_cleanup": proof,
+            "supervisor_identity": manifest["supervisor_identity"], "supervisor_transport": transport,
+            "stage_removed": True, "status": "iteration_failed_quiescent" if result["status"] == "failed" else result["status"],
+            "artifact_digests": {name: hashlib.sha256(value).hexdigest() for name, value in outputs.items()}}
+        if marker.get("terminal_receipt", {}).get("manifest_sha256") != projection["artifact_digests"]["manifest.json"]:
+            raise RepoSandboxError("Original iteration physical readback changed")
+        return RepoIterationCleanupWitness(job.job_id, job.attempt_id, job.fencing_token,
+            binding.iteration_id, binding.iteration_index, job.authority_digest,
+            projection["artifact_digests"]["manifest.json"], projection["artifact_digests"]["readback.json"],
+            json.dumps(projection, sort_keys=True, separators=(",", ":")), _ITERATION_CLEANUP_SEAL)
 
     def _trusted_workspace(self) -> Path:
         descriptor = _open_trusted_directory(self.workspace_dir)
@@ -2665,6 +2751,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             "fencing_token": int(job.fencing_token or 0),
             "authority_digest": job.authority_digest,
         }
+        if job.iteration_binding is not None:
+            binding["iteration_id"] = job.iteration_binding.iteration_id
         return LocalRepoRepairExecutor._stage_binding_token(binding)
 
     @staticmethod
@@ -2792,6 +2880,9 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 and (existing_payload.get("cancellation_requested") is True or existing_payload.get("status") == "cancellation_requested")
                 and payload.get("status") != "cancellation_requested"
                 and payload.get("phase") != "cleanup_verified"
+                and not (payload.get("phase") == "iteration_cleanup_verified"
+                    and payload.get("iteration_binding") == existing_payload.get("iteration_binding")
+                    and payload.get("cleanup_proven") is True)
             ):
                 payload = {**payload, "status": "cancellation_requested", "phase": "cancel_requested"}
             marker_fd = os.open(
@@ -3118,6 +3209,88 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 raise RepoSandboxError("publication_runtime_unavailable:" + str(exc)) from exc
         return result
 
+    def iterative_preflight(self, authority: Mapping[str, Any] | None = None, *, deadline_at: float | None = None) -> RepoSandboxPreflight:
+        from src.execution.repo_supervisor import platform_ready
+        ordinary = self.preflight(authority, deadline_at=deadline_at)
+        if not ordinary.ok:
+            return ordinary
+        posture = dict(ordinary.posture)
+        try:
+            if self.config.executor_kind != "local" or str(self.config.profile) != PROFILE:
+                raise RepoSandboxError("iterative_python_profile_unsupported")
+            platform_ready()
+            supervisor = Path(__file__).with_name("repo_supervisor.py")
+            subprocess.run([sys.executable, "-I", str(supervisor), "--probe"], check=True, capture_output=True, timeout=2, env={"PATH": "/usr/bin:/bin"})
+            posture.update(process_supervision="linux_per_job_subreaper", supervisor_source_sha256=_digest_file(supervisor),
+                git_sha256=_digest_file(Path("/usr/bin/git").resolve()), iterative_python=True)
+            return RepoSandboxPreflight(True, "ready", "iterative_python_supervision_available", info=dict(ordinary.info),
+                executor_kind="local", posture=posture, posture_digest=executor_posture_digest(posture))
+        except (OSError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
+            return RepoSandboxPreflight(False, "blocked", str(exc)[:512], executor_kind="local", posture=posture)
+
+    def _run_supervised_python(self, job: RepoSandboxJob, *, stage: Path, runtime: dict, environment: dict,
+            deadline: float, observe_process: Callable, before_spawn: Callable, posture: Mapping) -> tuple[int, dict]:
+        from src.execution.repo_supervisor import PYTHON_PROFILE, finish_supervisor, exact_signal, start_identity
+        projection = iteration_process_projection(job.iteration_binding)
+        token = self._job_stage_token(job)
+        supervisor = Path(__file__).with_name("repo_supervisor.py")
+        if (posture.get("supervisor_source_sha256") != _digest_file(supervisor)
+            or posture.get("git_sha256") != _digest_file(Path("/usr/bin/git").resolve())):
+            raise RepoSandboxError("Original iterative supervisor or Git changed before dispatch")
+        payload = {"profile": PYTHON_PROFILE, "stage": str(stage), "runtime": runtime, "job_id": job.job_id,
+                   "iteration_binding": projection, "deadline_at": deadline, "token": token,
+                   "supervisor_source_sha256": posture["supervisor_source_sha256"], "git_sha256": posture["git_sha256"], "environment": environment}
+        request = stage / "supervisor.json"
+        request.write_text(json.dumps(payload, sort_keys=True))
+        request.chmod(0o600)
+        before_spawn()
+        process = subprocess.Popen([sys.executable, "-I", str(supervisor), str(request)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, start_new_session=True)
+        pid_start = start_identity(process.pid)
+        transport_complete = False
+        try:
+            if pid_start is None:
+                raise RepoSandboxError("Python supervisor identity unavailable", terminal_status="unknown_external_effect")
+            observe_process(process)
+            with self._job_marker_lock(job.job_id, timeout_seconds=max(0, deadline - time.monotonic())):
+                marker = self._read_job_marker(job.job_id)
+                if (marker is None or marker.get("iteration_binding") != projection
+                    or marker.get("pid") != process.pid or marker.get("pid_start_identity") != pid_start
+                    or marker.get("authority_digest") != job.authority_digest or time.monotonic() >= deadline):
+                    raise RepoSandboxError("Original Python dispatch marker changed", terminal_status="unknown_external_effect")
+                cancelled = marker.get("status") == "cancellation_requested" or marker.get("cancellation_requested") is True
+                process.stdin.write((("cancel:" if cancelled else "") + token + "\n").encode())
+                process.stdin.flush()
+            process.stdin.close()
+            transport = finish_supervisor(process, deadline=deadline, stream_limit=self.limits.max_stream_bytes)
+            transport_complete = True
+            raw = self._read_private_output(stage / "out", "supervisor-result.json")
+            result = json.loads(raw)
+            proof = result.get("process_cleanup") or {}
+            if (process.returncode != 0 or result.get("profile") != PYTHON_PROFILE or result.get("job_id") != job.job_id
+                or result.get("iteration_binding") != projection or result.get("token") != token
+                or result.get("supervisor_pid") != process.pid or result.get("supervisor_start") != pid_start
+                or result.get("cleanup_proven") is not True or proof.get("cleanup_proven") is not True
+                or proof.get("oracle") != "linux_subreaper_waitpid_echild"):
+                raise RepoSandboxError("Original Python supervisor cleanup unproven", terminal_status="unknown_external_effect")
+            receipt = {"process_cleanup": proof, "supervisor_identity": {"pid": process.pid, "start_identity": pid_start,
+                "source_sha256": payload["supervisor_source_sha256"], "token": token}, "supervisor_transport": transport,
+                "supervisor_result_sha256": hashlib.sha256(raw).hexdigest(), "supervisor_result": result,
+                "iteration_binding": projection}
+            observe_process(None)
+            return int(result.get("worker_exit") if result.get("worker_exit") is not None else 2), receipt
+        except (OSError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
+            marker = self._read_job_marker(job.job_id) or {}
+            self._write_job_marker(job.job_id, {**marker, "status": "unknown_external_effect", "cleanup_proven": False})
+            if pid_start is not None and process.poll() is None:
+                exact_signal(process.pid, pid_start, signal.SIGTERM)
+            raise RepoSandboxError("Original Python supervisor closure requires reconciliation", terminal_status="unknown_external_effect") from exc
+        finally:
+            if transport_complete:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream and not stream.closed:
+                        stream.close()
+
     def _read_private_output(self, output_root: Path, name: str) -> bytes:
         if not name or "/" in name or "\\" in name or "\x00" in name:
             raise RepoSandboxError("local worker output name is invalid", phase="output_exported")
@@ -3164,7 +3337,10 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
 
         if int(job.deadline_seconds) < 1 or int(job.deadline_seconds) > self.limits.max_wall_seconds:
             raise RepoSandboxError("job deadline is outside the local fixed profile")
-        preflight = self.preflight()
+        if job.iteration_binding is not None:
+            from src.workflows.repo_repair_source import assert_repo_iteration_process_binding
+            assert_repo_iteration_process_binding(job.iteration_binding, job)
+        preflight = self.iterative_preflight() if job.iteration_binding is not None else self.preflight()
         if not preflight.ok:
             return {
                 "status": "blocked",
@@ -3232,12 +3408,27 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         }
         marker_token = self._job_stage_token(job)
         existing_marker = self._read_job_marker(job.job_id)
+        if existing_marker is not None and job.iteration_binding is not None:
+            prior = existing_marker.get("iteration_binding") or {}
+            if (existing_marker.get("phase") != "iteration_cleanup_verified"
+                or existing_marker.get("cleanup_proven") is not True
+                or existing_marker.get("status") != "iteration_failed_quiescent"
+                or prior.get("repository_job_id") != job.job_id
+                or prior.get("iteration_index") != job.iteration_binding.iteration_index - 1
+                or prior.get("repository_attempt_id") != job.attempt_id
+                or prior.get("repository_fence") != job.fencing_token
+                or existing_marker.get("authority_digest") != prior.get("authority_digest")):
+                raise RepoSandboxError("Original prior iteration cleanup is unproven", terminal_status="unknown_external_effect")
+            existing_marker = None
         if existing_marker is not None:
             raise RepoSandboxError(
                 "local job already has a durable marker; reconcile before retry",
                 phase=str(existing_marker.get("phase") or "admitted"),
                 terminal_status="unknown_external_effect",
             )
+        if job.iteration_binding is not None:
+            stage_binding["iteration_id"] = job.iteration_binding.iteration_id
+        supervised_receipt = None
         phases = ["admitted"]
         marker_base = {
             "schema": "seraph.repo_repair_local_job.v1",
@@ -3266,6 +3457,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             "created_at": time.time(),
             "deadline_at": deadline_wall,
         }
+        if job.iteration_binding is not None:
+            marker_base["iteration_binding"] = iteration_process_projection(job.iteration_binding)
         marker_state: dict[str, Any] = {**marker_base, "phase": "admitted", "status": "running"}
         self._write_job_marker(job.job_id, marker_state)
         with self._active_lock:
@@ -3366,6 +3559,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             failure remains an unknown external effect.
             """
 
+            if job.iteration_binding is not None and supervised_receipt is None:
+                raise RepoSandboxError("Original iterative cancellation closure is unproven", terminal_status="unknown_external_effect")
             _local_remaining(deadline_at, phase="cancel_cleanup")
             self._assert_stage_identity(root, marker_state.get("stage_identity") or {})
             shutil.rmtree(root)
@@ -3407,13 +3602,14 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 "resource_enforcement": "admission_and_wall_timeout_only",
                 "source_original_unchanged": True,
                 "cleanup_proven": True,
+                **({**supervised_receipt, "stage_removed": True} if job.iteration_binding is not None else {}),
             }
             encoded = json.dumps(cancelled_manifest, sort_keys=True).encode("utf-8") + b"\n"
             if "cleanup_verified" not in phases:
                 phases.append("cleanup_verified")
             marker_state.update(
                 {
-                    "phase": "cleanup_verified",
+                    "phase": "iteration_cleanup_verified" if job.iteration_binding is not None else "cleanup_verified",
                     "status": "cancelled",
                     "cleanup_proven": True,
                     "terminal_receipt": {
@@ -3427,7 +3623,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 }
             )
             self._write_job_marker(job.job_id, marker_state)
-            return {
+            terminal = {
                 "status": "cancelled",
                 "reason": reason,
                 "manifest": cancelled_manifest,
@@ -3445,6 +3641,11 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 "learning": "no_learning",
                 "operator_visible": True,
             }
+            if job.iteration_binding is not None:
+                self._owned_iteration_terminal[(job.job_id, job.iteration_binding.iteration_id)] = terminal
+                terminal["iteration_cleanup_witness"] = self._iteration_cleanup_witness(job, terminal)
+                terminal["cleanup"] = {"status": "iteration_cleanup_verified", "cleanup_proven": True}
+            return terminal
 
         try:
             with self._job_staging_directory(marker_token) as root:
@@ -3514,7 +3715,15 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 mark_phase("dispatch_authorized")
 
                 try:
-                    worker_exit = run_local_job(
+                    worker_runner = run_local_job
+                    if job.iteration_binding is not None:
+                        def worker_runner(*_args, **_kwargs):
+                            nonlocal supervised_receipt
+                            code, supervised_receipt = self._run_supervised_python(job, stage=root,
+                                runtime=current_identity, environment=environment, deadline=deadline_at,
+                                observe_process=observe_process, before_spawn=before_spawn, posture=posture)
+                            return code
+                    worker_exit = worker_runner(
                         bundle / "job.json",
                         workspace_root=root / "workspace",
                         output_root=output_root,
@@ -3540,7 +3749,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     # fenced cancellation without inventing a repair
                     # readback.  If the direct process is still alive, retain
                     # the unknown outcome and the stage for reconciliation.
-                    if durable_cancellation_requested():
+                    if job.iteration_binding is None and durable_cancellation_requested():
                         with self._active_lock:
                             active_state = self._active.get(job.job_id) or {}
                             active_process = active_state.get("process")
@@ -3660,6 +3869,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     "resource_enforcement": "admission_and_wall_timeout_only",
                     "source_original_unchanged": True,
                     "cleanup_proven": False,
+                    **(supervised_receipt or {}),
                 }
                 encoded_manifest = json.dumps(local_manifest, sort_keys=True).encode("utf-8") + b"\n"
                 encoded_readback = json.dumps(local_manifest, sort_keys=True).encode("utf-8") + b"\n"
@@ -3668,7 +3878,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 _write_private_output(output_root, "manifest.json", encoded_manifest)
                 _write_private_output(output_root, "readback.json", encoded_readback)
                 phases.extend(("tests_finished", "output_exported", "readback_verified"))
-                marker_state.update({"phase": "readback_verified", "status": status, "cleanup_proven": False})
+                marker_state.update({"phase": "iteration_readback_verified" if job.iteration_binding is not None else "readback_verified", "status": status, "cleanup_proven": False})
                 self._write_job_marker(job.job_id, marker_state)
                 result = {
                     "status": status,
@@ -3698,7 +3908,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                         phase="cleanup",
                         terminal_status="unknown_external_effect",
                     )
-                local_manifest = {**local_manifest, "cleanup_proven": True}
+                local_manifest = {**local_manifest, "cleanup_proven": True,
+                    **({"stage_removed": True} if job.iteration_binding is not None else {})}
                 encoded_manifest = json.dumps(local_manifest, sort_keys=True).encode("utf-8") + b"\n"
                 encoded_readback = json.dumps(local_manifest, sort_keys=True).encode("utf-8") + b"\n"
                 result["cleanup"] = {"status": "cleanup_verified", "cleanup_proven": True}
@@ -3708,8 +3919,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 result["outputs"]["readback.json"] = encoded_readback
                 marker_state.update(
                     {
-                        "phase": "cleanup_verified",
-                        "status": status,
+                        "phase": "iteration_cleanup_verified" if job.iteration_binding is not None else "cleanup_verified",
+                        "status": "iteration_failed_quiescent" if job.iteration_binding is not None and status == "failed" else status,
                         "cleanup_proven": True,
                         "terminal_receipt": {
                             "status": status,
@@ -3722,16 +3933,40 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     }
                 )
                 self._write_job_marker(job.job_id, marker_state)
+                if job.iteration_binding is not None:
+                    self._owned_iteration_terminal[(job.job_id, job.iteration_binding.iteration_id)] = result
+                    result["iteration_cleanup_witness"] = self._iteration_cleanup_witness(job, result)
+                    result["cleanup"] = {"status": "iteration_cleanup_verified", "cleanup_proven": True}
                 return result
         finally:
-            with self._active_lock:
-                self._active.pop(job.job_id, None)
+            marker = self._read_job_marker(job.job_id) if job.iteration_binding is not None else None
+            if job.iteration_binding is None or (marker is not None and marker.get("phase") == "iteration_cleanup_verified" and marker.get("cleanup_proven") is True):
+                with self._active_lock:
+                    self._active.pop(job.job_id, None)
+
+    def _cancel_iterative_supervisor(self, job_id: str, authority: Mapping[str, Any]) -> dict[str, Any]:
+        from src.execution.repo_supervisor import exact_signal
+        with self._job_marker_lock(job_id):
+            marker = self._read_job_marker(job_id)
+            if (marker is None or not marker.get("iteration_binding")
+                or (authority.get("authority_digest") and authority["authority_digest"] != marker.get("authority_digest"))):
+                return {"status": "unknown_external_effect", "cleanup_proven": False, "reason": "original_iterative_binding_missing"}
+            if marker.get("phase") == "iteration_cleanup_verified":
+                return {"status": "cancel_requested", "cleanup_proven": False, "reason": "original_closed_iteration_requires_terminal_owner"}
+            marker = {**marker, "status": "cancellation_requested", "phase": "cancel_requested", "cancellation_requested": True}
+            self._write_job_marker_locked(job_id, marker)
+            pid, start = marker.get("pid"), marker.get("pid_start_identity")
+            if type(pid) is not int or not start or not exact_signal(pid, start, signal.SIGTERM):
+                return {"status": "unknown_external_effect", "cleanup_proven": False, "reason": "original_supervisor_signal_unproven"}
+            return {"status": "cancel_requested", "cleanup_proven": False, "job_id": job_id}
 
     def cancel(self, *, job_id: str | None = None, authority: Mapping[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
         resolved_job_id = job_id or str((authority or {}).get("job_id") or "")
         if not resolved_job_id:
             return {"status": "unknown_external_effect", "reason": "local_job_identity_missing", "cleanup_proven": False}
         marker = self._read_job_marker(resolved_job_id)
+        if marker is not None and marker.get("iteration_binding"):
+            return self._cancel_iterative_supervisor(resolved_job_id, authority or {})
         expected_authority = str((authority or {}).get("authority_digest") or "")
         if expected_authority and (marker is None or marker.get("authority_digest") != expected_authority):
             return {
@@ -3938,6 +4173,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
     def reconcile(self, authority: Mapping[str, Any] | None = None) -> dict[str, Any]:
         job_id = str((authority or {}).get("job_id") or "")
         marker = self._read_job_marker(job_id) if job_id else None
+        if marker is not None and marker.get("iteration_binding"):
+            return {"status": "unknown_external_effect", "reason": "original_iteration_source_witness_required", "cleanup_proven": False, "learning": "no_learning"}
         supplied_authority = authority or {}
         if marker is not None and str(supplied_authority.get("authority_digest") or "") not in {
             "",

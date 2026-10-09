@@ -13,6 +13,42 @@ from src.workflows.general_task_guard import read_manifest
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
 
 
+REPOSITORY_WORK_DESCRIPTOR_ID = "repository_work"
+
+
+def _is_repository_work_descriptor(descriptor) -> bool:
+    return getattr(descriptor, "tool_id", None) == REPOSITORY_WORK_DESCRIPTOR_ID
+
+
+def _is_repository_work_child(child_projection) -> bool:
+    """Identify the fixed descriptor from the private durable child input.
+
+    ``WorkflowRunState.arguments_json`` is intentionally not exposed by the
+    normal job projection.  Recovery callers therefore pass a row here, while
+    focused tests may pass a small mapping.  A public projection never grants
+    this branch authority.
+    """
+    import json
+    if hasattr(child_projection, "arguments_json"):
+        encoded = child_projection.arguments_json
+    elif isinstance(child_projection, dict):
+        encoded = child_projection.get("arguments_json", child_projection.get("arguments", {}))
+    else:
+        return False
+    try:
+        arguments = json.loads(encoded) if isinstance(encoded, str) else encoded
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(arguments, dict) and arguments.get("tool_id") == REPOSITORY_WORK_DESCRIPTOR_ID
+
+
+async def _binding_is_repository_work(jobs, binding) -> bool:
+    """Read the private child input before selecting the fixed route."""
+    async with jobs._session() as db:
+        child = await jobs._fetch(db, binding.invocation_id)
+        return _is_repository_work_child(child)
+
+
 async def current_interpreter(jobs, parent_id, *, owner, fence):
     """Return only a verified current joint native binding."""
     async with jobs._session() as db:
@@ -110,8 +146,188 @@ async def publish_positive_claim(jobs, binding, *, child_owner, child_fence):
         fencing_token=child_fence, expected_parent_revision=parent["revision"])
 
 
+async def _run_repository_native_step(service, jobs, binding, *, child_owner,
+    principal, approved_resume=False):
+    """Run the one fixed repository adapter without the generic callback path.
+
+    The adapter is intentionally a private seam supplied by the source owner
+    through ``registry.repository_work_adapter`` (or the equivalent service
+    attribute used by the application composition root).  It may return only a
+    producer-sealed wait witness, or a producer-sealed final witness plus a
+    staged artifact.  No ordinary registry invocation, approval exception,
+    callback Future, or caller-provided mapping is accepted here.
+    """
+    import inspect
+    from datetime import datetime, timezone
+    from math import ceil
+    from src.work_board.general_task import digest
+    from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input
+    from src.workflows.job_runtime import DurableJobLeaseError, _as_utc
+
+    deadline = min(binding.native_deadline_at, binding.original_deadline_at)
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        raise BoardError("general_task_deadline", "Original native cutoff expired", status_code=409)
+
+    if approved_resume:
+        async with jobs._session() as db:
+            row = await jobs._fetch(db, binding.invocation_id)
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            manifest = read_manifest(parent)
+            lease_expiry = _as_utc(row.lease_expires_at)
+            if (row.status != "running" or row.lease_owner != child_owner
+                or row.attempt_count != 1 or row.fencing_token < 1
+                or row.lease_expires_at is None or row.failure_reason is not None
+                or parent.status != "paused"
+                or parent.failure_reason != "general_task_native_wait"
+                or manifest is None or manifest.phase != "native_wait"
+                or lease_expiry is None
+                or lease_expiry <= datetime.now(timezone.utc)
+                or lease_expiry > deadline):
+                raise BoardError("repository_resume_binding_changed",
+                    "Exact original repository child wake is required", status_code=409)
+        child = await jobs.get_job(binding.invocation_id)
+    else:
+        pending = await jobs.get_job(binding.invocation_id)
+        if pending is None:
+            raise DurableJobLeaseError("original repository child input required")
+        if (pending["attempt_count"] != 0 or pending["lease"]["fencing_token"] != 0
+            or pending["effects"] or pending["lease"]["owner"] or pending["lease"]["expires_at"]):
+            raise DurableJobLeaseError("original unclaimed repository child required; never replay")
+        if pending["status"] == "accepted":
+            await jobs.queue_job(binding.invocation_id)
+        elif pending["status"] != "queued":
+            raise DurableJobLeaseError("original accepted or queued repository child required")
+        # The first claim owns the entire remaining original cutoff. The
+        # fixed process phase remains capped below at 180 seconds, but no
+        # heartbeat or resume path may extend this lease later.
+        child = await jobs.claim_job(binding.invocation_id, owner=child_owner,
+            lease_seconds=max(1, ceil(remaining)))
+
+    fence = child["lease"]["fencing_token"]
+    if type(fence) is not int or fence < 1:
+        raise DurableJobLeaseError("original repository child claim fence required")
+    if not approved_resume:
+        await publish_positive_claim(jobs, binding, child_owner=child_owner, child_fence=fence)
+
+    async with jobs._session() as db:
+        row = await jobs._fetch(db, binding.invocation_id)
+        private = await read_current_native_tool_input(db, row)
+        parent_row = await jobs._fetch(db, binding.parent_job_id)
+        attempt = await db.scalar(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.attempt_id == binding.attempt_id))
+        task = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == binding.task_id))
+        envelope = await read_current_native_envelope(db, parent_row, task, attempt)
+        plan = current_plan(read_manifest(parent_row), envelope)
+        step = next((item for item in plan.steps if item.step_id == binding.step_id), None)
+        if step is None:
+            raise BoardError("repository_step_binding_changed",
+                "Original repository plan step required", status_code=409)
+
+    descriptors = {item.tool_id: item for item in service.registry.descriptors()}
+    descriptor = descriptors.get(private.tool_id)
+    if (descriptor is None or not _is_repository_work_descriptor(descriptor)
+        or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest):
+        raise BoardError("repository_tool_contract_changed",
+            "Original fixed repository descriptor required", status_code=409)
+
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        raise BoardError("general_task_deadline", "Original native cutoff expired", status_code=409)
+    descriptor_deadline = getattr(descriptor, "deadline", 180)
+    if type(descriptor_deadline) not in {int, float} or descriptor_deadline <= 0:
+        raise BoardError("repository_tool_contract_changed",
+            "Fixed repository command deadline is invalid", status_code=409)
+    phase_budget = min(180.0, float(descriptor_deadline), remaining)
+    lease_expiry = child["lease"]["expires_at"]
+    if lease_expiry is None:
+        raise DurableJobLeaseError("original repository child lease is unavailable")
+    try:
+        lease_expiry_at = datetime.fromisoformat(str(lease_expiry).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DurableJobLeaseError("original repository child lease metadata is malformed") from exc
+    if lease_expiry_at.tzinfo is None:
+        lease_expiry_at = lease_expiry_at.replace(tzinfo=timezone.utc)
+    if lease_expiry_at <= datetime.now(timezone.utc) or lease_expiry_at > deadline:
+        raise DurableJobLeaseError("original repository child lease cutoff changed")
+
+    registry_adapter = getattr(getattr(service, "registry", None),
+        "repository_work_adapter", None)
+    service_adapter = getattr(service, "repository_work_adapter", None)
+    adapter = registry_adapter if callable(registry_adapter) else service_adapter
+    if not callable(adapter):
+        raise BoardError("repository_native_adapter_unavailable",
+            "The fixed repository source adapter is unavailable", status_code=409)
+    result = adapter(jobs=jobs, binding=binding, descriptor=descriptor,
+        inputs=private.inputs, step=step, child_owner=child_owner,
+        principal=principal, fencing_token=fence, approved_resume=approved_resume,
+        original_deadline=deadline, phase_timeout=phase_budget)
+    if inspect.isawaitable(result):
+        result = await result
+    if not isinstance(result, dict):
+        raise BoardError("repository_native_adapter_invalid",
+            "The fixed repository adapter returned no sealed transition", status_code=409)
+
+    wait_witness = result.get("wait_witness")
+    final_witness = result.get("final_witness")
+    if wait_witness is not None and final_witness is not None:
+        raise BoardError("repository_native_adapter_invalid",
+            "A repository transition cannot publish wait and final evidence together", status_code=409)
+    if wait_witness is not None:
+        if set(result) != {"wait_witness"}:
+            raise BoardError("repository_native_adapter_invalid",
+                "Repository wait evidence cannot carry untrusted output", status_code=409)
+        parent = await jobs.get_job(binding.parent_job_id)
+        waiting = await jobs.publish_repository_child_wait(binding.invocation_id,
+            owner=child_owner, fencing_token=fence,
+            expected_parent_revision=parent["revision"], producer_witness=wait_witness)
+        return {"awaiting_repository_wait": True, "child_id": binding.invocation_id,
+            "wait": waiting["wait"], "no_learning": True}, None, None
+    if final_witness is None or "staged_artifact" not in result:
+        raise BoardError("repository_native_adapter_invalid",
+            "The fixed repository adapter must return one sealed wait or final transition", status_code=409)
+    allowed = {"final_witness", "staged_artifact", "authority_check", "authority_scope"}
+    if set(result) - allowed:
+        raise BoardError("repository_native_adapter_invalid",
+            "Repository final evidence carries untrusted output", status_code=409)
+    parent = await jobs.get_job(binding.parent_job_id)
+    published = await jobs.publish_general_task_step_receipt(binding.parent_job_id,
+        staged_artifact=result["staged_artifact"], child_id=binding.invocation_id,
+        owner=child_owner, fencing_token=fence,
+        expected_parent_revision=parent["revision"], repository_final_witness=final_witness,
+        repository_final_authority_check=result.get("authority_check"),
+        repository_final_authority_scope=result.get("authority_scope"))
+    receipt = published.get("receipt") if isinstance(published, dict) else None
+    if not isinstance(receipt, dict):
+        raise BoardError("repository_final_receipt_missing",
+            "The canonical repository final receipt is unavailable", status_code=409)
+    final_id = final_witness.final_artifact_id
+    final_digest = final_witness.final_artifact_digest
+    references = [item for item in receipt.get("artifact_refs", [])
+        if item.get("artifact_id") == final_id and item.get("digest") == final_digest]
+    # The final output belongs to the original native child.  The parent job
+    # projection contains only the staged StepReceipt artifact, so read the
+    # child projection returned by the canonical writer when checking the
+    # physical output record.  A source producer that has not recorded this
+    # child artifact cannot be adopted as a native output.
+    child_artifacts = published.get("child", {}).get("artifacts", [])
+    records = [item for item in child_artifacts
+        if item.get("artifact_id") == final_id and item.get("content_sha256") == final_digest]
+    if len(references) != 1 or len(records) != 1:
+        raise BoardError("repository_final_receipt_missing",
+            "The canonical repository final artifact readback is unavailable", status_code=409)
+    from src.work_board.contracts import GeneralTaskArtifactRef
+    reference = GeneralTaskArtifactRef.model_validate(references[0])
+    return {"verified": True, "repository_final": True, "child_id": binding.invocation_id,
+        "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True}, records[0], reference
+
+
 async def run_native_step(service, jobs, binding, *, child_owner, principal, approved_resume=False):
     """Execute through the existing registry after positive durable admission."""
+    if await _binding_is_repository_work(jobs, binding):
+        return await _run_repository_native_step(service, jobs, binding,
+            child_owner=child_owner, principal=principal, approved_resume=approved_resume)
     import asyncio
     import json
     from dataclasses import replace

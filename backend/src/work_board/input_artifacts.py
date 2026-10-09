@@ -494,6 +494,11 @@ async def _validate_request(
     publication_population=None,
     general_task_publication=None,
 ) -> tuple[dict[str, Any], str, str]:
+    if (request.capability_id == "agent.task.v1" and isinstance(request.input, Mapping)
+            and request.input.get("repository_source") is not None
+            and general_task_publication is None):
+        raise BoardError("repository_source_publication_required",
+            "Repository source binding requires its fixed inspected Task publisher", status_code=422)
     if general_task_publication is not None:
         from src.work_board.general_task_proposal import recheck_proposal_publication
         envelope = await recheck_proposal_publication(db, owner, general_task_publication)

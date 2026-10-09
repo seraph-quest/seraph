@@ -122,6 +122,7 @@ class RemoteInferenceReceiptBinding:
     owner: str | None = None
     fencing_token: int | None = None
     job_id: str | None = None
+    repository_iteration_witness: object | None = None
 
 
 _current_receipt_binding: ContextVar[RemoteInferenceReceiptBinding | None] = ContextVar(
@@ -156,6 +157,7 @@ def bind_remote_inference_receipt(
     job_id: str,
     owner: str,
     fencing_token: int,
+    repository_iteration_witness: object = None,
 ) -> Iterator[RemoteInferenceReceiptBinding]:
     """Bind one existing durable job lease around a remote inference call.
 
@@ -179,11 +181,18 @@ def bind_remote_inference_receipt(
         raise ValueError("durable remote inference requires a positive fencing token") from exc
     if normalized_fence <= 0:
         raise ValueError("durable remote inference requires a positive fencing token")
+    if repository_iteration_witness is not None:
+        from src.workflows.repo_repair_source import assert_repository_iteration_witness
+        assert_repository_iteration_witness(repository_iteration_witness)
+        if (repository_iteration_witness.repository_job_id != normalized_job
+            or repository_iteration_witness.repository_fence != normalized_fence):
+            raise ValueError("original repository iteration receipt fence required")
     binding = RemoteInferenceReceiptBinding(
         repository=repository,
         owner=normalized_owner,
         fencing_token=normalized_fence,
         job_id=normalized_job,
+        repository_iteration_witness=repository_iteration_witness,
     )
     token = set_remote_inference_receipt_binding(binding)
     try:
@@ -212,6 +221,16 @@ def stable_remote_inference_operation_id(
     durable_job_id = str(getattr(binding, "job_id", "") or "").strip()
     if not durable_job_id:
         return str(fallback or "").strip()
+    if binding.repository_iteration_witness is not None:
+        from src.workflows.repo_repair_source import assert_repository_iteration_witness
+        from .accounting import current_repository_iteration_accounting_witness
+        witness = binding.repository_iteration_witness
+        assert_repository_iteration_witness(witness)
+        if (current_repository_iteration_accounting_witness() is not witness
+            or witness.repository_job_id != durable_job_id
+            or witness.repository_fence != binding.fencing_token):
+            raise ValueError("original repository iteration accounting context required")
+        return witness.operation_id
     del profile_id
     operation_id = f"remote:{durable_job_id}"
     if len(operation_id) <= 256:

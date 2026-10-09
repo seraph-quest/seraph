@@ -278,7 +278,12 @@ async def test_protected_checkpoint_capacity_and_missing_proof_fail_closed(task_
     special = {'checkpoint_id': 'general-task:current-manifest:v1', 'safe': True,
                'payload': manifest.model_dump(mode='json'), 'state_digest': _digest(manifest.model_dump(mode='json'))}
     history = [{'checkpoint_id': key, 'safe': True} for key in proof_ids] + [special]
-    retained = _bounded_checkpoint_receipts(history + [{'checkpoint_id': 'ordinary-later'}], limit=50)
+    from copy import deepcopy
+    original_history = deepcopy(history)
+    with pytest.raises(DurableJobTransitionError, match='capacity'):
+        _bounded_checkpoint_receipts(history + [{'checkpoint_id': 'ordinary-later'}], limit=50)
+    assert history == original_history
+    retained = _bounded_checkpoint_receipts(history, limit=50)
     assert {x['checkpoint_id'] for x in retained} == set(proof_ids) | {special['checkpoint_id']}
     with pytest.raises(DurableJobTransitionError, match='capacity'):
         _bounded_checkpoint_receipts(history, limit=49)

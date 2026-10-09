@@ -92,6 +92,7 @@ import {
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
 import { PttAudioControl } from "../chat/PttAudioControl";
+import { partialInspectionKey, partialJobHasExactReceipt, type PartialArtifactInspectionBinding, type PartialArtifactInspectionRequest, type PartialArtifactInspectionReceipt } from "./partialArtifactInspection";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
@@ -6484,6 +6485,7 @@ interface BoardBrowserResultPreview {
 }
 
 type BoardArtifactRecord = ArtifactRecord & {
+  partialReceiptBinding?: PartialArtifactInspectionBinding;
   browserResultRequested?: boolean;
   browserResult?: BoardBrowserResultPreview | null;
   calendarResultRequested?: boolean;
@@ -7986,8 +7988,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, []);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
   const workBoardInspectionGenerationRef = useRef(0);
+  const partialReceiptElement = useRef<HTMLDivElement | null>(null);
+  const partialPresentation = useRef<{ binding: PartialArtifactInspectionBinding; current: () => boolean; resolve: (value: PartialArtifactInspectionReceipt | null) => void } | null>(null);
+  const currentPartialOwner = useRef(operatorAuth);
+  currentPartialOwner.current = operatorAuth;
   useEffect(() => () => {
     workBoardInspectionGenerationRef.current += 1;
+    partialPresentation.current?.resolve(null); partialPresentation.current = null;
   }, []);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
@@ -9717,6 +9724,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     isCurrentInspection: () => boolean,
     browserReference?: WorkBoardReceiptReference | null,
     calendarReference?: WorkBoardReceiptReference | null,
+    partialBinding?: PartialArtifactInspectionBinding,
   ): Promise<{
     job: Record<string, unknown> | null;
     workflow: BoardBoundWorkflowRun | null;
@@ -9765,6 +9773,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         calendarResultRequested,
         calendarResult: null,
       };
+    }
+    if (partialBinding && !partialJobHasExactReceipt(job, partialBinding)) {
+      return { job: null, workflow: null, status: result.status };
     }
     const browserResultStatus = job.browser_result_status;
     const browserResult = browserResultRequested && browserResultStatus === "available"
@@ -9821,6 +9832,55 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus(message);
     });
   }
+  useEffect(() => {
+    const pending = partialPresentation.current;
+    if (!pending) return;
+    const artifact = selectedInspector?.kind === "artifact" ? selectedInspector.artifact as BoardArtifactRecord : null;
+    const key = partialInspectionKey(pending.binding);
+    if (pending.current() && visibleSections.inspector && artifact?.partialReceiptBinding
+      && partialInspectionKey(artifact.partialReceiptBinding) === key
+      && partialReceiptElement.current?.dataset.partialReceipt === key) {
+      partialPresentation.current = null;
+      pending.resolve({ binding: pending.binding, presented: true });
+    } else if (!pending.current() || (artifact && artifact.partialReceiptBinding && partialInspectionKey(artifact.partialReceiptBinding) !== key)) {
+      partialPresentation.current = null; pending.resolve(null);
+    }
+  }, [selectedInspector, visibleSections.inspector, operatorAuth.status, operatorAuth.principalId, operatorAuth.sessionId]);
+
+  async function inspectPartialArtifactReceipt({ binding, signal }: PartialArtifactInspectionRequest): Promise<PartialArtifactInspectionReceipt | null> {
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    partialPresentation.current?.resolve(null); partialPresentation.current = null;
+    const current = () => !signal.aborted && cockpitMountedRef.current
+      && inspectionGeneration === workBoardInspectionGenerationRef.current
+      && currentPartialOwner.current.status === "authenticated"
+      && currentPartialOwner.current.principalId === binding.ownerPrincipalId
+      && currentPartialOwner.current.sessionId === binding.ownerSessionId;
+    if (!current()) return null;
+    const output = binding.output;
+    setWorkBoardEvidenceStatus("Loading the exact authenticated partial artifact receipt.");
+    const reference = { artifact_id: output.artifact_id, content_sha256: output.content_sha256 };
+    try {
+      const { job, workflow } = await loadBoardBoundWorkflowRun(output.child_job_id, binding.ownerSessionId, current, null, null, binding);
+      if (!current()) return null;
+      if (!job || !workflow || !partialJobHasExactReceipt(job, binding)) throw Error("Exact partial artifact receipt or child lineage is unavailable.");
+      const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId: binding.ownerSessionId, workflowRunId: output.child_job_id });
+      if (!artifact || artifact.sizeBytes !== output.size_bytes) throw Error("Exact partial artifact metadata is unavailable.");
+      return await new Promise(resolve => {
+        const pending = { binding, current, resolve };
+        partialPresentation.current = pending;
+        const abort = () => { if (partialPresentation.current === pending) partialPresentation.current = null; resolve(null); };
+        signal.addEventListener("abort", abort, { once: true });
+        pending.resolve = value => { signal.removeEventListener("abort", abort); resolve(value); };
+        setSelectedInspector({ kind: "artifact", artifact: { ...artifact, partialReceiptBinding: binding } as BoardArtifactRecord });
+        focusPane("inspector_pane");
+        setWorkBoardEvidenceStatus(null);
+      });
+    } catch (error) {
+      if (current()) { const message = (error as Error).message; setWorkBoardEvidenceStatus(message); setOperatorStatus(message); }
+      return null;
+    }
+  }
+
   function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
@@ -15899,6 +15959,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 3);
           return (
             <>
+              {(artifact as BoardArtifactRecord).partialReceiptBinding && <div ref={partialReceiptElement}
+                data-partial-receipt={partialInspectionKey((artifact as BoardArtifactRecord).partialReceiptBinding!)}
+                aria-label="Authenticated partial artifact receipt">
+                <p>Artifact receipt {artifact.id} · {artifact.sizeBytes} bytes · SHA-256 {artifact.contentSha256}</p>
+                <p>Owner {(artifact as BoardArtifactRecord).partialReceiptBinding!.ownerSessionId} · child {artifact.runId} · delegation {(artifact as BoardArtifactRecord).partialReceiptBinding!.output.delegation_invocation_id}</p>
+                <p>Metadata only. File content is not previewed; the server physically verifies it when accepting the partial decision.</p>
+              </div>}
               <div className="cockpit-feedback-row">
                 <button
                   className="cockpit-feedback-button"
@@ -17578,6 +17645,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 selectCockpitSection("inbox");
               }}
               onInspectArtifact={inspectWorkBoardArtifact}
+              onInspectPartialArtifact={inspectPartialArtifactReceipt}
               onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
             />
           </CockpitWorkspaceWindow>

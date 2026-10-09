@@ -1166,6 +1166,138 @@ cover exact control bindings and truthful cancellation states. These isolated
 Linux receipts make no external provider call or quality claim. The contract is
 OS-agnostic; native macOS execution remains unverified.
 
+#### Bounded specialist delegation (#999)
+
+**Intended Shipped scope after reviewed merge:** available on the installed
+`develop` revision containing the independently reviewed
+[#999](https://github.com/seraph-quest/seraph/issues/999) implementation merge.
+It extends the accepted native task contract above, using the same Python
+dispatcher, canonical Work cards and governed inference accounting owner.
+
+An accepted plan can invoke the fixed `specialist_delegate` tool. The server
+reserves the original parent/step association and publishes a real specialist
+Work card with an immutable private input. Both cards expose reciprocal
+navigation after canonical publication. This is informational lineage, not a
+dependency edge or permission: Attempt/job identities are labeled reserved
+until the existing dispatcher actually claims them. Missing or foreign cards
+remain unavailable through the existing owner-filtered inspector.
+
+When the parent has an accepted reviewed task method, the authenticated private
+specialist reservation revalidates that parent's original immutable method pin.
+The child executes its narrower server-reserved plan and allowed tool subset,
+without selecting a fresh general method or inheriting the parent's full tool
+sequence. Original owner, Goal, callback/fence, request and handoff bindings
+remain mandatory. Ordinary public task admission still selects the current
+method and requires its complete reviewed sequence; caller-supplied lineage
+cannot authorize a narrowed plan.
+
+The original group permits at most two active and four retained specialist
+children and one specialist depth; a specialist cannot delegate recursively.
+Planning and execution share the original task's allowance of at most twelve
+inference calls, explicit cost ceiling and absolute deadline. No child obtains
+a new inference lane, approval, Root or budget from its lineage. Selected
+execution evidence is copied into a bounded private handoff under current
+producer, Goal and owner checks. The child consumes that sealed copy; it does
+not regain an arbitrary source path or inherit credentials. Changed source or
+Vault metadata, missing or altered copied artifacts and unrelated pointers
+block the governed use.
+
+Proposal publication, specialist planning, stop compilation and partial-review
+cost readback each use three private indexed queries: one-row checks for missing
+or invalid classification,
+then at most thirteen original-group rows to detect overflow beyond twelve.
+Released, settled and Unknown history remains included; original evidence,
+group, owner, Root, ordinal and deadline bindings still determine authority.
+Canonical startup strictly classifies legacy rows in batches of at most 128;
+malformed or unsupported evidence stays invalid for fail-closed admission.
+Historical financial membership seals retain their original typed defaults and
+field presence; migration neither normalizes retained evidence bytes nor reseals
+existing journals. The private lookup
+hint is not a grant or integrity seal against arbitrary direct database edits.
+
+The stopped workspace CLI accepts the old schema and its sole added private
+hint column for backup/restore and continuity readback. Restore leaves that hint
+NULL; canonical startup migration must classify it before governed accounting
+is ready. Other unexpected columns still fail closed. These bounded specialist
+reads do not bound the existing global `_accounting_rows` baseline, which still
+loads the deployment ledger.
+
+Private handoff publication discovers at most twelve distinct specialist
+callback identities from validated original-group reservations, then checks each
+through an exact unique run-identity lookup. Original owner, Root, callback kind,
+reservation, current delegation and narrowed envelope checks remain mandatory;
+unrelated same-Root job history is not scanned. The existing full Vault
+fingerprint still scales with all secret rows and bytes. These bounded lookups
+do not make the entire publication path independent of global workspace size.
+
+The parent enters a durable wait rather than holding an active callback while
+the child works. Reconciliation uses the original protected reservation and
+actual child execution/readback. Restart can continue that retained wait or
+adopt already verified physical child output without launching another child.
+Only verified parent assembly reaches Review. A failed sibling retains the
+successful child's private output and visible original accounting; it does not
+convert partial work into successful final assembly. Outcomes record
+`no_learning`; task or child success does not update canonical memory.
+
+Cancel on the original root fences the complete original direct/specialist
+descendant set and further output adoption. Held pause also stops admission;
+it provides no new resume bridge for uncertain work. Original callbacks,
+Unknown effects and contacted cost liabilities stay visible. A stop receipt,
+lease expiry, absent process or reserved child identity does not prove positive
+callback closure. Existing original-source closure and accounting readbacks
+remain necessary for reconciliation; the partial-review action cannot supply
+them or renew execution.
+
+For eligible stopped work, the GeneralTask inspector shows producer-issued
+verified specialist steps and exact private output references. Inspect each
+selected artifact through the existing artifact inspector, then explicitly
+acknowledge the remaining effects and accounting debt. Opening that inspector
+alone is not a successful physical-readback claim. The existing task action
+`accept_partial_results` binds the original task revision, Attempt, workflow,
+manifest and plan revisions, selected steps and one UUID idempotency key.
+The server physically verifies those selected outputs and records an immutable
+`SpecialistPartialResult.v1` review artifact without changing the original
+Task/Attempt, stop state or callback closure. This metadata review can occur
+after the original execution cutoff; it grants no new contact.
+
+Accepted selections remain **partial review pending debt**, never full task
+success. The display separates the historical unresolved jobs/effects at
+acceptance from current unresolved job, effect and cost-operation counts and
+current cancellation state. Even zero current counts or later genuine stop
+reconciliation cannot make that decision a full-success result or authorize
+resume. An uncertain POST retains its exact original request for explicit
+reconciliation; there is no automatic retry or new selection. Exact replay
+after restart still requires the current authenticated paired owner before
+stale-revision handling. Foreign or recovered read-only access cannot accept
+or replay private decisions; changed selections, stale source and mismatched
+bindings require inspection and recovery.
+
+[Native specialist journeys](../../backend/tests/test_specialist_delegation_runtime.py),
+[copied evidence tests](../../backend/tests/test_specialist_evidence_runtime.py),
+[durable wait tests](../../backend/tests/test_specialist_durable_wait.py),
+[stop tests](../../backend/tests/test_specialist_stop.py) and
+[authenticated partial-review tests](../../backend/tests/test_specialist_partial.py)
+exercise actual production owners and private physical outputs with only the
+final approved model/MCP transports scripted. The
+[partial UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.partial.test.tsx)
+cover inspection, exact replay, owner changes and truthful historical/current
+debt display. These isolated Linux receipts make no external provider call,
+quality or general callback-recovery claim. Native macOS execution remains
+unverified. The optional Cordis bridge remains separately owned by #1007.
+
+The [reviewed-method specialist journey](../../backend/tests/test_specialist_reviewed_method.py)
+completes a real native source task and its operator review, derives and accepts
+its signed method, then executes a new parent under that immutable pin. Both
+narrower children reach Done with distinct physical outputs; the new parent
+reaches Review and still awaits its normal operator completion. Legitimate
+continuations retain each callback's exact admitted revision and digest from
+the verified finite consecutive revision manifest; the executed step must equal
+the final frozen step and its private inputs must match current dependency
+resolution. Missing revisions or altered source bytes block lesson eligibility.
+Method compatibility uses detached descriptors from the genuinely started
+dispatcher registry when available, with stage and final-writer rechecks. Those
+descriptors describe compatibility only and grant no execution authority.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for

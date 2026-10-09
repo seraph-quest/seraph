@@ -154,6 +154,37 @@ def _map_legacy_workflow_status(status: str | None) -> tuple[str, str | None]:
     return _LEGACY_WORKFLOW_STATUS_MAP[original_status], None
 
 
+async def _ensure_inference_group_lookup(conn) -> None:
+    """Add and classify the private hint without rewriting financial evidence."""
+    columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_cost_reservations)")).fetchall()}
+    if not columns:
+        return
+    if "group_lookup_key" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_cost_reservations ADD COLUMN group_lookup_key VARCHAR")
+    from types import SimpleNamespace
+    from src.workflows.inference_group_lookup import classify_group_lookup, INDEX_NAME
+    cursor = None
+    while True:
+        query = "SELECT * FROM inference_cost_reservations WHERE group_lookup_key IS NULL"
+        parameters = {}
+        if cursor is not None:
+            query += " AND operation_id > :cursor"
+            parameters["cursor"] = cursor
+        result = await conn.execute(text(query + " ORDER BY operation_id LIMIT 128"), parameters)
+        batch = result.mappings().all()
+        if not batch:
+            break
+        for row in batch:
+            await conn.execute(text("UPDATE inference_cost_reservations SET group_lookup_key = :key "
+                "WHERE operation_id = :operation AND group_lookup_key IS NULL"),
+                {"key": classify_group_lookup(SimpleNamespace(**row)), "operation": row["operation_id"]})
+        cursor = batch[-1]["operation_id"]
+    await conn.exec_driver_sql(f"CREATE INDEX IF NOT EXISTS {INDEX_NAME} "
+        "ON inference_cost_reservations (owner_id, group_lookup_key)")
+
+
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
     async def _table_columns(table_name: str) -> set[str]:
@@ -1882,6 +1913,7 @@ async def init_db() -> None:
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_inference_group_lookup(conn)
         await _ensure_operator_session_columns(conn)
         await _ensure_vault_owner(conn)
         await _ensure_operator_principals(conn)

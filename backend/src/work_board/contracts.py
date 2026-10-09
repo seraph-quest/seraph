@@ -393,7 +393,97 @@ GENERAL_TASK_MANIFEST_KEY = "general-task:current-manifest:v1"
 class GeneralTaskArtifactRef(ClosedTaskModel):
     artifact_id: TaskIdentity
     digest: TaskDigest
-    schema_version: Literal["GeneralTaskEnvelope.v1", "GeneralTaskPlanRevision.v1", "StepReceipt.v1", "GeneralTaskOutput.v1", "GeneralTaskToolInput.v1"]
+    schema_version: Literal["GeneralTaskEnvelope.v1", "GeneralTaskPlanRevision.v1", "StepReceipt.v1", "GeneralTaskOutput.v1", "GeneralTaskToolInput.v1", "SpecialistEvidenceHandoff.v1", "SpecialistPartialResult.v1"]
+
+
+class SpecialistPartialOutputV1(ClosedTaskModel):
+    step_id: TaskIdentity
+    child_task_id: TaskIdentity
+    child_job_id: TaskIdentity
+    artifact_id: TaskIdentity
+    file_path: str = Field(min_length=1,max_length=512)
+    content_sha256: TaskDigest
+    size_bytes: int = Field(ge=1,le=65536)
+
+
+class SpecialistPartialEffectV1(ClosedTaskModel):
+    job_id: TaskIdentity
+    effect_id: TaskIdentity
+    status: str = Field(min_length=1,max_length=64)
+
+
+class SpecialistPartialCostV1(ClosedTaskModel):
+    operation_id: TaskIdentity
+    state: str = Field(min_length=1,max_length=64)
+    evidence_digest: TaskDigest
+
+
+class SpecialistPartialJobV1(ClosedTaskModel):
+    job_id: TaskIdentity
+    parent_job_id: TaskIdentity | None
+    status: str = Field(min_length=1,max_length=64)
+    attempts: int = Field(ge=0,le=1)
+    input_digest: TaskDigest
+    authority_digest: TaskDigest
+    effect_digest: TaskDigest
+    artifact_digest: TaskDigest
+    checkpoint_digest: TaskDigest
+
+
+class SpecialistPartialResultV1(ClosedTaskModel):
+    schema_version: Literal["SpecialistPartialResult.v1"] = "SpecialistPartialResult.v1"
+    parent_job_id: TaskIdentity
+    creation_digest: TaskDigest
+    decision_binding_digest: TaskDigest
+    selected_outputs: list[SpecialistPartialOutputV1] = Field(min_length=1,max_length=64)
+    unresolved_effects: list[SpecialistPartialEffectV1] = Field(default_factory=list,max_length=256)
+    unresolved_job_ids: list[TaskIdentity] = Field(default_factory=list,max_length=84)
+    costs: list[SpecialistPartialCostV1] = Field(default_factory=list,max_length=12)
+    no_learning: Literal[True] = True
+
+
+class SpecialistPartialDecisionV1(ClosedTaskModel):
+    schema_version: Literal["SpecialistPartialDecision.v1"] = "SpecialistPartialDecision.v1"
+    parent_job_id: TaskIdentity
+    task_id: TaskIdentity
+    attempt_id: TaskIdentity
+    creation_digest: TaskDigest
+    original_stop_digest: TaskDigest
+    original_stop_manifest_digest: TaskDigest
+    task_revision: int = Field(ge=1)
+    owner_principal_id: TaskIdentity
+    original_root_id: TaskIdentity
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    group_id: TaskDigest
+    group_digest: TaskDigest
+    original_deadline_at: datetime
+    native_deadline_at: datetime
+    _utc_timestamp = field_validator("original_deadline_at", "native_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+    idempotency_key: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    request_digest: TaskDigest
+    decision_binding_digest: TaskDigest
+    selected_step_ids: list[TaskIdentity] = Field(min_length=1,max_length=4)
+    selected_receipt_digests: list[TaskDigest] = Field(min_length=1,max_length=4)
+    selected_closure_digests: list[TaskDigest] = Field(min_length=1,max_length=4)
+    result_ref: GeneralTaskArtifactRef
+    jobs: list[SpecialistPartialJobV1] = Field(max_length=85)
+    cost_membership_digest: TaskDigest
+    state: Literal["partial_review_pending_debt"] = "partial_review_pending_debt"
+    no_learning: Literal[True] = True
+
+
+class SpecialistPartialArtifactProofV1(ClosedTaskModel):
+    schema_version: Literal["SpecialistPartialArtifactProof.v1"] = "SpecialistPartialArtifactProof.v1"
+    kind: Literal["artifact", "readback"]
+    parent_job_id: TaskIdentity
+    creation_digest: TaskDigest
+    decision_digest: TaskDigest
+    result_ref: GeneralTaskArtifactRef
+    file_path: str = Field(min_length=1,max_length=512)
+    size_bytes: int = Field(ge=1,le=65536)
+    verified: Literal[True] = True
+    no_learning: Literal[True] = True
 
 
 class GeneralTaskStepReceiptV1(StepReceipt):
@@ -563,8 +653,18 @@ class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
     artifact_digest: TaskDigest
     checkpoint_digest: TaskDigest
     closure: GeneralTaskToolClosureV1 | None = None
+    delegation_closure_digest: TaskDigest | None = None
+    delegation_stop_checkpoint: str | None = Field(default=None, max_length=512)
     effect_debt: bool
     no_learning: Literal[True] = True
+
+    @model_serializer(mode="wrap")
+    def preserve_original_cancel_shape(self, handler):
+        result = handler(self)
+        for key in ("delegation_closure_digest", "delegation_stop_checkpoint"):
+            if result.get(key) is None:
+                result.pop(key, None)
+        return result
 
 
 class GeneralTaskNativeCancelV1(ClosedTaskModel):
@@ -586,7 +686,15 @@ class GeneralTaskNativeCancelV1(ClosedTaskModel):
     phase: Literal["unknown_recovery", "cancelled"]
     state: Literal["pending", "callback_closed_outcome_debt", "fully_cancelled"]
     children: list[GeneralTaskNativeCancelChildV1] = Field(default_factory=list, max_length=16)
+    stop_action: Literal["cancel", "pause"] = "cancel"
     no_learning: Literal[True] = True
+
+    @model_serializer(mode="wrap")
+    def preserve_original_cancel_shape(self, handler):
+        result = handler(self)
+        if self.stop_action == "cancel":
+            result.pop("stop_action", None)
+        return result
 
 
 class GeneralTaskApprovalTransitionV1(ClosedTaskModel):
@@ -665,6 +773,46 @@ class GeneralTaskToolInputV1(ClosedTaskModel):
         return self
 
 
+class SpecialistEvidenceEntry(ClosedTaskModel):
+    reference: str = Field(min_length=1, max_length=512)
+    producer_revision: int = Field(ge=1)
+    producer_attempt_ref: str = Field(min_length=1, max_length=128)
+    file_path: str = Field(min_length=1, max_length=512)
+    content_sha256: TaskDigest
+    size_bytes: int = Field(ge=1, le=32768)
+    content: str = Field(max_length=32768)
+
+
+class SpecialistEvidenceHandoffV1(ClosedTaskModel):
+    """Private copied evidence; never a public task input or planner prompt."""
+    schema_version: Literal["SpecialistEvidenceHandoff.v1"] = "SpecialistEvidenceHandoff.v1"
+    parent_job_id: str = Field(min_length=1, max_length=128)
+    creation_digest: TaskDigest
+    invocation_id: str = Field(min_length=1, max_length=128)
+    request_digest: TaskDigest
+    child_task_id: TaskIdentity
+    owner_principal_id: str = Field(min_length=1, max_length=128)
+    original_root_id: str = Field(min_length=1, max_length=128)
+    group_digest: TaskDigest
+    producer_tokens: list[TaskDigest] = Field(max_length=60)
+    vault_state_digest: TaskDigest
+    entries: list[SpecialistEvidenceEntry] = Field(max_length=12)
+
+    @model_validator(mode="after")
+    def bounded_copy(self):
+        from src.work_board.general_task import canonical
+        if len(canonical([entry.model_dump(mode="json") for entry in self.entries])) > 32768:
+            raise ValueError("explicit copied evidence exceeds 32 KiB")
+        if 5 * len(self.entries) != len(self.producer_tokens) or len({e.reference for e in self.entries}) != len(self.entries):
+            raise ValueError("exact copied evidence bindings required")
+        import hashlib
+        for entry in self.entries:
+            raw = entry.content.encode("utf-8")
+            if len(raw) != entry.size_bytes or hashlib.sha256(raw).hexdigest() != entry.content_sha256:
+                raise ValueError("copied evidence bytes changed")
+        return self
+
+
 class GeneralTaskEnvelope(ClosedTaskModel):
     """Single immutable artifact holding intent and the accepted inert plan."""
     schema_version: Literal[1] = 1
@@ -676,6 +824,7 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     proposal_group: "TaskProposalGroupV1 | None" = None
     proposal_provenance: "TaskProposalProvenanceV1 | None" = None
+    specialist_handoff: GeneralTaskArtifactRef | None = None
 
     @model_validator(mode="after")
     def immutable_snapshot(self):
@@ -744,6 +893,7 @@ class WorkBoardAction(str, Enum):
     request_changes = "request_changes"
     complete_review = "complete_review"
     renew_review = "renew_review"
+    accept_partial_results = "accept_partial_results"
 
 
 # ``operator`` is retained for the M1 operator-correction path.  The other
@@ -1016,6 +1166,30 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
         return self
 
 
+class SpecialistPartialDecisionRequest(ClosedTaskModel):
+    idempotency_key: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    attempt_id: TaskIdentity
+    workflow_run_id: TaskIdentity
+    expected_manifest_revision: int = Field(ge=1)
+    expected_plan_revision: int = Field(ge=1,le=16)
+    selected_step_ids: list[TaskIdentity] = Field(min_length=1,max_length=4)
+    acknowledge_unresolved: Literal[True]
+
+    @field_validator("acknowledge_unresolved",mode="before")
+    @classmethod
+    def explicit_ack(cls,value):
+        if value is not True:
+            raise ValueError("literal unresolved acknowledgment required")
+        return value
+
+    @field_validator("selected_step_ids")
+    @classmethod
+    def unique_steps(cls,value):
+        if len(set(value))!=len(value):
+            raise ValueError("unique selected original steps required")
+        return value
+
+
 class WorkBoardActionRequest(WorkBoardBaseModel):
     action: WorkBoardAction
     expected_revision: int = Field(ge=1)
@@ -1034,6 +1208,7 @@ class WorkBoardActionRequest(WorkBoardBaseModel):
     evidence_refs: list[str] = Field(default_factory=list, max_length=20)
     reason: str | None = Field(default=None, min_length=1, max_length=500)
     resolution: str | None = Field(default=None, min_length=1, max_length=1_000)
+    partial_decision: SpecialistPartialDecisionRequest | None = None
     document_build_review: DocumentBuildReview | None = None
 
     @field_validator("attempt_id")

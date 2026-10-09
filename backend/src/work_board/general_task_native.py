@@ -62,6 +62,18 @@ async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, 
         payload=GeneralTaskToolInputV1(parent_job_id=parent_id, creation_digest=previous.creation_digest,
             invocation_id=binding.invocation_id, tool_id=descriptor.tool_id,
             descriptor_digest=binding.descriptor_digest, input_digest=binding.input_digest, inputs=inputs))
+    native_authority = {"principal": task.owner_principal_id, "owner_kind": "user",
+        "session_id": task.owner_session_id, "capability_id": GENERAL_TASK_NATIVE_CHILD_CAPABILITY,
+        "general_task_child_binding": binding.model_dump(mode="json")}
+    from src.workflows.specialist_delegation import is_specialist_root
+    if is_specialist_root(parent):
+        import json
+        original = json.loads(parent.declared_authority_json)
+        for key in ("specialist_delegation_invocation_id", "specialist_original_parent_id"):
+            native_authority[key] = original[key]
+    if descriptor.tool_id == "document_build":
+        native_authority.update({"document_build_priority": task.priority,
+            "document_build_input_artifact_id": task.input_artifact_id})
     spec = DurableJobSpec(identity=DurableJobIdentity(binding.invocation_id, "user",
         task.owner_principal_id, GENERAL_TASK_NATIVE_CHILD_KIND, "1", "general-native-tool", binding.invocation_id),
         inputs={"step_id": step.step_id, "tool_id": descriptor.tool_id,
@@ -72,11 +84,7 @@ async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, 
         parent_job_id=parent_id, parent_fencing_token=parent.fencing_token,
         goal_id=task.goal_id, goal_revision=task.goal_revision, plan_revision=previous.plan_revision,
         priority=task.priority if descriptor.tool_id == "document_build" else 50,
-        declared_authority={"principal": task.owner_principal_id, "owner_kind": "user",
-            "session_id": task.owner_session_id, "capability_id": GENERAL_TASK_NATIVE_CHILD_CAPABILITY,
-            "general_task_child_binding": binding.model_dump(mode="json"),
-            **({"document_build_priority": task.priority, "document_build_input_artifact_id": task.input_artifact_id}
-                if descriptor.tool_id == "document_build" else {})},
+        declared_authority=native_authority,
         deadline_at=parent.deadline_at, max_attempts=1)
     capacity_witness = None
     if service is not None:
@@ -212,9 +220,18 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         principal=replace(principal, job_id=binding.invocation_id), job_id=binding.invocation_id,
         fencing_token=fence)
     service.retain_native_invocation(jobs, binding, invocation, output_root_witness=output_root_witness)
+    from src.workflows.specialist_lifecycle import SpecialistWaitRequired
     try:
         try:
             output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
+        except SpecialistWaitRequired as signal:
+            from src.workflows.specialist_lifecycle import verify_wait_signal
+            if descriptor.tool_id != "delegate_task":
+                raise BoardError("specialist_wait_signal_denied","Only original delegation may wait",status_code=409)
+            async with jobs._session() as db:
+                wait = await verify_wait_signal(db,signal,binding=binding,fencing_token=fence)
+            service.release_native_invocation(binding.invocation_id)
+            return {"awaiting_specialists":True,"child_id":wait.child_task_id},None,None
         except TaskToolApprovalRequired:
             metadata = service.registry.approval_context(descriptor, private.inputs, job_id=binding.invocation_id)
             parent = await jobs.get_job(binding.parent_job_id)
@@ -557,6 +574,11 @@ async def continue_verified_plan(service, jobs, parent, task, attempt, envelope,
     from src.work_board.contracts import WorkBoardOwner, PlanRevisionRequest
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     limits = envelope.task_input.limits
+    from src.workflows.specialist_delegation import is_specialist_root
+    if is_specialist_root(parent):
+        # The child's initial reserved plan is immutable. Ordinary continuation
+        # would lose the narrower callback/request accounting subgroup.
+        return False
     if (service.planner is None or not envelope.task_input.inference_egress_acknowledged
         or limits.max_inference_calls <= 0 or limits.max_cost_microusd <= 0 or not manifest.step_ids):
         return False

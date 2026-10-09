@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
 from tests.test_general_documents import fixture_bytes, read_request
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_general_task_planner import prepare, forbid_external_inference
 from tests.test_work_board_m6_provider_free_journey import _goal
 
@@ -61,7 +62,7 @@ async def claimed_document_parent(service, dispatcher, sessions, task, owner):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", [None, "owner", "root", "source_ref", "descriptor", "input", "fence", "capability", "kind", "version", "depth", "tool_input_ref", "late_source"])
-async def test_actual_document_child_private_readback_and_precontact_denials(accounting_db, monkeypatch, change):
+async def test_actual_document_child_private_readback_and_precontact_denials(accounting_db, monkeypatch, change, build_admission_lifecycle):
     from src.api import documents
     from src.auth.service import create_session, authenticate_token
     from src.db.models import WorkBoardTask
@@ -78,6 +79,7 @@ async def test_actual_document_child_private_readback_and_precontact_denials(acc
     jobs, _ = await prepare(accounting_db, monkeypatch)
     token, operator = await create_session()
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    await build_admission_lifecycle.start()
     workspace, _, factory = accounting_db
     sessions = factory.accounting_sessions
     monkeypatch.setattr(crypto, "_fernet", None)

@@ -1,4 +1,5 @@
 """Closed specialist accounting proof; original budget/debt is never reset."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
@@ -123,7 +124,7 @@ def test_specialist_sibling_limits_and_released_calls_do_not_mint_new_allowance(
 
 
 @pytest.mark.asyncio
-async def test_nested_root_cannot_borrow_original_continuation_allowance(task_runtime, monkeypatch):
+async def test_nested_root_cannot_borrow_original_continuation_allowance(task_runtime, monkeypatch, native_admission_lifecycle):
     from sqlalchemy import update, select
     from src.db.models import WorkflowRunState, InferenceCostReservation
     from src.workflows.general_task_accounting import validate_continuation

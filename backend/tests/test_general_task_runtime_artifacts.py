@@ -1,4 +1,5 @@
 """Immutable local readback and canonical child binding, without contact."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from dataclasses import replace
 
 import pytest
@@ -21,7 +22,7 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
 @pytest.mark.asyncio
-async def test_revision_sixteen_is_last_adoptable_immutable_plan(task_runtime):
+async def test_revision_sixteen_is_last_adoptable_immutable_plan(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime)
     from src.work_board.contracts import PlanRevisionRequest
     from src.work_board.general_task_native import publish_plan_revision, current_plan
@@ -66,7 +67,7 @@ async def test_revision_sixteen_is_last_adoptable_immutable_plan(task_runtime):
 
 
 @pytest.mark.asyncio
-async def test_manifest_and_child_compilers_use_original_canonical_binding(task_runtime):
+async def test_manifest_and_child_compilers_use_original_canonical_binding(task_runtime, native_admission_lifecycle):
     sessions, _dispatcher, _service, envelope, current = await running_task(task_runtime)
     async with sessions() as db:
         parent = await db.scalar(select(WorkflowRunState).where(
@@ -112,7 +113,7 @@ async def test_private_input_staging_requires_exact_seal_creation_and_readback(t
 
 
 @pytest.mark.asyncio
-async def test_public_typed_input_cannot_supply_server_group_or_publication_witness(task_runtime):
+async def test_public_typed_input_cannot_supply_server_group_or_publication_witness(task_runtime, native_admission_lifecycle):
     sessions, _dispatcher, _service, envelope, current = await running_task(task_runtime)
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.general_task_proposal import seal_proposal_publication, recheck_proposal_publication
@@ -139,7 +140,7 @@ async def test_public_typed_input_cannot_supply_server_group_or_publication_witn
 
 
 @pytest.mark.asyncio
-async def test_interpreter_admission_retains_canonical_identity_and_private_readback(task_runtime):
+async def test_interpreter_admission_retains_canonical_identity_and_private_readback(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime)
     from src.work_board.general_task_native import admit_native_step, publish_positive_claim
     from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input
@@ -162,7 +163,7 @@ async def test_interpreter_admission_retains_canonical_identity_and_private_read
 
 
 @pytest.mark.asyncio
-async def test_native_success_receipt_and_parent_assembly_share_original_attempt(task_runtime):
+async def test_native_success_receipt_and_parent_assembly_share_original_attempt(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime)
     from dataclasses import replace
     from src.auth.service import authenticate_session
@@ -221,7 +222,7 @@ async def test_native_success_receipt_and_parent_assembly_share_original_attempt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_id", ["read_file", "write_file"])
-async def test_real_filesystem_native_child_reads_physical_workspace(task_runtime, tool_id):
+async def test_real_filesystem_native_child_reads_physical_workspace(task_runtime, tool_id, native_admission_lifecycle):
     from dataclasses import replace
     from src.auth.service import authenticate_session
     from src.native_tools.registry import ToolRegistry
@@ -263,7 +264,7 @@ async def test_real_filesystem_native_child_reads_physical_workspace(task_runtim
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["expired", "unknown"])
-async def test_retained_readonly_projection_has_no_current_execution_authority(task_runtime, monkeypatch, state):
+async def test_retained_readonly_projection_has_no_current_execution_authority(task_runtime, monkeypatch, state, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime)
     from datetime import datetime, timedelta, timezone
     from src.work_board.contracts import WorkBoardOwner

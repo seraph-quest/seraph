@@ -1,4 +1,5 @@
 """Authentic reviewed producer and sealed copy: fail closed on later mutation."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 
 import pytest
@@ -11,7 +12,7 @@ from tests.test_specialist_evidence_runtime import copied_evidence_fixture, rese
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["copied_tamper", "copied_delete", "producer_stale", "vault_changed"])
-async def test_original_sealed_handoff_mutation_denies_before_contact(task_runtime, monkeypatch, mutation):
+async def test_original_sealed_handoff_mutation_denies_before_contact(task_runtime, monkeypatch, mutation, native_admission_lifecycle):
     from src.db.models import WorkBoardTask
     from src.work_board.repository import BoardError
     from src.workflows.specialist_delegation import execute_specialist
@@ -70,7 +71,7 @@ async def test_original_sealed_handoff_mutation_denies_before_contact(task_runti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["secret", "raw_path", "depth", "child_limit", "fake_handoff"])
-async def test_public_delegate_input_cannot_expand_original_scope(task_runtime, monkeypatch, mutation):
+async def test_public_delegate_input_cannot_expand_original_scope(task_runtime, monkeypatch, mutation, native_admission_lifecycle):
     from pydantic import ValidationError
     from src.work_board.repository import BoardError
     from src.auth.service import authenticate_session
@@ -105,7 +106,7 @@ async def test_public_delegate_input_cannot_expand_original_scope(task_runtime, 
 
 
 @pytest.mark.asyncio
-async def test_original_planner_unrelated_pointer_denied_before_tool_write(task_runtime, monkeypatch):
+async def test_original_planner_unrelated_pointer_denied_before_tool_write(task_runtime, monkeypatch, native_admission_lifecycle):
     from src.work_board.repository import BoardError
     from src.workflows.specialist_delegation import execute_specialist
     fixture = await copied_evidence_fixture(task_runtime, monkeypatch)

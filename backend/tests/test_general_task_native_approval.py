@@ -1,4 +1,5 @@
 """Existing owned local MCP callback, exact HTTP approval and one native child."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from dataclasses import replace
 
 import httpx
@@ -20,7 +21,7 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("postcontact_failure", [False, True])
-async def test_actual_mcp_approval_resumes_same_native_child_once(task_runtime, postcontact_failure):
+async def test_actual_mcp_approval_resumes_same_native_child_once(task_runtime, postcontact_failure, native_admission_lifecycle):
     registry = ToolRegistry()
     registry.start()
     registry, manager, tool, _, _ = mcp_registry.__wrapped__(task_runtime[1], registry)

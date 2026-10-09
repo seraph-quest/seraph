@@ -8,12 +8,13 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_general_task_planner import prepare, forbid_external_inference
 from tests.test_document_build_storage import setup, SPEC
 
 
 @pytest.mark.parametrize("kind", ["report", "table_workbook", "report_missing_pdf"])
-async def test_actual_private_build_task_download_and_retire(accounting_db, monkeypatch, kind):
+async def test_actual_private_build_task_download_and_retire(accounting_db, monkeypatch, kind, build_admission_lifecycle):
     from src.api import documents, work_board
     from src.auth.service import authenticate_token
     from src.native_tools.registry import ToolRegistry
@@ -22,6 +23,7 @@ async def test_actual_private_build_task_download_and_retire(accounting_db, monk
     from src.db.models import WorkBoardInputArtifact, WorkBoardTask, WorkBoardAttempt, WorkflowRunState, WorkBoardEvent
     token, operator, owner, goal = await setup(accounting_db, monkeypatch)
     jobs, _owner = await prepare(accounting_db, monkeypatch, existing_owner=owner)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     monkeypatch.setattr(documents, "get_session", sessions)
     registry = ToolRegistry(); registry.start()

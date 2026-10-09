@@ -618,11 +618,19 @@ def protected_checkpoint_ids(history):
     """Protect native identities already committed by the fixed writer."""
     from types import SimpleNamespace
     from src.workflows.job_runtime import DurableJobTransitionError
+    from src.workflows.job_runtime import _digest
+    repository = [item for item in history if isinstance(item, dict)
+        and isinstance(item.get("checkpoint_id"), str) and item["checkpoint_id"].startswith("repository:")]
+    repository_ids = {item["checkpoint_id"] for item in repository}
+    if (len(repository_ids) != len(repository) or len(repository_ids) > 50
+            or any(item.get("safe") is not True or not isinstance(item.get("payload"), dict)
+                or item.get("state_digest") != _digest(item["payload"]) for item in repository)):
+        raise DurableJobTransitionError("repository protected checkpoint journal is malformed")
     manifest = read_manifest(SimpleNamespace(checkpoint_receipts_json=json.dumps(history)))
     if manifest is None:
-        return set()
+        return repository_ids
     _check_reserved_capacity(history)
-    protected = {GENERAL_TASK_MANIFEST_KEY, *manifest.required_checkpoint_ids}
+    protected = {GENERAL_TASK_MANIFEST_KEY, *manifest.required_checkpoint_ids, *repository_ids}
     present = {item.get("checkpoint_id") for item in history if isinstance(item, dict)}
     if not protected.issubset(present):
         raise DurableJobTransitionError("general task required checkpoint proof is missing")

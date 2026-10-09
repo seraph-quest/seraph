@@ -552,10 +552,10 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
         # so the workflow module can import the board contracts without a
         # dispatcher import cycle during application startup.
         try:
-            from src.workflows.repo_repair import RepoRepairInput
+            from src.workflows.repo_repair import RepoRepairCapabilityInput
         except (ImportError, ModuleNotFoundError):
             return None
-        return RepoRepairInput
+        return RepoRepairCapabilityInput
     return None
 
 
@@ -6747,6 +6747,14 @@ class WorkBoardDispatcher:
         if capability_id == "engineering.repo-repair.v1":
             from src.workflows.repo_repair import RepoRepairService, _executor_preflight
             from src.workflows.job_runtime import _digest as _durable_digest
+
+            if "repository_ref" in inputs:
+                # Typed seven-field selection is not an original C1 source
+                # grant. Its fixed native owner must supply the protected
+                # handoff; never enter legacy proposal/model admission here.
+                return {"status": "blocked", "reason_code": "repository_original_source_required",
+                    "recovery_action": "inspect_and_create_repository_source_task",
+                    "admission_only": False, "no_learning": True}
 
             job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
                 task,

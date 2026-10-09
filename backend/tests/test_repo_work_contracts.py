@@ -5,6 +5,22 @@ from pydantic import ValidationError
 from src.workflows.repo_repair import RepoIteration, RepoWorkInput, compile_repo_work_input
 
 
+def test_existing_repair_parser_retains_two_closed_shapes_without_authority():
+    from src.work_board.dispatcher import validate_capability_input, TypedInputError
+    from src.workflows.repo_repair import RepoRepairInput
+    work = selection()
+    assert validate_capability_input('engineering.repo-repair.v1', work) == work
+    legacy = RepoRepairInput(repository_path='projects/example',
+        problem_statement='Correct addition.', source_paths=['calculator.py'],
+        allowed_paths=['calculator.py', 'tests/test_calculator.py'],
+        test_args=['-q', 'tests/test_calculator.py'], acceptance_criteria=['Actual checks pass.']).model_dump(mode='json')
+    assert validate_capability_input('engineering.repo-repair.v1', legacy) == legacy
+    with pytest.raises(TypedInputError):
+        validate_capability_input('engineering.repo-repair.v1', work | {'repository_path': 'projects/example'})
+    with pytest.raises(TypedInputError):
+        validate_capability_input('engineering.repo-repair.v1', work | {'native_binding': {}})
+
+
 def selection(**changes):
     value = {
         "repository_ref": "projects/example", "base_commit": "a" * 40,

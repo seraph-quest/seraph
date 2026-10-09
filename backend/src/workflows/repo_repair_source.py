@@ -175,7 +175,7 @@ def read_repository_original(run):
                 or compiled.allowed_paths != work.allowed_paths
                 or cutoff > group.original_deadline_at or cutoff > binding.original_deadline_at
                 or cutoff > binding.native_deadline_at
-                or cutoff > _utc(run.started_at) + timedelta(seconds=work.limits.max_seconds)
+                or cutoff > _utc(run.started_at) + timedelta(seconds=work.limits.max_total_seconds)
                 or _utc(run.deadline_at) != cutoff
                 or group.owner_principal_id != binding.owner_principal_id
                 or group.owner_session_id != binding.original_root_id
@@ -187,6 +187,173 @@ def read_repository_original(run):
     except (ValueError, TypeError, KeyError) as exc:
         raise DurableJobLeaseError("original fixed repository source binding changed") from exc
     return payload, work, compiled, group, binding, source
+
+
+async def prepare_repository_original_admission(service, db, *, native_invocation_id,
+        repository_task_id, repository_attempt_id):
+    """Stage the actual original child before the existing admission writer.
+
+    This is a private new-root producer, not immutable admission replay. The
+    caller must retain its returned scope through admit_job's actual commit.
+    No public projection, supplied group, or already-admitted root qualifies.
+    """
+    import asyncio
+    from sqlalchemy import select
+    from src.db.models import WorkflowRunState, WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact, Goal
+    from src.workflows.repo_repair import RepoRepairService
+    from src.workflows.general_task_guard import child_binding, read_manifest, assert_general_task_child_current
+    from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
+    from src.workflows.job_runtime import DurableJobLeaseError, _utc_now, _as_utc, _canonical, _digest
+    from src.security.trust_contract import canonical_digest
+    from src.native_tools.task_adapters import repository_work_descriptor
+    from src.work_board.general_task import digest as native_digest
+    if type(service) is not RepoRepairService:
+        raise DurableJobLeaseError("actual original repository source owner required")
+    child = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == native_invocation_id))
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == repository_task_id))
+    attempt = await db.get(WorkBoardAttempt, repository_attempt_id)
+    if (child is None or task is None or attempt is None
+            or attempt.task_id != task.task_id or attempt.workflow_run_id is not None
+            or task.capability_id != "engineering.repo-repair.v1"
+            or task.status != "running" or not attempt.lease_owner
+            or attempt.lease_expires_at is None or _as_utc(attempt.lease_expires_at) <= _utc_now()
+            or attempt.fencing_token < 1
+            or attempt.ended_at is not None or attempt.cancel_requested_at is not None):
+        raise DurableJobLeaseError("new original repository Task attempt required")
+    # Reject existing-root attempts before any private physical source read.
+    await assert_general_task_child_current(db, child)
+    binding = child_binding(child)
+    parent = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == binding.parent_job_id))
+    parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+    parent_attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+    goal = await db.get(Goal, binding.goal_id)
+    manifest = read_manifest(parent) if parent is not None else None
+    if parent_task is None or parent_attempt is None or manifest is None or goal is None:
+        raise DurableJobLeaseError("original C1 source Task required")
+    envelope = await verify_general_task_manifest(db, parent, parent_task, parent_attempt, manifest)
+    source = envelope.repository_source
+    group = envelope.proposal_group
+    input_artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+    if (source is None or group is None or input_artifact is None
+            or json.loads(child.arguments_json).get("tool_id") != "repository_work"
+            or source.original_root_id != binding.original_root_id
+            or (task.owner_principal_id, task.owner_session_id, task.goal_id, task.goal_revision) !=
+                (binding.owner_principal_id, binding.original_root_id, binding.goal_id, binding.goal_revision)
+            or input_artifact.bound_task_id != task.task_id
+            or input_artifact.payload_sha256 != task.typed_input_digest
+            or input_artifact.typed_input_ref != task.typed_input_ref
+            or input_artifact.capability_id != task.capability_id or input_artifact.capability_version != "1"
+            or input_artifact.owner_principal_id != task.owner_principal_id
+            or input_artifact.owner_session_id != task.owner_session_id
+            or input_artifact.goal_id != task.goal_id or input_artifact.goal_revision != task.goal_revision
+            or input_artifact.state != "bound" or _as_utc(input_artifact.expires_at) <= _utc_now()
+            or input_artifact.bound_task_revision > task.task_revision):
+        raise DurableJobLeaseError("original source and repository Task artifact binding required")
+    work = service._read_bound_work_input(input_artifact)
+    if (canonical_digest(work.model_dump(mode="json")) != source.original_input_digest
+            or native_digest(work.model_dump(mode="json")) != binding.input_digest):
+        raise DurableJobLeaseError("original seven-field repository input changed")
+    fixed_descriptor = repository_work_descriptor()
+    if native_digest(fixed_descriptor.model_dump(mode="json")) != binding.descriptor_digest:
+        raise DurableJobLeaseError("original fixed repository descriptor changed")
+    originals = ((WorkflowRunState, child.id, child), (WorkflowRunState, parent.id, parent),
+        (WorkBoardTask, parent_task.creation_sequence, parent_task),
+        (WorkBoardAttempt, parent_attempt.attempt_id, parent_attempt),
+        (WorkBoardTask, task.creation_sequence, task), (WorkBoardAttempt, attempt.attempt_id, attempt),
+        (WorkBoardInputArtifact, input_artifact.artifact_id, input_artifact), (Goal, goal.id, goal))
+    rows = tuple((model, key, _canonical(row.model_dump(mode="json"))) for model, key, row in originals)
+    witness, entered = object(), ContextVar("repository_original_admission", default=None)
+    compiled = None
+
+    @asynccontextmanager
+    async def scope():
+        nonlocal compiled
+        from src.model_fabric.effective_policy import configuration_mutation_lock
+        from config.settings import settings
+        async with configuration_mutation_lock:
+            staged_config = _assert_task_publication_configuration(service)
+            facts = json.loads(service._read_private_artifact(source.source_artifact_ref,
+                expected_digest=source.source_artifact_digest))
+            compiled = service.recheck_task_source_snapshot(work, facts)
+            if (facts.get("original_input") != work.model_dump(mode="json")
+                    or canonical_digest(staged_config.model_dump(mode="json")) != source.executor_profile_digest
+                    or repository_work_descriptor() != fixed_descriptor):
+                raise DurableJobLeaseError("original inspected repository source changed")
+            token = entered.set((asyncio.current_task(), witness, staged_config,
+                canonical_digest(settings.repo_sandbox.model_dump(mode="json"))))
+            try:
+                yield
+            finally:
+                entered.reset(token)
+
+    async def check(current_db, run):
+        from src.workflows.general_task_accounting import validate_group_owner
+        from config.settings import settings
+        held = entered.get()
+        if held is None or held[:2] != (asyncio.current_task(), witness) or compiled is None:
+            raise DurableJobLeaseError("original repository source admission scope required")
+        _assert_task_publication_configuration(service, staged_config=held[2])
+        if (canonical_digest(settings.repo_sandbox.model_dump(mode="json")) != held[3]
+                or repository_work_descriptor() != fixed_descriptor):
+            raise DurableJobLeaseError("original repository configuration changed")
+        for model, key, original in rows:
+            current = await current_db.get(model, key, populate_existing=True)
+            if current is None or _canonical(current.model_dump(mode="json")) != original:
+                raise DurableJobLeaseError("original repository admission source row changed")
+        await validate_group_owner(current_db, group)
+        from sqlalchemy import func
+        from src.workflows.job_runtime import _canonical_goal_max_outstanding, DURABLE_JOB_TERMINAL_STATUSES, DURABLE_JOB_RECORD_SCHEMA_VERSION
+        goal_capacity = _canonical_goal_max_outstanding(goal) or 1
+        outstanding = await current_db.scalar(select(func.count(WorkflowRunState.run_identity)).where(
+            WorkflowRunState.goal_id == binding.goal_id,
+            WorkflowRunState.parent_job_id.is_(None), WorkflowRunState.parent_run_identity.is_(None),
+            WorkflowRunState.status.not_in(tuple(DURABLE_JOB_TERMINAL_STATUSES)),
+            WorkflowRunState.record_schema_version >= DURABLE_JOB_RECORD_SCHEMA_VERSION))
+        if int(outstanding or 0) >= goal_capacity:
+            raise DurableJobLeaseError("original Goal outstanding capacity cannot admit repository root")
+        # The original native invocation can mint only one repository root,
+        # including after its terminal/Unknown lifetime. The existing journal
+        # is the canonical mapping; a fresh Task/idempotency key cannot reset it.
+        candidates = (await current_db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "engineering.repo-repair.v1",
+            WorkflowRunState.owner_principal_id == binding.owner_principal_id,
+            WorkflowRunState.operator_session_id == binding.original_root_id))).scalars().all()
+        for candidate in candidates:
+            original_records = [item for item in json.loads(candidate.checkpoint_receipts_json or "[]")
+                if isinstance(item, dict) and item.get("checkpoint_id") == "repository:original:v1"]
+            if any(item.get("payload", {}).get("native_binding", {}).get("invocation_id") == binding.invocation_id
+                    for item in original_records):
+                raise DurableJobLeaseError("original C1 invocation already owns its repository root")
+        now = _utc_now()
+        cutoff = _as_utc(run.deadline_at)
+        if (child.status != "running" or child.attempt_count != 1 or child.fencing_token < 1
+                or not child.lease_owner or _as_utc(child.lease_expires_at) <= now
+                or _as_utc(attempt.lease_expires_at) <= now
+                or run.job_kind != "engineering.repo-repair.v1" or run.capability_version != "1"
+                or run.root_run_identity != run.run_identity or run.parent_job_id
+                or run.input_digest != input_artifact.payload_sha256
+                or (run.owner_principal_id, run.operator_session_id, run.goal_id, run.goal_revision) !=
+                    (binding.owner_principal_id, binding.original_root_id, binding.goal_id, binding.goal_revision)
+                or cutoff is None or not now < cutoff <= min(group.original_deadline_at,
+                    binding.original_deadline_at, binding.native_deadline_at,
+                    _as_utc(child.lease_expires_at), _as_utc(attempt.lease_expires_at),
+                    now + timedelta(seconds=work.limits.max_total_seconds))
+                or json.loads(run.checkpoint_receipts_json or "[]")):
+            raise DurableJobLeaseError("new original repository root bounds changed")
+        payload = {"schema_version": "repository.original.v1", "repository_job_id": run.run_identity,
+            "repository_task_id": task.task_id, "repository_attempt_id": attempt.attempt_id,
+            "repository_input_artifact_digest": input_artifact.payload_sha256,
+            "original_input": work.model_dump(mode="json"), "compiled_input": compiled.model_dump(mode="json"),
+            "original_deadline_at": cutoff.isoformat(), "original_max_cost_microusd": work.limits.max_cost_microusd,
+            "group": group.model_dump(mode="json"), "native_binding": binding.model_dump(mode="json"),
+            "source_binding": source.model_dump(mode="json")}
+        run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "repository:original:v1",
+            "state_digest": _digest(payload), "safe": True, "payload": payload,
+            "created_at": now.isoformat()}])
+
+    return check, scope
 
 
 def iteration_identity(repository_job_id: str, repository_attempt_id: str,

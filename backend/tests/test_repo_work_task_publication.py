@@ -22,9 +22,18 @@ from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
 
-async def actual_publication(accounting_db, monkeypatch):
+async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None):
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
+    if goal_capacity is not None:
+        # This is the ORIGINAL Goal policy, established before the first C1
+        # Task/group. No accepted Task, Goal revision or grant is refreshed.
+        from src.db.models import Goal
+        from src.goals.contracts import GoalAdmissionBudget
+        async with factory.accounting_sessions() as db:
+            goal = await db.get(Goal, 'goal:fixture')
+            goal.admission_budget_json = GoalAdmissionBudget(max_outstanding_jobs=goal_capacity,
+                max_runtime_seconds=900).model_dump_json()
     # The persisted selector owner requires a private directory, unlike the
     # broader accounting fixture's disposable workspace.
     workspace.chmod(0o700)
@@ -155,9 +164,9 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-@pytest.mark.asyncio
-async def test_actual_source_task_original_native_child_binding(accounting_db, monkeypatch):
-    factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch)
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None):
+    factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
+        goal_capacity=goal_capacity)
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_native import (
@@ -198,11 +207,11 @@ async def test_actual_source_task_original_native_child_binding(accounting_db, m
         owner=parent['lease']['owner'], fence=parent['lease']['fencing_token'], service=service)
     envelope = GeneralTaskEnvelope.model_validate(inputs)
     assert envelope.repository_source is not None
-    child = await admit_native_step(jobs, spec.identity.job_id,
+    binding, child = await admit_native_step(jobs, spec.identity.job_id,
         owner=parent['lease']['owner'], fence=parent['lease']['fencing_token'],
         step=envelope.plan.steps[0], descriptor=envelope.descriptors[0],
         inputs=envelope.plan.steps[0].input, service=service)
-    child_id = child['run_identity']
+    child_id = binding.invocation_id
     await jobs.queue_job(child_id)
     claimed_child = await jobs.claim_job(child_id, owner='actual-repository-native-worker', lease_seconds=900)
     async with factory.accounting_sessions() as db:
@@ -218,6 +227,82 @@ async def test_actual_source_task_original_native_child_binding(accounting_db, m
         assert binding.original_root_id == owner.session_id
         assert binding.input_digest == digest(request.plan.steps[0].input)
         assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == 1
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+    return factory, owner, service, jobs, binding, request
+
+
+@pytest.mark.asyncio
+async def test_actual_source_task_original_native_child_binding(accounting_db, monkeypatch):
+    await actual_native_source(accounting_db, monkeypatch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('goal_capacity', [None, 1, 2])
+async def test_actual_original_repository_admission_mints_protected_source(accounting_db, monkeypatch, goal_capacity):
+    factory, owner, service, jobs, binding, request = await actual_native_source(accounting_db, monkeypatch,
+        goal_capacity=goal_capacity)
+    from datetime import datetime, timedelta, timezone
+    from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardTaskCreate
+    from src.work_board.input_artifacts import prepare_input_artifact
+    from src.workflows.job_runtime import DurableJobSpec, DurableJobIdentity, _digest, DurableJobAdmissionDenied
+    from src.workflows.repo_repair_source import prepare_repository_original_admission, read_repository_original
+    async with factory.accounting_sessions() as db:
+        artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
+            schema_version=1, capability_id='engineering.repo-repair.v1', goal_id='goal:fixture', goal_revision=1,
+            input=request.plan.steps[0].input, idempotency_key='original-repo-artifact'))
+        created = await service.repository.create_task(db, owner, WorkBoardTaskCreate(
+            title='Original bounded repair', goal_id='goal:fixture', goal_revision=1,
+            capability_id='engineering.repo-repair.v1', input_artifact_id=artifact.artifact_id,
+            idempotency_scope='original-repository-child', idempotency_key=binding.invocation_id,
+            status='todo', requires_review=False))
+    async with factory.accounting_sessions() as db:
+        ready = await service.repository.promote_task_ready(db, created.task.task_id,
+            expected_revision=created.task.task_revision,
+            actor_principal_id='actual-repo-runner', actor_session_id='actual-repo-runner-session')
+    async with factory.accounting_sessions() as db:
+        claimed = await service.repository.claim_ready_task(db, created.task.task_id,
+            expected_revision=ready.task.task_revision, lease_owner='actual-repo-runner', lease_seconds=900)
+    async with factory() as db:
+        check, scope = await prepare_repository_original_admission(service.repository_source_service, db,
+            native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
+            repository_attempt_id=claimed.attempt.attempt_id)
+    run_id = 'repo-repair-actual-original-source'
+    inputs = {'schema_version': 1, 'capability_id': 'engineering.repo-repair.v1',
+        'input': request.plan.steps[0].input}
+    authority = {'principal': owner.principal_id, 'owner_kind': 'user', 'session_id': owner.session_id,
+        'capability_id': 'engineering.repo-repair.v1'}
+    cutoff = min(binding.native_deadline_at, binding.original_deadline_at,
+        datetime.now(timezone.utc) + timedelta(seconds=800))
+    spec = DurableJobSpec(identity=DurableJobIdentity(run_id, 'user', owner.principal_id,
+        'engineering.repo-repair.v1', '1', 'original-repository-child', binding.invocation_id),
+        inputs=inputs, session_id=owner.session_id, operator_session_id=owner.session_id,
+        goal_id='goal:fixture', goal_revision=1, deadline_at=cutoff,
+        resource_claims=('repo-repair-execution',), declared_authority=authority,
+        max_attempts=1, max_outstanding_jobs=goal_capacity or 1)
+    if goal_capacity != 2:
+        async with scope():
+            with pytest.raises(DurableJobAdmissionDenied, match='goal_budget_outstanding_limit'):
+                await jobs.admit_job(spec, admission_authority_check=check)
+        async with factory() as db:
+            assert await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id)) is None
+            assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+        return
+    async with scope():
+        admitted = await jobs.admit_job(spec, admission_authority_check=check)
+    async with factory() as db:
+        run = await jobs._fetch(db, run_id)
+        # Admission is a real new row; execution/start and all iteration
+        # witnesses are deliberately not asserted by this admission test.
+        journal = json.loads(run.checkpoint_receipts_json)
+        assert len(journal) == 1 and journal[0]['checkpoint_id'] == 'repository:original:v1'
+        payload = journal[0]['payload']
+        assert journal[0]['state_digest'] == _digest(payload)
+        assert payload['native_binding'] == binding.model_dump(mode='json')
+        assert payload['repository_task_id'] == created.task.task_id
+        assert payload['repository_attempt_id'] == claimed.attempt.attempt_id
+        assert payload['original_input'] == request.plan.steps[0].input
+        assert payload['original_deadline_at'] == cutoff.isoformat()
+        assert payload['group']['group_id']
         assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
 
 

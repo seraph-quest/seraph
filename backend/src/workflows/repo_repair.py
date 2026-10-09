@@ -25,7 +25,7 @@ import tempfile
 from typing import Any, Awaitable, Callable, Literal, Mapping
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -473,6 +473,14 @@ class RepoRepairInput(BaseModel):
         except (RepoSandboxError, ValueError) as exc:
             raise ValueError("test_args are not an allowlisted profile invocation") from exc
         return self
+
+
+class RepoRepairCapabilityInput(RootModel[RepoRepairInput | RepoWorkInput]):
+    """The existing repair identity accepts either exact owned input shape.
+
+    Parsing confers no source authority. Seven-field execution still requires
+    the producer-sealed original C1 handoff; legacy repair input is unchanged.
+    """
 
 
 def compile_repo_work_input(

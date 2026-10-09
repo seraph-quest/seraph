@@ -70,3 +70,17 @@ def test_actual_original_input_artifact_preserves_limits_and_blocks_changed_byte
     path.write_text("{}")
     with pytest.raises(RepoRepairError):
         service._read_bound_work_input(row)
+def test_original_repository_journal_survives_bounded_ordinary_history():
+    from src.workflows.job_runtime import _bounded_checkpoint_receipts, _digest, DurableJobTransitionError
+    import pytest
+    payload = {'schema_version': 'repository.original.v1', 'identity': 'retention-only'}
+    original = {'checkpoint_id': 'repository:original:v1', 'safe': True,
+        'payload': payload, 'state_digest': _digest(payload)}
+    ordinary = [{'checkpoint_id': f'ordinary:{index}'} for index in range(70)]
+    retained = _bounded_checkpoint_receipts([original, *ordinary])
+    assert len(retained) == 50 and original in retained
+    with pytest.raises(DurableJobTransitionError):
+        _bounded_checkpoint_receipts([original, original, *ordinary])
+    with pytest.raises(DurableJobTransitionError):
+        _bounded_checkpoint_receipts([original | {'state_digest': '0' * 64}, *ordinary])
+

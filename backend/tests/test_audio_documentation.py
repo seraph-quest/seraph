@@ -469,3 +469,70 @@ async def test_http_accept_refreshes_owner_changed_between_bounded_body_reads(cl
     assert response.json()['detail']['code']=='audio_documentation_not_found'
     async with async_db() as db:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
     assert len(calls)==2
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('fault',['wrong_revision','blob_revision','wrong_error','null_error','oversize_body','blob_body','blob_digest'])
+async def test_http_noncanonical_rejected_zero_remains_visible_and_blocks_stage(client,documentary,async_db,monkeypatch,fault):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:sources=(await db.execute(select(Source))).scalars().all()
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before_files={source.object_id:(objects/source.object_id).read_bytes() for source in sources}
+    changes={'wrong_revision':('revision',1),'blob_revision':('revision',b'corrupt'),
+        'wrong_error':('error_code','audio_documentation_acquisition_incomplete'),'null_error':('error_code',None),
+        'oversize_body':('binding_json','x'*1000000),'blob_body':('binding_json',b'corrupt'),'blob_digest':('bundle_digest',b'corrupt')}
+    column,value=changes[fault]
+    snapshot=text("SELECT typeof(revision),CASE WHEN typeof(revision)='integer' THEN revision END,state,reserved_bytes,"
+        "error_code,typeof(binding_json),octet_length(binding_json),typeof(bundle_digest),octet_length(bundle_digest) "
+        "FROM model_audio_documentation_attestations")
+    async with async_db() as db:
+        await db.execute(text("UPDATE model_audio_documentation_attestations SET revision=2,state='rejected',reserved_bytes=0 WHERE id=:id"),
+            {'id':staged['staged_ref']})
+        await db.execute(text(f'UPDATE model_audio_documentation_attestations SET {column}=:value WHERE id=:id'),
+            {'value':value,'id':staged['staged_ref']})
+        before_row=(await db.execute(snapshot)).one()
+        engine=db.bind.sync_engine
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement or 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('noncanonical zero marker materialized a documentary body')
+    def no_private_access(*args,**kwargs):raise AssertionError('noncanonical zero marker opened private storage')
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    event.listen(engine,'before_cursor_execute',trap)
+    try:
+        readback=await client.get('/api/settings/model-fabric/audio-documentation')
+        assert readback.status_code==409,readback.text
+        assert readback.json()['detail']['code']=='audio_documentation_cleanup_unknown'
+        renewed=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=request.model_dump())
+        assert renewed.status_code==409,renewed.text
+        assert renewed.json()['detail']['code']=='audio_documentation_quota_full'
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    async with async_db() as db:
+        assert (await db.execute(snapshot)).one()==before_row
+        assert (await db.execute(text('SELECT count(*) FROM model_audio_documentation_attestations'))).scalar_one()==1
+    assert len(calls)==2 and {name:(objects/name).read_bytes() for name in before_files}==before_files
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_http_actual_final_cas_zero_is_omitted_idempotent_and_frees_stage_slot(client,documentary,async_db):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    body={'action':'reject_staged_documentation','staged_ref':staged['staged_ref'],
+        'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']}
+    rejected=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=body)
+    assert rejected.status_code==200 and rejected.json()['revision']==2
+    assert (await client.get('/api/settings/model-fabric/audio-documentation')).json()=={'staged':[]}
+    repeated=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+        json={**body,'expected_staged_revision':2})
+    assert repeated.status_code==200 and repeated.json()==rejected.json()
+    async with async_db() as db:
+        original=await db.get(Bundle,staged['staged_ref'])
+        assert original.revision==2 and original.state=='rejected' and original.reserved_bytes==0
+        assert original.error_code=='audio_documentation_source_incomplete'
+    assert not list((Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects').iterdir())
+    renewed=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=request.model_dump())
+    assert renewed.status_code==201,renewed.text
+    assert renewed.json()['staged_ref']!=staged['staged_ref'] and not renewed.json()['ready']
+    assert len(calls)==4

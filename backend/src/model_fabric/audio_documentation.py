@@ -60,7 +60,11 @@ SOURCE_STORAGE = ("typeof(id)='text' AND octet_length(id)=32 "
     "AND typeof(acquired_at)='text' AND octet_length(acquired_at) BETWEEN 1 AND 32 "
     "AND typeof(ordinal)='integer' AND ordinal IN (0,1) "
     "AND typeof(size_bytes)='integer' AND size_bytes BETWEEN 1 AND 262144")
-OPEN_RESERVATION = "NOT (typeof(reserved_bytes)='integer' AND reserved_bytes=0 AND state='rejected')"
+# Only the bounded final-CAS tuple can leave the charged candidate set.
+# CASE keeps malformed/NULL predicates open instead of SQL UNKNOWN hiding them.
+OPEN_RESERVATION = ("CASE WHEN "+BUNDLE_STORAGE+
+    " AND revision=2 AND state='rejected' AND reserved_bytes=0 "
+    "AND error_code='audio_documentation_source_incomplete' THEN 0 ELSE 1 END=1")
 
 
 def canonical(value):

@@ -1639,8 +1639,8 @@ named implementation receipts; these are separate local proof runs, not a
 single end-to-end browser run. UI responses come from the actual native journey.
 Only final HTTPS service responses were scripted, with external sockets and
 inference denied. Local mechanics are proven; learned improvement, live provider
-usefulness and native macOS execution remain unverified. The milestone's final
-independent cumulative review and merge are required for availability.
+usefulness and native macOS execution remain unverified. The milestone passed
+final independent cumulative review and merged through #1053.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 

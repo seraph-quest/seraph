@@ -2308,6 +2308,22 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 
 
 from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
+from src.work_board.communication_contracts import CommunicationCreate, ActionBundle
+
+
+@router.post("/general-tasks/communications")
+async def create_communication_task(request: Request, body: CommunicationCreate):
+    owner = _owner(_operator(request))
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        from src.work_board.communication_preparation import propose
+        async with get_session() as db:
+            mutation = await propose(db, owner, dispatcher.general_tasks, body)
+            return {"task": await _safe_task_payload(mutation.task, db=db),
+                    "idempotent_replay": mutation.idempotent_replay}
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 
 @router.get("/general-tasks/tools")
@@ -2350,6 +2366,35 @@ async def get_general_task_plan(request: Request, task_id: str):
             safe = await vault_redaction.redact_secrets_in_text_readonly(db,
                 json.dumps(payload), fail_closed=True)
             return json.loads(safe)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/tasks/{task_id}/communications")
+async def get_private_communication_plan(request: Request, task_id: str):
+    owner = _owner(_operator(request))
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        from src.work_board.communication_preparation import read_plan
+        async with get_session() as db:
+            plan = await read_plan(db, owner, task_id, service=dispatcher.general_tasks)
+            return {"task_id": task_id, "plan": plan.model_dump(mode="json"), "no_learning": True}
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/communications/selection")
+async def review_communication_selection(request: Request, task_id: str, body: ActionBundle):
+    operator = _operator(request)
+    owner = _owner(operator)
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        from src.work_board.communication_preparation import review_bundle
+        async with get_session() as db:
+            reviewed = await review_bundle(db, owner, operator, task_id, body, service=dispatcher.general_tasks)
+            return {"task_id": task_id, "bundle": reviewed.model_dump(mode="json"), "no_learning": True}
     except BoardError as exc:
         _raise_board_error(exc)
 

@@ -499,6 +499,10 @@ class InferenceAccountingRepositoryMixin:
                             and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
                             and prior.policy_digest == policy_digest and prior.runtime_path == runtime_path and prior.profile_id == profile_id
                             and prior.bound_microusd == bound and _utc(prior.deadline_at) > observed):
+                            from src.workflows.general_task_accounting import entry_for, validate_recovered_entry
+                            if entry_for(prior) is not None or general_task_binding is not None:
+                                await validate_recovered_entry(db, run, prior, rows, general_task_binding,
+                                    runtime_path=runtime_path)
                             prior.job_fencing_token = fencing_token
                             prior.recovery_reason = None
                             prior.revision += 1
@@ -511,7 +515,7 @@ class InferenceAccountingRepositoryMixin:
                     if general_task_binding is not None:
                         from src.workflows.general_task_accounting import reserve_entry
                         task_group_entry = await reserve_entry(db, run, rows, general_task_binding,
-                            operation_id=operation_id, bound=bound, runtime_path=runtime_path)
+                            operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline)
                     period = period_id(observed)
                     from src.workspace.accounting_witness import period_state, unreviewed_overruns
                     owner_data, operations = account.model_dump(mode="json"), [_operation_payload(item) for item in rows]
@@ -551,7 +555,8 @@ class InferenceAccountingRepositoryMixin:
 
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str,
-                                         near_contact_witness: object = None) -> dict[str, object]:
+                                         near_contact_witness: object = None,
+                                         general_task_binding: object = None) -> dict[str, object]:
         from src.workflows.research_accounting import discovery_accounting_scope
         async with discovery_accounting_scope(self, operation_id=operation_id):
             denial = None
@@ -601,7 +606,7 @@ class InferenceAccountingRepositoryMixin:
                     from src.workflows.general_task_accounting import entry_for, validate_contact
                     general_entry = entry_for(row)
                     if general_entry is not None:
-                        await validate_contact(db, run, row, rows)
+                        await validate_contact(db, run, row, rows, binding=general_task_binding)
                     if run.job_kind == "work_board_proposal":
                         from src.guardian.opportunity_plans import guard_linked_plan_provider_contact
                         from src.guardian.opportunity_contracts import OpportunityError

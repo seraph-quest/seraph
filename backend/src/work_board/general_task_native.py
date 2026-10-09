@@ -218,6 +218,11 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
             async def document_authority(db, run):
                 await document_invocation(db, replace(principal, job_id=binding.invocation_id),
                     binding.invocation_id, fence)
+        elif descriptor.tool_id == "communication_prepare":
+            from src.work_board.communication_preparation import stage_plan_authority
+            async with jobs._session() as db:
+                document_authority = await stage_plan_authority(db,
+                    replace(principal, job_id=binding.invocation_id), binding.invocation_id, fence, output)
         artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
             owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id,
             output=output, authority_check=document_authority)

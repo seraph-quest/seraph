@@ -56,6 +56,40 @@ class DocumentTaskBinding(ClosedTaskModel):
         return value
 
 
+class CommunicationSelection(ClosedTaskModel):
+    reply_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
+    meeting_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
+    reschedule_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    acknowledge_private_review: Literal[True]
+
+    @field_validator("acknowledge_private_review", mode="before")
+    @classmethod
+    def literal_ack(cls, value):
+        if value is not True:
+            raise ValueError("explicit private review acknowledgement required")
+        return value
+
+    @field_validator("reply_inputs", "meeting_inputs", "reschedule_inputs")
+    @classmethod
+    def source_grammar(cls, values, info):
+        # Lazy import: dispatcher owns the existing source grammar, not this DTO.
+        from src.work_board.dispatcher import MailReplyDraftInput, CalendarMeetingPrepInput, CalendarRescheduleInput
+        grammar = {"reply_inputs": MailReplyDraftInput, "meeting_inputs": CalendarMeetingPrepInput,
+                   "reschedule_inputs": CalendarRescheduleInput}[info.field_name]
+        parsed = [grammar.model_validate(value).model_dump(mode="json", exclude_none=True) for value in values]
+        keys = [value.get("message_binding_id") or value["event_binding_id"] for value in parsed]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate source selection")
+        return parsed
+
+    @model_validator(mode="after")
+    def selected_reschedule(self):
+        meetings = {value["event_binding_id"] for value in self.meeting_inputs}
+        if any(value["event_binding_id"] not in meetings for value in self.reschedule_inputs):
+            raise ValueError("reschedule requires its selected meeting source")
+        return self
+
+
 class GeneralTaskInput(ClosedTaskModel):
     schema_version: Literal[1] = 1
     goal_ref: str = Field(min_length=1, max_length=128)
@@ -66,12 +100,15 @@ class GeneralTaskInput(ClosedTaskModel):
     tool_set_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     inference_egress_acknowledged: bool = False
     document_source: DocumentTaskBinding | None = None
+    communication_selection: CommunicationSelection | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_input(self, handler):
         result = handler(self)
         if self.document_source is None:
             result.pop("document_source", None)
+        if self.communication_selection is None:
+            result.pop("communication_selection", None)
         return result
 
     @field_validator("intent")

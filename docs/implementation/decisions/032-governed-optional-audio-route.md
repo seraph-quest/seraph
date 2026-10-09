@@ -121,3 +121,56 @@ Isolated SQLite/workspace/ASGI/local HTTP provider fixture exercises actual priv
 5. Use current app.py lifespan (`342+,422–430`) to explicitly start/stop the existing worker's registration and task handles: stop admission first, cancel/wait within original deadlines, close sockets/process groups, route durable outcomes through Workflow writer, then cleanup readback. Existing scheduler audio_ingress_cleanup only triggers the canonical cleanup owner; no polling/execution loop or composition ownership state. Later #1007 integrates these current Python callables exactly once; no future bridge imports or migrations now.
 6. Update current audio API/PTT settings controls with explicit one-call audio budget disclosure and corrected transcript review; wire fresh selected Goal/native budget Task submission separately through current C1 owner. Legacy capture/status/cleanup reads remain; v1/v2 configuration yields visible audio_setup_v3_required, missing proof/decoder/budget yields blocked. New native execution fields are server-issued/readback-only; legacy process requests cannot infer a paid grant. Stale save/confirm/CAS returns 409; missing authority 403; unsupported local/profile capability remains a bounded blocked receipt. No raw/transcript secrets in logs/outbox.
 7. Provider-free ordinary tests use disposable DB/workspace and final owned HTTP transport substitution: populated v1/v2 migration/no-proof preservation; full suffix provider.only and mismatch denial; missing native binding; concurrent admission/cancel/revoke/lease/restart/contactUnknown/late publication; positive reserve/one-call/no transfer/fresh Task action; actual local converter protocols/resources/process closure; corrected Message and exactly one planless Task. Deny external inference sockets and ambient credentials, assert zero external contacts/spend. Test failures block implementation acceptance; none of these mechanics claim model quality/current upstream/native macOS/Safari availability.
+
+### Scoped documentary and pre-capture amendment (2026-10-09)
+
+The audio-only documentary owner is the existing ModelFabricRepository, with
+separate canonical attestation/source records and private exact source bytes.
+It never stores documentary claims as empirical ModelRouteProof, health,
+latency, canary or successful inference evidence. Existing v1/v2 and all
+text/vision/embedding proof and routing predicates remain unchanged.
+
+An explicit current authenticated original Root may select one existing
+owner-private Vault key name for selected-v3-profile metadata only. Loopback
+is insufficient authentication. Management keys have account-level
+administrative scope; this feature restricts their use to exactly GET
+`/api/v1/key` and GET `/api/v1/models/{author}/{slug}/endpoints` on the fixed
+verified OpenRouter HTTPS authority. Missing or rotated owner metadata
+credentials block; inference/environment credentials cannot substitute.
+Bounded retained responses are private; explicit acquire/accept/reject actions
+use original owner/profile/config/Vault bindings, quota and revision CAS.
+Operator acceptance cannot supply missing codec, context/template, charge or
+exact ZDR facts. Successfully settled source-incomplete metadata remains NotReady
+and rejectable by its original authenticated owner using the exact canonical
+two-source physical inventory; bounded cleanup may remove that successful subset
+after staging expiry or original Root death. Failed, cancelled, in-flight,
+ambiguous or older unbound inventories are cleanup_unknown and remain charged;
+error codes, expiry and deleting state cannot prove acquisition closure. Private
+deletion releases quota only after exact object absence, directory fsync and the
+winning same-witness revision CAS; accepted documents are excluded.
+
+For new governed audio work, original positive B_audio and exactly one call
+must be selected, disclosed and bound by the existing model-consent issuer
+BEFORE model/capture grants and microphone capture. The sanitized committed
+issuer readback supplies the original request ID, immutable selection digest,
+model grant reference, original cutoff, budget/calls and public profile/docs
+binding. No key name, secret binding, ciphertext or private source body appears
+in this readback. One linked capture grant and one original job consume this
+selection through the original grant writer CAS; old captures cannot acquire
+it retrospectively. Missing complete documentary authority issues no new
+preselection, linked grant, execution offer or native V2 authority.
+
+Where exact current sources eventually establish every required fact, a
+separate immutable quote must precede an explicit acknowledgement of
+availability-unverified for ONE original ordinary call. Process budget equals
+original selection/offer budget, max_calls is1, expected audio revision equals
+the committed offer/current row revision, and model-grant revision/digest also
+match. Positive source-derived reserve must remain within original route
+bound and B_audio at issuance, admission and immediately before contact.
+Original ACK/grant/native V2/audio/workflow writes commit through the same
+paired CAS transaction; no new grant, queue or ledger is introduced. These
+source-complete positive operations remain blocked until actual exact source
+facts and their reviewed producer exist. Documentary admission readiness never
+claims empirical availability, health or measured latency. Unknown contact
+consumes the original one-call authority without retry, fallback or deadline
+renewal; no evaluation or probe is part of this amendment.

@@ -56,6 +56,31 @@ macOS acceptance remains unexecuted. These locks enforce the cooperative writer
 protocol, not filesystem confidentiality or hostile-host isolation. The existing
 invoice profile gains bounded writer cleanup without a new boot prerequisite.
 
+Only an original privately issuer-bound Telegram task-document acquisition may
+reserve a pending `document-source.v1` stub before its source SHA256 is known.
+This pending object is not `DocumentReadInput`, is not a parser source, has no
+adopted metadata digest or typed input reference, and has no source digest. Its
+payload digest identifies only the bounded canonical pending stub. The same
+fenced upload writer may use a distinct `telegram-document-upload-lease.v1`
+immutable binding containing the exact pending acquisition binding digest instead
+of a source SHA256. All other owner/workspace/nonce/generation/slot/device/inode,
+quota, kernel exclusion, original cutoff and positive-cleanup requirements are
+unchanged. Once actual physical bytes have been completely received, EOF and
+awaited closure proved, encrypted publication privately read back and actual
+SHA256/size verified, one exact canonical first-seal transaction may replace that
+pending payload with the ordinary strict source wrapper and adopt its real
+digest/metadata. No later reseal or partial adoption is permitted. Every generic
+reader, parser, comparison, task publisher and source capability continues to
+reject pending stubs until this verified first seal. Existing known-SHA
+reservation/upload paths and their original lease schemas remain unchanged.
+This narrow exception requires explicit one-use acquisition consent selected
+before the genuine original paired event, quota and kernel ownership before
+`getFile` or bytes, a closed ASCII relative-path grammar before the fixed HTTPS
+Telegram token URL, and original current authority at each boundary. Unknown
+acquisition remains charged and cleanup-only; it never retries or renews its
+original deadline. This is accepted target scope for
+[#1022](https://github.com/seraph-quest/seraph/issues/1022), not shipped-state proof.
+
 `DocumentReadInput` declares `artifact_ref`, `format` (pdf/docx/xlsx/csv),
 `selection`, and `page_sheet_limits`. `DocumentEvidence` contains source-linked
 sections (`source_ref`, `text`, `table_cells`), warnings and `source_digest`.

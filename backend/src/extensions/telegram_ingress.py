@@ -192,6 +192,13 @@ class TelegramIngressPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramDocumentMetadata:
+    file_id: str
+    size_bytes: int
+    format: str
+
+
+@dataclass(frozen=True, slots=True)
 class TelegramUpdate:
     """External update plus canonical-owner identity references."""
 
@@ -207,6 +214,7 @@ class TelegramUpdate:
     sequence: int = 1
     server_owned_identity: bool = True
     local_fallback_requested: bool = False
+    document: TelegramDocumentMetadata | None = None
 
     @property
     def normalized_text(self) -> str | None:
@@ -564,6 +572,9 @@ def canonical_telegram_request_digest(update: TelegramUpdate) -> str:
         "server_owned_identity": update.server_owned_identity,
         "local_fallback_requested": update.local_fallback_requested,
     }
+    if update.document is not None:
+        payload["document"] = {"file_id": update.document.file_id,
+            "size_bytes": update.document.size_bytes, "format": update.document.format}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

@@ -47,7 +47,28 @@ class TranscriptConfirmationBody(BaseModel):
 
 
 class AudioConsentGrantBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     boundary: Literal["capture", "cloud_upload", "model"]
+    original_audio_selection: "OriginalAudioSelectionV1 | None" = None
+    pre_capture_model_consent_reference: str | None = Field(default=None, min_length=1, max_length=128)
+    expected_pre_capture_selection_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class OriginalAudioSelectionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["select_one_original_audio_call"]
+    conversation_session_id: str = Field(min_length=1, max_length=256)
+    audio_budget_microusd: int = Field(ge=1, le=1_000_000_000)
+    max_calls: int = Field(strict=True, ge=1, le=1)
+    expected_audio_profile_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    documentation_attestation_ref: str = Field(min_length=1, max_length=128)
+    expected_documentation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AudioExecutionReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    max_calls: int = Field(strict=True, ge=1, le=1)
+    expected_audio_revision: int = Field(ge=0)
 
 
 class AudioExecutionBody(BaseModel):
@@ -193,6 +214,20 @@ async def issue_audio_consent(body: AudioConsentGrantBody, request: Request) -> 
     owner, operator_session_id, operator = _operator(request)
     if body.boundary in {"cloud_upload", "model"} and not _has_model_inference_grant(operator):
         raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
+    if body.original_audio_selection is not None:
+        from src.model_fabric.repository import model_fabric_repository
+        from src.model_fabric.audio_documentation import DocumentationError
+        if body.boundary not in {"model", "cloud_upload"}:
+            raise HTTPException(status_code=422, detail={"code":"audio_selection_boundary_invalid"})
+        try:
+            await model_fabric_repository.require_audio_execution_documentation(operator,
+                body.original_audio_selection.documentation_attestation_ref,
+                body.original_audio_selection.expected_documentation_digest)
+        except DocumentationError as exc:
+            # Missing exact facts cannot issue a model grant or preselection.
+            raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
+    if body.pre_capture_model_consent_reference is not None or body.expected_pre_capture_selection_digest is not None:
+        raise HTTPException(status_code=409, detail={"code":"audio_pre_capture_selection_unavailable"})
     try:
         grant = await default_audio_worker.issue_consent_grant(
             owner_principal_id=owner,
@@ -327,6 +362,20 @@ async def process_audio(request_id: str, request: Request, body: AudioExecutionB
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+
+
+@router.post("/audio/ptt/{request_id}/execution-review")
+async def review_original_audio_execution(request_id: str, body: AudioExecutionReviewBody, request: Request):
+    snapshot, _, _, operator = await _owned_job(request_id, request, require_model=True)
+    row = await default_audio_worker._job(snapshot.request_id)
+    if row.revision != body.expected_audio_revision:
+        raise HTTPException(status_code=409, detail={"code":"audio_revision_changed"})
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.audio_documentation import DocumentationError
+    try:
+        await model_fabric_repository.require_audio_execution_documentation(operator, None, None)
+    except DocumentationError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
 
 
 @router.post("/audio/ptt/{request_id}/confirm")

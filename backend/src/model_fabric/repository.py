@@ -50,6 +50,30 @@ class ModelFabricRepository:
     def _session(self) -> AbstractAsyncContextManager[AsyncSession]:
         return (self._session_provider or get_session)()
 
+    async def stage_audio_documentation(self, operator, request):
+        from .audio_documentation import stage
+        return await stage(self, operator, request)
+
+    async def cleanup_settled_audio_documentation(self):
+        from .audio_documentation import cleanup_settled
+        return await cleanup_settled(self)
+
+    async def accept_audio_documentation(self, operator, request):
+        from .audio_documentation import AcceptStagedDocumentationV1, review
+        if type(request) is not AcceptStagedDocumentationV1:
+            raise TypeError("closed audio acceptance action required")
+        return await review(self, operator, request)
+
+    async def reject_audio_documentation(self, operator, request):
+        from .audio_documentation import RejectStagedDocumentationV1, review
+        if type(request) is not RejectStagedDocumentationV1:
+            raise TypeError("closed audio rejection action required")
+        return await review(self, operator, request)
+
+    async def require_audio_execution_documentation(self, operator, reference, expected_digest):
+        from .audio_documentation import require_execution_documentation
+        return await require_execution_documentation(self, operator, reference, expected_digest)
+
     async def persist_capability_proof(
         self,
         proof: ModelRouteProof,

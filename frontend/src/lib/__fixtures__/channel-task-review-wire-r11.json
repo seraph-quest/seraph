@@ -1,0 +1,10 @@
+{
+  "action": "open_exact_review",
+  "goal_id": "6e3b0a26",
+  "goal_revision": 1,
+  "no_learning": true,
+  "original_root_id": "04081b2fbc9d4108b07323e30bcbf82c",
+  "review_required": true,
+  "task_id": "d06e32252186488aba1cc069c1f663da",
+  "task_revision": 11
+}

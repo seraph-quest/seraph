@@ -42,6 +42,7 @@ from src.extensions.telegram_ingress import (
     OPENROUTER_INFERENCE_CONSENT_SCOPE,
     TELEGRAM_TRANSIT_CONSENT_SCOPE,
     TelegramAttachmentMetadata,
+    TelegramDocumentMetadata,
     TelegramConsent,
     TelegramConsentState,
     TelegramIngressPolicy,
@@ -76,9 +77,11 @@ TELEGRAM_DELIVERY_DEADLINE_SECONDS = 24 * 60 * 60
 
 def telegram_state_revision(row) -> int:
     # Safe exact state identity for adapter CAS, including repeated updates.
-    payload = [str(row.updated_at), row.pairing_state, row.revoked_at is not None,
-               row.transit_consent_reference, str(row.transit_consent_expires_at),
-               row.model_consent_reference, str(row.model_consent_expires_at)]
+    def timestamp(value):
+        return _aware(value).isoformat() if value is not None else None
+    payload = [timestamp(row.updated_at), row.pairing_state, row.revoked_at is not None,
+               row.transit_consent_reference, timestamp(row.transit_consent_expires_at),
+               row.model_consent_reference, timestamp(row.model_consent_expires_at)]
     return int(hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:12], 16)
 
 
@@ -343,6 +346,7 @@ class TelegramTransportAdapter:
         self,
         *,
         transport: InjectedTelegramTransport | None = None,
+        document_http=None,
         max_attempts: int = TELEGRAM_DEFAULT_MAX_ATTEMPTS,
         poll_timeout_seconds: float = TELEGRAM_DEFAULT_POLL_TIMEOUT_SECONDS,
         effect_timeout_seconds: float = TELEGRAM_DEFAULT_EFFECT_TIMEOUT_SECONDS,
@@ -372,6 +376,8 @@ class TelegramTransportAdapter:
         ):
             raise ValueError("delivery_deadline_seconds must be between one second and seven days")
         self.transport = transport or RecordingTelegramTransport()
+        from src.extensions.telegram_document_transport import TelegramDocumentHTTP
+        self.document_http = document_http or TelegramDocumentHTTP()
         self.max_attempts = max_attempts
         self.poll_timeout_seconds = float(poll_timeout_seconds)
         self.effect_timeout_seconds = float(effect_timeout_seconds)
@@ -864,7 +870,9 @@ class TelegramTransportAdapter:
         message_id = _positive_int(message_id, "invalid_message_id")
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
             raise TelegramTransportError("invalid_sequence", "Telegram sequence is invalid")
-        text = message.get("text", payload.get("text"))
+        from src.work_board.document_channel_ingest import normalize_document
+        document = normalize_document(message)
+        text = message.get("caption") if document is not None else message.get("text", payload.get("text"))
         if text is not None and not isinstance(text, str):
             raise TelegramTransportError("invalid_text", "Telegram text is invalid")
         attachment_payload = message.get("voice") or payload.get("attachment")
@@ -916,6 +924,7 @@ class TelegramTransportAdapter:
             external_transit_consent=_consent_from_state(row.transit_consent_reference, row.transit_consent_expires_at, TELEGRAM_TRANSIT_CONSENT_SCOPE, now),
             openrouter_consent=_consent_from_state(row.model_consent_reference, row.model_consent_expires_at, OPENROUTER_INFERENCE_CONSENT_SCOPE, now),
             sequence=sequence,
+            document=TelegramDocumentMetadata(**document) if document is not None else None,
         )
 
     async def _ingress_state(self, db, *, row: TelegramTransportState) -> TelegramIngressState:
@@ -975,6 +984,16 @@ class TelegramTransportAdapter:
         receipt = await self._ingest_update(payload, owner_principal_id=owner_principal_id,
             operator_session_id=operator_session_id)
         capture = receipt.get("channel_task_capture")
+        if isinstance(capture, dict) and capture.get("document_acquisition"):
+            from src.work_board.document_channel_ingest import acquire_original_document
+            from src.work_board.contracts import WorkBoardOwner
+            owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id)
+            source = await acquire_original_document(self, owner, receipt["idempotency_key"])
+            async with db_engine.get_session() as db:
+                event = await db.scalar(select(TelegramInboundUpdate).where(
+                    TelegramInboundUpdate.idempotency_key == receipt["idempotency_key"]))
+                receipt = json.loads(event.receipt_json)
+                capture = receipt["channel_task_capture"]
         if isinstance(capture, dict) and capture.get("phase") in {"reserved", "linked"}:
             from src.work_board.channel_capture import ChannelTaskIngress, ChannelReplyContext
             reservation = capture["reservation"]
@@ -1150,6 +1169,9 @@ class TelegramTransportAdapter:
                         "message_id": update_payload.message_id,
                         "sequence": update_payload.sequence,
                         "request_digest": result.request_digest,
+                        **({"document": {"file_id": update_payload.document.file_id,
+                            "size_bytes": update_payload.document.size_bytes, "format": update_payload.document.format}}
+                            if update_payload.document is not None else {}),
                         "voice_handoff": receipt.get("voice_handoff", {"status": "none"}),
                     },
                 }
@@ -1197,7 +1219,11 @@ class TelegramTransportAdapter:
                         receipt_payload["channel_task_capture"] = {"phase": "blocked", "reason": "channel_document_source_unsealed"}
                     else:
                         await reserve_telegram_event_capture(db, row, canonical_message, receipt_payload,
-                            event_key=result.idempotency_key, adapter=self, service=dispatcher.general_tasks)
+                            event_key=result.idempotency_key, adapter=self, service=dispatcher.general_tasks,
+                            document=({"file_id": update_payload.document.file_id,
+                                "size_bytes": update_payload.document.size_bytes, "format": update_payload.document.format}
+                                if update_payload.document is not None else None),
+                            provider_update_id=update_payload.update_id, provider_request_digest=result.request_digest)
                 db.add(TelegramInboundUpdate(
                     idempotency_key=result.idempotency_key,
                     request_digest=result.request_digest,
@@ -1519,6 +1545,16 @@ class TelegramTransportAdapter:
                 if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 await self._assert_active_row(state, current=current)
+                captured_control_identity = None
+                if row.task_control_markup_json or (row.correlation_id or "").startswith("telegram-control:"):
+                    from src.extensions.telegram_task_controls import TelegramTaskControls
+                    captured_control_identity = await TelegramTaskControls(self).prepare_captured_delivery(db, row)
+                    if captured_control_identity is not None:
+                        from src.work_board.repository import _begin_sqlite_immediate
+                        await _begin_sqlite_immediate(db)
+                        row = await db.get(TelegramTransportOutbox, outbox_key, populate_existing=True)
+                        if row is None or row.status != "queued":
+                            raise TelegramTransportError("telegram_control_delivery_changed", "Original notice changed")
                 channel_output_proof = None
                 if (row.correlation_id or "").startswith("channel-output:"):
                     from src.work_board.channel_capture import read_channel_outbox_output, check_channel_output_publication
@@ -1541,7 +1577,8 @@ class TelegramTransportAdapter:
                         raise TelegramTransportError(exc.code, str(exc)) from exc
                 if row.task_control_markup_json or (row.correlation_id or "").startswith("telegram-control:"):
                     from src.extensions.telegram_task_controls import TelegramTaskControls
-                    await TelegramTaskControls(self).validate_delivery(db, row)
+                    await TelegramTaskControls(self).validate_delivery(db, row,
+                        captured_identity=captured_control_identity)
                 token = await vault_repository.get(state.token_secret_ref or "")
                 if not token:
                     raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
@@ -1631,7 +1668,7 @@ class TelegramTransportAdapter:
 
         async with self._lock:
             async with db_engine.get_session() as db:
-                if channel_output_proof is not None:
+                if channel_output_proof is not None or captured_control_identity is not None:
                     from src.work_board.repository import _begin_sqlite_immediate
                     await _begin_sqlite_immediate(db)
                 current = _now()
@@ -1668,6 +1705,14 @@ class TelegramTransportAdapter:
                     try:
                         await check_channel_output_publication(db, output_owner, source_output,
                             adapter=self, staged_workspace=staged_workspace)
+                    except (BoardError, TelegramTransportError):
+                        revoked = True
+                if captured_control_identity is not None:
+                    from src.extensions.telegram_task_controls import TelegramTaskControls
+                    from src.work_board.repository import BoardError
+                    try:
+                        await TelegramTaskControls(self).validate_delivery(db, fresh,
+                            captured_identity=captured_control_identity)
                     except (BoardError, TelegramTransportError):
                         revoked = True
                 if revoked:
@@ -1843,6 +1888,11 @@ class TelegramTransportAdapter:
                     raise TelegramTransportError("telegram_reconciliation_not_required", "Telegram delivery is not ambiguous")
                 if resolution == "retry" and (row.correlation_id or "").startswith("channel-output:"):
                     raise TelegramTransportError("channel_output_unknown_no_resend", "Unknown completion delivery requires readback; it cannot be resent")
+                if resolution == "retry" and (row.task_control_markup_json or
+                    (row.correlation_id or "").startswith("telegram-control:")):
+                    from src.extensions.telegram_task_controls import TelegramTaskControls
+                    if await TelegramTaskControls(self).prepare_captured_delivery(db, row) is not None:
+                        raise TelegramTransportError("channel_control_unknown_no_resend", "Unknown captured control delivery requires readback; it cannot be resent")
                 current = _now()
                 if resolution == "retry":
                     state = await self._state(db)

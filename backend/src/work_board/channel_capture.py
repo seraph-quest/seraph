@@ -16,6 +16,35 @@ from src.work_board.repository import BoardError
 from datetime import datetime, timezone
 
 
+class TelegramDocumentAcquisitionSelection(ClosedTaskModel):
+    action: Literal["acquire_one_original_task_document"]
+    max_sources: Literal[1]
+    source_cap_bytes: Literal[16777216]
+    docx_cap_bytes: Literal[10485760]
+    formats: list[Literal["pdf", "docx", "xlsx", "csv"]]
+    no_learning: Literal[True]
+
+    @field_validator("max_sources", "source_cap_bytes", "docx_cap_bytes", mode="before")
+    @classmethod
+    def strict_document_integer(cls, value):
+        if type(value) is not int:
+            raise ValueError("strict document integer required")
+        return value
+
+    @field_validator("no_learning", mode="before")
+    @classmethod
+    def strict_document_no_learning(cls, value):
+        if value is not True:
+            raise ValueError("explicit no-learning required")
+        return value
+
+    @model_validator(mode="after")
+    def exact_formats(self):
+        if self.formats != ["pdf", "docx", "xlsx", "csv"]:
+            raise ValueError("exact ordered document formats required")
+        return self
+
+
 class TelegramCaptureSelection(ClosedTaskModel):
     expected_revision: int = Field(ge=1)
     enabled: bool = False
@@ -24,6 +53,7 @@ class TelegramCaptureSelection(ClosedTaskModel):
     requested_output: dict
     limits: TaskLimits = Field(default_factory=lambda: TaskLimits(max_inference_calls=0, max_cost_microusd=0))
     inference_egress_acknowledged: bool = False
+    document_acquisition: TelegramDocumentAcquisitionSelection | None = None
 
 
 class ChannelReplyContext(ClosedTaskModel):
@@ -62,6 +92,32 @@ class TelegramCaptureBindingV1(ClosedTaskModel):
 
     _utc_timestamp = field_validator("expires_at", mode="before")(
         TaskProposalGroupV1.utc_timestamp.__func__)
+
+
+class TelegramCaptureBindingV2(ClosedTaskModel):
+    schema_version: Literal["telegram-task-capture-binding.v2"] = "telegram-task-capture-binding.v2"
+    selection: TelegramCaptureBindingV1
+    document_acquisition: TelegramDocumentAcquisitionSelection
+    selected_document_event_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+def decode_telegram_capture_binding(raw):
+    value = json.loads(raw)
+    if value.get("schema_version") == "telegram-task-capture-binding.v2":
+        return TelegramCaptureBindingV2.model_validate(value)
+    return TelegramCaptureBindingV1.model_validate(value)
+
+
+def telegram_capture_selection(binding):
+    return binding.selection if type(binding) is TelegramCaptureBindingV2 else binding
+
+
+def telegram_capture_binding_digest(binding):
+    from src.work_board.general_task import digest
+    if type(binding) is TelegramCaptureBindingV2:
+        # Lifecycle consumption never changes the immutable original selection.
+        return digest(binding.model_dump(mode="json", exclude={"selected_document_event_id"}))
+    return digest(binding.model_dump(mode="json"))
 
 
 def current_workspace_digest():
@@ -109,15 +165,19 @@ async def select_telegram_capture(adapter, owner, selection):
                 goal_revision=selection.goal_revision, requested_output=selection.requested_output,
                 limits=selection.limits, inference_egress_acknowledged=selection.inference_egress_acknowledged,
                 expires_at=min(cutoffs))
+            if selection.document_acquisition is not None:
+                binding = TelegramCaptureBindingV2(selection=binding,
+                    document_acquisition=selection.document_acquisition)
             pairing.capture_binding_json = binding.model_dump_json()
             pairing.updated_at = _now()
             await db.commit()
             return {"capture_binding": binding.model_dump(mode="json"),
-                "capture_binding_digest": digest(binding.model_dump(mode="json")),
+                "capture_binding_digest": telegram_capture_binding_digest(binding),
                 "state_revision": telegram_state_revision(pairing)}
 
 
-async def reserve_telegram_event_capture(db, pairing, message, receipt, *, event_key, adapter, service):
+async def reserve_telegram_event_capture(db, pairing, message, receipt, *, event_key, adapter, service,
+    document=None, provider_update_id=None, provider_request_digest=None):
     """Reserve the original selected group in the existing event writer before Task staging."""
     from src.auth.service import authenticate_session
     from src.db.models import TelegramTransportState
@@ -144,7 +204,8 @@ async def reserve_telegram_event_capture(db, pairing, message, receipt, *, event
     if (not pairing.model_consent_reference or not _aware(pairing.model_consent_expires_at)
         or _aware(pairing.model_consent_expires_at) <= _now()):
         raise BoardError("channel_capture_model_grant_changed", "Original channel model grant is no longer current", status_code=403)
-    binding = TelegramCaptureBindingV1.model_validate_json(pairing.capture_binding_json)
+    envelope = decode_telegram_capture_binding(pairing.capture_binding_json)
+    binding = telegram_capture_selection(envelope)
     owner = WorkBoardOwner(principal_id=pairing.owner_principal_id, session_id=pairing.operator_session_id)
     if (not binding.enabled or binding.expires_at <= _now()
         or binding.owner_principal_id != owner.principal_id or binding.original_root_id != owner.session_id
@@ -173,8 +234,28 @@ async def reserve_telegram_event_capture(db, pairing, message, receipt, *, event
         idempotency_key=selected.idempotency_key, task_input=task_input, proposal_group=group)
     receipt["channel_task_capture"] = {"phase": "reserved",
         "pairing_id": pairing_id,
-        "binding_digest": digest(binding.model_dump(mode="json")),
+        "binding_digest": telegram_capture_binding_digest(envelope),
         "reservation": reservation.model_dump(mode="json")}
+    if document is not None:
+        if (type(envelope) is not TelegramCaptureBindingV2
+            or envelope.selected_document_event_id is not None):
+            receipt["channel_task_capture"] = {"phase": "blocked", "reason": "channel_document_acquisition_selection_required"}
+            return
+        from src.work_board.document_channel_ingest import issue_original_document_binding
+        acquired = issue_original_document_binding(pairing, envelope, reservation, document,
+            provider_update_id=provider_update_id, provider_request_digest=provider_request_digest)
+        receipt["channel_task_capture"]["document_acquisition"] = acquired.model_dump(mode="json")
+        from sqlalchemy import update
+        previous_binding = pairing.capture_binding_json
+        consumed_binding = envelope.model_copy(update={"selected_document_event_id": event_key}).model_dump_json()
+        consumed = await db.execute(update(TelegramTransportState).where(
+            TelegramTransportState.id == pairing.id,
+            TelegramTransportState.capture_binding_json == previous_binding).values(
+                capture_binding_json=consumed_binding).execution_options(synchronize_session=False))
+        if consumed.rowcount != 1:
+            raise BoardError("channel_document_selection_changed", "Original one-use document selection changed", status_code=409)
+        pairing.capture_binding_json = consumed_binding
+        pairing.updated_at = _now()
 
 
 class ChannelCaptureReservationV1(ClosedTaskModel):
@@ -245,11 +326,38 @@ def _origin_record(task, reservation):
         group_digest=digest(reservation.proposal_group.model_dump(mode="json")))
 
 
-def _origin_mac(payload):
+_IDENTITY_SEAL = object()
+
+
+@dataclass(frozen=True, repr=False)
+class _CapturedIdentity:
+    workspace_digest: str
+    callback_root_digest: str
+    origin_key: bytes
+    _seal: object
+
+
+def stage_captured_identity():
+    """Stage fixed workspace and existing signing identity outside writers."""
+    import hashlib, hmac
+    from src.extensions.telegram_task_controls import root_digest
+    return _CapturedIdentity(current_workspace_digest(), root_digest(),
+        hmac.new(_output_signing_key(), b"seraph.channel-capture-origin.v1", hashlib.sha256).digest(),
+        _IDENTITY_SEAL)
+
+
+def _checked_identity(identity):
+    if type(identity) is not _CapturedIdentity or identity._seal is not _IDENTITY_SEAL:
+        raise BoardError("channel_capture_identity_required", "Stage the original server identity", status_code=403)
+    return identity
+
+
+def _origin_mac(payload, *, identity=None):
     import hashlib, hmac
     from src.work_board.general_task import canonical
     # Existing configured server identity; no separately managed key lifecycle.
-    key = hmac.new(_output_signing_key(), b"seraph.channel-capture-origin.v1", hashlib.sha256).digest()
+    key = (_checked_identity(identity).origin_key if identity is not None else
+        hmac.new(_output_signing_key(), b"seraph.channel-capture-origin.v1", hashlib.sha256).digest())
     return hmac.new(key, canonical(payload), hashlib.sha256).hexdigest()
 
 
@@ -258,12 +366,15 @@ async def publish_capture_origin(db, owner, request, mutation, capture):
     from src.work_board.general_task import canonical, digest
     reservation = await check_capture_publication(db, owner, request, capture)
     origin = _origin_record(mutation.task, reservation).model_dump(mode="json")
-    encoded = canonical({"origin": origin, "mac": _origin_mac(origin)}).decode("utf-8")
+    encoded = canonical({"origin": origin, "mac": _origin_mac(origin, identity=capture.identity)}).decode("utf-8")
     if len(encoded.encode("utf-8")) > 4096:
         raise BoardError("channel_capture_origin_invalid", "Capture provenance exceeds its bound", status_code=409)
     if mutation.idempotent_replay:
         if mutation.task.channel_capture_origin_json != encoded:
             raise BoardError("channel_capture_origin_changed", "Original capture provenance needs recovery", status_code=409)
+        if capture.document_link is not None:
+            from src.work_board.document_channel_ingest import bind_original_document_task
+            await bind_original_document_task(db, owner, mutation.task, reservation, capture.document_link)
         return
     if mutation.task.channel_capture_origin_json not in (None, encoded):
         raise BoardError("channel_capture_origin_changed", "Original capture provenance changed", status_code=409)
@@ -274,10 +385,14 @@ async def publish_capture_origin(db, owner, request, mutation, capture):
     metadata["channel_capture_origin_digest"] = digest(encoded)
     mutation.event.metadata_json = canonical(metadata).decode("utf-8")
     await db.flush()
+    if capture.document_link is not None:
+        from src.work_board.document_channel_ingest import bind_original_document_task
+        await bind_original_document_task(db, owner, mutation.task, reservation, capture.document_link)
+    await db.flush()
 
 
 async def check_capture_origin(db, owner, task, *, expected_reservation=None,
-                               _workspace_digest=None, _classify_only=False):
+                               _workspace_digest=None, _classify_only=False, _identity=None):
     """Classify authentic captured Tasks before their private input is parsed.
 
     Source-owner guards authenticate the original Root/grants before canonical
@@ -301,7 +416,7 @@ async def check_capture_origin(db, owner, task, *, expected_reservation=None,
             wrapper = json.loads(raw)
             if set(wrapper) != {"origin", "mac"} or not isinstance(wrapper["mac"], str):
                 raise ValueError()
-            if not hmac.compare_digest(_origin_mac(wrapper["origin"]), wrapper["mac"]):
+            if not hmac.compare_digest(_origin_mac(wrapper["origin"], identity=_identity), wrapper["mac"]):
                 raise ValueError()
             origin = ChannelCaptureOriginV1.model_validate(wrapper["origin"])
             if (origin.task_id != task.task_id or origin.owner_principal_id != owner.principal_id
@@ -383,12 +498,14 @@ async def check_capture_origin(db, owner, task, *, expected_reservation=None,
         raise denied() from None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CaptureIntentPublication:
     reservation: ChannelCaptureReservationV1
     source_check: object
     source_scope: object
     _seal: object
+    identity: object = None
+    document_link: object = None
 
 
 async def reserve_confirmed_audio_capture(db, owner, request, *, service, jobs,
@@ -434,7 +551,8 @@ async def reserve_confirmed_audio_capture(db, owner, request, *, service, jobs,
             raise BoardError("channel_capture_source_changed", "Confirmed source changed", status_code=409)
     def source_scope():
         return jobs.confirmed_audio_task_source_scope(**source)
-    capture = CaptureIntentPublication(reservation, source_check, source_scope, _CAPTURE_SEAL)
+    capture = CaptureIntentPublication(reservation, source_check, source_scope, _CAPTURE_SEAL,
+        stage_captured_identity())
     await check_capture_publication(db, owner, request, capture)
     return capture
 
@@ -447,6 +565,7 @@ async def check_capture_publication(db, owner, request, capture):
         or not callable(capture.source_check) or not callable(capture.source_scope)):
         raise BoardError("channel_capture_source_required", "Use the original confirmed channel source", status_code=403)
     reservation = capture.reservation
+    _checked_identity(capture.identity)
     if (request.plan is not None or request.accept
         or reservation.owner_principal_id != owner.principal_id
         or reservation.original_root_id != owner.session_id
@@ -455,6 +574,19 @@ async def check_capture_publication(db, owner, request, capture):
         or reservation.idempotency_key != request.idempotency_key):
         raise BoardError("channel_capture_request_changed", "Original capture request changed", status_code=409)
     await capture.source_check(db)
+    if reservation.source_kind == "telegram":
+        from sqlalchemy import select
+        from src.db.models import TelegramInboundUpdate
+        event = await db.scalar(select(TelegramInboundUpdate).where(
+            TelegramInboundUpdate.idempotency_key == reservation.source_id,
+            TelegramInboundUpdate.owner_principal_id == owner.principal_id,
+            TelegramInboundUpdate.operator_session_id == owner.session_id).execution_options(populate_existing=True))
+        stored = json.loads(event.receipt_json).get("channel_task_capture", {}) if event else {}
+        if stored.get("document_acquisition") is not None:
+            if capture.document_link is None:
+                raise BoardError("channel_document_link_required", "Use the original sealed document witness", status_code=409)
+            from src.work_board.document_channel_ingest import check_original_document_link
+            await check_original_document_link(db, owner, reservation, capture.document_link)
     await validate_group_owner(db, reservation.proposal_group)
     return reservation
 
@@ -480,13 +612,14 @@ async def check_telegram_capture_source(db, owner, ingress, *, adapter, _workspa
     if (not pairing.model_consent_reference or not _aware(pairing.model_consent_expires_at)
         or _aware(pairing.model_consent_expires_at) <= _now()):
         raise BoardError("channel_capture_model_grant_changed", "Original channel model grant is no longer current", status_code=403)
-    binding = TelegramCaptureBindingV1.model_validate_json(pairing.capture_binding_json)
+    envelope = decode_telegram_capture_binding(pairing.capture_binding_json)
+    binding = telegram_capture_selection(envelope)
     if (not binding.enabled or binding.expires_at <= _now()
         or binding.pairing_id != ingress.pairing_id
         or binding.owner_principal_id != owner.principal_id or binding.original_root_id != owner.session_id
         or binding.transit_consent_reference != pairing.transit_consent_reference
         or binding.workspace_identity_digest != (_workspace_digest if _workspace_digest is not None else current_workspace_digest())
-        or digest(binding.model_dump(mode="json")) != ingress.reply_context.capture_binding_digest):
+        or telegram_capture_binding_digest(envelope) != ingress.reply_context.capture_binding_digest):
         raise BoardError("channel_capture_binding_changed", "Original capture selection changed or expired", status_code=409)
     event = (await db.execute(select(TelegramInboundUpdate).where(
         TelegramInboundUpdate.idempotency_key == ingress.event_id,
@@ -506,6 +639,10 @@ async def check_telegram_capture_source(db, owner, ingress, *, adapter, _workspa
         or reservation.task_input.inference_egress_acknowledged != binding.inference_egress_acknowledged):
         raise BoardError("channel_capture_reservation_changed", "Original source selection changed", status_code=409)
     await validate_group_owner(db, reservation.proposal_group)
+    if stored.get("document_acquisition") is not None:
+        from src.work_board.document_channel_ingest import check_original_document_sealed
+        await check_original_document_sealed(db, owner, event, reservation,
+            expected_task_id=stored.get("task_id"))
     message = await db.get(Message, event.canonical_message_id, populate_existing=True)
     if (message is None or message.session_id != event.session_id or message.role != "user"
         or hashlib.sha256(message.content.encode()).hexdigest() != event.content_digest
@@ -519,7 +656,8 @@ async def check_telegram_capture_source(db, owner, ingress, *, adapter, _workspa
 async def reserved_telegram_capture(db, owner, ingress, *, adapter):
     """Seal only an already-reserved original provider event, without renewal."""
     from src.work_board.contracts import GeneralTaskCreate
-    staged_workspace = current_workspace_digest()
+    identity = stage_captured_identity()
+    staged_workspace = identity.workspace_digest
     _event, reservation = await check_telegram_capture_source(db, owner, ingress, adapter=adapter,
         _workspace_digest=staged_workspace)
     # Capture requests are server-resolved from the immutable reserved input.
@@ -531,12 +669,20 @@ async def reserved_telegram_capture(db, owner, ingress, *, adapter):
             _workspace_digest=staged_workspace)
         if current != reservation:
             raise BoardError("channel_capture_reservation_changed", "Original reservation changed", status_code=409)
-    capture = CaptureIntentPublication(reservation, source_check, lambda: adapter._lock, _CAPTURE_SEAL)
+        if document_link is not None:
+            from src.work_board.document_channel_ingest import check_original_document_link
+            await check_original_document_link(db, owner, reservation, document_link)
+    document_link = None
+    if json.loads(_event.receipt_json)["channel_task_capture"].get("document_acquisition") is not None:
+        from src.work_board.document_channel_ingest import stage_original_document_link
+        document_link = await stage_original_document_link(db, owner, reservation)
+    capture = CaptureIntentPublication(reservation, source_check, lambda: adapter._lock, _CAPTURE_SEAL,
+        identity, document_link)
     await check_capture_publication(db, owner, request, capture)
     return request, capture
 
 
-async def check_captured_task_control(db, owner, action, *, adapter, _workspace_digest=None):
+async def check_captured_task_control(db, owner, action, *, adapter, _workspace_digest=None, _identity=None):
     """Resolve a control only from its original linked provider reservation."""
     from sqlalchemy import func, select
     from src.db.models import TelegramInboundUpdate
@@ -547,7 +693,7 @@ async def check_captured_task_control(db, owner, action, *, adapter, _workspace_
     task = await task_owned(db, owner.principal_id, owner.session_id, action.task_id)
     if task.capability_id != "agent.task.v1" or task.task_revision != action.expected_revision:
         raise BoardError("channel_task_revision_changed", "Refresh the original captured Task", status_code=409)
-    await check_capture_origin(db, owner, task, _workspace_digest=_workspace_digest)
+    await check_capture_origin(db, owner, task, _workspace_digest=_workspace_digest, _identity=_identity)
     event = (await db.execute(select(TelegramInboundUpdate).where(
         TelegramInboundUpdate.owner_principal_id == owner.principal_id,
         TelegramInboundUpdate.operator_session_id == owner.session_id,
@@ -570,6 +716,99 @@ async def check_captured_task_control(db, owner, action, *, adapter, _workspace_
     return task, reservation
 
 
+_CONTROL_COMMIT_SEAL = object()
+
+
+@dataclass(frozen=True, repr=False)
+class CapturedChannelControlCommit:
+    action: str
+    task_id: str
+    task_revision: int
+    attempt_id: str
+    board_fence: int
+    parent_id: str
+    parent_revision: int
+    parent_fence: int
+    callback_id: str
+    callback_digest: str
+    reservation_digest: str
+    query_id: str
+    update_id: int
+    request_digest: str
+    source_check: object
+    consume: object
+    _seal: object
+
+
+async def issue_captured_control_commit(db, *, controls, owner, action, row, query,
+                                       update_id, request_digest, identity):
+    """Only the actual callback owner may stage an original native intent."""
+    from sqlalchemy import select
+    from src.db.models import TelegramTaskCallback, WorkBoardAttempt, WorkflowRunState
+    from src.extensions.telegram_task_controls import TelegramTaskControls, effect_digest
+    from src.work_board.general_task import digest
+    if type(controls) is not TelegramTaskControls or action.action not in {"pause", "resume", "cancel"}:
+        raise BoardError("channel_control_commit_required", "Use the original callback owner", status_code=403)
+    _checked_identity(identity)
+    actual = await db.get(TelegramTaskCallback, row.id, populate_existing=True)
+    if actual is None or actual is not row or row.effect != action.action or row.status != "pending":
+        raise BoardError("channel_control_callback_changed", "Original callback changed", status_code=409)
+    task, reservation = await check_captured_task_control(db, owner, action, adapter=controls.adapter,
+        _workspace_digest=identity.workspace_digest, _identity=identity)
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id,
+        WorkBoardAttempt.ended_at.is_(None)).execution_options(populate_existing=True))
+    parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)
+        .execution_options(populate_existing=True)) if attempt else None
+    if (attempt is None or parent is None or row.attempt_id != attempt.attempt_id
+        or row.workflow_run_id != parent.run_identity or row.board_fence != attempt.fencing_token):
+        raise BoardError("channel_control_native_changed", "Original native binding changed", status_code=409)
+    callback_digest = effect_digest(row)
+    reservation_digest = digest(reservation.model_dump(mode="json"))
+    async def source_check(check_db):
+        current = await check_db.get(TelegramTaskCallback, row.id, populate_existing=True)
+        if current is None or effect_digest(current) != callback_digest:
+            raise BoardError("channel_control_callback_changed", "Original callback changed", status_code=409)
+        await controls._validate(check_db, current, owner=owner.principal_id, session=owner.session_id,
+            query=query, update_id=update_id, request_digest=request_digest, captured_identity=identity)
+        _task, original = await check_captured_task_control(check_db, owner, action, adapter=controls.adapter,
+            _workspace_digest=identity.workspace_digest, _identity=identity)
+        if digest(original.model_dump(mode="json")) != reservation_digest:
+            raise BoardError("channel_control_source_changed", "Original capture source changed", status_code=409)
+    async def consume(check_db, current_task):
+        current = await check_db.get(TelegramTaskCallback, row.id, populate_existing=True)
+        if current.status != "pending":
+            raise BoardError("channel_control_callback_replayed", "Original callback was already consumed", status_code=409)
+        await controls._claim(check_db, current, query, update_id, request_digest)
+        current.status = "cancel_intent" if action.action == "cancel" else "channel_action_intent"
+        current.result_json = json.dumps({"task_id": current_task.task_id,
+            "task_revision": current_task.task_revision, "task_status": current_task.status.value,
+            "action": action.action, "status": "intent_committed", "no_learning": True}, sort_keys=True)
+        check_db.add(current)
+    return CapturedChannelControlCommit(action.action, task.task_id, task.task_revision,
+        attempt.attempt_id, attempt.fencing_token, parent.run_identity, parent.revision, parent.fencing_token,
+        row.id, callback_digest, reservation_digest, query["id"], update_id, request_digest,
+        source_check, consume, _CONTROL_COMMIT_SEAL)
+
+
+async def check_captured_control_commit(db, commit, *, action):
+    if (type(commit) is not CapturedChannelControlCommit or commit._seal is not _CONTROL_COMMIT_SEAL
+        or commit.action != action):
+        raise BoardError("channel_control_commit_required", "Use the original callback owner", status_code=403)
+    await commit.source_check(db)
+
+
+async def consume_captured_control_commit(db, commit, *, action, task, attempt, parent):
+    """Called only in the final native writer immediately before paired CAS."""
+    if (type(commit) is not CapturedChannelControlCommit or commit._seal is not _CONTROL_COMMIT_SEAL
+        or commit.action != action or commit.task_id != task.task_id or commit.task_revision != task.task_revision
+        or commit.attempt_id != attempt.attempt_id or commit.board_fence != attempt.fencing_token
+        or commit.parent_id != parent.run_identity or commit.parent_revision != parent.revision
+        or commit.parent_fence != parent.fencing_token):
+        raise BoardError("channel_control_commit_changed", "Original native callback binding changed", status_code=409)
+    await commit.source_check(db)
+    await commit.consume(db, task)
+
+
 @dataclass(frozen=True)
 class VerifiedChannelOutput:
     """Private physical readback witness; a caller-shaped receipt is not one."""
@@ -585,6 +824,7 @@ class VerifiedChannelOutput:
     completed_at: datetime
     native_sql_digest: str
     _seal: object
+    identity: object = None
 
 
 _OUTPUT_SEAL = object()
@@ -616,7 +856,7 @@ async def check_channel_output_publication(db, owner, output, *, adapter, staged
         raise BoardError("channel_output_proof_required", "Original physical output readback required", status_code=403)
     task, reservation = await check_captured_task_control(db, owner, ChannelAction(task_id=output.task_id,
         action="inspect", expected_revision=output.task_revision), adapter=adapter,
-        _workspace_digest=staged_workspace)
+        _workspace_digest=staged_workspace, _identity=output.identity)
     attempt = await db.get(WorkBoardAttempt, output.attempt_id, populate_existing=True)
     parent = await db.scalar(select(WorkflowRunState).where(
         WorkflowRunState.run_identity == output.parent_job_id).execution_options(populate_existing=True))
@@ -803,9 +1043,10 @@ async def read_captured_terminal_output(db, owner, action, *, adapter):
     from src.memory.evidence_working_set import _verified_receipts, _read_file
     from src.workflows.general_task_accounting import entry_for
     from src.work_board.general_task import digest
-    staged_workspace = current_workspace_digest()
+    identity = stage_captured_identity()
+    staged_workspace = identity.workspace_digest
     task, reservation = await check_captured_task_control(db, owner, action, adapter=adapter,
-        _workspace_digest=staged_workspace)
+        _workspace_digest=staged_workspace, _identity=identity)
     if task.status not in {WorkBoardStatus.review, WorkBoardStatus.done}:
         raise BoardError("channel_output_not_verified", "Original execution has not completed for review", status_code=409)
     attempts = list((await db.execute(select(WorkBoardAttempt).where(
@@ -892,7 +1133,7 @@ async def read_captured_terminal_output(db, owner, action, *, adapter):
     # A read itself grants no delivery. Final publication/delivery must recheck
     # this original source and the same physical tuple under its own writer.
     task, reservation = await check_captured_task_control(db, owner, action, adapter=adapter,
-        _workspace_digest=staged_workspace)
+        _workspace_digest=staged_workspace, _identity=identity)
     pairing = await db.get(TelegramTransportState, "telegram", populate_existing=True)
     return VerifiedChannelOutput(task.task_id, task.task_revision, attempt.attempt_id,
         parent.run_identity, parent.revision, digest(manifest.model_dump(mode="json")),
@@ -900,4 +1141,4 @@ async def read_captured_terminal_output(db, owner, action, *, adapter):
         dict(reference), reservation.proposal_group.original_deadline_at,
         attempt.ended_at.replace(tzinfo=timezone.utc) if attempt.ended_at.tzinfo is None else attempt.ended_at,
         _terminal_sql_digest(task, attempt, parent, children, rows),
-        _OUTPUT_SEAL)
+        _OUTPUT_SEAL, identity)

@@ -224,11 +224,30 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
 async def telegram_task_notice(task_id: str, body: TelegramTaskNoticeBody, request: Request):
     """Explicit neutral notice; an ID or chat message never grants task authority."""
     from src.extensions.telegram_task_controls import TelegramTaskControls
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
     owner, session, _ = _operator(request)
     try:
         return await TelegramTaskControls(default_telegram_transport).notice(task_id,
             owner_principal_id=owner, operator_session_id=session,
             expected_revision=body.expected_revision, idempotency_key=body.idempotency_key)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/telegram/task-review")
+async def telegram_task_review(request: Request, handle: str) -> dict:
+    from src.extensions.telegram_task_controls import TelegramTaskControls
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
+    owner, session, _ = _operator(request)
+    try:
+        return await TelegramTaskControls(default_telegram_transport).read_exact_review(handle,
+            owner_principal_id=owner, operator_session_id=session)
+    except BoardError as exc:
+        _raise_board_error(exc)
     except TelegramTransportError as exc:
         raise _error(exc) from exc
 

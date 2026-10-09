@@ -588,7 +588,7 @@ class GeneralTaskService:
                     raise BoardError("channel_capture_task_changed", "Original capture Task is unavailable", status_code=409)
                 from src.work_board.channel_capture import check_capture_origin
                 await check_capture_origin(db, owner, existing, expected_reservation=reservation,
-                    _workspace_digest=staged_workspace)
+                    _workspace_digest=staged_workspace, _identity=capture.identity)
                 original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
                 if (original.task_input != reservation.task_input
                     or original.proposal_group != reservation.proposal_group

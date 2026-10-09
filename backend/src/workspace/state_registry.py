@@ -1460,6 +1460,7 @@ _RUNTIME_PATH_SPECS = (
     ("extensions-state.json", WorkspaceStateClass.CANONICAL),
     ("starter-packs.json", WorkspaceStateClass.CANONICAL),
     ("model-fabric-settings.json", WorkspaceStateClass.CANONICAL),
+    (".model-fabric", WorkspaceStateClass.CANONICAL),
     ("screen-analysis-settings.json", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),

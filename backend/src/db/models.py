@@ -311,6 +311,37 @@ class AudioConsentGrant(SQLModel, table=True):
 
 # ─── Session Todo ───────────────────────────────────────
 
+class ModelAudioDocumentationAttestationRecord(SQLModel, table=True):
+    """Documentary staging, deliberately separate from empirical route proofs."""
+    __tablename__ = "model_audio_documentation_attestations"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    original_root_id: str = Field(index=True)
+    profile_hash: str = Field(index=True)
+    revision: int = Field(default=0)
+    state: str = Field(default="staged", index=True)
+    binding_json: str
+    bundle_digest: str = Field(default="")
+    error_code: Optional[str] = Field(default=None)
+    reserved_bytes: int = Field(default=540672)
+    created_at: datetime = Field(default_factory=_now)
+    expires_at: datetime
+
+
+class ModelAudioDocumentationSourceRecord(SQLModel, table=True):
+    __tablename__ = "model_audio_documentation_sources"
+    __table_args__ = (Index("ux_audio_documentation_source_ordinal", "attestation_id", "ordinal", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    attestation_id: str = Field(foreign_key="model_audio_documentation_attestations.id", index=True)
+    ordinal: int
+    source_id: str
+    source_url: str
+    object_id: str
+    sha256: str
+    size_bytes: int
+    acquired_at: datetime = Field(default_factory=_now)
+
+
 class SessionTodo(SQLModel, table=True):
     __tablename__ = "session_todos"
 

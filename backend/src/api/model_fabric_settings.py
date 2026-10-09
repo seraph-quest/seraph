@@ -23,6 +23,9 @@ import httpx
 from config.settings import settings
 from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from src.model_fabric.audio_documentation import (MetadataSelection, DocumentationAction,
+    AcquireSelectedProfileMetadataV1, AcceptStagedDocumentationV1, DocumentationError,
+    select_metadata, access_readback)
 
 from src.approval.runtime import get_current_trust_principal
 from src.llm_runtime import provider_profiles
@@ -290,6 +293,7 @@ class ModelFabricConfigurationRequest(BaseModel):
     openrouter_setup: OpenRouterSetupInput | None = None
     near_text: NearTextSetupInput | None = None
     expected_policy_revision: int | None = Field(default=None, ge=1, strict=True)
+    audio_metadata_access: MetadataSelection | None = None
 
     @model_validator(mode="after")
     def one_openrouter_setup_field(self):
@@ -626,6 +630,38 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
         return await _put_model_fabric_settings_locked(body, request)
 
 
+@router.post("/settings/model-fabric/audio-documentation")
+async def audio_documentation_action(body: DocumentationAction, request: Request):
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail={"code":"audio_documentation_boundary_forbidden"})
+    try:
+        async with configuration_mutation_lock:
+            operator = getattr(request.state, "operator", None)
+            if isinstance(body, AcquireSelectedProfileMetadataV1):
+                from fastapi.responses import JSONResponse
+                result = await model_fabric_repository.stage_audio_documentation(operator, body)
+                return JSONResponse(result, status_code=201)
+            if isinstance(body, AcceptStagedDocumentationV1):
+                return await model_fabric_repository.accept_audio_documentation(operator, body)
+            return await model_fabric_repository.reject_audio_documentation(operator, body)
+    except DocumentationError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
+    except (OSError, TimeoutError):
+        raise HTTPException(status_code=409, detail={"code":"audio_documentation_acquisition_unavailable"}) from None
+
+
+@router.get("/settings/model-fabric/audio-documentation")
+async def read_owned_audio_documentation(request: Request):
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.audio_documentation import owned_staging
+    try:
+        return {"staged": await owned_staging(model_fabric_repository, getattr(request.state, "operator", None))}
+    except DocumentationError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
+
+
 async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(
@@ -633,6 +669,23 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
             detail="Model-fabric settings require a loopback request or an authenticated operator on the configured host/origin boundary",
         )
     credential_mutated = False
+    if "audio_metadata_access" in body.model_fields_set:
+        if body.audio_metadata_access is None or {"openrouter", "openrouter_setup", "near_text", "profiles", "workload_policies"}.intersection(body.model_fields_set):
+            raise HTTPException(status_code=422, detail={"code":"audio_metadata_selection_separate_mutation_required"})
+        persisted = read_model_fabric_configuration()
+        if body.expected_policy_revision != persisted.egress_revision:
+            raise HTTPException(status_code=409, detail={"code":"audio_metadata_revision_changed"})
+        from src.model_fabric.repository import model_fabric_repository
+        try:
+            selected = await select_metadata(model_fabric_repository, getattr(request.state, "operator", None),
+                persisted, body.audio_metadata_access)
+            target = replace(persisted, audio_metadata_access=selected, egress_revision=persisted.egress_revision+1)
+            write_model_fabric_configuration(target, expected_revision=persisted.egress_revision)
+        except DocumentationError as exc:
+            raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
+        except ValueError:
+            raise HTTPException(status_code=409, detail={"code":"audio_metadata_selection_unavailable"}) from None
+        return await model_fabric_settings_payload()
     previous_vault_value: str | None = None
     previous_process_value = str(settings.openrouter_api_key or "")
     try:
@@ -1196,6 +1249,7 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "inference_accounting": accounting,
         "egress_revision": configured.egress_revision,
         "egress_revoked": configured.egress_revoked,
+        "audio_metadata_access": access_readback(configured.audio_metadata_access),
     }
 
 
@@ -1818,6 +1872,7 @@ def _operator_profile_statuses(proofs) -> list[dict[str, object]]:
         statuses.append(
             {
                 "id": profile.id,
+                "profile_contract_hash": profile.contract_hash,
                 "provider_kind": profile.provider_kind,
                 "model": profile.model,
                 "api_base": safe_api_base,

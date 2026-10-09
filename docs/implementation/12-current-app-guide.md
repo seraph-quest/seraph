@@ -737,6 +737,11 @@ costs, and embedding usefulness remain externally unverified.
 Optional governed audio and paired-channel Task capture under
 [ADR-032](./decisions/032-governed-optional-audio-route.md) and
 [#1022](https://github.com/seraph-quest/seraph/issues/1022) are **Planned**.
+The branch-local documentary recovery target distinguishes successfully settled
+source-incomplete staging, which its original owner can reject and bounded
+expiry/dead-Root cleanup can remove, from failed or ambiguous acquisition, which
+shows `audio_documentation_cleanup_unknown` and retains quota. Older inventories
+are not upgraded; accepted documents are excluded. Audio readiness remains blocked.
 The accepted target keeps audio disabled without exact source-attested endpoint,
 codec and finite chat-audio pricing proof. Audio confirmation saves one corrected
 canonical Message. A separate explicit current Goal and native Task allowance

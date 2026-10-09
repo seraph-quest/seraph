@@ -3513,6 +3513,7 @@ class WorkBoardDispatcher:
         expected_revision: int,
         reason: str = "operator_cancelled",
         intent_guard=None,
+        authority_commit=None,
     ) -> BoardAttemptProjection:
         """Persist cancellation, clean up the adapter, then reconcile safely."""
 
@@ -3529,7 +3530,8 @@ class WorkBoardDispatcher:
                 raise BoardError("admission_reconcile_required", "The original task admission must be reconciled before cancellation", status_code=409)
             try:
                 cancelled = await self.jobs.cancel_general_task_native_parent(latest.workflow_run_id,
-                    operator_owner=owner, expected_task_revision=expected_revision)
+                    operator_owner=owner, expected_task_revision=expected_revision,
+                    authority_commit=authority_commit)
             except BoardError:
                 raise
             except Exception as exc:
@@ -10754,7 +10756,7 @@ class WorkBoardDispatcher:
         task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
         return task, attempt
 
-    async def control_general_task(self, owner, task_id, *, expected_revision, action, authority_check=None):
+    async def control_general_task(self, owner, task_id, *, expected_revision, action, authority_check=None, authority_commit=None):
         """Operator controls derive every native execution binding server-side."""
         from src.workflows.general_task_guard import _current, _assert_joint_manifest
         from src.work_board.repository import _begin_sqlite_immediate
@@ -10783,12 +10785,14 @@ class WorkBoardDispatcher:
         if action == "pause":
             await self.jobs.pause_general_task_native_parent(parent_id, operator_owner=owner,
                 expected_task_revision=expected_revision, expected_revision=parent_revision,
-                expected_manifest_revision=manifest_revision, authority_check=authority_check)
+                expected_manifest_revision=manifest_revision, authority_check=authority_check,
+                authority_commit=authority_commit)
             task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
             return task, attempt
         await self.jobs.resume_general_task_native_parent(parent_id,
             owner=f"{self.runner_id}:{attempt.attempt_id}", expected_revision=parent_revision,
-            expected_manifest_revision=manifest_revision, authority_check=authority_check)
+            expected_manifest_revision=manifest_revision, authority_check=authority_check,
+            authority_commit=authority_commit)
         task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
         outcome = await self._execute_registered(task, attempt, _parse_typed_input(task), job_id=parent_id,
             parent_runtime_owner=parent_owner, parent_fence=parent_fence,
@@ -11352,6 +11356,23 @@ class WorkBoardDispatcher:
         """
         observed_at = now or self.now()
         recovered: list[str] = []
+        async def check_captured_source_before_private_read(selected):
+            if selected.capability_id != "agent.task.v1":
+                return
+            from src.work_board.channel_capture import check_capture_origin, stage_captured_identity
+            owner = WorkBoardOwner(principal_id=selected.owner_principal_id, session_id=selected.owner_session_id)
+            async with self.session_provider() as source_db:
+                if not await check_capture_origin(source_db, owner, selected, _classify_only=True):
+                    return
+            identity = stage_captured_identity()
+            async with self.session_provider() as source_db:
+                current = await source_db.get(WorkBoardTask, selected.creation_sequence, populate_existing=True)
+                if (current is None or current.task_id != selected.task_id
+                    or current.task_revision != selected.task_revision
+                    or current.typed_input_digest != selected.typed_input_digest):
+                    raise BoardError("channel_capture_recovery_changed", "Refresh the original captured Task", status_code=409)
+                await check_capture_origin(source_db, owner, current,
+                    _workspace_digest=identity.workspace_digest, _identity=identity)
         async with self.session_provider() as db:
             linked = await self.repository.list_linked_active_attempts(
                 db,
@@ -11383,6 +11404,12 @@ class WorkBoardDispatcher:
                 # GitHub attempt. This branch never prepares or executes work.
                 try:
                     projection = await self.jobs.get_job(job_id)
+                    try:
+                        await check_captured_source_before_private_read(task)
+                    except BoardError as source_error:
+                        logger.info("captured linked source retains original recovery: %s", source_error.code)
+                        recovered.append(job_id)
+                        continue
                     inputs = _parse_typed_input(task)
                     expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
                     bound = await self.jobs.get_by_idempotency_binding(
@@ -11451,6 +11478,14 @@ class WorkBoardDispatcher:
                 # admission still matches the exact per-capability root and
                 # common board binding.  Looking up by a reconstructed job id
                 # alone could adopt an unrelated run after a crash.
+                try:
+                    await check_captured_source_before_private_read(task)
+                except BoardError as source_error:
+                    # Source loss does not authorize generic projection,
+                    # cancellation, lease renewal or any private input read.
+                    logger.info("captured linked source retains original recovery: %s", source_error.code)
+                    recovered.append(job_id)
+                    continue
                 inputs = _parse_typed_input(task)
                 binding_job_id = await self._lookup_linked_binding(
                     task,

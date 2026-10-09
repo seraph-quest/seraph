@@ -1340,12 +1340,15 @@ async def _cancel_result(jobs, db, parent_id, task_id, attempt_id, event=None):
         "cancellation": read_general_task_native_cancel(parent, task, attempt), "job": _serialize(parent)}
 
 
-async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task_revision):
+async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task_revision, authority_commit=None):
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.repository import _begin_sqlite_immediate, WorkBoardRepository
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _utc_now, _as_utc
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
+        if authority_commit is not None:
+            from src.work_board.channel_capture import check_captured_control_commit
+            await check_captured_control_commit(db, authority_commit, action="cancel")
         parent, task, attempt, previous, artifact, goal, children = await _cancel_original(jobs, db, parent_id)
         if (type(operator_owner) is not WorkBoardOwner or operator_owner.principal_id != task.owner_principal_id
             or operator_owner.session_id != task.owner_session_id or task.task_revision != expected_task_revision):
@@ -1418,6 +1421,10 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
             await _cancel_cas_job(db, child, {"status": "cancelled" if state == "fully_cancelled" or not child.attempt_count else "blocked",
                 "failure_reason": "general_task_native_cancel_" + state, "fencing_token": child.fencing_token + 1,
                 "lease_owner": None, "lease_expires_at": None})
+        if authority_commit is not None:
+            from src.work_board.channel_capture import consume_captured_control_commit
+            await consume_captured_control_commit(db, authority_commit, action="cancel", task=task,
+                attempt=attempt, parent=parent)
         await _cancel_cas_board(db, task, attempt, artifact, goal, state=state, first=True)
         await _cancel_cas_job(db, parent, {**values, "status": "cancelled" if state == "fully_cancelled" else "blocked",
             "failure_reason": "general_task_native_cancel_" + state, "fencing_token": proposed.job_fence,
@@ -1813,7 +1820,7 @@ def _phase_successor(previous, *, phase, task_revision, job_fence, board_fence):
     return value.model_copy(update={"phase_digest": compile_phase_digest(value)})
 
 
-async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revision, expected_revision, expected_manifest_revision, authority_check=None):
+async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revision, expected_revision, expected_manifest_revision, authority_check=None, authority_commit=None):
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _serialize, _job_has_unsafe_effects, _verified_readback_exists
@@ -1859,6 +1866,10 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
         proposed = _phase_successor(previous, phase="operator_paused", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)
         published, values = _published_values(parent, proposed, ())
+        if authority_commit is not None:
+            from src.work_board.channel_capture import consume_captured_control_commit
+            await consume_captured_control_commit(db, authority_commit, action="pause", task=task,
+                attempt=attempt, parent=parent)
         await _cas_board(db, task, attempt, status=WorkBoardStatus.blocked,
             reason="general_task_operator_paused", owner=None, expiry=None, advance_fence=True)
         await _cas_parent(db, parent, {**values, "status": "paused",
@@ -2005,7 +2016,7 @@ async def revise_operator_paused_parent(jobs, parent_id, *, operator_owner, requ
         return {"job": _serialize(await jobs._fetch(db, parent_id)), "manifest": published.model_dump(mode="json")}
 
 
-async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_manifest_revision, authority_check=None):
+async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_manifest_revision, authority_check=None, authority_commit=None):
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _as_utc, _job_has_unsafe_effects, _serialize, _utc_now, _verified_readback_exists
     async with jobs._session() as db:
@@ -2048,6 +2059,10 @@ async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_m
         # attempt-qualified owner, preserving existing wrapper identity.
         runtime_owner = owner if owner.endswith(":" + attempt.attempt_id) else owner + ":" + attempt.attempt_id
         board_owner = runtime_owner[:-(len(attempt.attempt_id) + 1)]
+        if authority_commit is not None:
+            from src.work_board.channel_capture import consume_captured_control_commit
+            await consume_captured_control_commit(db, authority_commit, action="resume", task=task,
+                attempt=attempt, parent=parent)
         await _cas_board(db, task, attempt, status=WorkBoardStatus.running,
             reason=None, owner=board_owner, expiry=expiry, advance_fence=True)
         await _cas_parent(db, parent, {**values, "status": "running", "failure_reason": None,

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { GoalInfo } from "../../types";
 import type { GeneralTaskCreateRequest } from "../../lib/generalTask";
+import { apiFetch } from "../../lib/api";
+import { API_URL } from "../../config/constants";
 
 export type PttAudioState =
   | "idle"
@@ -157,6 +159,17 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
           setModelConsent(false);
         }
         return;
+      }
+      if (boundary === "model") {
+        const budget = Number(audioBudget);
+        if (!Number.isSafeInteger(budget) || budget <= 0 || budget > 1_000_000_000) {
+          throw new Error("Select the original positive audio-only allowance and one call before consent or recording.");
+        }
+        const response = await apiFetch(API_URL + "/api/settings/model-fabric/audio-documentation");
+        if (!response.ok) throw new Error("Current owned audio documentary sources are unavailable.");
+        // Metadata staging is not a pre-capture selection or execution grant.
+        // No complete official catalog is currently issued by the backend.
+        throw new Error("Audio admission blocked: complete exact codec, context/template, pricing and ZDR sources are required before model and linked capture consent.");
       }
       const response = await fetch(`${endpoint}/consent`, {
         method: "POST",

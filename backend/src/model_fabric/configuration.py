@@ -219,6 +219,7 @@ class ModelFabricConfiguration:
     egress_revoked: bool = False
     egress_revocation_key: str | None = None
     v1_rollback_snapshot: dict[str, object] | None = None
+    audio_metadata_access: dict[str, object] | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -445,7 +446,11 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         egress_revoked=payload.get("egress_revoked", False),
         egress_revocation_key=payload.get("egress_revocation_key"),
         v1_rollback_snapshot=payload.get("v1_rollback_snapshot"),
+        audio_metadata_access=payload.get("audio_metadata_access"),
     )
+    if configuration.audio_metadata_access is not None:
+        from .audio_documentation import AudioMetadataAccessV1
+        AudioMetadataAccessV1.model_validate(configuration.audio_metadata_access)
     if near is not None:
         deployment_spend_ceiling(configuration)
     return configuration
@@ -556,6 +561,8 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
     }
     if configuration.v1_rollback_snapshot is not None:
         payload["v1_rollback_snapshot"] = configuration.v1_rollback_snapshot
+    if configuration.audio_metadata_access is not None:
+        payload["audio_metadata_access"] = configuration.audio_metadata_access
     if configuration.openrouter_setup is not None:
         payload["openrouter_setup"] = _openrouter_setup_payload(configuration.openrouter_setup)
     if configuration.near_text is not None:

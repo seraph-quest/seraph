@@ -1,0 +1,19 @@
+{
+  "attempt_id": "32b9dcbe2fb64e7abe954895bd9882d7",
+  "no_learning": true,
+  "owner_session_id": "04081b2fbc9d4108b07323e30bcbf82c",
+  "parent_workflow_run_id": null,
+  "reference": {
+    "artifact_id": "art_4275db8cd6c46ca10b9021e5",
+    "artifact_type": "general_task_step",
+    "content_sha256": "fde4349180befffbabd000c3e5cbabbd5881bc4aa0931ac5d54eea9ca0052942",
+    "exists": true,
+    "file_path": "artifacts/work-board/general-tasks/f9ad3d08fecbc381ab89acb0033e65324824ee60f0494a1a7f4aaf2c9ee578ea-fde4349180befffbabd000c3e5cbabbd5881bc4aa0931ac5d54eea9ca0052942.json",
+    "producer": "agent.task.v1",
+    "recorded_at": "2026-10-09T06:47:02.788977+00:00",
+    "size_bytes": 153
+  },
+  "task_id": "d06e32252186488aba1cc069c1f663da",
+  "task_revision": 11,
+  "workflow_run_id": "work-board:d06e32252186488aba1cc069c1f663da:32b9dcbe2fb64e7abe954895bd9882d7"
+}

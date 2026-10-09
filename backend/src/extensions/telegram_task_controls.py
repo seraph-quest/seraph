@@ -21,7 +21,7 @@ from config.settings import settings
 from src.approval.repository import approval_decision_digest, approval_repository
 from src.db import engine as db_engine
 from src.db.models import (ApprovalRequest, AuditEvent, Goal, Message, OperatorSession,
-    TelegramTaskCallback, TelegramTransportOutbox, TelegramTransportState,
+    TelegramDeliveryAttempt, TelegramTaskCallback, TelegramTransportOutbox, TelegramTransportState,
     WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask, WorkflowRunState)
 from src.workspace import canonical_workspace_root_identity
 from src.work_board.contracts import WorkBoardOwner
@@ -61,6 +61,18 @@ def now():
 def fail(code: str):
     from src.extensions.telegram_transport import TelegramTransportError
     raise TelegramTransportError(code, "Task control unavailable. Review the current task in the cockpit.")
+
+
+async def verified_captured_delivery(db, outbox):
+    """Require the original transport's positive final receipt, not reconciliation."""
+    attempt = await db.scalar(select(TelegramDeliveryAttempt).where(
+        TelegramDeliveryAttempt.outbox_id == outbox.id,
+        TelegramDeliveryAttempt.attempt_index == outbox.attempt_count,
+        TelegramDeliveryAttempt.fencing_token == outbox.fencing_token))
+    if (attempt is None or attempt.status != "delivered" or attempt.finished_at is None
+        or type(attempt.response_code) is not int or not 200 <= attempt.response_code < 300
+        or attempt.error_code is not None):
+        fail("telegram_delivery_unverified")
 
 
 def root_digest():
@@ -176,15 +188,16 @@ class TelegramTaskControls:
 
     async def action(self, action, *, owner_principal_id, operator_session_id):
         """Closed captured-task controls delegate to the original native owner."""
-        from src.work_board.channel_capture import ChannelAction, check_captured_task_control, current_workspace_digest
+        from src.work_board.channel_capture import ChannelAction, check_captured_task_control, stage_captured_identity
         from src.api.work_board import dispatcher
         if type(action) is not ChannelAction:
             fail("telegram_channel_action_required")
         owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id)
-        workspace_digest = current_workspace_digest()
+        identity = stage_captured_identity()
+        workspace_digest = identity.workspace_digest
         async def guard(db, *_):
             return await check_captured_task_control(db, owner, action, adapter=self.adapter,
-                _workspace_digest=workspace_digest)
+                _workspace_digest=workspace_digest, _identity=identity)
         async with self.adapter._lock:
             async with db_engine.get_session() as db:
                 await _begin_sqlite_immediate(db)
@@ -208,7 +221,8 @@ class TelegramTaskControls:
             "task_status": task.status.value, "action": action.action,
             "no_learning": True, "review_required": True}
 
-    async def _mint(self, db, pairing, task, outbox, effect, *, approval=None, attempt=None):
+    async def _mint(self, db, pairing, task, outbox, effect, *, approval=None, attempt=None,
+                    captured_identity=None, captured_reservation=None):
         wire = PREFIX + secrets.token_urlsafe(32)
         expiry = now() + timedelta(seconds=TTL_SECONDS)
         auth = await db.get(OperatorSession, task.owner_session_id)
@@ -217,6 +231,8 @@ class TelegramTaskControls:
                       auth.idle_expires_at, auth.absolute_expires_at]:
             if value:
                 expiry = min(expiry, aware(value))
+        if captured_reservation is not None:
+            expiry = min(expiry, captured_reservation.proposal_group.original_deadline_at)
         workflow = await db.scalar(select(WorkflowRunState).where(
             WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
         if attempt and workflow is None:
@@ -224,7 +240,8 @@ class TelegramTaskControls:
         row = TelegramTaskCallback(nonce_digest=digest(wire),
             owner_principal_id=task.owner_principal_id, operator_session_id=task.owner_session_id,
             pairing_id=pairing.pairing_id, transit_reference=pairing.transit_consent_reference,
-            actor_id=pairing.operator_id, chat_id=pairing.chat_id, root_digest=root_digest(),
+            actor_id=pairing.operator_id, chat_id=pairing.chat_id,
+            root_digest=captured_identity.callback_root_digest if captured_identity is not None else root_digest(),
             task_id=task.task_id, task_revision=task.task_revision, goal_id=task.goal_id,
             goal_revision=task.goal_revision, outbox_id=outbox.id, effect=effect,
             effect_digest="", approval_id=approval.id if approval else None,
@@ -237,7 +254,9 @@ class TelegramTaskControls:
         row.effect_digest = effect_digest(row)
         db.add(row)
         return {"text": {"review": "Review status (send metadata)", "deny": "Deny this request",
-                         "cancel": "Cancel this attempt"}[effect], "callback_data": wire}
+                         "cancel": "Cancel this attempt", "inspect": "Inspect status",
+                         "pause": "Pause Task", "resume": "Resume original Task",
+                         "open_exact_review": "Open exact Cockpit review"}[effect], "callback_data": wire}
 
     async def notice(self, task_id, *, owner_principal_id, operator_session_id,
                      expected_revision: int, idempotency_key: str):
@@ -248,15 +267,28 @@ class TelegramTaskControls:
             if task.task_revision != expected_revision:
                 fail("telegram_task_revision_changed")
             await current(db, owner_principal_id, operator_session_id)
+            from src.work_board.channel_capture import check_capture_origin, stage_captured_identity
+            captured_identity = stage_captured_identity() if await check_capture_origin(db,
+                WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id),
+                task, _classify_only=True) else None
         payload = await self.adapter.enqueue_outbound(NOTICE,
             owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
-            idempotency_key=f"telegram-task:{task_id}:{expected_revision}:{idempotency_key}")
+            idempotency_key=f"telegram-task:{task_id}:{expected_revision}:{idempotency_key}",
+            session_id=task.origin_session_id if captured_identity is not None else None)
         async with db_engine.get_session() as db:
             await _begin_sqlite_immediate(db)
             pairing = await current(db, owner_principal_id, operator_session_id)
             task = await task_owned(db, owner_principal_id, operator_session_id, task_id)
             if task.task_revision != expected_revision:
                 fail("telegram_task_revision_changed")
+            captured_reservation = None
+            if captured_identity is not None:
+                from src.work_board.channel_capture import ChannelAction, check_captured_task_control
+                task, captured_reservation = await check_captured_task_control(db,
+                    WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id),
+                    ChannelAction(task_id=task_id, action="inspect", expected_revision=expected_revision),
+                    adapter=self.adapter, _workspace_digest=captured_identity.workspace_digest,
+                    _identity=captured_identity)
             outbox = await db.get(TelegramTransportOutbox, payload["id"])
             if outbox.task_control_markup_json:
                 return {**payload, "memory_status": "no_learning"}
@@ -269,20 +301,41 @@ class TelegramTaskControls:
                 TelegramTaskCallback.owner_principal_id == owner_principal_id,
                 TelegramTaskCallback.operator_session_id == operator_session_id,
                 TelegramTaskCallback.status == "pending").values(status="retired"))
-            markup = {"inline_keyboard": [[await self._mint(db, pairing, task, outbox, "review")]]}
+            if captured_identity is None:
+                buttons = [await self._mint(db, pairing, task, outbox, "review")]
+            else:
+                active = await db.scalar(select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
+                actions = ["inspect", "open_exact_review"]
+                if active is not None and active.cancel_requested_at is None:
+                    if task.status is WorkBoardStatus.running:
+                        actions.extend(["pause", "cancel"])
+                    elif task.status is WorkBoardStatus.blocked and task.block_reason == "general_task_operator_paused":
+                        actions.extend(["resume", "cancel"])
+                buttons = [await self._mint(db, pairing, task, outbox, action,
+                    attempt=active if action in {"pause", "resume", "cancel"} else None,
+                    captured_identity=captured_identity, captured_reservation=captured_reservation)
+                    for action in actions]
+                outbox.deadline_at = min(aware(outbox.deadline_at), captured_reservation.proposal_group.original_deadline_at)
+            markup = {"inline_keyboard": [buttons]}
             outbox.task_control_markup_json = json.dumps(markup, sort_keys=True)
             outbox.task_control_markup_digest = digest(markup)
             db.add(outbox)
         return {**payload, "memory_status": "no_learning"}
 
     async def _validate(self, db, row, *, owner, session, query, update_id, request_digest,
-                        revision_delta=0):
+                        revision_delta=0, captured_identity=None):
+        if captured_identity is not None:
+            from src.work_board.channel_capture import _checked_identity
+            expected_root_digest = _checked_identity(captured_identity).callback_root_digest
+        else:
+            expected_root_digest = root_digest()
         pairing = await current(db, owner, session)
         if (row.owner_principal_id != owner or row.operator_session_id != session
             or row.pairing_id != pairing.pairing_id
             or row.transit_reference != pairing.transit_consent_reference
             or row.actor_id != pairing.operator_id or row.chat_id != pairing.chat_id
-            or row.root_digest != root_digest() or aware(row.expires_at) <= now()
+            or row.root_digest != expected_root_digest or aware(row.expires_at) <= now()
             or not hmac.compare_digest(row.effect_digest, effect_digest(row))):
             fail("telegram_callback_authority_changed")
         message = query["message"]
@@ -294,6 +347,8 @@ class TelegramTaskControls:
         if (outbox is None or outbox.status != "delivered" or not outbox.external_message_id
             or str(message["message_id"]) != outbox.external_message_id):
             fail("telegram_delivery_unverified")
+        if captured_identity is not None:
+            await verified_captured_delivery(db, outbox)
         task = await task_owned(db, owner, session, row.task_id)
         if task.goal_id != row.goal_id or task.goal_revision != row.goal_revision:
             fail("telegram_goal_changed")
@@ -329,6 +384,11 @@ class TelegramTaskControls:
         original = await db.get(TelegramTransportOutbox, row.outbox_id)
         text = (f"Task status: {payload['task_status']}. Revision: {payload['task_revision']}. "
                 f"Decision: {payload['status']}. Sensitive details, approval and recovery require the cockpit.")
+        if row.effect == "open_exact_review" and payload.get("review_path"):
+            expected = "/?channel_review="
+            if not payload["review_path"].startswith(expected) or len(payload["review_path"].encode()) > 128:
+                fail("telegram_review_handle_invalid")
+            text += " Local Cockpit review: " + payload["review_path"]
         if len(text.encode()) > MAX_DETAIL_BYTES:
             fail("telegram_detail_too_large")
         outbox = TelegramTransportOutbox(idempotency_key=f"telegram-task-result:{row.id}:{payload['status']}",
@@ -386,6 +446,33 @@ class TelegramTaskControls:
             fail("telegram_callback_invalid")
         request_digest = digest([payload["update_id"], query["id"], query["from"]["id"],
             query["message"]["chat"]["id"], query["message"]["message_id"], digest(query["data"])])
+        from src.work_board.channel_capture import check_capture_origin, stage_captured_identity
+        captured_identity = None
+        async with db_engine.get_session() as preliminary_db:
+            preliminary_row = await preliminary_db.scalar(select(TelegramTaskCallback).where(
+                TelegramTaskCallback.nonce_digest == digest(query["data"])))
+            if preliminary_row is not None:
+                preliminary_task = await preliminary_db.scalar(select(WorkBoardTask).where(
+                    WorkBoardTask.task_id == preliminary_row.task_id))
+                if (preliminary_task is not None and await check_capture_origin(preliminary_db,
+                    WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id),
+                    preliminary_task, _classify_only=True)):
+                    captured_identity = stage_captured_identity()
+        if captured_identity is not None:
+            import sqlite3
+            from sqlalchemy.exc import OperationalError
+            try:
+                return await self._captured_callback(payload, query, request_digest,
+                    owner_principal_id, operator_session_id, captured_identity)
+            except OperationalError as exc:
+                original = exc.orig
+                code = getattr(original, "sqlite_errorcode", None)
+                if (isinstance(original, sqlite3.OperationalError)
+                    and (code == sqlite3.SQLITE_BUSY or (code is None and str(original) == "database is locked"))):
+                    # The owning session has rolled back before this boundary.
+                    # A collision grants no retry or replacement attempt.
+                    fail("telegram_control_writer_busy")
+                raise
         async with db_engine.get_session() as db:
             await _begin_sqlite_immediate(db)
             row = await db.scalar(select(TelegramTaskCallback).where(
@@ -473,9 +560,105 @@ class TelegramTaskControls:
             response["delivery_status"] = "unknown"
         return response
 
+    async def _captured_callback(self, payload, query, request_digest, owner_id, session_id, identity):
+        """Five closed actions from genuine original captured-source callbacks."""
+        from src.work_board.channel_capture import (ChannelAction, check_captured_task_control,
+            issue_captured_control_commit)
+        from src.api.work_board import dispatcher
+        owner = WorkBoardOwner(principal_id=owner_id, session_id=session_id)
+        async def source(db, task, effect="inspect"):
+            return await check_captured_task_control(db, owner, ChannelAction(task_id=task.task_id,
+                action=effect, expected_revision=task.task_revision), adapter=self.adapter,
+                _workspace_digest=identity.workspace_digest, _identity=identity)
+        committed = None
+        response = None
+        async with self.adapter._lock, db_engine.get_session() as db:
+            await _begin_sqlite_immediate(db)
+            row = await db.scalar(select(TelegramTaskCallback).where(
+                TelegramTaskCallback.nonce_digest == digest(query["data"])))
+            if row is None or row.effect not in {"inspect", "pause", "resume", "cancel", "open_exact_review"}:
+                fail("telegram_callback_effect_forbidden")
+            _pairing, task = await self._validate(db, row, owner=owner_id, session=session_id,
+                query=query, update_id=payload["update_id"], request_digest=request_digest,
+                captured_identity=identity)
+            await source(db, task)
+            row_id, task_id, revision, effect = row.id, task.task_id, row.task_revision, row.effect
+            if row.status != "pending":
+                saved = json.loads(row.result_json)
+                if saved.get("outbox_id"):
+                    response = saved
+                elif row.status == "channel_action_intent":
+                    # A committed resume may have crashed before execution or
+                    # reply. This is current readback, never a second execution.
+                    response = await self._reply(db, row, task, {**saved,
+                        "task_status": task.status.value, "task_revision": task.task_revision})
+                elif row.status == "cancel_intent":
+                    response = await self._cancel_readback(db, row, task)
+                else:
+                    fail("telegram_callback_replayed")
+            elif effect in {"inspect", "open_exact_review"}:
+                await self._claim(db, row, query, payload["update_id"], request_digest)
+                receipt = {"task_id": task_id, "task_revision": task.task_revision,
+                    "task_status": task.status.value, "action": effect, "status": "review_required",
+                    "no_learning": True}
+                if effect == "open_exact_review":
+                    receipt["review_path"] = "/?channel_review=" + query["data"]
+                response = await self._reply(db, row, task, receipt)
+            elif effect in {"pause", "resume", "cancel"}:
+                committed = await issue_captured_control_commit(db, controls=self, owner=owner,
+                    action=ChannelAction(task_id=task_id, action=effect, expected_revision=revision),
+                    row=row, query=query, update_id=payload["update_id"], request_digest=request_digest,
+                    identity=identity)
+        if response is None:
+            if effect in {"pause", "resume"}:
+                await dispatcher.control_general_task(owner, task_id, expected_revision=revision,
+                    action=effect, authority_check=committed.source_check, authority_commit=committed)
+            else:
+                await dispatcher.cancel_task(owner, task_id, expected_revision=revision, authority_commit=committed)
+            async with db_engine.get_session() as db:
+                await _begin_sqlite_immediate(db)
+                row = await db.get(TelegramTaskCallback, row_id, populate_existing=True)
+                task = await task_owned(db, owner_id, session_id, task_id)
+                await self._validate(db, row, owner=owner_id, session=session_id, query=query,
+                    update_id=payload["update_id"], request_digest=request_digest, captured_identity=identity)
+                await source(db, task)
+                if effect == "cancel":
+                    response = await self._cancel_readback(db, row, task)
+                else:
+                    response = await self._reply(db, row, task, {"task_id": task_id,
+                        "task_revision": task.task_revision, "task_status": task.status.value,
+                        "action": effect, "status": "readback", "no_learning": True})
+        from src.extensions.telegram_transport import TelegramTransportError
+        response = dict(response)
+        try:
+            delivered = await self.adapter.deliver(response["outbox_id"], owner_principal_id=owner_id,
+                operator_session_id=session_id)
+            response["delivery_status"] = delivered["status"]
+        except TelegramTransportError as exc:
+            response.update(delivery_status="blocked", delivery_reason_code=exc.code)
+        except Exception:
+            response["delivery_status"] = "unknown"
+        return response
+
     async def _cancel_readback(self, db, row, task):
         attempt = await db.scalar(select(WorkBoardAttempt).where(
             WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.attempt_id == row.attempt_id))
+        if task.capability_id == "agent.task.v1":
+            from src.workflows.general_task_guard import read_general_task_native_cancel
+            parent = await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == row.workflow_run_id))
+            if (attempt is None or parent is None or attempt.cancel_requested_at is None
+                or attempt.workflow_run_id != row.workflow_run_id
+                or attempt.fencing_token != row.board_fence + 1 or row.status != "cancel_intent"):
+                fail("telegram_cancel_binding_changed")
+            cancellation = read_general_task_native_cancel(parent, task, attempt)
+            prior = json.loads(row.result_json)
+            if prior.get("outbox_id"):
+                return prior
+            return await self._reply(db, row, task, {"task_id": task.task_id,
+                "task_revision": task.task_revision, "task_status": task.status.value,
+                "action": "cancel", "status": "cancelled" if cancellation["state"] == "fully_cancelled" else "unknown",
+                "cancellation_state": cancellation["state"], "no_learning": True})
         if (attempt is None or attempt.cancel_requested_at is None
             or attempt.fencing_token != row.board_fence
             or attempt.workflow_run_id != row.workflow_run_id
@@ -504,6 +687,45 @@ class TelegramTaskControls:
             return await self._reply(db, row, task, result(task, status="cancelled", effect="cancel"))
         return json.loads(row.result_json)
 
+    async def read_exact_review(self, handle, *, owner_principal_id, operator_session_id):
+        """An existing consumed callback locates a current private review only."""
+        from src.work_board.channel_capture import (stage_captured_identity, ChannelAction,
+            check_captured_task_control)
+        if not isinstance(handle, str) or not handle.startswith(PREFIX) or not 1 <= len(handle.encode()) <= 64:
+            fail("telegram_review_handle_invalid")
+        identity = stage_captured_identity()
+        owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id)
+        async with db_engine.get_session() as db:
+            pairing = await current(db, owner_principal_id, operator_session_id)
+            row = await db.scalar(select(TelegramTaskCallback).where(
+                TelegramTaskCallback.nonce_digest == digest(handle)))
+            if (row is None or row.effect != "open_exact_review" or row.status != "consumed"
+                or row.owner_principal_id != owner_principal_id or row.operator_session_id != operator_session_id
+                or row.pairing_id != pairing.pairing_id or row.actor_id != pairing.operator_id
+                or row.chat_id != pairing.chat_id or row.transit_reference != pairing.transit_consent_reference
+                or row.root_digest != identity.callback_root_digest or aware(row.expires_at) <= now()
+                or not hmac.compare_digest(effect_digest(row), row.effect_digest)):
+                fail("telegram_review_handle_changed")
+            original = await db.get(TelegramTransportOutbox, row.outbox_id)
+            try:
+                saved = json.loads(row.result_json)
+            except (TypeError, ValueError):
+                fail("telegram_review_handle_changed")
+            if not isinstance(saved, dict):
+                fail("telegram_review_handle_changed")
+            if (original is None or original.status != "delivered" or not original.external_message_id
+                or saved.get("review_path") != "/?channel_review=" + handle
+                or saved.get("task_revision") != row.task_revision):
+                fail("telegram_review_handle_changed")
+            await verified_captured_delivery(db, original)
+            task, _reservation = await check_captured_task_control(db, owner,
+                ChannelAction(task_id=row.task_id, action="open_exact_review", expected_revision=row.task_revision),
+                adapter=self.adapter, _workspace_digest=identity.workspace_digest, _identity=identity)
+            return {"task_id": task.task_id, "task_revision": task.task_revision,
+                "goal_id": task.goal_id, "goal_revision": task.goal_revision,
+                "original_root_id": owner.session_id, "action": "open_exact_review",
+                "review_required": True, "no_learning": True}
+
     async def _ack(self, query_id, owner, session, nonce_data=None):
         from src.vault.repository import vault_repository
         try:
@@ -527,17 +749,48 @@ class TelegramTaskControls:
         except Exception:
             return "unknown"
 
-    async def validate_delivery(self, db, outbox):
+    async def prepare_captured_delivery(self, db, outbox):
+        """Stage captured-only filesystem/key context before a delivery writer."""
+        from src.work_board.channel_capture import check_capture_origin, stage_captured_identity
+        await current(db, outbox.owner_principal_id, outbox.operator_session_id)
+        rows = list((await db.execute(select(TelegramTaskCallback).where(
+            TelegramTaskCallback.outbox_id == outbox.id))).scalars().all())
+        if (outbox.correlation_id or "").startswith("telegram-control:"):
+            original = await db.get(TelegramTaskCallback, outbox.correlation_id.split(":", 1)[1])
+            if original is not None:
+                rows.append(original)
+        owner = WorkBoardOwner(principal_id=outbox.owner_principal_id, session_id=outbox.operator_session_id)
+        for row in rows:
+            task = await task_owned(db, owner.principal_id, owner.session_id, row.task_id)
+            if await check_capture_origin(db, owner, task, _classify_only=True):
+                return stage_captured_identity()
+        return None
+
+    async def validate_delivery(self, db, outbox, *, captured_identity=None):
+        if captured_identity is not None:
+            from src.work_board.channel_capture import _checked_identity, ChannelAction, check_captured_task_control
+            identity = _checked_identity(captured_identity)
+            expected_root_digest = identity.callback_root_digest
+            async def source_check(task):
+                await check_captured_task_control(db, WorkBoardOwner(principal_id=outbox.owner_principal_id,
+                    session_id=outbox.operator_session_id), ChannelAction(task_id=task.task_id,
+                    action="inspect", expected_revision=task.task_revision), adapter=self.adapter,
+                    _workspace_digest=identity.workspace_digest, _identity=identity)
+        else:
+            expected_root_digest = root_digest()
+            async def source_check(_task):
+                return None
         if (outbox.correlation_id or "").startswith("telegram-control:"):
             source = await db.get(TelegramTaskCallback, outbox.correlation_id.split(":", 1)[1])
             if source is None:
                 fail("telegram_control_delivery_unbound")
             pairing = await current(db, outbox.owner_principal_id, outbox.operator_session_id)
             task = await task_owned(db, source.owner_principal_id, source.operator_session_id, source.task_id)
+            await source_check(task)
             saved = json.loads(source.result_json)
             if (source.owner_principal_id != outbox.owner_principal_id
                 or source.operator_session_id != outbox.operator_session_id
-                or source.root_digest != root_digest() or source.pairing_id != pairing.pairing_id
+                or source.root_digest != expected_root_digest or source.pairing_id != pairing.pairing_id
                 or source.transit_reference != pairing.transit_consent_reference
                 or aware(source.expires_at) <= now() or effect_digest(source) != source.effect_digest
                 or saved.get("outbox_id") != outbox.id or saved.get("task_revision") != task.task_revision
@@ -565,7 +818,8 @@ class TelegramTaskControls:
         pairing = await current(db, outbox.owner_principal_id, outbox.operator_session_id)
         for row in rows:
             task = await task_owned(db, row.owner_principal_id, row.operator_session_id, row.task_id)
-            if (row.status != "pending" or row.root_digest != root_digest()
+            await source_check(task)
+            if (row.status != "pending" or row.root_digest != expected_root_digest
                 or row.pairing_id != pairing.pairing_id
                 or row.transit_reference != pairing.transit_consent_reference
                 or aware(row.expires_at) <= now() or row.task_revision != task.task_revision

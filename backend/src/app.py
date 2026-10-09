@@ -434,6 +434,19 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
             )
+        try:
+            from src.model_fabric.repository import ModelFabricRepository
+
+            documentary_cleanup = await ModelFabricRepository().cleanup_settled_audio_documentation()
+            if documentary_cleanup['inspected']:
+                logging.getLogger(__name__).warning(
+                    "Audio documentary cleanup inspected %d; deleted %d; unknown charged %d",
+                    documentary_cleanup['inspected'], documentary_cleanup['deleted'], documentary_cleanup['unknown'],
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio documentary cleanup failed; private staging remains charged"
+            )
         ensure_soul_exists()
         init_llm_logging()
         # Load persisted settings before scheduler starts

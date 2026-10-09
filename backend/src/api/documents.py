@@ -17,10 +17,13 @@ async def lifespan(app):
     service = DocumentService()
     await service.start()
     app.state.document_service = service
+    from src.api.telegram import default_telegram_transport
+    default_telegram_transport.document_service = service
     try:
         yield
     finally:
         await service.stop()
+        default_telegram_transport.document_service = None
         app.state.document_service = None
 
 

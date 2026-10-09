@@ -145,6 +145,7 @@ export interface WorkBoardPanelProps {
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
   focusTaskId?: string | null;
+  discardFocusedTaskId?: string | null;
   onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
@@ -804,6 +805,7 @@ function WorkBoardPanel({
   onInspectWorkflowRun,
   onInspectArtifact,
   focusTaskId,
+  discardFocusedTaskId,
   onFocusTaskHandled,
   ownerPrincipalId,
   ownerSessionId,
@@ -939,6 +941,8 @@ function WorkBoardPanel({
   const tasksRef = useRef(tasks);
   const eventCursorRef = useRef<number | null>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
+  const detailSelectionGenerationRef = useRef(0);
+  const detailControllerRef = useRef<AbortController | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const socketEventControllerRef = useRef<AbortController | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -1249,11 +1253,13 @@ function WorkBoardPanel({
   const refreshSelectedTask = useCallback(async () => {
     if (stoppedRef.current || !selectedTaskId) return;
     const requestedTaskId = selectedTaskId;
+    const selectionGeneration = detailSelectionGenerationRef.current;
     setDetailLoading(true);
     setDetailError(null);
     try {
       const nextDetail = await readTaskDetail(requestedTaskId);
-      if (stoppedRef.current || !nextDetail || selectedTaskIdRef.current !== requestedTaskId) return;
+      if (stoppedRef.current || !nextDetail || selectedTaskIdRef.current !== requestedTaskId
+        || selectionGeneration !== detailSelectionGenerationRef.current) return;
       setDetail(nextDetail);
       setTasks((current) => uniqueTasks([
         ...current.filter((task) => task.task_id !== requestedTaskId),
@@ -1464,9 +1470,11 @@ function WorkBoardPanel({
       return;
     }
     let active = true;
+    const controller = new AbortController();
+    detailControllerRef.current = controller;
     setDetailLoading(true);
     setDetailError(null);
-    void readTaskDetail(selectedTaskId)
+    void readTaskDetail(selectedTaskId, controller.signal)
       .then((nextDetail) => {
         if (!active || !nextDetail) return;
         setDetail(nextDetail);
@@ -1477,7 +1485,7 @@ function WorkBoardPanel({
       })
       .catch((error) => { if (active) setDetailError(errorText(error)); })
       .finally(() => { if (active) setDetailLoading(false); });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [readTaskDetail, selectedTaskId]);
 
   useEffect(() => {
@@ -1767,6 +1775,7 @@ function WorkBoardPanel({
   const archivedTasks = useMemo(() => visibleTasks.filter((task) => task.status === "archived"), [visibleTasks]);
 
   const openTask = useCallback((taskId: string) => {
+    detailSelectionGenerationRef.current += 1;
     if (selectedTaskIdRef.current === null && document.activeElement instanceof HTMLElement) {
       taskDetailOpenerRef.current = createOpenerRef.current?.isConnected
         ? createOpenerRef.current
@@ -1813,14 +1822,22 @@ function WorkBoardPanel({
   }, [focusTaskId, onFocusTaskHandled, openTask]);
 
   const closeTask = useCallback(() => {
+    detailSelectionGenerationRef.current += 1;
+    detailControllerRef.current?.abort();
+    detailControllerRef.current = null;
     selectedTaskIdRef.current = null;
     setSelectedTaskId(null);
+    setDetail(null);
     onSelectedTaskChange?.(null);
     inboxOriginControllerRef.current?.abort();
     inboxOriginControllerRef.current = null;
     inboxOriginRequestKeyRef.current = null;
     setInboxOrigin(null);
   }, [onSelectedTaskChange]);
+
+  useEffect(() => {
+    if (discardFocusedTaskId && selectedTaskIdRef.current === discardFocusedTaskId) closeTask();
+  }, [discardFocusedTaskId, closeTask]);
 
   const openCreateDialog = (event: MouseEvent<HTMLButtonElement>) => {
     createOpenerRef.current = event.currentTarget;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { AudioDocumentationControls } from "./AudioDocumentationControls";
 import {
   normalizeModelFabricSettings,
   type ModelFabricSettingsStatus,
@@ -240,6 +241,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
   }
   return (
     <div className="mt-2 border border-retro-text/10 px-2 py-2" data-testid="openrouter-setup-panel">
+      {metadata?.schema_version === "seraph.openrouter.setup.v3" && <AudioDocumentationControls />}
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="text-[10px] text-retro-text">OpenRouter setup</div>
         <div className="text-[9px] text-retro-text/60">{metadataRetained ? "stale retained" : (metadata?.status ?? "configuration_required").replace(/_/g, " ")}</div>

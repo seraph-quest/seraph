@@ -242,6 +242,26 @@ describe("WorkBoardPanel", () => {
     expect(screen.getAllByRole("button", { name: "Refresh research" })).toHaveLength(1);
   });
 
+  it("closes only the verified channel review Task on source denial and rejects late detail", async () => {
+    const currentTask = task();
+    taskResponse(fetchMock, currentTask);
+    const props = { ownerPrincipalId: "operator:one", ownerSessionId: "operator-session-1" };
+    const mounted = render(<WorkBoardPanel {...props} focusTaskId="task-1" />);
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="other-task" />);
+    expect(screen.getByRole("region", { name: "Task details for Bounded task" })).toBeInTheDocument();
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="task-1" />);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Task details for Bounded task" })).not.toBeInTheDocument());
+    let resolveDetail: ((value: unknown) => void) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => String(input).endsWith("/tasks/task-1")
+      ? new Promise(resolve => { resolveDetail = resolve; }) : Promise.resolve(response({})));
+    mounted.rerender(<WorkBoardPanel {...props} focusTaskId="task-1" discardFocusedTaskId={null} />);
+    await waitFor(() => expect(resolveDetail).toBeDefined());
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="task-1" />);
+    await act(async () => resolveDetail?.(response(detail(currentTask))));
+    expect(screen.queryByRole("region", { name: "Task details for Bounded task" })).not.toBeInTheDocument();
+  });
+
   it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
     const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
     taskResponse(fetchMock, currentTask);

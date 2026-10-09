@@ -25,6 +25,13 @@ from src.auth.service import AuthFailure
 CAPABILITY = "document.read.v1"
 
 
+async def _source_change_receipt(db, row, value, previous):
+    if value.get("channel_ingest"):
+        from src.work_board.document_channel_ingest import sync_channel_source_receipt
+        await sync_channel_source_receipt(db, row, value,
+            previous_revision=previous[0], previous_metadata_digest=previous[1])
+
+
 class ClosedModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -105,12 +112,15 @@ def projection(row):
     value = sources.metadata(row)
     return {"artifact_id": row.artifact_id, "artifact_ref": value["input"]["artifact_ref"],
         "revision": row.revision, "state": value["phase"], "format": value["input"]["format"],
-        "source_digest": value["input"]["source"]["sha256"], "goal_id": row.goal_id,
+        "source_digest": value["input"].get("source", {}).get("sha256"), "goal_id": row.goal_id,
         "goal_revision": row.goal_revision, "reason_code": value.get("reason"),
         "ingest_deadline": value["ingest_deadline"], "no_learning": True,
         "cleanup": "unknown_writer_retained" if value.get("live_writer") else "quiescent",
         "writer_kind": ("parser" if value["live_writer"].get("slot") == "parser" else "upload") if value.get("live_writer") else None,
-        "provider_contacts": 0}
+        "provider_contacts": (0 if value.get("channel_ingest", {}).get("contact", "not_started") == "not_started" else
+            2 if value.get("channel_ingest", {}).get("contact") == "closed" else None),
+        "typed_input_ref": row.typed_input_ref if row.metadata_digest else None,
+        "typed_input_digest": row.payload_sha256 if row.metadata_digest else None}
 
 
 def read_witness(row, value):
@@ -154,8 +164,10 @@ async def reconcile_reader(db, owner, identifier, revision):
     current["live_writer"] = None
     current["witness_digest"] = witness_digest
     current["reason"] = "document_original_reader_reaped_output_unavailable"
+    previous = (fresh.revision, fresh.metadata_digest)
     fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
     fresh.metadata_digest = _metadata_digest(fresh)
+    await _source_change_receipt(db, fresh, current, previous)
     await db.commit()
     return projection(fresh)
 
@@ -392,8 +404,10 @@ class DocumentService:
         # All fallible filesystem preparation precedes durable parser ownership.
         directory, _leaf = _open_input_artifact_parent(sources.source_path(fresh, current, "source"), create=False)
         try:
+            previous = (fresh.revision, fresh.metadata_digest)
             fresh.document_metadata_json = canonical(current).decode(); fresh.revision += 1
             fresh.metadata_digest = _metadata_digest(fresh)
+            await _source_change_receipt(db, fresh, current, previous)
             await db.commit()
         except BaseException:
             os.close(directory)
@@ -417,8 +431,10 @@ class DocumentService:
                 raise BoardError("document_original_execution_window_expired", "The original parser window cannot cover execution and cleanup", status_code=409)
             ready_binding = {**binding, "supervisor_pid": handshake["supervisor_pid"], "parser_pid": handshake["parser_pid"]}
             ready_value["parser_binding"] = ready_binding
+            previous = (ready_row.revision, ready_row.metadata_digest)
             ready_row.document_metadata_json = canonical(ready_value).decode(); ready_row.revision += 1
             ready_row.metadata_digest = _metadata_digest(ready_row)
+            await _source_change_receipt(db, ready_row, ready_value, previous)
             await db.commit()
         try:
             result = await self.parse(raw, request, witness_directory=directory, binding=binding, on_ready=ready,
@@ -470,8 +486,10 @@ class DocumentService:
                             latest["reason"] = "document_output_cleanup_required"
                         else:
                             latest["evidence"] = receipt
+                    previous = (final.revision, final.metadata_digest)
                     final.document_metadata_json = canonical(latest).decode(); final.revision += 1
                     final.metadata_digest = _metadata_digest(final)
+                    await _source_change_receipt(db, final, latest, previous)
                     await db.commit()
             await shield_positive_cleanup(settle())
         if adoption_error is not None:
@@ -488,8 +506,10 @@ class DocumentService:
                 if closed_value != latest or closed_value.get("live_writer") or closed_value.get("evidence"):
                     raise BoardError("document_reader_fence_changed", "Inspect the original cleanup receipt", status_code=409)
                 closed_value["reason"] = "document_authority_changed_output_discarded"
+                previous = (closed.revision, closed.metadata_digest)
                 closed.document_metadata_json = canonical(closed_value).decode(); closed.revision += 1
                 closed.metadata_digest = _metadata_digest(closed)
+                await _source_change_receipt(db, closed, closed_value, previous)
                 await db.commit()
             raise adoption_error
         # Revalidate current owner/Goal after extraction and before private return.

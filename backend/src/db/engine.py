@@ -98,6 +98,8 @@ OPERATOR_REQUIRED_TABLES = (
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
+    "model_audio_documentation_attestations",
+    "model_audio_documentation_sources",
     "work_board_tasks",
     "work_board_input_artifacts",
     "work_board_attempts",

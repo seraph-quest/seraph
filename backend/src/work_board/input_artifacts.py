@@ -1728,6 +1728,9 @@ async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_i
     else:
         from src.work_board.pipeline_contracts import EvidenceConsumerInput
         from src.work_board.pipeline_cpu import spec_for
+    if task.capability_id == "work.local-evidence-report.v1":
+        from src.auth.service import authenticate_principal
+        from src.runtime_plugins.ownership import validate_run
     if task.pipeline_operation_id:
         from src.work_board.pipelines import task_guard
         from src.security.site_policy import evaluate_site_access
@@ -1740,7 +1743,15 @@ async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_i
         or artifact.typed_input_ref != task.typed_input_ref or artifact.payload_sha256 != task.typed_input_digest):
         raise BoardError("input_artifact_consume_conflict", "The original input binding changed", status_code=409)
     literal_payload = resolved.payload
-    if not _workflow_run_binds_board_attempt(task, attempt, run, _staged_literalbytes=literal_payload):
+    if task.capability_id == "work.local-evidence-report.v1":
+        await validate_run(db, run)
+        principal = (await authenticate_principal(task.owner_principal_id, db=db)).principal
+        native_binding_matches = _workflow_run_binds_board_attempt(task, attempt, run,
+            _staged_literalbytes=literal_payload, _report_principal=principal)
+    else:
+        native_binding_matches = _workflow_run_binds_board_attempt(task, attempt, run,
+            _staged_literalbytes=literal_payload)
+    if not native_binding_matches:
         raise BoardError("input_artifact_consume_conflict", "The original native binding changed", status_code=409)
     source = await stage_accepted_plan_task(db, task, attempt=attempt)
     operation_token = None
@@ -1831,8 +1842,15 @@ async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_i
             or (root.model_dump(mode="json"), goal.model_dump(mode="json"),
                 identity.model_dump(mode="json") if identity is not None else None) != authority_tokens):
             raise BoardError("evidence_owner_not_current", "The exact original authority changed", status_code=403)
-        if not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run,
-                                                 _staged_literalbytes=literal_payload):
+        if current_task.capability_id == "work.local-evidence-report.v1":
+            await validate_run(db, current_run)
+            principal = (await authenticate_principal(current_task.owner_principal_id, db=db)).principal
+            native_binding_matches = _workflow_run_binds_board_attempt(current_task, current_attempt, current_run,
+                _staged_literalbytes=literal_payload, _report_principal=principal)
+        else:
+            native_binding_matches = _workflow_run_binds_board_attempt(current_task, current_attempt, current_run,
+                _staged_literalbytes=literal_payload)
+        if not native_binding_matches:
             raise BoardError("input_artifact_consume_conflict", "The original native binding changed", status_code=409)
         if _metadata_digest(current_input) != current_input.metadata_digest or _utc(current_input.expires_at) <= observed:
             raise BoardError("input_artifact_consume_conflict", "The original input metadata changed", status_code=409)

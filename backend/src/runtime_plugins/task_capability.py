@@ -376,6 +376,67 @@ def checked_report_records(run):
         "link_id", "handoff_id", "producer_task_id", "producer_attempt_id", "goal_id")}
 
 
+def report_identity_matches_current(task, attempt, inputs, run, *, principal) -> bool:
+    """Compare immutable report data; original callers retain all authority gates.
+
+    The principal is the caller's current authenticated canonical principal.
+    This reads no rows/files and supplies no execution or terminal permission.
+    Mutable lifecycle rows are checked by the original phase-specific owners.
+    """
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    from src.work_board.pipeline_cpu import spec_for
+    from src.work_board.pipelines import utc
+    from src.workflows.job_runtime import _admission_conflicts, _binding, _composition_fingerprint, _digest
+    try:
+        metadata = read_report_candidate(run)
+        model = EvidenceConsumerInput.model_validate(dict(inputs))
+        if (type(task) is not WorkBoardTask or type(attempt) is not WorkBoardAttempt
+            or task.capability_id != REPORT or attempt.task_id != task.task_id
+            or principal.principal_id != task.owner_principal_id
+            or task.task_id != metadata["task_id"] or attempt.attempt_id != metadata["attempt_id"]
+            or attempt.fencing_token != metadata["board_fencing_token"]
+            or attempt.started_at is None or utc(attempt.started_at).isoformat() != metadata["attempt_started_at"]
+            or task.owner_principal_id != metadata["owner_principal_id"]
+            or task.owner_session_id != metadata["original_root_id"]
+            or task.goal_id != metadata["goal_id"] or task.goal_revision != metadata["goal_revision"]
+            or task.input_artifact_id != metadata["input_id"]
+            or task.typed_input_ref != metadata["typed_input_ref"]
+            or task.typed_input_digest != metadata["typed_input_digest"]
+            or task.typed_input_digest != metadata["payload_sha256"]
+            or task.pipeline_operation_id != metadata["operation_id"]
+            or model.operation_ref != metadata["operation_id"] or model.plan_version != metadata["plan_version"]
+            or model.producer_task_ref != metadata["producer_task_id"]
+            or model.producer_attempt_ref != metadata["producer_attempt_id"]
+            or model.producer_sha256 != metadata["producer_sha256"]
+            or model.handoff_ref != metadata["handoff_id"]):
+            return False
+        original = spec_for(task, attempt, inputs, deadline=datetime.fromisoformat(metadata["cutoff"]))
+        authority = {**original.declared_authority,
+            "grants": sorted(str(getattr(grant, "value", grant)) for grant in principal.grants)}
+        original = replace(original, declared_authority=authority,
+            composition_binding=RuntimeCompositionBinding.from_json(run.composition_binding_json),
+            run_fingerprint=digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
+                "inputs": original.inputs, "authority": authority}))
+        input_digest = _digest(original.inputs)
+        return (not _admission_conflicts(run, spec=original, input_digest=input_digest,
+                    authority_digest=_digest(authority), deadline=original.deadline_at)
+            and canonical_bytes(json.loads(run.arguments_json)) == canonical_bytes(original.inputs)
+            and canonical_bytes(json.loads(run.declared_authority_json)) == canonical_bytes(authority)
+            and run.operator_session_id == task.owner_session_id
+            and run.idempotency_scope == original.identity.idempotency_scope
+            and run.idempotency_key == original.identity.idempotency_key
+            and run.idempotency_binding == _binding(owner_principal_id=original.identity.owner_principal_id,
+                goal_id=original.goal_id, goal_revision=original.goal_revision,
+                idempotency_scope=original.identity.idempotency_scope, dedupe_key=original.identity.idempotency_key)
+            and not run.parent_run_identity
+            and (run.root_run_identity or run.run_identity) == run.run_identity
+            and input_digest == metadata["input_digest"]
+            and _digest(authority) == metadata["authority_digest"]
+            and _composition_fingerprint(original, input_digest) == metadata["run_fingerprint"])
+    except (AttributeError, ValueError, TypeError, KeyError, BoardError):
+        return False
+
+
 def validated_terminal_report_source(run):
     """Historic metadata locator only; current/physical Memory owners recheck."""
     from src.workflows.job_runtime import _digest

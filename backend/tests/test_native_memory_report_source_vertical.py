@@ -66,7 +66,7 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board import pipelines
     from src.work_board.pipeline_cpu import read_output
-    from src.work_board.review import native_report_memory_metadata
+    from src.work_board.review import native_report_memory_metadata, stage_pipeline_producer_readback
     from src.guardian import opportunity_plans
     import httpx
 
@@ -185,7 +185,12 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
                 output = await pipelines.verified_output(db, owner, task)
                 content = read_output(output['file_path'], output['content_sha256'])
                 run = (await db.scalars(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))).one()
-                metadata = await native_report_memory_metadata(db, task, attempt, run)
+                witness = await stage_pipeline_producer_readback(db, owner, task)
+                metadata = await native_report_memory_metadata(db, task, attempt, run,
+                    _report_input_bytes=witness.report_input_bytes,
+                    _report_source_witness=witness.report_source_witness,
+                    _report_workspace_identity=witness.report_workspace_identity)
+                assert metadata == json.loads(witness.proof_bytes)
                 record_property('actual_report_source', json.dumps({'task_id': task.task_id, 'attempt_id': attempt.attempt_id,
                     'input_ref': task.typed_input_ref, 'input_digest': task.typed_input_digest,
                     'report_sha256': hashlib.sha256(content).hexdigest(), 'metadata': metadata}, default=str))

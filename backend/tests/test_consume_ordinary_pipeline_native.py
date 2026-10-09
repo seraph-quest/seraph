@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import traceback
 from pathlib import Path
 from importlib.machinery import SourceFileLoader
 
@@ -46,10 +47,30 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
             (work_board.router, "/api"), (approvals.router, "/api")):
         app.include_router(router, prefix=prefix)
     state, denials, consumes = {}, [], []
+    operator_cookies = [None]
+    advance_receipts = []
     active = [None, None]
     physical_reads = []
     original_begin = ownership.begin_native_writer
     original_consume = input_artifacts.consume_input_artifact
+    original_resolve = input_artifacts.resolve_input_artifact_for_task
+    original_errors = []
+    active_denial = [None]
+    def record_first_error(boundary, exc):
+        if active_denial[0] is not None and isinstance(exc, BoardError):
+            return
+        if not original_errors:
+            original_errors.append({"boundary": boundary, "type": type(exc).__name__,
+                "code": getattr(exc, "code", None),
+                "frames": [{"filename": frame.f_code.co_filename, "function": frame.f_code.co_name, "line": line}
+                    for frame, line in traceback.walk_tb(exc.__traceback__)]})
+    async def observe_resolve(*args, **kwargs):
+        try:
+            return await original_resolve(*args, **kwargs)
+        except Exception as exc:
+            record_first_error("resolve_input_artifact_for_task", exc)
+            raise
+    monkeypatch.setattr(input_artifacts, "resolve_input_artifact_for_task", observe_resolve)
     from src.work_board import pipeline_cpu
     def observe_reader(function, name):
         def reader(*args, **kwargs):
@@ -104,6 +125,7 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
                 "expected_digest": preview["digest"]})
             assert response.status_code == 200, response.text
             state["operation_id"] = preview["operation_id"]
+            operator_cookies[0] = httpx.Cookies(client.cookies)
 
     async def entry_before_fresh_begin(db, *, owner, fresh=False, **kwargs):
         if fresh and not state:
@@ -114,7 +136,9 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
     async def mutate(model, key, changes):
         async with get_session() as changed:
             await original_begin(changed, owner="native_ingress")
-            row = await changed.get(model, key, populate_existing=True)
+            row = (await changed.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == key)
+                .execution_options(populate_existing=True)) if model is WorkBoardTask
+                else await changed.get(model, key, populate_existing=True))
             previous = {field: getattr(row, field) for field in changes}
             for field, value in changes.items():
                 setattr(row, field, value)
@@ -123,16 +147,21 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
 
     async def deny(owner, kwargs, name, changes=None):
         before = _raw_rows(root / "seraph.db")
-        with pytest.raises(BoardError):
-            async with get_session() as rejected:
-                await original_consume(rejected, owner, **{**kwargs, **(changes or {})})
+        active_denial[0] = name
+        try:
+            with pytest.raises(BoardError) as failure:
+                async with get_session() as rejected:
+                    await original_consume(rejected, owner, **{**kwargs, **(changes or {})})
+        finally:
+            active_denial[0] = None
         after = _raw_rows(root / "seraph.db")
         assert before == after, name
         denials.append({"case": name, "raw_rows_unchanged": True,
+            "exception_type": type(failure.value).__name__, "code": failure.value.code,
             "snapshot_sha256": hashlib.sha256(repr(before).encode()).hexdigest()})
 
-    async def observe(db, owner, **kwargs):
-        task = await db.get(WorkBoardTask, kwargs["task_id"])
+    async def observe_consume(db, owner, **kwargs):
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == kwargs["task_id"]))
         operation = await db.get(WorkBoardProposal, task.pipeline_operation_id)
         assert operation.status == "accepted" and operation.opportunity_id is None
         assert await stage_accepted_plan_task(db, task) is None
@@ -180,6 +209,12 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
         consumes.append({"task_id": kwargs["task_id"], "artifact_id": actual.artifact_id,
             "capability_id": actual.capability_id, "before": before, "after": actual.model_dump(mode="json"),
             "original_kwargs": dict(kwargs)})
+    async def observe(db, owner, **kwargs):
+        try:
+            return await observe_consume(db, owner, **kwargs)
+        except Exception as exc:
+            record_first_error("consume_input_artifact", exc)
+            raise
     monkeypatch.setattr(input_artifacts, "consume_input_artifact", observe)
 
     async def ordinary_runtime(*args, **kwargs):
@@ -199,11 +234,27 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
         dispatcher = WorkBoardDispatcher(jobs=durable_job_repository, session_provider=factory.accounting_sessions)
         for _ in range(8):
             await dispatcher.run_pass()
+            advance_revision = None
             async with get_session() as committed:
                 tasks = list((await committed.scalars(select(WorkBoardTask))).all())
                 completed = [task for task in tasks if task.capability_id in
                     {"browser.public-task.v1", "work.evidence-dossier.v1"}]
+                if not advance_receipts and any(task.capability_id == "browser.public-task.v1"
+                        and task.status == WorkBoardStatus.done for task in completed):
+                    operation = await committed.get(WorkBoardProposal, state["operation_id"])
+                    dossiers = [task for task in tasks if task.capability_id == "work.evidence-dossier.v1"
+                        and task.pipeline_operation_id == operation.proposal_id
+                        and (task.owner_principal_id, task.owner_session_id) ==
+                            (state["owner"].principal_id, state["owner"].session_id)]
+                    assert len(dossiers) == 1
+                    assert dossiers[0].status == WorkBoardStatus.triage
+                    assert dossiers[0].input_artifact_id is None
+                    advance_revision = operation.revision
                 if len(completed) == 2 and all(task.status == WorkBoardStatus.done for task in completed):
+                    assert len(advance_receipts) == 1
+                    assert advance_receipts[0]["status_code"] == 200
+                    assert advance_receipts[0]["operation_id"] == state["operation_id"]
+                    assert advance_receipts[0]["response"]["operation_id"] == state["operation_id"]
                     assert len(consumes) == 2 and len(denials) == 5
                     for receipt in consumes:
                         actual = await committed.get(WorkBoardInputArtifact, receipt["artifact_id"])
@@ -212,12 +263,27 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
                     state["canonical_commit_readback"] = True
                     for receipt in consumes:
                         before_replay = _raw_rows(root / "seraph.db")
-                        with pytest.raises(BoardError):
-                            async with get_session() as replay:
-                                await original_consume(replay, state["owner"], **receipt["original_kwargs"])
+                        active_denial[0] = "original_replay"
+                        try:
+                            with pytest.raises(BoardError) as replay_failure:
+                                async with get_session() as replay:
+                                    await original_consume(replay, state["owner"], **receipt["original_kwargs"])
+                        finally:
+                            active_denial[0] = None
                         assert before_replay == _raw_rows(root / "seraph.db")
                         receipt["replay_rows_unchanged"] = True
+                        receipt["replay_exception_type"] = type(replay_failure.value).__name__
+                        receipt["replay_code"] = replay_failure.value.code
                     raise _OrdinaryConsumesCommitted()
+            if advance_revision is not None:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                        headers={"origin": "http://localhost:3001"}, cookies=operator_cookies[0]) as client:
+                    response = await client.post(f"/api/work-board/pipelines/{state['operation_id']}/advance",
+                        json={"expected_revision": advance_revision})
+                advance_receipts.append({"operation_id": state["operation_id"],
+                    "expected_revision": advance_revision, "status_code": response.status_code,
+                    "response": response.json()})
+                assert response.status_code == 200, response.text
         raise AssertionError("Ordinary Browser and Dossier did not complete through original owners")
     monkeypatch.setattr(original_vertical, "_actual_plan_journey", ordinary_runtime)
     try:
@@ -229,4 +295,6 @@ async def test_actual_ordinary_browser_and_dossier_consume(accounting_db, real_a
         (root / "ordinary-consume-receipts.json").write_text(json.dumps({"denials": denials,
             "consumes": consumes, "canonical_commit_readback": state.get("canonical_commit_readback", False),
             "physical_reads_outside_consume_writer": physical_reads,
+            "original_errors": original_errors,
+            "advance_receipts": advance_receipts,
             "whole_pipeline_pass": False, "report_admission_excluded": True}, indent=2))

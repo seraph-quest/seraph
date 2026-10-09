@@ -945,6 +945,33 @@ class WorkBoardRepository:
             raise BoardOwnerMismatch(task_id)
         return task
 
+    async def _report_link_correlation(self, db, task, attempt, run):
+        from src.runtime_plugins.task_capability import read_report_candidate
+        from src.work_board.pipelines import row_token
+        metadata = read_report_candidate(run)
+        events = list((await db.scalars(select(WorkBoardEvent).where(
+            WorkBoardEvent.task_id == task.task_id, WorkBoardEvent.kind == "attempt.linked"))).all())
+        selected = [event for event in events
+            if json.loads(event.metadata_json).get("attempt_id") == attempt.attempt_id]
+        if attempt.workflow_run_id is None:
+            if (selected or row_token(task) != metadata["task_token"]
+                or row_token(attempt) != metadata["attempt_token"]
+                or task.task_revision != metadata["task_revision"]):
+                raise BoardError("pipeline_task_changed", "The actual original report birth changed")
+            return ()
+        if (attempt.workflow_run_id != run.run_identity or task.idempotency_binding != run.idempotency_binding
+            or task.task_revision != metadata["task_revision"] + 1 or len(selected) != 1):
+            raise BoardError("pipeline_task_changed", "The actual original report link changed")
+        event = selected[0]
+        event_metadata = json.loads(event.metadata_json)
+        if (type(event_metadata.get("task_revision")) is not int
+            or (event.owner_principal_id, event.owner_session_id) != (task.owner_principal_id, task.owner_session_id)
+            or event.actor_principal_id != metadata["board_lease_owner"] or not event.actor_session_id
+            or event_metadata != {"attempt_id": attempt.attempt_id,
+                "workflow_run_id": run.run_identity, "task_revision": metadata["task_revision"] + 1}):
+            raise BoardError("pipeline_task_changed", "The actual original report link event changed")
+        return (row_token(event),)
+
     async def _begin_dispatch_writer(self, db, task_id, *, action, attempt_id=None,
                                      workflow_run_id=None, positive=False, proof=None):
         """Selected original dispatch entries only; ownership is not permission.
@@ -980,6 +1007,7 @@ class WorkBoardRepository:
         if positive and action in {"link", "project"} and run is None:
             raise BoardError("pipeline_task_changed", "The actual original workflow is unavailable")
         run_token = token(run)
+        report_events = None
         if positive:
             # Resolve this finite original validation path before any physical stage
             # or native writer. Imports and callables confer no Source authority.
@@ -995,6 +1023,10 @@ class WorkBoardRepository:
             else:
                 from src.work_board.pipeline_contracts import EvidenceConsumerInput
                 from src.work_board.pipeline_cpu import spec_for
+                if task.capability_id == "work.local-evidence-report.v1":
+                    from src.auth.service import authenticate_principal
+                    from src.runtime_plugins.task_capability import report_identity_matches_current, read_report_candidate
+                    from src.runtime_plugins.ownership import validate_run
         source = None
         operation_token = None
         workspace_identity = None
@@ -1061,6 +1093,13 @@ class WorkBoardRepository:
                 raise BoardError("pipeline_input_changed", "Original task input changed")
             input_token = token(resolved.row)
             input_payload = resolved.payload
+            if task.capability_id == "work.local-evidence-report.v1" and run is not None:
+                principal = (await authenticate_principal(owner.principal_id, db=db)).principal
+                report_inputs = _decode_typed_input_payload(task, input_payload)
+                if not report_identity_matches_current(task, attempt, report_inputs, run, principal=principal):
+                    raise BoardError("pipeline_task_changed", "The actual original report identity changed")
+                await validate_run(db, run)
+                report_events = await self._report_link_correlation(db, task, attempt, run)
             if action in {"promote", "claim"}:
                 from src.work_board.review import _stage_dispatch_handoffs
                 handoffs = await _stage_dispatch_handoffs(db, owner, task)
@@ -1114,6 +1153,15 @@ class WorkBoardRepository:
                     raise
                 denial = _dispatch_admission_denial(exc)
         if positive and denial is None:
+            report_principal = None
+            if current_task.capability_id == "work.local-evidence-report.v1" and current_run is not None:
+                report_principal = (await authenticate_principal(owner.principal_id, db=db)).principal
+                await validate_run(db, current_run)
+                if (await self._report_link_correlation(db, current_task, current_attempt, current_run)) != report_events:
+                    raise BoardError("pipeline_task_changed", "The exact original report link event changed")
+                if not report_identity_matches_current(current_task, current_attempt,
+                    _decode_typed_input_payload(current_task, input_payload), current_run, principal=report_principal):
+                    raise BoardError("pipeline_task_changed", "The exact original report identity changed")
             if current_run is not None:
                 if action == "link":
                     # A new immutable link has no attempt.workflow_run_id yet.
@@ -1127,7 +1175,7 @@ class WorkBoardRepository:
                         expected = WorkBoardDispatcher._browser_expected_identity(current_task, current_attempt, inputs,
                             actual, limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
                         _validate_linked_workflow_projection(current_task, current_attempt, run_id, actual, expected)
-                    else:
+                    elif current_task.capability_id != "work.local-evidence-report.v1":
                         spec = spec_for(current_task, current_attempt, inputs, deadline=current_run.deadline_at)
                         if (current_run.run_identity != spec.identity.job_id
                             or current_run.input_digest != _safe_digest(spec.inputs)
@@ -1142,7 +1190,7 @@ class WorkBoardRepository:
                             raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
                 else:
                     if not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run,
-                        _staged_literalbytes=input_payload):
+                        _staged_literalbytes=input_payload, _report_principal=report_principal):
                         raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
             if action == "project":
                 from src.work_board.review import _recheck_dispatch_projection

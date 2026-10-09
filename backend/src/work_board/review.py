@@ -9,7 +9,7 @@ and never trust reviewer, run, or evidence identities supplied by a browser.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import re
@@ -86,6 +86,12 @@ class PipelineProducerWitness:
     output_bytes: bytes
     output_reference: str
     content_sha256: str
+    report_input_bytes: bytes = b""
+    report_source_witness: Any = field(default=None, compare=False)
+    report_event_tokens: tuple[str, ...] = ()
+    report_authority_tokens: tuple[str, ...] = ()
+    report_workspace_identity: bytes = b""
+    report_operation_token: str = ""
 
 
 class _DispatchReadbacks:
@@ -157,6 +163,12 @@ async def _stage_dispatch_projection(db, owner, task, attempt, run, proof):
         for item in _decode_list(run.effect_receipts_json)):
         raise BoardError("pipeline_output_unverified", "Exact settled original readback required")
     raw = read_output(artifacts[0]["file_path"], digest)
+    if task.capability_id == "work.local-evidence-report.v1":
+        from src.runtime_plugins.task_capability import validated_terminal_report_source
+        terminal = validated_terminal_report_source(run)
+        if (terminal["output_reference"] != artifacts[0]["file_path"]
+            or terminal["output_sha256"] != digest or terminal["size_bytes"] != len(raw)):
+            raise BoardError("pipeline_output_unverified", "The actual report terminal publication changed")
     artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
     handle = _DispatchReadbacks()
     _DISPATCH_READBACKS[handle] = (db, task.task_id, asyncio.current_task(), {
@@ -178,15 +190,28 @@ async def _recheck_dispatch_projection(db, task, attempt, run, proof, handle):
         proof.get("content_sha256"), dict(proof))
     if held != current:
         raise BoardError("pipeline_output_unverified", "The actual original projection binding changed")
+    if task.capability_id == "work.local-evidence-report.v1":
+        from src.runtime_plugins.task_capability import validated_terminal_report_source
+        terminal = validated_terminal_report_source(run)
+        if terminal["output_sha256"] != proof["content_sha256"]:
+            raise BoardError("pipeline_output_unverified", "The actual report terminal publication changed")
 
 
 async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProducerWitness:
     from src.work_board.pipelines import row_token
     from src.work_board.pipeline_cpu import read_output
     from src.work_board.pipeline_contracts import canonical_bytes, MAX_QUOTED_BYTES, REPORT
+    if (producer.status != WorkBoardStatus.done or producer.owner_principal_id != owner.principal_id
+        or producer.owner_session_id != owner.session_id):
+        raise BoardError("pipeline_output_unverified", "The real producer readback is required", status_code=409)
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == producer.task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
-    proof = await _verified_workflow_readback(db, producer, attempt) if attempt else None
+    report_payload, report_source, report_workspace, report_operation = None, None, None, None
+    if producer.capability_id == REPORT:
+        report_payload, report_source, report_workspace, report_operation = await _stage_terminal_report_input(db, producer)
+    proof = await _verified_workflow_readback(db, producer, attempt,
+        _report_input_bytes=report_payload, _report_source_witness=report_source,
+        _report_workspace_identity=report_workspace) if attempt else None
     if (producer.status != WorkBoardStatus.done or producer.owner_principal_id != owner.principal_id
         or producer.owner_session_id != owner.session_id or proof is None):
         raise BoardError("pipeline_output_unverified", "The real producer readback is required", status_code=409)
@@ -198,6 +223,10 @@ async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProdu
         raise BoardError("pipeline_output_unverified", "The producer artifact is ambiguous", status_code=409)
     reference = matching[0]["file_path"]
     raw = read_output(reference, proof["content_sha256"])
+    if producer.capability_id == REPORT:
+        from src.runtime_plugins.task_capability import validated_terminal_report_source
+        if validated_terminal_report_source(run)["size_bytes"] != len(raw):
+            raise BoardError("pipeline_output_unverified", "The actual report output size changed")
     if producer.capability_id != REPORT and len(raw) > MAX_QUOTED_BYTES:
         raise BoardError("pipeline_output_too_large", "The producer exceeds the input allowance", status_code=409)
     from src.db.models import WorkBoardInputArtifact
@@ -207,7 +236,11 @@ async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProdu
     return PipelineProducerWitness(owner.principal_id, owner.session_id, producer.task_id, row_token(producer),
         attempt.attempt_id, row_token(attempt), run.run_identity, row_token(run), input_artifact.artifact_id,
         row_token(input_artifact), canonical_bytes(proof),
-        raw, reference, proof["content_sha256"])
+        raw, reference, proof["content_sha256"],
+        report_input_bytes=report_payload or b"", report_source_witness=report_source,
+        report_event_tokens=await _report_done_events(db, producer, attempt, run) if producer.capability_id == REPORT else (),
+        report_authority_tokens=(await _report_current_authority(db, producer))[1] if producer.capability_id == REPORT else (),
+        report_workspace_identity=report_workspace or b"", report_operation_token=report_operation or "")
 
 
 async def recheck_pipeline_producer_readback(db, owner, *, witness: PipelineProducerWitness):
@@ -228,6 +261,22 @@ async def recheck_pipeline_producer_readback(db, owner, *, witness: PipelineProd
         or input_artifact is None or row_token(input_artifact) != witness.input_artifact_token
         or hashlib.sha256(witness.output_bytes).hexdigest() != witness.content_sha256):
         raise BoardError("pipeline_producer_changed", "The staged producer binding changed", status_code=409)
+    if producer.capability_id == "work.local-evidence-report.v1":
+        if (await _report_done_events(db, producer, attempt, run)) != witness.report_event_tokens:
+            raise BoardError("pipeline_producer_changed", "The original report event rows changed")
+        if (await _report_current_authority(db, producer))[1] != witness.report_authority_tokens:
+            raise BoardError("pipeline_producer_changed", "The original report authority rows changed")
+        from src.work_board.pipelines import owned
+        operation, _ = await owned(db, owner, producer.pipeline_operation_id, workspace_identity=witness.report_workspace_identity)
+        if row_token(operation) != witness.report_operation_token:
+            raise BoardError("pipeline_producer_changed", "The original report operation changed")
+        proof = await native_report_memory_metadata(db, producer, attempt, run,
+            _report_input_bytes=witness.report_input_bytes, _report_source_witness=witness.report_source_witness,
+            _report_workspace_identity=witness.report_workspace_identity)
+        from src.runtime_plugins.task_capability import validated_terminal_report_source
+        if (json.loads(witness.proof_bytes) != proof
+            or validated_terminal_report_source(run)["size_bytes"] != len(witness.output_bytes)):
+            raise BoardError("pipeline_producer_changed", "The original report proof changed")
     return {"file_path": witness.output_reference, "content_sha256": witness.content_sha256,
         "attempt_id": witness.attempt_id, "quoted_source_data": witness.output_bytes.decode("utf-8")}
 
@@ -460,7 +509,8 @@ async def _verified_workflow_readback(
     db: AsyncSession,
     task: WorkBoardTask,
     attempt: WorkBoardAttempt,
-    *, native_memory_report_source=None,
+    *, native_memory_report_source=None, _report_input_bytes=None, _report_source_witness=None,
+    _report_workspace_identity=None,
 ) -> dict[str, Any] | None:
     """Require both the receipt proof and the authoritative terminal run."""
     if native_memory_report_source is not None:
@@ -491,7 +541,11 @@ async def _verified_workflow_readback(
                 return None
     native_report = task.capability_id == "work.local-evidence-report.v1" and run.composition_binding_json is not None
     if native_report:
-        proof = await native_report_memory_metadata(db, task, attempt, run)
+        if _report_input_bytes is None:
+            _report_input_bytes, _report_source_witness, _report_workspace_identity, _ = await _stage_terminal_report_input(db, task)
+        proof = await native_report_memory_metadata(db, task, attempt, run,
+            _report_input_bytes=_report_input_bytes, _report_source_witness=_report_source_witness,
+            _report_workspace_identity=_report_workspace_identity)
     elif not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
     if task.capability_id == "memory.opportunity-preference.v1":
@@ -560,62 +614,154 @@ async def _verified_workflow_readback(
     return proof if _safe_verification_receipt(proof, require_complete=True) else None
 
 
-async def native_report_memory_metadata(db, task, attempt, run):
-    """Exact terminal Task5 source correlation; no file/configuration access."""
-    from src.runtime_plugins.task_capability import read_report_candidate
+async def _stage_terminal_report_input(db, task):
+    if db.info.get("native_writer_started") and db.in_transaction():
+        raise BoardError("pipeline_output_unverified", "Original report physical stage must precede writer")
+    from src.work_board.input_artifacts import resolve_input_artifact_for_copy
+    from src.guardian.opportunity_plans import stage_accepted_plan_task
+    from src.runtime_plugins.task_capability import report_identity_matches_current
     from src.runtime_plugins.ownership import validate_run
-    from src.db.models import WorkBoardInputArtifact, Goal
+    from src.auth.service import authenticate_principal
+    from src.work_board.dispatcher import _decode_typed_input_payload, _typed_input_model
+    _typed_input_model(task.capability_id)
+    await _report_current_authority(db, task)
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
+    if (task.status != WorkBoardStatus.done or attempt is None or attempt.ended_at is None
+        or attempt.outcome != "verified" or attempt.lease_owner is not None or attempt.lease_expires_at is not None
+        or run is None or run.status != "succeeded" or run.finished_at is None):
+        raise BoardError("pipeline_output_unverified", "The actual terminal report attempt is required")
+    await validate_run(db, run)
+    owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+    source = await stage_accepted_plan_task(db, task, attempt=attempt)
+    from src.work_board.pipelines import owned, row_token, canonical_bytes
+    from src.security.site_policy import evaluate_site_access
+    operation, value = await owned(db, owner, task.pipeline_operation_id)
+    if operation.status != "accepted" or (operation.opportunity_id and source is None):
+        raise BoardError("pipeline_source_changed", "The actual accepted report operation changed")
+    resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=task.typed_input_ref,
+        typed_input_digest=task.typed_input_digest, goal_id=task.goal_id, goal_revision=task.goal_revision,
+        capability_id=task.capability_id, allow_goal_change=False)
+    if resolved.row.state != "consumed" or resolved.row.bound_task_id != task.task_id:
+        raise BoardError("pipeline_input_changed", "The actual consumed report Input is required")
+    return resolved.payload, source, canonical_bytes(value["live_root"]), row_token(operation)
+
+
+async def _report_current_authority(db, task):
+    from src.db.models import OperatorSession, OperatorIdentity, Goal
+    from src.auth.service import authenticate_principal
+    from src.work_board.pipelines import row_token, utc
+    root = await db.get(OperatorSession, task.owner_session_id, populate_existing=True)
+    goal = await db.get(Goal, task.goal_id, populate_existing=True)
+    identity = await db.get(OperatorIdentity, root.operator_identity_id, populate_existing=True) if root and root.operator_identity_id else None
+    observed = _now()
+    if (root is None or root.principal_id != task.owner_principal_id or root.revoked_at is not None
+        or root.replaced_by_id is not None or root.is_bearer_tombstone
+        or utc(root.idle_expires_at) <= observed or utc(root.absolute_expires_at) <= observed
+        or (root.operator_identity_id and (identity is None or identity.revoked_at is not None))
+        or goal is None or goal.status != "active" or goal.revision != task.goal_revision
+        or (goal.owner_principal_id, goal.owner_session_id) != (task.owner_principal_id, task.owner_session_id)):
+        raise BoardError("pipeline_root_changed", "The current report authority changed")
+    principal = (await authenticate_principal(task.owner_principal_id, db=db)).principal
+    return principal, (row_token(root), row_token(goal), row_token(identity) if identity else "")
+
+
+async def _report_done_events(db, task, attempt, run):
+    from src.runtime_plugins.task_capability import read_report_candidate
     from src.work_board.pipelines import row_token
+    value = read_report_candidate(run)
+    events = list((await db.scalars(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task.task_id,
+        WorkBoardEvent.kind.in_(["attempt.linked", "attempt.done"])))).all())
+    def chosen(kind):
+        return [event for event in events if event.kind == kind
+            and _decode_object(event.metadata_json).get("attempt_id") == attempt.attempt_id]
+    links, dones = chosen("attempt.linked"), chosen("attempt.done")
+    if (len(links) != 1 or len(dones) != 1 or dones[0].event_id <= links[0].event_id
+        or task.task_revision != value["task_revision"] + 2 or task.status != WorkBoardStatus.done
+        or task.idempotency_binding != run.idempotency_binding or attempt.workflow_run_id != run.run_identity):
+        raise ValueError("native_memory_report_source_changed")
+    link, done = links[0], dones[0]
+    link_metadata, done_metadata = _decode_object(link.metadata_json), _decode_object(done.metadata_json)
+    if (type(link_metadata.get("task_revision")) is not int
+        or type(done_metadata.get("task_revision")) is not int
+        or type(done_metadata.get("verified_readback")) is not bool
+        or done_metadata.get("verified_readback") is not True
+        or any((event.owner_principal_id, event.owner_session_id) != (task.owner_principal_id, task.owner_session_id)
+            or event.actor_principal_id != value["board_lease_owner"] or not event.actor_session_id for event in (link, done))
+        or done.actor_session_id != link.actor_session_id
+        or _decode_object(link.metadata_json) != {"attempt_id": attempt.attempt_id, "workflow_run_id": run.run_identity,
+            "task_revision": value["task_revision"] + 1}
+        or _decode_object(done.metadata_json) != {"attempt_id": attempt.attempt_id, "outcome": "verified",
+            "status": "done", "task_revision": value["task_revision"] + 2, "verified_readback": True}):
+        raise ValueError("native_memory_report_source_changed")
+    return (row_token(link), row_token(done))
+
+
+async def native_report_memory_metadata(db, task, attempt, run, *, _report_input_bytes=None,
+    _report_source_witness=None, _report_workspace_identity=None):
+    """Current terminal correlation; historical admission tokens grant no read."""
+    if type(_report_input_bytes) is not bytes or type(_report_workspace_identity) is not bytes:
+        raise BoardError("pipeline_output_unverified", "Original report physical stage required; M5 activation excluded")
+    from src.runtime_plugins.task_capability import read_report_candidate, validated_terminal_report_source, report_identity_matches_current
+    from src.runtime_plugins.ownership import validate_run
+    from src.db.models import WorkBoardInputArtifact
+    from src.work_board.input_artifacts import _metadata_digest
+    from src.work_board.dispatcher import _decode_typed_input_payload
+    from src.work_board.pipelines import task_guard
+    from src.guardian.opportunity_plans import recheck_accepted_plan_task
     if (task.capability_id != "work.local-evidence-report.v1" or task.status != WorkBoardStatus.done
-        or attempt.task_id != task.task_id or attempt.ended_at is None or run.status != "succeeded"
-        or attempt.workflow_run_id != run.run_identity):
+        or attempt.task_id != task.task_id or attempt.ended_at is None or attempt.outcome != "verified"
+        or attempt.lease_owner is not None or attempt.lease_expires_at is not None
+        or run.status != "succeeded" or run.finished_at is None or attempt.workflow_run_id != run.run_identity):
         raise ValueError("native_memory_report_source_changed")
     value = read_report_candidate(run)
     await validate_run(db, run)
-    input_artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
-    goal = await db.get(Goal, task.goal_id, populate_existing=True)
+    artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
     latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
     if (value["task_id"] != task.task_id or value["attempt_id"] != attempt.attempt_id
         or value["board_fencing_token"] != attempt.fencing_token or latest != attempt.attempt_id
-        or value["owner_principal_id"] != task.owner_principal_id or value["original_root_id"] != task.owner_session_id
-        or value["goal_id"] != task.goal_id or value["goal_revision"] != task.goal_revision
-        or value["typed_input_ref"] != task.typed_input_ref or value["typed_input_digest"] != task.typed_input_digest
-        or input_artifact is None or task.input_artifact_id != input_artifact.artifact_id
-        or input_artifact.owner_principal_id != task.owner_principal_id
-        or input_artifact.owner_session_id != task.owner_session_id
-        or input_artifact.goal_id != task.goal_id or input_artifact.goal_revision != task.goal_revision
-        or input_artifact.capability_id != task.capability_id or input_artifact.capability_version != "1"
-        or input_artifact.bound_task_id != task.task_id or input_artifact.state != "consumed"
-        or input_artifact.payload_sha256 != value["payload_sha256"]
-        or input_artifact.typed_input_ref != value["typed_input_ref"]
-        or row_token(input_artifact) != value["input_token"]
-        or goal is None or goal.status != "active" or goal.revision != task.goal_revision
-        or goal.owner_principal_id != task.owner_principal_id or goal.owner_session_id != task.owner_session_id):
+        or artifact is None or task.input_artifact_id != artifact.artifact_id
+        or (artifact.owner_principal_id, artifact.owner_session_id, artifact.goal_id, artifact.goal_revision,
+            artifact.capability_id, artifact.capability_version, artifact.bound_task_id) !=
+            (task.owner_principal_id, task.owner_session_id, task.goal_id, task.goal_revision, task.capability_id, "1", task.task_id)
+        or artifact.state != "consumed" or artifact.consumed_at is None or not artifact.metadata_digest
+        or type(artifact.bound_task_revision) is not int or artifact.bound_task_revision < 1
+        or artifact.payload_sha256 != value["payload_sha256"] or artifact.payload_sha256 != task.typed_input_digest
+        or artifact.typed_input_ref != value["typed_input_ref"] or artifact.typed_input_ref != task.typed_input_ref
+        or artifact.size_bytes != value["payload_bytes"] or len(_report_input_bytes) != artifact.size_bytes
+        or hashlib.sha256(_report_input_bytes).hexdigest() != artifact.payload_sha256
+        or _metadata_digest(artifact) != artifact.metadata_digest):
         raise ValueError("native_memory_report_source_changed")
-    from src.runtime_plugins import task_capability
-    validator = getattr(task_capability, "validated_terminal_report_source", None)
-    if not callable(validator):
-        raise ValueError("native_memory_terminal_report_unavailable")
-    terminal = validator(run)
+    await _report_done_events(db, task, attempt, run)
+    principal, _ = await _report_current_authority(db, task)
+    inputs = _decode_typed_input_payload(task, _report_input_bytes)
+    if not report_identity_matches_current(task, attempt, inputs, run, principal=principal):
+        raise ValueError("native_memory_report_source_changed")
+    await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=_report_source_witness)
+    operation, operation_value = await task_guard(db, task, attempt=attempt,
+        workspace_identity=_report_workspace_identity, source_witness=_report_source_witness)
+    reservation = operation_value["reservations"].get(task.pipeline_slot)
+    if (not isinstance(reservation, Mapping) or reservation.get("state") != "bound"
+        or reservation.get("artifact_ref") != artifact.artifact_id
+        or artifact.bound_task_revision != reservation.get("consumer_revision", -2) + 1):
+        raise ValueError("native_memory_report_source_changed")
+    terminal = validated_terminal_report_source(run)
     if (type(terminal) is not dict or set(terminal) != {"candidate", "output_reference", "output_sha256", "size_bytes"}
-        or terminal["candidate"] != value
-        or type(terminal["size_bytes"]) is not int or not 0 < terminal["size_bytes"] <= 65536
-        or type(terminal["output_reference"]) is not str
+        or terminal["candidate"] != value or type(terminal["size_bytes"]) is not int
+        or not 0 < terminal["size_bytes"] <= 65536 or type(terminal["output_reference"]) is not str
         or not terminal["output_reference"].startswith("artifacts/work-board/evidence/")):
         raise ValueError("native_memory_report_source_changed")
-    invoked = terminal
     proof = _verified_readback(attempt)
-    if (proof is None or proof["content_sha256"] != invoked["output_sha256"]
+    if (proof is None or proof["content_sha256"] != terminal["output_sha256"]
         or not _safe_verification_receipt(proof, require_complete=True)):
         raise ValueError("native_memory_report_source_changed")
     artifacts, effects = _decode_list(run.artifact_receipts_json), _decode_list(run.effect_receipts_json)
     if (len([item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
-             and item.get("file_path") == invoked["output_reference"]
-             and item.get("content_sha256") == invoked["output_sha256"]]) != 1
+        and item.get("file_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"]]) != 1
         or not any(isinstance(item, dict) and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
-                   and item.get("target_path") == invoked["output_reference"]
-                   and item.get("content_sha256") == invoked["output_sha256"] for item in effects)):
+            and item.get("target_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"] for item in effects)):
         raise ValueError("native_memory_report_source_changed")
     return dict(proof)
 
@@ -626,6 +772,7 @@ def _workflow_run_binds_board_attempt(
     run: WorkflowRunState,
     *,
     _staged_literalbytes: bytes | None = None,
+    _report_principal=None,
 ) -> bool:
     """Validate the durable root identity consumed by review and handoff.
 
@@ -717,6 +864,11 @@ def _workflow_run_binds_board_attempt(
                     and _safe_digest(authority) == expected["authority_digest"]
                     and run.idempotency_scope == "work-board-attempt"
                     and run.idempotency_key == f"{task.task_id}:{attempt.attempt_id}")
+            if capability_id == "work.local-evidence-report.v1":
+                from src.runtime_plugins.task_capability import report_identity_matches_current
+                return (_report_principal is not None
+                    and task.idempotency_binding == run.idempotency_binding
+                    and report_identity_matches_current(task, attempt, inputs, run, principal=_report_principal))
             from src.work_board.pipeline_cpu import spec_for
             spec = spec_for(task, attempt, inputs, deadline=_now())
             return (run.owner_kind == "user" and run.owner_principal_id == task.owner_principal_id

@@ -141,7 +141,12 @@ class TestSchedulerEngine:
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
                     "goal_public_discovery",
+                    "programme_daily_digest",
                 }
+                digest = scheduler.get_job("programme_daily_digest")
+                assert digest.trigger.interval.total_seconds() == 60
+                assert digest.coalesce is True and digest.max_instances == 1
+                assert digest.misfire_grace_time == 60
                 discovery = scheduler.get_job("goal_public_discovery")
                 assert discovery.trigger.interval.total_seconds() == 60
                 assert discovery.coalesce is True and discovery.max_instances == 1

@@ -39,6 +39,7 @@ from src.memory.repository import memory_repository
 from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
 from src.memory.task_lessons import LessonRequest, LessonAutoPolicyRequest, create_task_lesson, inspect_task_lesson, eligible_lesson_source, set_automatic_lesson_policy
 from src.memory.task_methods import TaskMethodReview, inspect_method, review_method
+from src.memory.task_method_invocation import TaskMethodInvoke, invoke_method
 from src.memory.task_lessons import ResearchMethodRequest, create_research_method
 from src.guardian.opportunity_preferences import OpportunityPreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
@@ -72,6 +73,22 @@ async def post_task_method_action(http_request: Request, request: TaskMethodRevi
     from src.work_board.repository import BoardError
     try:
         return await review_method(http_request.state.operator, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/task-methods/{proposal_id}/invoke", status_code=201)
+async def post_task_method_invoke(http_request: Request, proposal_id: str, request: TaskMethodInvoke):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    from src.work_board.dispatcher import _dispatcher
+    try:
+        if _dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        return await invoke_method(http_request.state.operator, proposal_id, request, _dispatcher.general_tasks)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail={"code": "method_invocation_invalid",
+            "message": "Supply the exact current method and declared ordinary parameters"}) from exc
     except BoardError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 

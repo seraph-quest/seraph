@@ -90,6 +90,37 @@ OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
 
+**Document generation #1011: Planned target, feature-branch implementation.**
+[ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+also accepts explicit report/brief/workbook authoring, signed private review and
+the same original C1 native ToolStep producing editable DOCX/XLSX and direct PDF.
+The generation family reserves its own 24 MiB, preserves source32/pair16 MiB
+charges, shares durable process exclusion/queued priority with comparison, and
+retains output quota until explicit positively verified retirement. The target
+separates successful/degraded output retirement from protected fully-cancelled
+outputless retirement: blocked Task, ended cancelled Attempt, cancelled parent
+and complete settled original child/effect/cost set. Zero launch still requires
+the same full stop before Goal deletion/cutoff; later current authenticated
+cleanup only reduces capacity. Actual original stdin/EOF/supervisor wait issues
+the private persisted supervision proof; a parser witness alone or missing outer
+receipt after restart holds Unknown and charge. Capacity release never settles
+Task, effect or cost state.
+
+Source-private pending reservation and physical output readback precede final
+native writer adoption; its exact identity-sealed proof and current CAS are
+required without full output-file reads in that writer. Later output/download
+and retirement still perform physical validation because same-user post-read
+replacement remains a local race. Fixed cleanup tombstones before exact
+unlink/fsync/final CAS; partial or foreign inventory holds charge. Metadata
+headroom preserves the 24 MiB reservation within 8,192 bytes (1,781-byte fixed
+private supervision codec). A fresh bounded 4 KiB cleanup-witness read inside
+its writer still has filesystem-stall risk. The shared 4,096-row historical
+inventory ceiling fails closed; the sequential journey reaching a 4,097th
+historical row remains unexecuted and no eviction/recovery bypass is claimed. Actual CPU/Linux receipts
+do not claim shipped generation, native macOS proof, model composition or
+automatic iterative repair. Availability still requires independent full-journey
+review and the reviewed implementation merge; the owning issue/PR carries proof.
+
 ## Task conversation continuity
 
 **Shipped** within the bounded
@@ -169,6 +200,31 @@ managed lifecycle remains the execution owner before the separately owned
 Specialist delegation in
 [#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
 
+**Communication preparation (#1016): intended Partial scope after independently
+reviewed merge.** This is source-branch behavior until the installed `develop`
+revision contains that merge. One accepted original task composes actual native
+Mail reply drafts and Calendar meeting preparations from explicitly selected,
+currently granted sources under the same original inference group and cutoff.
+The private encrypted five-field plan retains exact source provenance and
+affected-only blockers. Each selected send or owned-event reschedule uses its
+own fresh exact preview, immutable approval, existing native action and
+independent provider readback; validating a subset performs no effects.
+Unknown contacts/costs retain their original liabilities and never trigger
+automatic replay. Read-only RecoveryGoal observation cannot renew an old write.
+Recovered selection grants no private-body access; generic Calendar readers
+remain root-only. Stored configuration alone establishes no readiness.
+
+Deliberate exact-task cleanup reports verified aggregate absence or unresolved
+cleanup. Access expiry does not delete bytes, and aggregate cleanup leaves
+original Mail drafts, plaintext Calendar briefs and approval/effect history with
+their existing owners. Isolated authenticated native/API and UI receipts prove
+these bounded mechanics and explicit `no_learning`, not live-provider usefulness,
+model quality or native macOS execution. Unresolved native process exits 139/245
+remain a validation limitation; a single debugger run passing 24 tests does not
+erase those failures or establish runtime readiness. Only positive cleanup has
+captured authenticated API wire evidence; unresolved cleanup has service/UI
+coverage. See the [operator contract](./12-current-app-guide.md#communication-preparation-1016).
+
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,
 owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
@@ -188,13 +244,46 @@ macOS ABI; unknown restart proof visibly retains capacity while same-process
 workers and manual review remain usable. macOS native execution is unverified
 on the Linux validation host. It makes no
 inference call, grants no trace-egress permission and
-does not infer a positive preference from success. Strategy adoption and
-next-task reuse (#1001) remain **Planned**. The named proof is an actual
+does not infer a positive preference from success. The named #1000 proof is an actual
 authenticated failed formatter journey with terminal failure, proven process
 cleanup, private inspectable candidate and no output adoption, plus isolated
 M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
+**Reviewed task methods (#1001): Shipped on `develop` revisions containing the
+independently reviewed milestone merge.** Earlier revisions require that merge;
+branch-local receipts do not establish availability. Explicit review accepts
+immutable closed `TaskMethod.v1` or `ResearchStrategy.v1` data into signed
+canonical M5 patterns and an atomic signed Goal-revision/family selection, with
+at most 16 accepted versions per scope. Generic recall and M5 selection exclude
+these methods. New general tasks apply supported registered tool sequences and
+finite guards through existing PlanSpec/native execution; public discovery
+applies approved research fields within its original finite programme grant.
+Structured research proposals require exact completed research-dossier sources
+and verified native output. The existing Inspector exposes bounded structured
+research fields only for that verified source, shows original Task/Attempt/Goal
+revision/references/observed receipts in private and canonical inspection, and
+requires explicit acknowledgment before adoption. Candidate preparation remains
+inert; known-candidate recovery reads the same draft and uncertain preparation
+requires explicit same-request reconciliation. Dossier execution itself remains
+explicit baseline.
+Unsupported formatter capability steps cannot activate a general-task method.
+Rollback selects baseline for future work while an admitted original immutable
+pin may continue under current source and authority; tombstones and revocation
+still deny it. Missing, invalid, changed or revoked state blocks rather than
+silently downgrading; only demonstrably never-selected scopes preserve ordinary
+baseline. Selected recovered logins are read-only.
+
+Named provider-free Linux proofs exercise an authenticated completed native
+general task, operator completion, exact source discovery, review and subsequent
+native physical output with the selected method; a completed research dossier,
+structured proposal, signed adoption and subsequent real public discovery; and
+rollback, original-pin continuation, explicit future baseline, recovery,
+signature/source/selection tamper and pre-contact revocation. Independent review
+is required for the milestone merge. These receipts establish bounded mechanics,
+not learned quality, live-provider usefulness or native macOS execution. See the
+[operator contract](./12-current-app-guide.md#reviewed-task-methods).
 
 **Finite public goal programme authority: Shipped** on `develop` revisions
 containing the independently reviewed

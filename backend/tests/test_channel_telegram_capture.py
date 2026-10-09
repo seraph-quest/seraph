@@ -271,7 +271,8 @@ async def test_actual_captured_task_native_pause_resume_keeps_original_attempt_a
     assert reviewed.json()["reference"]["content_sha256"] == output.reference["content_sha256"]
     assert reviewed.json()["task_id"] == task_id and reviewed.json()["attempt_id"] == attempt.attempt_id
     assert reviewed.json()["no_learning"] is True and "Original private physical source" not in reviewed.text
-    Path("/home/pawel/repos/seraph/.agent-evidence/986/c7/channel-native-output-wire-r1.json").write_text(
+    capture_path = setup_workspace.parent / (setup_workspace.name + "-native-output-wire-r6.json")
+    capture_path.write_text(
         json.dumps(reviewed.json(), sort_keys=True, indent=2) + "\n")
     from src.db.models import TelegramTransportOutbox, Message
     from src.work_board.channel_capture import maybe_publish_channel_output

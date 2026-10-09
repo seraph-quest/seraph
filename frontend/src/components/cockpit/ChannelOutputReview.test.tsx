@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import wire from "../../lib/__fixtures__/channel-output-wire-r1.json";
+import wire from "../../lib/__fixtures__/channel-output-wire-r6.json";
 import { ChannelOutputReview } from "./ChannelOutputReview";
 
 const handle = `sco1.YWN0dWFsLXNpc25lZC1oYW5kbGU.${"1".repeat(64)}`;

@@ -144,7 +144,9 @@ async def test_authenticated_audio_api_separate_fresh_goal_task_action_and_exact
     assert source_read.status_code == 200, source_read.text
     from pathlib import Path
     import json
-    Path("/home/pawel/repos/seraph/.agent-evidence/986/c7/channel-audio-task-wire-r1.json").write_text(
+    from config.settings import settings
+    capture_path = Path(settings.workspace_dir).parent / "channel-audio-task-wire-r6.json"
+    capture_path.write_text(
         json.dumps({"source": source_read.json(), "request": payload, "receipt": first.json()}, sort_keys=True, indent=2) + "\n")
     repeated = await client.post(f"/api/audio/ptt/{audio.request_id}/task", json=payload, headers=origin)
     assert repeated.status_code == 200, repeated.text

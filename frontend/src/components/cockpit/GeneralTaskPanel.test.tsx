@@ -19,6 +19,27 @@ const documentPlan = { ...plan, accepted: true, task_input: { ...plan.task_input
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status }); }
 beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
 
+it("inspects the original admitted method pin without a separate memory fetch or action", async () => {
+  const strategy = { status: "active", method_id: "original-reviewed-proposal", version: "original-immutable-version", digest: "ab".repeat(32),
+    typed_data: { schema_version: "TaskMethod.v1", family: "general", steps: [{ kind: "registered_tool", tool_id: "local.note" }],
+      registered_tool_ids: ["local.note"], input_parameters: {}, output_contract: { artifact_type: "task_result", required_fields: ["status"] } } };
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, accepted: true, strategy }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  expect(await screen.findByLabelText("Original task method binding")).toHaveTextContent("original-immutable-version");
+  expect(screen.getByLabelText("Original task method binding")).toHaveTextContent("Quality is unmeasured");
+  expect(screen.getByLabelText("Original task method binding")).toHaveTextContent("future selection changes do not replace it");
+  expect(apiFetch).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Accept method" })).toBeNull();
+});
+
+it("rejects an incomplete active method pin before showing plan controls", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...plan, strategy: { status: "active", method_id: "unbound-proposal" } }));
+  render(<GeneralTaskPanel {...owner} task={task} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("method binding");
+  expect(screen.queryByLabelText("Original task method binding")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Accept reviewed task plan" })).toBeNull();
+});
+
 it("shows factual native remaining work and verified partial refs separately from final success", async () => {
   const native = { phase: "native_wait", plan_revision: 1, manifest_revision: 4,
     original_deadline_at: "2099-01-01T00:10:00Z", native_deadline_at: "2099-01-01T00:05:00Z",

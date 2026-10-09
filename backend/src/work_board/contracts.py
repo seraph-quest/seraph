@@ -6,7 +6,7 @@ Execution authority stays in ``WorkflowRunState`` and the durable job runtime.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 import re
 from typing import Annotated, Any, Literal, Protocol
@@ -56,6 +56,98 @@ class DocumentTaskBinding(ClosedTaskModel):
         return value
 
 
+class CommunicationSelection(ClosedTaskModel):
+    reply_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
+    meeting_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
+    reschedule_inputs: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    acknowledge_private_review: Literal[True]
+
+    @field_validator("acknowledge_private_review", mode="before")
+    @classmethod
+    def literal_ack(cls, value):
+        if value is not True:
+            raise ValueError("explicit private review acknowledgement required")
+        return value
+
+    @field_validator("reply_inputs", "meeting_inputs", "reschedule_inputs")
+    @classmethod
+    def source_grammar(cls, values, info):
+        # Lazy import: dispatcher owns the existing source grammar, not this DTO.
+        from src.work_board.dispatcher import MailReplyDraftInput, CalendarMeetingPrepInput, CalendarRescheduleInput
+        grammar = {"reply_inputs": MailReplyDraftInput, "meeting_inputs": CalendarMeetingPrepInput,
+                   "reschedule_inputs": CalendarRescheduleInput}[info.field_name]
+        parsed = [grammar.model_validate(value).model_dump(mode="json", exclude_none=True) for value in values]
+        keys = [value.get("message_binding_id") or value["event_binding_id"] for value in parsed]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate source selection")
+        return parsed
+
+    @model_validator(mode="after")
+    def selected_reschedule(self):
+        meetings = {value["event_binding_id"] for value in self.meeting_inputs}
+        if any(value["event_binding_id"] not in meetings for value in self.reschedule_inputs):
+            raise ValueError("reschedule requires its selected meeting source")
+        return self
+
+
+class DocumentBuildTaskBinding(ClosedTaskModel):
+    build_ref: str = Field(pattern=r"^document-build:[a-f0-9-]{36}$")
+    build_revision: int = Field(ge=1)
+    spec_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    selection_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_binding: DocumentTaskBinding | None
+    original_deadline: str = Field(min_length=1, max_length=64)
+
+    @model_serializer(mode="wrap")
+    def preserve_closed_binding(self, handler):
+        result = handler(self)
+        if self.source_binding is None:
+            result["source_binding"] = None
+        return result
+
+    @field_validator("original_deadline")
+    @classmethod
+    def utc_timestamp(cls, value):
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0) or parsed.isoformat() != value:
+            raise ValueError("canonical UTC timestamp required")
+        return value
+
+
+class DocumentBuildReviewBinding(ClosedTaskModel):
+    schema: Literal["document-build-review.v1"]
+    owner_principal_id: str = Field(min_length=1, max_length=128)
+    owner_session_id: str = Field(min_length=1, max_length=128)
+    root_authority: str = Field(pattern=r"^[a-f0-9]{64}$")
+    root_token_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(ge=1)
+    build_id: str = Field(pattern=r"^[a-f0-9-]{36}$")
+    build_revision: int = Field(ge=1)
+    generation: Literal[1]
+    spec_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    selection_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_binding_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    descriptor_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    policy_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    renderer_profile: Literal["document-build-renderer.v1"]
+    renderer_profile_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    limits_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    formats: list[Literal["docx", "xlsx", "pdf"]] = Field(min_length=2, max_length=2)
+    original_deadline: str = Field(min_length=1, max_length=64)
+    task_id: str | None = Field(default=None, min_length=1, max_length=128)
+    task_revision: int | None = Field(default=None, ge=1)
+    plan_revision: int | None = Field(default=None, ge=1)
+    expires_at: str = Field(min_length=1, max_length=64)
+
+    _utc_timestamp = field_validator("original_deadline", "expires_at")(DocumentBuildTaskBinding.utc_timestamp.__func__)
+
+
+class DocumentBuildReview(ClosedTaskModel):
+    binding: DocumentBuildReviewBinding
+    mac: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class GeneralTaskInput(ClosedTaskModel):
     schema_version: Literal[1] = 1
     goal_ref: str = Field(min_length=1, max_length=128)
@@ -66,12 +158,18 @@ class GeneralTaskInput(ClosedTaskModel):
     tool_set_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     inference_egress_acknowledged: bool = False
     document_source: DocumentTaskBinding | None = None
+    communication_selection: CommunicationSelection | None = None
+    document_build: DocumentBuildTaskBinding | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_input(self, handler):
         result = handler(self)
         if self.document_source is None:
             result.pop("document_source", None)
+        if self.communication_selection is None:
+            result.pop("communication_selection", None)
+        if self.document_build is None:
+            result.pop("document_build", None)
         return result
 
     @field_validator("intent")
@@ -185,6 +283,9 @@ class TaskStrategyBinding(ClosedTaskModel):
 class StrategyResolver(Protocol):
     def resolve(self, owner: "WorkBoardOwner", goal_ref: str, task_family: str,
                 programme_grant: Any | None = None) -> TaskStrategyBinding: ...
+    def validate_pinned(self, owner: "WorkBoardOwner", goal_ref: str,
+                        binding: TaskStrategyBinding, programme_grant: Any | None = None,
+                        db: Any | None = None) -> TaskStrategyBinding: ...
 
 
 class GeneralTaskCreate(ClosedTaskModel):
@@ -933,6 +1034,7 @@ class WorkBoardActionRequest(WorkBoardBaseModel):
     evidence_refs: list[str] = Field(default_factory=list, max_length=20)
     reason: str | None = Field(default=None, min_length=1, max_length=500)
     resolution: str | None = Field(default=None, min_length=1, max_length=1_000)
+    document_build_review: DocumentBuildReview | None = None
 
     @field_validator("attempt_id")
     @classmethod

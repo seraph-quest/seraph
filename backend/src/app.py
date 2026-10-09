@@ -357,6 +357,7 @@ async def lifespan(app: FastAPI):
     from src.integrations.connection_sync import ConnectionSyncService
     from src.work_board.dispatcher import _dispatcher
     from src.guardian.goal_programmes import goal_programme_service
+    from src.memory.task_methods import current_method
     continuity = None
     connection_sync_runtime = None
     try:
@@ -485,6 +486,7 @@ async def lifespan(app: FastAPI):
             manifest_roots=manifest_roots,
         )
         await goal_programme_service.start()
+        await current_method.start()
         with current_task_service():
             from src.guardian.goal_discovery import current_goal_discovery
             async with current_goal_discovery():
@@ -517,7 +519,10 @@ async def lifespan(app: FastAPI):
                 await continuity.stop()
         finally:
             try:
-                await goal_programme_service.stop()
+                try:
+                    await current_method.stop()
+                finally:
+                    await goal_programme_service.stop()
             finally:
                 try:
                     if connection_sync_runtime is not None:

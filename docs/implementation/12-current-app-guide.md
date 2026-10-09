@@ -544,6 +544,74 @@ unavailable resource or network confinement visibly blocks this optional profile
 while the CPU core stays usable. This profile establishes literal extraction,
 not OCR, malware certification, model understanding or general usefulness.
 
+### Explicit local document builds
+
+**Status:** Planned target with #1011 feature-branch implementation; installation
+and independent full-journey review determine availability. The generation
+subsection of [ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+owns this contract separately from literal source extraction.
+
+In Work → Describe a task, select **Build a local editable document and PDF**.
+The editor authors report, brief or workbook fields and
+validates their finite specification. Optional citations choose exact adopted
+source leaves; private discovery and selection reuse the original evidence.
+Create a private immutable build, review its signed specification/source/limits,
+prepare its inert one-step task, then reload the task-bound review and explicitly
+accept it through Work. Edits require a fresh immutable build and review. This
+path does not compose with a model or automatically repair content. The retained
+private-build list restores the original charged build and Task after reload;
+discarding an unbound staged build requires an explicit retirement request.
+
+One original C1 native child renders editable DOCX/XLSX and direct PDF from the
+same validated specification. Its encrypted private build reserves 24 MiB in
+addition to any source charge. Genuine queued comparisons/builds share priority
+ordering and the source/comparison/build families share durable process capacity;
+Unknown or unreaped writers block new launch. A denied build retains its original
+queued child without claim/contact. Workbook literal strings remain strings;
+only separately declared supported formulas are calculated in the generated file.
+Imported formulas remain inert evidence.
+
+Outputs appear on the same Work task only after original native success, positive
+original supervisor closure and current-owner physical readback. The original
+invocation must positively close stdin, consume complete bounded stdout EOF and
+wait on its supervisor before issuing its private persisted supervision proof.
+A parser witness alone or missing outer receipt after restart retains Unknown
+and capacity; cleanup cannot reconstruct a callback from status or PID absence.
+Physical capacity release does not settle Task, effect or cost state.
+Authenticated downloads use fixed MIME
+types and server basenames, with no-store/nosniff responses. Missing PDF retains
+the verified editable output and a bounded warning. Output publication reserves
+exact pending inventory before filesystem work and verifies actual private bytes
+outside the final native writer. That writer consumes the source-issued private
+readback proof and exact current authority/revision bindings without opening or
+decrypting output files. A missing or changed proof retains the charge. Readback
+and SQL are not filesystem-atomic: same-user replacement after the read remains
+a local race, so later downloads and retirement revalidate physical bytes.
+
+**Retire generated files** preserves separate retirement predicates. Successful
+or degraded output requires the original terminal Task, positive supervision and
+verified physical output. Outputless retirement instead requires the protected
+`fully_cancelled` stop: blocked Task with native-cancel reason, ended cancelled
+Attempt, cancelled parent and complete settled original child/effect/cost set,
+with no adopted output. A never-launched build still needs that same protected
+full stop before Goal deletion or the original cutoff; zero contact alone is
+insufficient. Later current authenticated cleanup under Goal drift or expiry can
+only reduce retained capacity. It grants no preview, download, renewed execution
+or automatic replay.
+
+Retirement tombstones reads before checking the exact fixed encrypted and pending
+fragments, unlinking and fsyncing, then returns quota only after the unchanged
+original owner/revision CAS. Missing/foreign files, partial unlink and Unknown
+closure keep the charge and show recovery. The original source and Task audit
+remain retained. One cleanup reconciliation reread is bounded to 4 KiB inside
+its writer; a stalled filesystem can still stall that writer. Build metadata
+reserves finite supervision headroom before launch (1,781-byte private codec
+inside the 8,192-byte metadata ceiling). The shared historical inventory blocks
+at its 4,096-row ceiling without eviction or a recovery bypass. The sequential
+journey reaching a 4,097th historical row remains unexecuted; finite overflow
+checks are not that proof.
+Actual CPU/Linux receipts do not establish native macOS execution.
+
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU
@@ -1166,6 +1234,87 @@ Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Communication preparation (#1016)
+
+**Intended Partial scope after independently reviewed merge:** this describes
+the source branch for [#1016](https://github.com/seraph-quest/seraph/issues/1016).
+Availability requires its implementation merge in the installed `develop`
+revision. The existing Python lifecycle owns this composition; configuration
+alone does not make Mail or Calendar ready.
+
+In the private Mail review or Calendar event selection, explicitly add current
+sources to communication preparation. Choose the same current owned Goal,
+review the selected sources and finite cost limit, then prepare one bounded
+task. Each reschedule candidate requires its selected meeting source. Existing
+source-specific model consent and grants must remain current. The accepted
+original task invokes the actual native Mail reply-draft and Calendar meeting-
+preparation owners sequentially under its original shared inference group,
+reserved limits and absolute cutoff. Internal source tasks cannot be promoted
+or retried as independent work. Private source bodies do not enter the general
+task planner; a new authority generation does not renew original reservations,
+Unknown costs, attempts or effects.
+
+Open the current private communication plan from its Work card. Its closed
+five-field value contains exact source references, up to five reply drafts,
+five meeting preparations, three reschedule proposals and bounded unresolved
+questions. Drafts and briefs come from physically read-back original native
+outputs. The encrypted aggregate is privately read and revalidated under the
+current owner, Root, Goal, task and source permissions. Source drift hides only
+affected entries and keeps their blocker visible; loss of Root or Goal authority
+hides the whole private value. Historical recovered selection is read-only
+metadata and grants no private-body access or fresh execution. Generic Calendar
+readers remain root-only; the specialized private aggregate reader does not
+expand their authority.
+
+Select only the actions wanted, inspect each fresh exact native preview and
+approve each independently. **Validate selected independent exact approvals**
+checks an inert `ActionBundle`; it performs no effects and grants no collective
+approval. Execute through each action's existing native controls. Mail follows
+[ADR-016](./decisions/016-exact-gmail-reply-send.md): one exact send and independent
+sender-Sent readback, which does not prove recipient delivery. Calendar follows
+[ADR-019](./decisions/019-exact-calendar-reschedule.md): one conditional owned-event
+patch and independent exact-event readback. A changed source, recipient, body,
+connection or event invalidates the affected action; a conflict does not erase
+another action's verified result. Unseen calendar occupancy remains unresolved
+and grants no broad free/busy read.
+
+Response loss keeps the original operation Unknown, with no automatic send,
+patch, reversal or replacement. Use the original action's finite read-only
+reconciliation controls. A separate current RecoveryGoal/read grant can observe
+the original effect only while its original Root remains authorized and owned
+transport closure is established. It cannot regrant the old write, change its
+deadline or settle historical cost liability by observation. An unconfirmed
+task admission retains its exact request in the current owner session's memory
+for explicit reconciliation; it does not create a replacement automatically.
+Preparation and actions explicitly record `no_learning`. Feedback must use a
+separate governed lesson proposal.
+
+The private view states the retention limit: access expiry does not delete
+artifacts. **Clean up aggregate private plan** deliberately requests cleanup
+at the exact current task revision. Only verified physical absence clears it
+as deleted; unresolved deletion or response loss stays visible and retains the
+original cleanup request for explicit reconciliation. Authoritative access
+denial discards the private view without claiming deletion. Cleanup removes only
+the encrypted aggregate, preserving original Mail drafts, Calendar briefs and
+immutable approvals/effect history under their existing owners. Original
+Calendar preparation briefs remain bounded local plaintext with private file
+modes; aggregate encryption does not migrate that storage. No automatic TTL
+deletion exists. Same-user filesystem replacement between the final inode check
+and unlink remains a residual race; no atomic conditional unlink is claimed.
+
+The [native composition journey](../../backend/tests/test_communication_native.py)
+uses actual isolated authenticated tasks, source callbacks, encrypted physical
+readback, separate native Mail/Calendar effects and literal provider readbacks,
+with scripted inference only at its owned transport. The
+[communication UI tests](../../frontend/src/components/cockpit/CommunicationPlanPanel.test.tsx)
+cover independent selection, stale authority, response loss and cleanup states.
+Current Linux validation still retains unresolved native process crashes
+(ordinary exit 139 and guarded exit 245); one debugger run passing 24 tests does
+not resolve them or establish runtime readiness. Only verified cleanup has a
+captured authenticated API wire receipt; unresolved cleanup has service and UI
+coverage. Live provider usefulness, native macOS execution and model quality
+remain unverified.
+
 ### Task lesson drafts (proposal-only)
 
 The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary
@@ -1225,11 +1374,9 @@ preserves its existing bytes for recovery through the evolution owner.
 Model reflection remains unavailable because no existing consent authorizes task-trace
 egress. No model call or spend is needed to draft a supported lesson.
 
-This section records the intended supported scope after merge; it makes no
-pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
-remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
-change task execution. Isolated local checks establish these mechanics, not
-learned quality or general usefulness.
+Generic memory acceptance rejects `task_method_proposal.v1`; a draft alone
+never changes task execution. Isolated local checks establish these mechanics,
+not learned quality or general usefulness.
 
 The actual authenticated formatter-to-lesson failure journey is verified on the
 implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
@@ -1237,6 +1384,60 @@ permitted`, process cleanup is proven, no formatted output is adopted, and an
 explicit correction creates an inspectable private inert method. The positive
 formatter journey remains blocked by that host sandbox limitation; this receipt
 does not establish successful formatter execution or lesson quality.
+
+### Reviewed task methods
+
+The [#1001](https://github.com/seraph-quest/seraph/issues/1001) capability is
+available on `develop` revisions containing its independently reviewed milestone
+merge. Earlier revisions require that merge; implementation-branch receipts do
+not establish their availability. [ADR-028](./decisions/028-reviewed-task-methods.md)
+defines the accepted boundary.
+
+In the existing Task Inspector, inspect the original source, observed method,
+explicit correction and exact typed candidate before accepting or rejecting it.
+Acceptance atomically writes a signed canonical pattern and a signed active
+selection for the stable operator, exact Goal revision and task family. Each
+scope admits at most 16 immutable accepted versions; exhaustion requires review
+and does not evict history. Current authority, source receipts, signatures and
+selection revision are checked again by the canonical writer. A recovered login
+can inspect an explicitly selected Goal but cannot adopt or roll back its method.
+Missing, stale, revoked or tampered state is visibly blocked; it cannot silently
+select baseline. A demonstrably never-selected scope retains ordinary baseline.
+
+A subsequent general task applies supported registered tool sequences and
+finite source-existence, verified-readback or attribution guards through its
+existing PlanSpec, approvals and native execution. Fixed formatter capability
+steps remain inspectable but unsupported for adoption by that consumer. An
+explicit structured research candidate requires a completed research-dossier
+task and verified original native output. When the server verifies that source,
+the existing Task Inspector offers bounded research fields for query templates,
+source preferences, evidence fields, draft sections and stop conditions. Review
+the original Task, Attempt, Goal revision, source references and observed receipt
+in both the private draft and canonical review; adoption requires an explicit
+acknowledgment. Preparing a candidate stays inert. Reopening a known candidate
+reads that original candidate, while an uncertain preparation requires explicit
+reconciliation of the same request. Public discovery applies its approved
+query templates, source preferences, evidence fields, draft sections and stop
+conditions within the original finite programme grant. Research dossier itself
+continues to use its explicit baseline. Candidate JSON cannot install tools,
+grant permissions or change providers, budgets, credentials or runtime limits;
+it is excluded from generic recall, prompts, semantic indexing and generic M5
+selection.
+
+**Rollback to baseline** changes future selection. An already admitted task or
+discovery retains its original immutable version while current authority and
+source remain valid. Tombstones, explicit revocation, changed Goal/source state
+or expired original grants block the next owned boundary. Rollback does not
+renew a contacted job, grant, deadline or allowance. The Inspector retains the
+literal previous version and source for review.
+
+Provider-free Linux receipts cover authenticated review, actual completed native
+general-task source and subsequent physical output, and actual research-dossier
+source followed by public discovery using its approved strategy. They also cover
+future baseline after rollback, original-pin continuation, read-only recovery,
+source/signature/selection tamper and revocation before contact. Scripted final
+transport proves these mechanics; learned quality, provider usefulness and
+native macOS execution remain unverified.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 

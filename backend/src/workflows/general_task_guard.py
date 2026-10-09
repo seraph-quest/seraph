@@ -738,6 +738,11 @@ async def _current(jobs, db, parent_id, *, manifest=None):
         owner_kind=parent.owner_kind, owner_principal_id=parent.owner_principal_id,
         session_id=parent.session_id, authority=parent.declared_authority_json)
     envelope = await verify_general_task_manifest(db, parent, task, attempt, selected)
+    if envelope.strategy.status == "active":
+        from src.memory.task_methods import current_method
+        from src.work_board.contracts import WorkBoardOwner
+        await current_method.validate_pinned(WorkBoardOwner(principal_id=task.owner_principal_id,
+            session_id=task.owner_session_id), envelope.task_input.goal_ref, envelope.strategy, db=db)
     return parent, task, attempt, selected, envelope
 
 
@@ -1670,6 +1675,11 @@ class _ChildAdmission:
         descriptors = [item for item in envelope.descriptors if step is not None and item.tool_id == step.tool_id]
         if len(descriptors) != 1 or digest(descriptors[0].model_dump(mode="json")) != binding.descriptor_digest:
             raise DurableJobLeaseError("general task child descriptor is outside the original selected grant")
+        if step.tool_id == "document_build":
+            authority = json.loads(child.declared_authority_json)
+            if (child.priority != task.priority or authority.get("document_build_priority") != task.priority
+                    or authority.get("document_build_input_artifact_id") != task.input_artifact_id):
+                raise DurableJobLeaseError("original document build priority/input binding changed")
         native_input, input_record = verify_staged_task_artifact(self.staged_input,
             parent_job_id=parent.run_identity, creation_digest=previous.creation_digest)
         resolved_inputs = await resolve_current_native_step_inputs(

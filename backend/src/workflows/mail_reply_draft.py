@@ -294,7 +294,7 @@ def _open_private_draft(
         try:
             final_fd = os.open(
                 filename,
-                flags | nofollow | cloexec,
+                flags | nofollow | cloexec | getattr(os, "O_NONBLOCK", 0),
                 _PRIVATE_FILE_MODE,
                 dir_fd=parent_fd,
             )
@@ -463,6 +463,46 @@ def read_private_draft(relative_path: str, expected_sha256: str) -> dict[str, An
     return decoded
 
 
+def delete_private_draft(relative_path: str, expected_sha256: str, *, expected_root: Mapping[str, Any]) -> dict[str, bool]:
+    """Remove only the exact closed owner's private ciphertext; verify absence.
+
+    The caller records its canonical cleanup reservation before this function.
+    This helper grants no authority and accepts no arbitrary artifact path.
+    """
+    from src.workspace import canonical_workspace_root_identity
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        raise OSError("mail reply artifact digest is invalid")
+    if canonical_workspace_root_identity(settings.workspace_dir) != dict(expected_root):
+        raise OSError("mail reply artifact workspace changed")
+    with _open_private_parent(relative_path) as (parent_fd, filename, nofollow, cloexec, owner_uid):
+        try:
+            descriptor = os.open(filename, os.O_RDONLY | nofollow | cloexec | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
+        except FileNotFoundError:
+            return {"absent": True, "deleted_now": False}
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != owner_uid
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != _PRIVATE_FILE_MODE
+                or before.st_size > 96 * 1024):
+                raise OSError("mail reply artifact is not a private regular file")
+            encrypted = handle.read(96 * 1024 + 1)
+            after = os.fstat(handle.fileno())
+            current = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+            if (len(encrypted) != before.st_size or hashlib.sha256(encrypted).hexdigest() != expected_sha256
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                raise OSError("mail reply artifact changed before cleanup")
+            os.unlink(filename, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        try:
+            os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return {"absent": True, "deleted_now": True}
+        raise OSError("mail reply artifact absence readback failed")
+
+
 __all__ = [
     "ARTIFACT_ROOT",
     "CAPABILITY_ID",
@@ -480,6 +520,7 @@ __all__ = [
     "parse_model_output",
     "publish_private_draft",
     "read_private_draft",
+    "delete_private_draft",
     "reply_job_id",
     "write_private_draft",
 ]

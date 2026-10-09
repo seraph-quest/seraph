@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import wire from "./__fixtures__/channel-output-wire-r1.json";
+import wire from "./__fixtures__/channel-output-wire-r6.json";
 import { decodeChannelOutputReview } from "./channelCapture";
 
 // Captured from the actual authenticated C1/native physical output test,

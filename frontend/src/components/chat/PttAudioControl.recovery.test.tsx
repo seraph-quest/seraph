@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import wire from "../../lib/__fixtures__/channel-audio-task-wire-r1.json";
+import wire from "../../lib/__fixtures__/channel-audio-task-wire-r6.json";
 import type { GoalInfo } from "../../types";
 import { PttAudioControl, type PttTaskRecovery } from "./PttAudioControl";
 

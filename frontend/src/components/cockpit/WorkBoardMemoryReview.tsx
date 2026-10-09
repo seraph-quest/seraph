@@ -456,7 +456,7 @@ function WorkBoardMemoryReview({
         {proposals.map((proposal) => {
           if (proposal.schema_version === "task_method_proposal.v1") return <article key={proposal.proposal_id} aria-label="Inert task method proposal" className="rounded bg-black/20 p-2">
             <strong>Private task method candidate · {proposal.status}</strong>
-            <p>Proposal {proposal.proposal_id} · revision {proposal.revision} · behavior unchanged. This candidate cannot use ordinary memory acceptance; a separate method adoption review is required.</p>
+            <p>Proposal {proposal.proposal_id} · revision {proposal.revision}. Ordinary memory acceptance cannot adopt a method. Inspect its exact canonical scope before explicit method review.</p>
             <button type="button" disabled={!ownsTask} onClick={() => setTaskLessonId(proposal.proposal_id)}>Inspect exact task method change</button>
           </article>;
           if (task.capability_id === "memory.opportunity-preference.v1" || proposal.schema_version === "opportunity_recommendation.v1"

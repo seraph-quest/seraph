@@ -1666,6 +1666,9 @@ async def _write_memory_action_audit(
         "expire": "memory_learning_expired",
         "rollback": "memory_learning_rolled_back",
         "recover": "memory_learning_source_reverified",
+        "disable": "task_method_family_disabled",
+        "activate": "task_method_version_activated",
+        "delete": "memory_learning_deleted",
     }[action]
     event = AuditEvent(
         session_id=owner_session_id,

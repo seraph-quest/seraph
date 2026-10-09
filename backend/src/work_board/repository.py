@@ -1140,9 +1140,11 @@ class WorkBoardRepository:
         origin_session_id: str | None = None,
         publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
         _specialist_publication=None,
+        _procedure_invocation=None,
     ) -> BoardMutation:
         return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
-            publication_authority_check=publication_authority_check, _specialist_publication=_specialist_publication)
+            publication_authority_check=publication_authority_check, _specialist_publication=_specialist_publication,
+            _procedure_invocation=_procedure_invocation)
 
     async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
                                   staged_input=None, publication_witness=None) -> BoardMutation:
@@ -1155,7 +1157,8 @@ class WorkBoardRepository:
 
     async def _create_task(self, db, owner, request, *, origin_session_id=None,
                            publication_authority_check=None, staged_text=None,
-                           staged_input=None, publication_witness=None, _specialist_publication=None) -> BoardMutation:
+                           staged_input=None, publication_witness=None, _specialist_publication=None,
+                           _procedure_invocation=None) -> BoardMutation:
         self._validate_task_fields(request)
         if (request.idempotency_scope == "general-task" and request.idempotency_key.startswith("specialist:")
             and _specialist_publication is None):
@@ -1218,7 +1221,7 @@ class WorkBoardRepository:
                 or staged_text.original_root_id != owner.session_id
                 or staged_text.request_digest != _payload_digest(request)):
                 raise BoardError("pipeline_task_changed", "The staged task binding changed", status_code=409)
-        elif request.input_artifact_id or publication_authority_check is not None:
+        elif request.input_artifact_id or publication_authority_check is not None or _procedure_invocation is not None:
             # Reserve the writer before reading the owner/goal/artifact graph.
             # Those reads establish the authority that is bound by the task
             # insert; moving the fence after redaction would allow a stale
@@ -1234,6 +1237,8 @@ class WorkBoardRepository:
             )
         )
         existing = existing_result.scalar_one_or_none()
+        if _procedure_invocation is not None:
+            await _procedure_invocation.check(db, existing)
         if existing is not None:
             if request.input_artifact_id:
                 # Replays must remain idempotent after a successful browser

@@ -205,6 +205,13 @@ def method_constraints(binding, descriptors):
         raise BoardError("general_task_strategy_blocked", "Current method is blocked", status_code=409)
     from src.memory.task_lessons import TaskMethod, ToolStep, GuardStep
     try:
+        if binding.typed_data.get("schema_version") == "ProcedurePlan.v3":
+            from src.workflows.procedure_contracts import ProcedureCandidateV3, validate_procedure_tool_contracts
+            candidate = ProcedureCandidateV3.model_validate(binding.typed_data)
+            if digest(candidate.model_dump(mode="json")) != binding.digest:
+                raise ValueError("procedure digest mismatch")
+            validate_procedure_tool_contracts(candidate.plan, descriptors)
+            return {"procedure": candidate.plan, "guards": []}
         method = TaskMethod.model_validate(binding.typed_data)
         if method.family != "general" or digest(method.model_dump(mode="json")) != binding.digest:
             raise ValueError("method scope/digest mismatch")
@@ -360,6 +367,16 @@ class GeneralTaskService:
 
     def validate_method_plan(self, envelope):
         constraints = self.method_constraints(envelope.strategy)
+        if constraints is not None and "procedure" in constraints:
+            from src.workflows.procedure_contracts import validate_procedure_plan_instance
+            if envelope.plan is None:
+                raise BoardError("procedure_parameter_input_required", "Supply the complete reviewed explicit plan", status_code=409)
+            try:
+                validate_procedure_plan_instance(constraints["procedure"], envelope.plan,
+                    envelope.task_input.requested_output)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise BoardError("procedure_plan_instance_invalid", "Plan differs from the exact reviewed substitution", status_code=409) from exc
+            return
         if constraints is None or envelope.plan is None:
             return
         if [step.tool_id for step in envelope.plan.steps] != constraints["tool_sequence"]:
@@ -506,7 +523,8 @@ class GeneralTaskService:
         return envelope
 
     async def create(self, db, owner, request: GeneralTaskCreate, *, _specialist_context=None,
-                     publication_authority_check=None, publication_authority_scope=None):
+                     publication_authority_check=None, publication_authority_scope=None,
+                     _procedure_invocation=None):
         if request.idempotency_key.startswith("specialist:") and _specialist_context is None:
             raise BoardError("specialist_delegation_publication_denied", "Specialist publication namespace is private", status_code=422)
         if request.input.communication_selection is not None and request.plan is None:
@@ -525,6 +543,11 @@ class GeneralTaskService:
             WorkBoardTask.idempotency_key == request.idempotency_key))
         if existing is not None:
             original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
+            if _procedure_invocation is not None:
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                existing = await self.repository.get_task(db, owner, existing.task_id)
+                await _procedure_invocation.check(db, existing, original=original)
             compared_input = request.input.model_copy(update={"tool_set_digest":
                 request.input.tool_set_digest or original.task_input.tool_set_digest})
             if (compared_input != original.task_input or request.goal_revision != existing.goal_revision
@@ -552,7 +575,10 @@ class GeneralTaskService:
         await self.repository._validate_goal(db, owner, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision)
         if _specialist_context is None:
-            await self.strategy(owner, request.input.goal_ref)
+            selected_strategy = await self.strategy(owner, request.input.goal_ref)
+            if (request.plan is None and selected_strategy.status == "active"
+                and selected_strategy.typed_data.get("schema_version") == "ProcedurePlan.v3"):
+                raise BoardError("procedure_parameter_input_required", "Supply the complete reviewed explicit plan", status_code=409)
         else:
             await self._specialist_strategy(db, owner, request, _specialist_context)
         if _specialist_context is not None:
@@ -625,6 +651,37 @@ class GeneralTaskService:
                     expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
                 envelope = envelope.model_copy(update={"proposal_group": group})
         envelope = envelope.model_copy(update={"evidence": evidence})
+        if _procedure_invocation is not None:
+            _procedure_invocation.stage_envelope(envelope)
+        elif (envelope.strategy.status == "active"
+            and envelope.strategy.typed_data.get("schema_version") == "ProcedurePlan.v3"):
+            # Ordinary explicit-plan admissions use the same current selection
+            # owner. Freeze its pointer revision before off-writer staging and
+            # recheck the exact pin under the final publication writer.
+            from src.memory.task_methods import current_method, _context, _pointer, _pointer_valid, ActiveMethodBinding
+            identity, method_scope = await _context(db, owner, request.input.goal_ref, "general")
+            selected_pointer = await _pointer(db, identity, method_scope)
+            if (selected_pointer is None or selected_pointer.baseline or current_method._key is None
+                or not _pointer_valid(selected_pointer, current_method._key)):
+                raise BoardError("method_invocation_pointer_changed", "Refresh the current reviewed method", status_code=409)
+            selected_revision = selected_pointer.revision
+            original_check = publication_authority_check
+            async def procedure_publication_check(check_db):
+                current_identity, current_scope = await _context(check_db, owner, request.input.goal_ref, "general")
+                pointer = await _pointer(check_db, current_identity, current_scope)
+                if (pointer is None or pointer.baseline or current_method._key is None
+                    or pointer.revision != selected_revision or not _pointer_valid(pointer, current_method._key)):
+                    raise BoardError("method_invocation_pointer_changed", "Refresh the current reviewed method", status_code=409)
+                selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
+                binding = await current_method._version(check_db, selected, current_identity, current_scope, allow_rollback=False)
+                if binding != envelope.strategy:
+                    raise BoardError("method_invocation_pin_changed", "Refresh the exact current reviewed version", status_code=409)
+                from src.workflows.procedure_contracts import ProcedureCandidateV3, validate_procedure_plan_instance
+                candidate = ProcedureCandidateV3.model_validate(binding.typed_data)
+                validate_procedure_plan_instance(candidate.plan, envelope.plan, envelope.task_input.requested_output)
+                if original_check is not None:
+                    await original_check(check_db)
+            publication_authority_check = procedure_publication_check
         if envelope.task_input.document_source is not None:
             from src.work_board.document_preparation import resolve
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
@@ -665,7 +722,10 @@ class GeneralTaskService:
                 requires_review=_specialist_context is None,
                 origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None),
                 publication_authority_check=publication_authority_check,
-                _specialist_publication=specialist_witness)
+                _specialist_publication=specialist_witness,
+                _procedure_invocation=_procedure_invocation)
+            if _procedure_invocation is not None and not mutation.idempotent_replay:
+                await _procedure_invocation.publish(db, mutation.task)
             if publication_authority_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.
@@ -978,8 +1038,11 @@ class GeneralTaskService:
             raise BoardError("general_task_resume_binding_changed", "Original pending plan step required", status_code=409)
         await read_current_native_outputs(db, parent, task, attempt, manifest, envelope, step.depends_on)
         private = read_bound_native_tool_input(child, binding)
-        descriptor = next((item for item in self.registry.descriptors() if item.tool_id == private.tool_id), None)
-        if descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest:
+        descriptor = next((item for item in envelope.descriptors if item.tool_id == private.tool_id), None)
+        current_descriptor = next((item for item in self.registry.descriptors() if item.tool_id == private.tool_id), None)
+        from src.workflows.procedure_contracts import procedure_execution_descriptor_matches
+        if (descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest
+            or not procedure_execution_descriptor_matches(current_descriptor, descriptor)):
             raise BoardError("general_task_tool_contract_changed", "Original registered descriptor required", status_code=409)
         metadata = self.registry.approval_context(descriptor, private.inputs, job_id=child.run_identity)
         if (metadata["fingerprint"] != transition.approval_fingerprint
@@ -1061,8 +1124,9 @@ class GeneralTaskService:
         current, _ = self.snapshot()
         self.validate_method_plan(envelope)
         by_id = {item.tool_id: item for item in current}
+        from src.workflows.procedure_contracts import procedure_execution_descriptor_matches
         for prior in envelope.descriptors:
-            if prior != by_id.get(prior.tool_id):
+            if not procedure_execution_descriptor_matches(by_id.get(prior.tool_id), prior):
                 raise BoardError("general_task_tool_contract_changed", "Restore or revise the tool contract", status_code=409)
         if len(envelope.plan.steps) > envelope.task_input.limits.max_steps:
             raise BoardError("general_task_plan_invalid", "Plan exceeds its finite task allowance", status_code=422)
@@ -1075,8 +1139,8 @@ class GeneralTaskService:
                     if envelope.specialist_handoff is None:
                         raise ValueError("copied evidence pointers require an internal handoff")
                     validate_evidence_pointers(step.input, envelope.task_input.evidence_refs)
-                descriptor = by_id.get(step.tool_id)
-                if descriptor is None or descriptor not in envelope.descriptors:
+                descriptor = next((item for item in envelope.descriptors if item.tool_id == step.tool_id), None)
+                if descriptor is None or not procedure_execution_descriptor_matches(by_id.get(step.tool_id), descriptor):
                     raise ValueError("step descriptor is unavailable")
                 validate_schema(step.output_contract, check_value=False)
                 if not schema_accepts_output(descriptor.output_schema, step.output_contract):

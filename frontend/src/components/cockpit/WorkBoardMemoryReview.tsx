@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import type { OpportunityPreferenceProposal, WorkBoardTask } from "../../types";
+import type { GoalInfo, OpportunityPreferenceProposal, WorkBoardTask } from "../../types";
 import { actOnOpportunityPreference, inspectOpportunityPreference } from "../../lib/opportunityPreferences";
 import { createGuardianUuid } from "../../lib/guardianInbox";
 import { TaskLessonReview } from "./TaskLessonReview";
@@ -125,6 +125,8 @@ interface WorkBoardMemoryReviewProps {
   task: WorkBoardTask;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
+  goals?: GoalInfo[];
+  onCreated?: (id: string) => Promise<void>;
 }
 
 const SAFE_ERROR_MESSAGES: Record<string, string> = {
@@ -179,6 +181,8 @@ function WorkBoardMemoryReview({
   task,
   ownerPrincipalId,
   ownerSessionId,
+  goals,
+  onCreated,
 }: WorkBoardMemoryReviewProps) {
   const [proposals, setProposals] = useState<TaskMemoryProposal[]>([]);
   const [receipts, setReceipts] = useState<SafeDecisionReceipt[]>([]);
@@ -425,7 +429,7 @@ function WorkBoardMemoryReview({
 
   return (
     <section className="rounded border border-white/10 p-3" aria-label="Verified outcome memory review">
-      <TaskLessonReview task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} proposalId={taskLessonId} />
+      <TaskLessonReview task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} proposalId={taskLessonId} goals={goals} onCreated={onCreated} />
       <div className="flex items-center justify-between gap-2">
         <div className="font-semibold">Learning from this task</div>
         {ownsTask && task.capability_id !== "memory.opportunity-preference.v1" && (

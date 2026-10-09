@@ -32,6 +32,40 @@ from src.vault.repository import vault_repository
 
 logger = logging.getLogger(__name__)
 
+
+def _mcp_procedure_contract(declaration, input_schema, *, extension_id, reference, server_id, tool_name):
+    """Only the current trusted local producer declares reusable ordinary leaves."""
+    from src.workflows.procedure_contracts import ProcedureInputContractV1, ProcedureInputLeafV1, procedure_v3_digest, _pointer_segments
+    declared = declaration.get("procedure_inputs")
+    if declared is None:
+        return None
+    if not isinstance(declared, list) or not 1 <= len(declared) <= 64:
+        raise ValueError("bounded local producer classifications required")
+    from src.work_board.dispatcher import _AUTHORITY_INPUT_KEYS
+    denied = set(_AUTHORITY_INPUT_KEYS) | {"body", "content", "headers", "code", "script",
+        "snippet", "command", "expression", "credentials", "credential", "credential_ref",
+        "password", "secret", "secret_ref", "api_key", "token", "authorization", "cookie",
+        "provider", "model", "verifier", "permissions", "effects", "policy", "install",
+        "deadline", "budget", "limits", "allowed_tool_ids"}
+    leaves = []
+    for raw in declared:
+        leaf = ProcedureInputLeafV1.model_validate(raw)
+        schema = input_schema
+        segments = _pointer_segments(leaf.input_pointer)
+        for segment in segments:
+            if segment.casefold().replace("-", "_") in denied and leaf.kind != "forbidden":
+                raise ValueError("authority, credentials and free body cannot be reusable")
+            if schema.get("type") != "object" or segment not in schema.get("properties", {}):
+                raise ValueError("producer classification must name an exact advertised leaf")
+            schema = schema["properties"][segment]
+        if schema != leaf.schema:
+            raise ValueError("producer classification schema must match exact advertised leaf")
+        leaves.append(leaf)
+    identity = procedure_v3_digest([extension_id, reference, server_id, tool_name])
+    return ProcedureInputContractV1(producer_id="seraph.mcp:" + identity,
+        producer_version=declaration["version"], input_schema_digest=procedure_v3_digest(input_schema),
+        classifications=leaves)
+
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
 _VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
 TASK_OUTPUT_BYTES = 64 * 1024
@@ -1030,7 +1064,10 @@ class MCPManager:
                             output_schema=output_schema, effects=effects,
                             permissions=declaration["permissions"], credential_refs=credentials,
                             deadline=declaration["deadline"], verifier="json_schema.v1",
-                            server_id=server_id, connection_revision=revision, policy_digest=digest(policy))
+                            server_id=server_id, connection_revision=revision, policy_digest=digest(policy),
+                            procedure_inputs=_mcp_procedure_contract(declaration, input_schema,
+                                extension_id=contribution.extension_id, reference=contribution.reference,
+                                server_id=server_id, tool_name=tool.name))
                         entries.append((descriptor, tool))
                     except (KeyError, TypeError, ValueError, SchemaError):
                         continue

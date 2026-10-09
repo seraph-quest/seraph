@@ -392,6 +392,7 @@ interface RepositorySourceStatus {
   revision: number;
   repository_review: RepositoryReview;
   repository_stop?: RepositoryStop;
+  source_recovery: RepositorySourceRecovery | null;
   patch_proposal: null | { proposal_id: string; revision: number; approval_id: string; status: string; summary: string; patch_artifact_ref: string; patch_sha256: string; expires_at: string; allowed_paths: string[]; test_args: string[] };
   approval: null | { id: string; status: string; fingerprint: string; expires_at: string };
   iterations: { index: number; input_tree_digest: string; patch_digest: string; command_refs: string[]; result_artifacts: string[] }[];
@@ -400,6 +401,29 @@ interface RepositorySourceStatus {
   provider_contacted: boolean;
   no_learning: true;
   operator_visible: true;
+}
+
+const SOURCE_RECOVERY_STATES = ["pending_original_producer", "held_unknown", "held_partial", "continuation_ready", "original_cleanup_committed", "original_stop_committed", "physical_cleanup_only"] as const;
+
+interface RepositorySourceRecovery {
+  state: typeof SOURCE_RECOVERY_STATES[number];
+  reason: string;
+  physical_hold: boolean | null;
+  original_result: "succeeded" | "failed" | "held_partial" | null;
+  public_actions: "unavailable";
+}
+
+function validateSourceRecovery(value: unknown): RepositorySourceRecovery | null {
+  // Null is an explicit authenticated Source-owner projection, never a client
+  // classification based on missing proof or a missing response field.
+  if (value === null) return null;
+  if (!isRecord(value) || !exactKeys(value, ["state", "reason", "physical_hold", "original_result", "public_actions"])
+    || !SOURCE_RECOVERY_STATES.includes(value.state as RepositorySourceRecovery["state"])
+    || typeof value.reason !== "string" || !/^[a-z][a-z0-9_]{0,127}$/.test(value.reason)
+    || (value.physical_hold !== null && typeof value.physical_hold !== "boolean")
+    || (value.original_result !== null && (typeof value.original_result !== "string" || !["succeeded", "failed", "held_partial"].includes(value.original_result)))
+    || value.public_actions !== "unavailable") throw new Error("The repository Source recovery readback is malformed.");
+  return value as unknown as RepositorySourceRecovery;
 }
 
 interface RepositorySourcePreview {
@@ -437,13 +461,14 @@ function validateRepositoryReview(value: unknown, jobId: string): RepositoryRevi
 
 function validateRepositoryStatus(value: unknown, jobId: string): RepositorySourceStatus {
   const reject = (): never => { throw new Error("The repository Source status is malformed or belongs to another job."); };
-  const keys = ["job_id", "status", "revision", "repository_review", "patch_proposal", "approval", "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"];
+  const keys = ["job_id", "status", "revision", "repository_review", "source_recovery", "patch_proposal", "approval", "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"];
   if (isRecord(value) && Object.prototype.hasOwnProperty.call(value, "repository_stop")) keys.push("repository_stop");
   if (!isRecord(value) || !exactKeys(value, keys)
     || value.job_id !== jobId || !isBoundedString(value.status, 64) || !isSafeNonNegativeInteger(value.revision, Number.MAX_SAFE_INTEGER)
     || !isBoundedString(value.recovery_action, 128) || typeof value.provider_contacted !== "boolean" || value.no_learning !== true || value.operator_visible !== true
     || !Array.isArray(value.iterations) || value.iterations.length > 3 || !Array.isArray(value.iteration_states) || value.iteration_states.length !== value.iterations.length) return reject();
   const review = validateRepositoryReview(value.repository_review, jobId);
+  validateSourceRecovery(value.source_recovery);
   const stop = value.repository_stop;
   const automaticReasons = ["deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"];
   if (Object.prototype.hasOwnProperty.call(value, "repository_stop")) {
@@ -1263,7 +1288,8 @@ export function RepoRepairInspector({
     const current = repositoryForRender;
     const review = current.repository_review;
     const preview = repositoryPreview;
-    const effectsBlocked = Boolean(current.repository_stop) || review.contact_state === "not_prepared";
+    const effectsBlocked = Boolean(current.repository_stop) || review.contact_state === "not_prepared"
+      || (current.source_recovery !== null && current.source_recovery.state !== "continuation_ready");
     const canInspect = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "review_code_egress" && review.contact_state === "not_started";
     const canExecute = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "execute_approved_patch" && current.patch_proposal?.status === "awaiting_approval"
       && current.approval?.status === "approved" && isFiniteFutureTimestamp(current.approval.expires_at) && isFiniteFutureTimestamp(current.patch_proposal.expires_at);
@@ -1271,6 +1297,13 @@ export function RepoRepairInspector({
       <div className="font-semibold">Repository repair</div>
       <div>{statusLabel(current.status)}{review.contact_state !== "not_prepared" && <> · iteration {review.iteration_index} of at most 3</>}</div>
       <div>Provider contact: {current.provider_contacted ? "recorded" : "not recorded"} · no learning</div>
+      {current.source_recovery && <div aria-label="Original Source recovery readback">
+        <div>Original recovery: {statusLabel(current.source_recovery.state)}</div>
+        <div>Recovery reason: {current.source_recovery.reason}</div>
+        <div>Original physical hold: {current.source_recovery.physical_hold === null ? "unknown" : current.source_recovery.physical_hold ? "held" : "released"}</div>
+        <div>Original result: {current.source_recovery.original_result === null ? "unavailable" : statusLabel(current.source_recovery.original_result)}</div>
+        <div role="status">Public Source recovery actions are unavailable pending acceptance. Refresh reads the original durable status; no recovery is retried.</div>
+      </div>}
       {current.repository_stop && <div>
         <div>Stop reason: {current.repository_stop.reason}</div>
         <div role="status">{current.repository_stop.pending ? "Original reservation remains held. Physical cleanup is pending verification." : "Original repository stop recorded."}</div>

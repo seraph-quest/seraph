@@ -14,12 +14,103 @@ from contextlib import asynccontextmanager, ExitStack
 from dataclasses import dataclass, field
 import weakref
 from types import MappingProxyType
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from src.work_board.contracts import WorkBoardOwner
 from src.workflows.job_runtime import DurableJobLeaseError
 
 
 _ACTIONS = frozenset({"reconcile_original_cleanup", "settle_original_host_boot_cleanup"})
+
+
+class RepositorySourceRecoveryProjection(BaseModel):
+    """Bounded operator metadata; this result never grants recovery authority."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    state: Literal["pending_original_producer", "held_unknown", "held_partial",
+        "continuation_ready", "original_cleanup_committed", "original_stop_committed",
+        "physical_cleanup_only"]
+    reason: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]*$")
+    physical_hold: bool | None
+    original_result: Literal["succeeded", "failed", "held_partial"] | None
+    public_actions: Literal["unavailable"] = "unavailable"
+
+
+def _latest_original_repository_registration(run):
+    """Select only protected original registrations, within the original cap."""
+    source = _source()
+    original, work, *_ = source.read_repository_original(run)
+    if source.read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3":
+        return None
+    latest = None
+    for index in range(1, work.limits.max_iterations + 1):
+        identity = source.iteration_identity(run.run_identity, original["repository_attempt_id"],
+            source._source_digest(original["original_input"]), index)
+        present = source._repository_record(run, "repository:producer:" + identity)
+        if present is not None:
+            if latest is None and index != 1 or latest is not None and index != latest["iteration_index"] + 1:
+                raise RepositorySourceRecoveryError("original_producer_registration_changed")
+            latest = read_registered_repository_producer(run, iteration_index=index)
+        elif source._repository_record(run, "repository:execution:" + identity) is not None:
+            raise RepositorySourceRecoveryError("original_producer_registration_missing")
+    return latest
+
+
+def repository_source_recovery_projection(service, jobs, run):
+    """Current durable metadata only; unknown liveness stays unproven."""
+    source = _source()
+    registration = _latest_original_repository_registration(run)
+    if registration is None:
+        return None
+    identity = registration["iteration_id"]
+    hold = jobs._repo_repair_reservation_state(run)
+    original = source.read_repository_original(run)[0]
+    if hold is not None and (not jobs._repo_repair_reservation_matches(hold,
+            job_id=run.run_identity, attempt_id=original["repository_attempt_id"],
+            fence=run.fencing_token, authority_digest=run.authority_digest)
+            or hold["execution_deadline_at"] != original["original_deadline_at"]):
+        raise RepositorySourceRecoveryError("repository_source_recovery_hold_changed")
+    physical_hold = None if hold is None else hold["status"] == "held"
+    cleanup = source._repository_record(run, "repository:cleanup:" + identity)
+    readback = source._repository_record(run, "repository:readback:" + identity)
+    stop = source._repository_record(run, "repository:stop-intent:v1")
+    terminal = source._repository_record(run, "repository:terminal:v1")
+    state, reason, result = "held_unknown", "original_completion_unproven", None
+    if cleanup is not None or readback is not None:
+        if (cleanup is None or readback is None or cleanup.get("cleanup_proven") is not True
+                or cleanup.get("status") != readback.get("status")
+                or readback.get("status") not in {"succeeded", "failed", "held_partial"}):
+            raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
+        result = readback["status"]
+        state, reason = "original_cleanup_committed", "original_cleanup_committed"
+        if result == "held_partial":
+            state, reason = "held_partial", "original_requested_checks_incomplete"
+        elif result == "failed" and stop is None:
+            _, work, *_ = source.read_repository_original(run)
+            index = registration["iteration_index"]
+            if index < work.limits.max_iterations:
+                original = source.read_repository_original(run)[0]
+                next_id = source.iteration_identity(run.run_identity, original["repository_attempt_id"],
+                    source._source_digest(original["original_input"]), index + 1)
+                if source._repository_record(run, "repository:prepared:" + next_id) is not None:
+                    state, reason = "continuation_ready", "original_next_review_ready"
+    else:
+        callback = service._iterative_process_callbacks.get(identity)
+        job = service._iterative_process_jobs.get(identity)
+        if (callback is not None and not callback.done() and job is not None
+                and job.job_id == run.run_identity
+                and job.attempt_id == registration["repository_attempt_id"]
+                and job.fencing_token == registration["root_fence"]):
+            state, reason = "pending_original_producer", "pending_original_producer"
+    if stop is not None:
+        reason = "original_stop_pending"
+        if (terminal is not None and terminal.get("schema") == "repository.stop_terminal.v1"
+                and run.status in {"failed", "cancelled"} and physical_hold is False):
+            state, reason = "original_stop_committed", "original_stop_committed"
+    return RepositorySourceRecoveryProjection(state=state, reason=reason,
+        physical_hold=physical_hold, original_result=result).model_dump(mode="json")
 _FENCES = weakref.WeakKeyDictionary()
 _FENCE_SEAL = object()
 _COMPLETIONS = weakref.WeakKeyDictionary()
@@ -1135,6 +1226,83 @@ async def recover_original_repository_cleanup(service, jobs, *, job_id, owner,
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
 
 
+async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner,
+        expected_job_revision):
+    """Internal candidate: original same-boot owners, with no public enablement.
+
+    Caller data chooses only the current Root revision. Selection precedes no
+    grant: the actual owner checks that revision again under its single fence.
+    """
+    source = _source()
+    if type(expected_job_revision) is not int or expected_job_revision < 0:
+        raise RepositorySourceRecoveryError("repository_source_recovery_request_invalid")
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
+            raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+        if run.revision != expected_job_revision:
+            raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+        registration = _latest_original_repository_registration(run)
+        if registration is None:
+            raise RepositorySourceRecoveryError("original_producer_registration_missing")
+        index, identity = registration["iteration_index"], registration["iteration_id"]
+        unknown = run.status == "unknown_external_effect"
+    if unknown:
+        # Ordinary discovery retains its exact Unknown successor predicate.
+        # The separately registered known-post verifier cannot be replaced by
+        # metadata or used here to manufacture terminal/publication authority.
+        async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
+            await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
+                expected_job_revision=expected_job_revision, fence=fence)
+            return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+    # Each scope independently authenticates the exact original registration,
+    # current rows, physical owner and optimistic revision. Never nest locks.
+    next_iteration = None
+    try:
+        async with stage_original_repository_completion_publication(service, jobs, job_id=job_id, owner=owner,
+                iteration_index=index, expected_job_revision=expected_job_revision) as completion:
+            outcome = repository_completion_outcome(completion)
+            context = repository_completion_context(completion)
+            async with jobs._session() as db:
+                current = await jobs._fetch(db, job_id)
+                stopping = source._repository_record(current, "repository:stop-intent:v1")
+                current_status = current.status
+            if stopping is not None or current_status == "unknown_external_effect":
+                # The existing terminal Stop owner requires complete Running
+                # positive authority. Unknown and partial never inherit it.
+                pass
+            elif outcome["status"] == "succeeded":
+                await source.finalize_recovered_repository_iteration(service, jobs,
+                    job_id=job_id, owner=owner, iteration_index=index,
+                    completion_witness=completion)
+            elif outcome["status"] == "failed" and index < context["work"].limits.max_iterations:
+                next_iteration = index + 1
+            elif outcome["status"] == "held_partial":
+                pass
+    except ValueError as exc:
+        if str(exc) != "pending_original_producer":
+            raise
+        # Only the actual physical owner supplies this finite Pending code.
+        # No stored registration or Running status impersonates liveness.
+        projection = await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+        packet = projection["source_recovery"]
+        if packet is None:
+            raise RepositorySourceRecoveryError("original_producer_registration_changed") from exc
+        projection["source_recovery"] = RepositorySourceRecoveryProjection(
+            state="pending_original_producer", reason="pending_original_producer",
+            physical_hold=packet["physical_hold"], original_result=packet["original_result"]).model_dump(mode="json")
+        return projection
+    except FileNotFoundError:
+        # Missing authenticated closure remains held, without an invented result.
+        return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+    if next_iteration is not None:
+        # Cleanup committed and the physical/Source fence is CLOSED before the
+        # original preparation owner applies all current caps/consent gates.
+        await source.prepare_repository_iteration(service, jobs, job_id=job_id,
+            owner=owner, iteration_index=next_iteration)
+    return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+
+
 def _assert_source_completion_append_metadata(run, identity, metadata):
     """Literal constructor metadata binds the existing two journal wrappers."""
     from src.workflows.job_runtime import _digest
@@ -1477,6 +1645,9 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
         raise RepositorySourceRecoveryError("original_repository_completion_owner_required")
     async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
         source._assert_task_publication_configuration(service)
+        if _scoped:
+            await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
+                expected_job_revision=expected_job_revision, fence=fence)
         async with jobs._session() as db:
             run = await jobs._fetch(db, job_id)
             if expected_job_revision is not None and (type(expected_job_revision) is not int

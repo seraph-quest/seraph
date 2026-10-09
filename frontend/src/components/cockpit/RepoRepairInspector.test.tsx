@@ -729,9 +729,89 @@ function repositorySourceStatus() {
     job_id: 'repository:source-test', status: 'running', revision: 6,
     repository_review: {native_child_id:'general-tool:source-test',repository_job_id:'repository:source-test',iteration_index:1,
       iteration_id:'a'.repeat(64),preparation_digest:'b'.repeat(64),contact_state:'not_started',source_preview_path:'/api/workflows/repo-repair/repository:source-test/source-preview'},
-    patch_proposal:null,approval:null,iterations:[],iteration_states:[],recovery_action:'review_code_egress',provider_contacted:false,no_learning:true,operator_visible:true,
+    source_recovery:null,patch_proposal:null,approval:null,iterations:[],iteration_states:[],recovery_action:'review_code_egress',provider_contacted:false,no_learning:true,operator_visible:true,
   };
 }
+
+describe('RepoRepairInspector original Source recovery readback', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); window.sessionStorage.clear(); });
+  const recovery = { state: 'held_unknown', reason: 'original_completion_unproven', physical_hold: true,
+    original_result: null, public_actions: 'unavailable' };
+  it.each(['pending_original_producer', 'held_unknown', 'held_partial', 'continuation_ready',
+    'original_cleanup_committed', 'original_stop_committed', 'physical_cleanup_only'])('renders owner state %s without enabling recovery', async (state) => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: {
+      ...recovery, state, physical_hold: state === 'physical_cleanup_only' ? false : true,
+      original_result: state === 'held_partial' ? 'held_partial' : null,
+    } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText(`Original recovery: ${state.replace(/_/g, ' ')}`)).toBeInTheDocument();
+    expect(screen.getByText(`Original physical hold: ${state === 'physical_cleanup_only' ? 'released' : 'held'}`)).toBeInTheDocument();
+    expect(screen.getByText(`Original result: ${state === 'held_partial' ? 'held partial' : 'unavailable'}`)).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/no learning/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /recover|reconcile|settle/i })).not.toBeInTheDocument();
+    if (state !== 'continuation_ready') expectNoRepositoryEffects();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.every(call => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
+  it('keeps unknown physical hold distinct from released capacity', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: { ...recovery, physical_hold: null } })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original physical hold: unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Original physical hold: released')).not.toBeInTheDocument();
+  });
+
+  it.each(['succeeded', 'failed'])('renders original %s without inferring it from cleanup', async (original_result) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: {
+      ...recovery, state: 'original_cleanup_committed', physical_hold: false, original_result,
+    } })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText(`Original result: ${original_result}`)).toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+
+  it('clears held recovery readback after a foreign-job refresh', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response({ ...repositorySourceStatus(), source_recovery: recovery }))
+      .mockResolvedValueOnce(response({ ...repositorySourceStatus(), job_id: 'repository:foreign', source_recovery: recovery }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original physical hold: held')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+
+  it.each([
+    ['unknown state', { ...recovery, state: 'recovered' }],
+    ['extra private data', { ...recovery, private_path: '/private/key' }],
+    ['unsafe reason', { ...recovery, reason: '/private/key' }],
+    ['unbounded reason', { ...recovery, reason: 'a'.repeat(129) }],
+    ['missing result', { state: recovery.state, reason: recovery.reason, physical_hold: true, public_actions: 'unavailable' }],
+    ['untyped hold', { ...recovery, physical_hold: 'false' }],
+    ['invented result', { ...recovery, original_result: 'verified' }],
+    ['array result', { ...recovery, original_result: ['succeeded'] }],
+    ['caller enablement', { ...recovery, public_actions: 'available' }],
+  ])('rejects %s without retaining controls', async (_label, source_recovery) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+  });
+
+  it('rejects a stale backend missing the required current projection field', async () => {
+    const payload: Record<string, unknown> = repositorySourceStatus();
+    delete payload.source_recovery;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(payload)));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+});
 
 describe('RepoRepairInspector current Source metadata boundary',()=>{
   beforeEach(()=>{vi.stubGlobal('fetch',vi.fn());window.sessionStorage.clear();});
@@ -800,7 +880,10 @@ function capturedRepositoryState(raw: string) {
   };
   const sourceCall = capture.captures.find((call) => call.status === 200 && call.path.startsWith('/api/workflows/repo-repair/'))!;
   const taskCall = capture.captures.find((call) => call.status === 200 && call.path.startsWith('/api/work-board/tasks/'))!;
-  const source = sourceCall.response;
+  // Preserve the literal R199 capture and its hash. This derived parser input
+  // adds the current owner's explicit not-applicable field; it is not a fresh
+  // current API receipt or proof of Source recovery execution.
+  const source = { ...sourceCall.response, source_recovery: null } as Record<string, unknown>;
   const task = taskCall.response.task as Record<string, unknown>;
   const review = task.repository_review as Record<string, unknown>;
   return { capture, source, sourceCall, task, review, props: {
@@ -832,7 +915,7 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
   beforeEach(() => { window.sessionStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); window.sessionStorage.clear(); });
 
-  it.each(repositorySourceCaptureBytes)('binds exact $state API bytes to the same owner and Task review', async ({ state, raw, sha256 }) => {
+  it.each(repositorySourceCaptureBytes)('binds historical $state capture plus current nullable schema to the same owner and Task review', async ({ state, raw, sha256 }) => {
     expect(await capturedBytesDigest(raw)).toBe(sha256);
     const { capture, source, sourceCall, task, review, props } = capturedRepositoryState(raw);
     expect(source.repository_review).toEqual(review);

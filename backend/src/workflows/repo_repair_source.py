@@ -1559,8 +1559,18 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
                 executed = _repository_record(run, "repository:execution:" + iteration)
                 if (prepared is None or executed is None or cleanup is None
                         or cleanup.get("cleanup_proven") is not True
-                        or readback.get("status") not in {"succeeded", "failed"}):
+                        or readback.get("status") not in {"succeeded", "failed", "held_partial"}):
                     raise DurableJobLeaseError("complete actual original iteration metadata required")
+                if readback["status"] == "held_partial":
+                    # A partial closure is recovery metadata, never a complete
+                    # RepoIteration or a fabricated failed requested check.
+                    from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
+                    if read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3":
+                        raise DurableJobLeaseError("original registered partial closure required")
+                    read_registered_repository_producer(run, iteration_index=index)
+                    if cleanup.get("status") != "held_partial" or readback.get("command_results") != []:
+                        raise DurableJobLeaseError("original registered partial closure changed")
+                    continue
                 iterations.append(RepoIteration(index=index, input_tree_digest=prepared["input_tree_digest"],
                     patch_digest=executed["patch_sha256"], command_refs=["repository:execution:" + iteration],
                     result_artifacts=["repository:cleanup:" + iteration,
@@ -1594,6 +1604,8 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
         provider_contacted = await db.scalar(select(InferenceCostReservation.operation_id).where(
             InferenceCostReservation.job_id == job_id,
             InferenceCostReservation.contact_started_at.is_not(None)).limit(1)) is not None
+        from src.workflows.repo_repair_source_recovery import repository_source_recovery_projection
+        recovery = repository_source_recovery_projection(service, jobs, run)
         return {"job_id": job_id, "status": run.status, "revision": run.revision,
             "repository_review": {key: value for key, value in projection.items() if key not in
                 {"awaiting_repository_consent", "native_execution", "verified", "no_learning"}},
@@ -1606,6 +1618,7 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
             "approval": None if approval is None else {"id": approval.id, "status": approval.status,
                 "fingerprint": approval.fingerprint, "expires_at": _as_utc(approval.expires_at).isoformat()},
             "iterations": iterations, "iteration_states": iteration_states, "recovery_action": action,
+            "source_recovery": recovery,
             "provider_contacted": provider_contacted,
             "no_learning": True, "operator_visible": True,
             **({"repository_stop": stop_metadata} if stop_metadata is not None else {})}

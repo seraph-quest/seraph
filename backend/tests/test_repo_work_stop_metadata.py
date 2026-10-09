@@ -17,7 +17,7 @@ from tests.test_repo_work_task_publication import actual_native_source
 
 
 NORMAL_KEYS = {"job_id", "status", "revision", "repository_review", "patch_proposal", "approval",
-    "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"}
+    "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible", "source_recovery"}
 
 
 def test_review_discriminant_is_closed_and_contains_no_preparation():
@@ -70,6 +70,7 @@ async def test_actual_no_preparation_stop_has_same_source_and_task_review(accoun
     forbid_private_metadata_reads(monkeypatch, source)
     status = await repository_operator_projection(source, jobs, job_id=root_id, owner=owner)
     assert set(status) == NORMAL_KEYS | {"repository_stop"}
+    assert status["source_recovery"] is None  # No producer registration grants no recovery state.
     stop = status["repository_stop"]
     assert set(stop) == {"reason", "pending", "limit_evidence", "limit_evidence_digest"}
     assert stop["pending"] is pending and stop["reason"] == "cost_exhausted"

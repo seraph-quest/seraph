@@ -23,6 +23,7 @@ import type {
   OpportunityPlanRequest,
 } from "../../types";
 import { opportunityRecommendation, postOpportunityFeedback } from "../../lib/opportunityPreferences";
+import { ProgrammeDigestContent } from "./ProgrammeDigestContent";
 
 export interface GuardianInboxPanelProps {
   currentOwnerPrincipalId?: string | null;
@@ -1016,6 +1017,8 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         </button>
       </div>
       <div className="cockpit-outcome-card-body" data-testid="guardian-inbox-list">
+        <ProgrammeDigestContent ownerKey={currentOwnerPrincipalId && currentRootId ? `${currentOwnerPrincipalId}:${currentRootId}` : ""}
+          active={active} onOpenGoals={onOpenGoals} onOpenTask={onOpenTask} />
         {status ? <div className="cockpit-outcome-note" role="status">{status}</div> : null}
         {lastConfirmedAt ? <div className="cockpit-outcome-note">last confirmed · {formatTime(lastConfirmedAt)}</div> : null}
         {!(loading && items.length === 0) ? (

@@ -321,3 +321,85 @@ async def recheck_native_admission(db, run, proof):
     if fresh != staged or type(staged.get("schema_version")) is not int or staged["schema_version"] != 1:
         raise DurableJobAdmissionDenied("research_original_admission_changed")
     return staged
+
+
+# This branch is selected only by the native public programme owner. Generic
+# Work requests cannot select a service principal or fabricate an issuer Root.
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
+from typing import Literal
+from src.goals.contracts import GoalProgrammeAuthorityBinding
+from src.guardian.research_plan_contracts import ArtifactRef
+
+DISCOVERY_KIND = "goal_public_discovery_v1"
+DISCOVERY_CAPABILITY = "guardian.goal-discovery.v1"
+DISCOVERY_SERVICE = "service:guardian-goal-programmes"
+
+
+class GoalDiscoveryAuthority(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    authority_type: Literal["goal_programme_discovery_v1"]
+    principal: Literal["service:guardian-goal-programmes"]
+    owner_kind: Literal["service"]
+    service_id: Literal["service:guardian-goal-programmes"]
+    capability_id: Literal["guardian.goal-discovery.v1"]
+    capability_version: Literal["1"]
+    goal_owner_principal_id: str
+    goal_owner_session_id: str
+    programme_binding: GoalProgrammeAuthorityBinding
+    plan_ref: ArtifactRef
+    occurrence_day: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    original_job_id: str
+    budget_microusd: int = Field(strict=True, ge=0)
+    no_learning: Literal[True]
+
+    @field_validator("no_learning", mode="before")
+    @classmethod
+    def explicit_no_learning(cls, value):
+        if value is not True:
+            raise ValueError("programme execution never implicitly learns")
+        return value
+
+    @model_validator(mode="after")
+    def immutable_owner(self):
+        binding = self.programme_binding
+        if (binding.capability_id != self.capability_id
+                or self.goal_owner_principal_id != binding.issuer_principal_id
+                or self.goal_owner_session_id != binding.issuer_root_id
+                or self.budget_microusd > binding.cost_ceiling_microusd):
+            raise ValueError("programme native authority widens or changes its immutable issuer")
+        from datetime import date
+        date.fromisoformat(self.occurrence_day)
+        if not self.original_job_id.startswith("goal-discovery:"):
+            raise ValueError("programme job requires its native lineage")
+        return self
+
+
+def discovery_authority(value):
+    if isinstance(value, str):
+        import json
+        value = json.loads(value)
+    return GoalDiscoveryAuthority.model_validate(value)
+
+
+class GoalDiscoveryInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    plan_ref: ArtifactRef
+    plan_file_path: str
+    public_brief_ref: ArtifactRef
+    public_brief_file_path: str
+    no_learning: Literal[True]
+
+    @field_validator("no_learning", mode="before")
+    @classmethod
+    def literal_no_learning(cls, value):
+        if value is not True:
+            raise ValueError("explicit no-learning required")
+        return value
+
+    @field_validator("plan_file_path", "public_brief_file_path")
+    @classmethod
+    def native_namespace(cls, value):
+        import re
+        if re.fullmatch(r"goal-programmes/[0-9a-f]{32}/[0-9a-f]{64}-[0-9a-f]{64}\.json", value) is None:
+            raise ValueError("original native programme artifact path required")
+        return value

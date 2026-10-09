@@ -208,14 +208,145 @@ Saving a preview with a changed public brief immediately pauses the old
 programme; abandoning that review does not restart it. An unchanged-brief
 renewal pauses its predecessor on acceptance. A new login
 cannot renew old authority; exact pause/revoke needs separately acknowledged
-stable-owner recovery. This authority milestone alone does not run discovery or
-produce a digest; later discovery retains native job/artifact/accounting owners.
+stable-owner recovery. The authority milestone alone does not run discovery or
+produce a digest.
+
+The public discovery executor under
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) is **Partial** until its
+whole native execution and recovery implementation is independently reviewed and
+merged. Its current Python owner accepts one occurrence for the current UTC day,
+using the original finite programme, native job queue, artifact owner and cost
+ledger. There is no catch-up after downtime. The fixed path plans at most three
+queries, searches the fixed DuckDuckGo HTML route, selects at most four manifest
+items, and prepares a cited local brief and inert checklist. Each occurrence has
+the original deadline of at most 300 seconds and at most four governed inference
+requests. The programme ceiling includes every daily occurrence and accounting
+period, including unresolved reservations and contacted Unknown work.
+Narrower accepted plan limits apply to the actual query, result, source and
+inference counts and declared output bytes. Search uses each plan's per-request
+time and response-byte cap within the original deadline. The fixed four-stage
+graph consumes whole original physical outputs; alternate graphs and JSON
+pointers are unsupported rather than silently ignored.
+
+Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
+held effects and cost liability. Selecting a completed brief performs an explicit
+local readback under current owner and original generation checks. Private Goal
+text is excluded from the public model/search path. Source quotations remain
+untrusted data; mechanical citation/span verification does not establish semantic
+truth. Full original brief and omitted source-line coverage stay visible. A brief
+that cannot fit the existing bounded request becomes unsupported before contact;
+source limits never silently truncate stored evidence. An unchanged later source
+set produces a quiet brief. Prepared checklists are local proposals requiring
+separate acceptance; discovery records `no_learning` and performs no external
+mutation or digest delivery.
+The inspector retains finite search-block reasons such as `search_captcha` and
+`search_markup_drift` after authenticated owner recovery and lifecycle restart.
+It exposes no raw query or response HTML and offers no provider replay. Complete
+HTTP responses have their own physical body digests, distinct from derived
+manifest and normalized-source digests. A known parser failure can have settled
+readback while the original occurrence remains held for review; a timed-out or
+oversized transfer keeps its unresolved contact evidence.
+
+Explicit revoke, replacement generation, Goal correction or expiry may negatively
+close an occurrence only when it was never claimed, has exactly its two initial
+local readbacks, and has no cost row or contact evidence. The native cancellation
+writer rechecks the exact original binding and denial cause. Browser logout is
+not a cancellation cause. Claimed, malformed, Unknown or cost-bearing occurrences
+remain visibly held for inspection; new authority does not replay or forgive
+them. Unadopted staged files grant no contact authority. Missing, partial or
+altered files block adoption rather than being overwritten as successful output.
+
+Isolated Linux tests exercise Auth, explicit programme acceptance/logout,
+canonical SQLite admission/accounting, the actual scheduler callback, owned
+literal-loopback HTTP search/source responses and scripted governed inference
+transport. They prove mechanical execution/readback and failure boundaries;
+provider availability, real inference quality/spend and native macOS execution
+remain unverified.
 
 Isolated Linux SQLite/ASGI checks verify the finite configuration/control path,
 logout/restart clocks, owner recovery and fail-closed correction boundaries.
 They make no provider calls and establish neither macOS execution nor model
 quality. The native contact/adoption executor still requires its separately
 implemented and reviewed integration before activation.
+
+## Daily programme digest and follow-through
+
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) implementation
+adds a passive daily programme digest and finding dispositions to Home and the
+Guardian Inbox on `develop` revisions containing that milestone merge. Earlier
+revisions require the independently reviewed merge; feature-branch receipts do
+not establish their availability.
+The existing Python scheduler considers the current operator IANA local day
+after 08:00. A durable stable-owner/day receipt survives restart and Goal
+deletion. Its bounded pending phase lets an original discovery finish before
+finalizing the same digest; an expired cutoff, missing source, changed authority
+or unresolved original work produces passive recovery. Missed days do not run in
+a catch-up burst. Only the exact original current UTC source occurrence is
+staged; unresolved current work never falls back to an older successful output.
+Finalized-day ticks do not reopen historical programme artifacts. This adds no
+inference, source fetch, execution queue or cost
+ledger and does not change discovery's original UTC occurrence or deadlines.
+Missing, unreadable or altered physical source files finalize the same receipt
+with passive blocked recovery. Digest and status reads remain available with
+unavailable source/output metadata; cited brief reads return a bounded review
+reason. They do not create tasks or reopen an older successful source. An opted-in
+deadline check retains a bounded negative memo, so unchanged ticks do not repeat
+the failed physical read or consume a deadline-notice slot.
+
+Inbox delivery is the default. Native notices need a separate explicit opt-in
+and an already reviewed programme notification allowance. Across all programmes,
+one owner can reserve one digest notice and one additional cited deadline notice
+per local day. Canonical Goal quiet windows and focus/observer interruption gates
+still apply. Slot reservation and the recipient-bound native outbox insert share
+one SQLite writer. Disable/revoke before commit prevents admission; the daemon
+claim also rechecks current consent, recipient, original day/generation and quiet
+hours. Ambiguous display consumes the slot and is never automatically retried.
+Deadline notices require an explicit ISO timestamp labelled `deadline:` or `due:`
+in a physically reopened cited source span, within 48 hours, plus a matching
+operator-declared category. Model urgency and finding prose supply no authority.
+
+Use the same finding card to reopen its original brief/checklist, prepare a local
+follow-through proposal, defer until a date, or dismiss it. Preparation checks the
+original Goal revision, programme generation, artifact readback, current Root
+and source age (at most 48 hours), including the final C1 publication writer
+after physical staging. Expiry there creates no Task or bound proposal artifact;
+private unbound staging remains subject to the existing input size bound and expiry
+cleanup. It creates an inert existing C1 general-task
+Triage card with a fixed local checklist plan, zero inference calls and no
+external mutation. `FollowThroughIntent.task_proposal_id` names that canonical
+Work task card; it is not a second proposal row or a new allowance. Review and
+accept the plan separately in Tasks. Completion links the verified physical
+local output back to the original finding. Corrections, missing/altered artifacts
+or expired sources block preparation; a selected recovered Goal remains
+read-only. All new dispositions, including defer and dismiss, require current
+original Goal ownership and fresh source authority again in their final writer.
+Private follow-through reads and exact action replay require that Goal's current
+read scope; a recovered Root must explicitly select it. Defer/dismiss and
+action-key replay/conflict survive reload. Operator
+disposition receipts are limited to 128 per owner/day and 16 KiB each, without
+evicting history to manufacture capacity.
+
+Home reports actual native run/source/output receipts and remaining finite
+allowance, including unresolved accounting reservations. **Next digest** is the
+local 08:00 schedule. **Next source eligibility** shows current eligibility or
+the next UTC daily occurrence when the active grant, allowance and running
+discovery scheduler support it. Native outstanding work and unresolved costs
+show a hold; inactive authority, an unavailable or paused scheduler, exhausted
+allowance and expiry before the next occurrence show an explicit reason.
+Eligibility is not an execution time: the existing scheduler, native admission
+and current authority determine whether execution proceeds. Pause/review uses
+existing programme controls. No activity
+is invented when a source or programme is blocked.
+
+Isolated Linux checks cover SQLite clock/DST/restart and cross-programme caps,
+native opt-out/quiet claim fences, actual cited-deadline delivery slots across
+two programmes, literal local HTTP discovery, a current-Root
+finding-to-C1 proposal/acceptance journey, actual checklist file/readback and
+same-card completion. Scripted inference replaces only its owned transport;
+there are no real provider contacts or spending. These receipts do not establish
+model quality or native desktop display on macOS.
+Authenticated journeys also unlink, alter and truncate actual source files and
+verify degraded reads, the original pending cutoff and no unchanged-tick replay.
 
 ## Optional NEAR HTTPS text question
 

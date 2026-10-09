@@ -465,219 +465,232 @@ class InferenceAccountingRepositoryMixin:
                                      priority: int, deadline_at: float, owner: str, fencing_token: int,
                                      general_task_binding: object = None,
                                      now: datetime | None = None) -> dict[str, object]:
-        bound = integer_amount(bound_microusd, positive=True)
-        if owner_ceiling_microusd is not None:
-            integer_amount(owner_ceiling_microusd, positive=True)
-        if not re.fullmatch(r"[0-9a-f]{64}", payload_digest or "") or not re.fullmatch(r"[0-9a-f]{64}", policy_digest or ""):
-            raise InferenceAccountingError("accounting_operation_binding_invalid")
-        observed = _utc(now or datetime.now(timezone.utc))
-        deadline = datetime.fromtimestamp(deadline_at, timezone.utc)
-        async with self._session() as db:
-            await self._accounting_begin(db)
-            account, rows = await self._accounting_rows(db)
-            with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
-                run = await self._fetch(db, job_id)
-                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
-                if run.status != "running" or run.owner_principal_id != owner_id or deadline <= observed:
-                    raise InferenceAccountingError("accounting_job_authority_invalid")
-                prior = next((row for row in rows if row.operation_id == operation_id), None)
-                if runtime_path == "near_text_native":
-                    if profile_id != "near.text" or run.job_kind != "inference.near-text.v1":
-                        raise InferenceAccountingError("near_native_binding_invalid")
-                    if any(row.operation_id != operation_id and row.owner_id == owner_id
-                        and row.runtime_path == "near_text_native"
-                        and row.state in {"reserved", "contact_started", "unknown"} for row in rows):
-                        raise InferenceAccountingError("near_owner_outstanding_limit")
-                if prior is not None:
-                    if (prior.state == "reserved" and prior.recovery_reason == "typed_owner_precontact_resume"
-                        and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
-                        and prior.policy_digest == policy_digest and prior.runtime_path == runtime_path and prior.profile_id == profile_id
-                        and prior.bound_microusd == bound and _utc(prior.deadline_at) > observed):
-                        prior.job_fencing_token = fencing_token
-                        prior.recovery_reason = None
-                        prior.revision += 1
-                        prior.updated_at = observed.replace(tzinfo=None)
-                        db.add(prior)
-                        await self._persist_accounting_witness(db, workspace, account, rows)
-                        return _operation_payload(prior)
-                    raise InferenceAccountingError("accounting_operation_already_reserved")
-                task_group_entry = None
-                if general_task_binding is not None:
-                    from src.workflows.general_task_accounting import reserve_entry
-                    task_group_entry = await reserve_entry(db, run, rows, general_task_binding,
-                        operation_id=operation_id, bound=bound, runtime_path=runtime_path)
-                period = period_id(observed)
-                from src.workspace.accounting_witness import period_state, unreviewed_overruns
-                owner_data, operations = account.model_dump(mode="json"), [_operation_payload(item) for item in rows]
-                period_status = period_state(owner_data, operations, period)
-                if period_status["reason_code"]:
-                    raise InferenceAccountingError(period_status["reason_code"])
-                if unreviewed_overruns(owner_data, operations):
-                    raise InferenceAccountingError("provider_charge_exceeded_reservation")
-                def held(row):
-                    if row.state in {"reserved", "contact_started", "unknown"}:
-                        return row.bound_microusd
-                    return (row.actual_cost_microusd or 0) if row.period_id >= period and row.state == "settled" else 0
-                if sum(held(row) for row in rows) + bound > account.ceiling_microusd:
-                    raise InferenceAccountingError("deployment_cost_budget_exhausted")
-                if owner_ceiling_microusd is not None and sum(held(row) for row in rows if row.owner_id == owner_id) + bound > owner_ceiling_microusd:
-                    raise InferenceAccountingError("owner_cost_budget_exhausted")
-                row = InferenceCostReservation(
-                    operation_id=operation_id, deployment_id=account.deployment_id,
-                    job_id=job_id, owner_id=owner_id, goal_id=run.goal_id, goal_revision=run.goal_revision,
-                    payload_digest=payload_digest, policy_digest=policy_digest, runtime_path=runtime_path,
-                    profile_id=profile_id, period_id=period, settings_revision=account.settings_revision,
-                    ceiling_microusd=account.ceiling_microusd, bound_microusd=bound,
-                    owner_ceiling_microusd=owner_ceiling_microusd, sequence=account.revision + 1,
-                    priority=priority, deadline_at=deadline.replace(tzinfo=None),
-                    job_fencing_token=fencing_token, created_at=observed.replace(tzinfo=None), updated_at=observed.replace(tzinfo=None),
-                    evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}]
-                        + ([task_group_entry] if task_group_entry else [])),
-                )
-                db.add(row)
-                rows.append(row)
-                await self._persist_accounting_witness(db, workspace, account, rows)
-                return _operation_payload(row)
+        from src.workflows.research_accounting import discovery_accounting_scope
+        async with discovery_accounting_scope(self, job_id=job_id):
+            bound = integer_amount(bound_microusd, positive=True)
+            if owner_ceiling_microusd is not None:
+                integer_amount(owner_ceiling_microusd, positive=True)
+            if not re.fullmatch(r"[0-9a-f]{64}", payload_digest or "") or not re.fullmatch(r"[0-9a-f]{64}", policy_digest or ""):
+                raise InferenceAccountingError("accounting_operation_binding_invalid")
+            observed = _utc(now or datetime.now(timezone.utc))
+            deadline = datetime.fromtimestamp(deadline_at, timezone.utc)
+            async with self._session() as db:
+                await self._accounting_begin(db)
+                account, rows = await self._accounting_rows(db)
+                with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+                    self._assert_accounting_continuity(workspace, account, rows)
+                    run = await self._fetch(db, job_id)
+                    self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                    if run.status != "running" or run.owner_principal_id != owner_id or deadline <= observed:
+                        raise InferenceAccountingError("accounting_job_authority_invalid")
+                    prior = next((row for row in rows if row.operation_id == operation_id), None)
+                    from src.workflows.research_accounting import discovery_generation_budget
+                    programme_budget = await discovery_generation_budget(self, db, run, rows,
+                        new_bound=bound if prior is None else 0, operation_id=operation_id, payload_digest=payload_digest)
+                    if runtime_path == "near_text_native":
+                        if profile_id != "near.text" or run.job_kind != "inference.near-text.v1":
+                            raise InferenceAccountingError("near_native_binding_invalid")
+                        if any(row.operation_id != operation_id and row.owner_id == owner_id
+                            and row.runtime_path == "near_text_native"
+                            and row.state in {"reserved", "contact_started", "unknown"} for row in rows):
+                            raise InferenceAccountingError("near_owner_outstanding_limit")
+                    if prior is not None:
+                        if (prior.state == "reserved" and prior.recovery_reason == "typed_owner_precontact_resume"
+                            and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
+                            and prior.policy_digest == policy_digest and prior.runtime_path == runtime_path and prior.profile_id == profile_id
+                            and prior.bound_microusd == bound and _utc(prior.deadline_at) > observed):
+                            prior.job_fencing_token = fencing_token
+                            prior.recovery_reason = None
+                            prior.revision += 1
+                            prior.updated_at = observed.replace(tzinfo=None)
+                            db.add(prior)
+                            await self._persist_accounting_witness(db, workspace, account, rows)
+                            return _operation_payload(prior)
+                        raise InferenceAccountingError("accounting_operation_already_reserved")
+                    task_group_entry = None
+                    if general_task_binding is not None:
+                        from src.workflows.general_task_accounting import reserve_entry
+                        task_group_entry = await reserve_entry(db, run, rows, general_task_binding,
+                            operation_id=operation_id, bound=bound, runtime_path=runtime_path)
+                    period = period_id(observed)
+                    from src.workspace.accounting_witness import period_state, unreviewed_overruns
+                    owner_data, operations = account.model_dump(mode="json"), [_operation_payload(item) for item in rows]
+                    period_status = period_state(owner_data, operations, period)
+                    if period_status["reason_code"]:
+                        raise InferenceAccountingError(period_status["reason_code"])
+                    if unreviewed_overruns(owner_data, operations):
+                        raise InferenceAccountingError("provider_charge_exceeded_reservation")
+                    def held(row):
+                        if row.state in {"reserved", "contact_started", "unknown"}:
+                            return row.bound_microusd
+                        return (row.actual_cost_microusd or 0) if row.period_id >= period and row.state == "settled" else 0
+                    if sum(held(row) for row in rows) + bound > account.ceiling_microusd:
+                        raise InferenceAccountingError("deployment_cost_budget_exhausted")
+                    if owner_ceiling_microusd is not None and sum(held(row) for row in rows if row.owner_id == owner_id) + bound > owner_ceiling_microusd:
+                        raise InferenceAccountingError("owner_cost_budget_exhausted")
+                    row = InferenceCostReservation(
+                        operation_id=operation_id, deployment_id=account.deployment_id,
+                        job_id=job_id, owner_id=owner_id, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                        payload_digest=payload_digest, policy_digest=policy_digest, runtime_path=runtime_path,
+                        profile_id=profile_id, period_id=period, settings_revision=account.settings_revision,
+                        ceiling_microusd=account.ceiling_microusd, bound_microusd=bound,
+                        owner_ceiling_microusd=owner_ceiling_microusd, sequence=account.revision + 1,
+                        priority=priority, deadline_at=deadline.replace(tzinfo=None),
+                        job_fencing_token=fencing_token, created_at=observed.replace(tzinfo=None), updated_at=observed.replace(tzinfo=None),
+                        evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}]
+                            + ([task_group_entry] if task_group_entry else [])),
+                    )
+                    if programme_budget is not None:
+                        evidence = json.loads(row.evidence_json)
+                        evidence.append({"kind": "goal_programme_binding", **programme_budget})
+                        row.evidence_json = _json(evidence)
+                    db.add(row)
+                    rows.append(row)
+                    await self._persist_accounting_witness(db, workspace, account, rows)
+                    return _operation_payload(row)
 
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str,
                                          near_contact_witness: object = None) -> dict[str, object]:
-        denial = None
-        result = None
-        denial_binding = None
-        denial_witness = None
-        denial_root_job_id = None
-        denial_live_root_digest = None
-        async with self._session() as db:
-            await self._accounting_begin(db)
-            account, rows = await self._accounting_rows(db)
-            pending = next((item for item in rows if item.operation_id == operation_id), None)
-            if pending is not None and pending.state == "reserved" and pending.policy_digest == policy_digest:
-                research_run = await self._fetch(db, pending.job_id)
-                if research_run.job_kind == "readonly_research_child":
-                    # The exact source permission/input/body check stays in
-                    # this same serialized contact writer. Completed local
-                    # source readback may acquire the witness lock itself, so
-                    # finish it before acquiring our contact witness lock.
-                    from src.workflows.research_sources import verify_current_prompt_in_db
-                    from src.workflows.job_runtime import _serialize
-                    self._assert_lease(research_run, owner=owner, fencing_token=fencing_token)
-                    await verify_current_prompt_in_db(self, db, _serialize(research_run))
-            with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
-                row = next((item for item in rows if item.operation_id == operation_id), None)
-                if row is None or row.state != "reserved" or row.policy_digest != policy_digest:
-                    raise InferenceAccountingError("accounting_contact_fence_invalid")
-                run = await self._fetch(db, row.job_id)
-                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
-                if run.job_kind == "readonly_research_child":
-                    from src.workflows.research_guard import assert_research_parent_current
-                    await assert_research_parent_current(db, run)
-                from src.workflows.job_runtime import _assert_canonical_goal_fence
-                await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
-                    owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
-                    session_id=run.session_id, authority=run.declared_authority_json)
-                if run.owner_kind == "user":
-                    from src.auth.service import authenticate_principal
-                    await authenticate_principal(row.owner_id, db=db)
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
-                    raise InferenceAccountingError("accounting_contact_fence_invalid")
-                opportunity_denial = None
-                from src.workflows.general_task_accounting import entry_for, validate_contact
-                general_entry = entry_for(row)
-                if general_entry is not None:
-                    await validate_contact(db, run, row, rows)
-                if run.job_kind == "work_board_proposal":
-                    from src.guardian.opportunity_plans import guard_linked_plan_provider_contact
-                    from src.guardian.opportunity_contracts import OpportunityError
-                    try:
-                        await guard_linked_plan_provider_contact(db, run)
-                    except OpportunityError as exc:
-                        opportunity_denial = exc.code
-                if run.job_kind == "guardian_opportunity_assess":
-                    from src.guardian.opportunity_runtime import guard_provider_contact
-                    from src.guardian.opportunity_contracts import OpportunityError
-                    try:
-                        await guard_provider_contact(db, run)
-                    except OpportunityError as exc:
-                        opportunity_denial = exc.code
-                # Reservations can predate another call's actual settlement.
-                # Recheck the canonical ledger under this SAME writer and
-                # witness lock before recording contact, including prefunding.
-                from src.model_fabric.effective_policy import current_inference_policy
-                from src.model_fabric.configuration import deployment_spend_ceiling
-                from src.workspace.accounting_witness import period_state, unreviewed_overruns
-                if row.runtime_path == "near_text_native":
-                    from src.work_board.near_text_native import recheck_provider_contact
-                    from src.work_board.repository import BoardError
-                    if row.profile_id != "near.text" or near_contact_witness is None:
-                        opportunity_denial = "near_contact_authority_required"
-                    else:
+        from src.workflows.research_accounting import discovery_accounting_scope
+        async with discovery_accounting_scope(self, operation_id=operation_id):
+            denial = None
+            result = None
+            denial_binding = None
+            denial_witness = None
+            denial_root_job_id = None
+            denial_live_root_digest = None
+            async with self._session() as db:
+                await self._accounting_begin(db)
+                account, rows = await self._accounting_rows(db)
+                pending = next((item for item in rows if item.operation_id == operation_id), None)
+                if pending is not None and pending.state == "reserved" and pending.policy_digest == policy_digest:
+                    research_run = await self._fetch(db, pending.job_id)
+                    if research_run.job_kind == "readonly_research_child":
+                        # The exact source permission/input/body check stays in
+                        # this same serialized contact writer. Completed local
+                        # source readback may acquire the witness lock itself, so
+                        # finish it before acquiring our contact witness lock.
+                        from src.workflows.research_sources import verify_current_prompt_in_db
+                        from src.workflows.job_runtime import _serialize
+                        self._assert_lease(research_run, owner=owner, fencing_token=fencing_token)
+                        await verify_current_prompt_in_db(self, db, _serialize(research_run))
+                with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+                    self._assert_accounting_continuity(workspace, account, rows)
+                    row = next((item for item in rows if item.operation_id == operation_id), None)
+                    if row is None or row.state != "reserved" or row.policy_digest != policy_digest:
+                        raise InferenceAccountingError("accounting_contact_fence_invalid")
+                    run = await self._fetch(db, row.job_id)
+                    self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                    if run.job_kind == "readonly_research_child":
+                        from src.workflows.research_guard import assert_research_parent_current
+                        await assert_research_parent_current(db, run)
+                    from src.workflows.job_runtime import _assert_canonical_goal_fence
+                    await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                        owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
+                        session_id=run.session_id, authority=run.declared_authority_json)
+                    from src.workflows.research_accounting import discovery_generation_budget
+                    await discovery_generation_budget(self, db, run, rows, operation_id=operation_id, payload_digest=row.payload_digest)
+                    if run.owner_kind == "user":
+                        from src.auth.service import authenticate_principal
+                        await authenticate_principal(row.owner_id, db=db)
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
+                        raise InferenceAccountingError("accounting_contact_fence_invalid")
+                    opportunity_denial = None
+                    from src.workflows.general_task_accounting import entry_for, validate_contact
+                    general_entry = entry_for(row)
+                    if general_entry is not None:
+                        await validate_contact(db, run, row, rows)
+                    if run.job_kind == "work_board_proposal":
+                        from src.guardian.opportunity_plans import guard_linked_plan_provider_contact
+                        from src.guardian.opportunity_contracts import OpportunityError
                         try:
-                            await recheck_provider_contact(
-                                db, run, witness=near_contact_witness,
-                                contact_operation_id=row.operation_id,
-                            )
-                        except (BoardError, ValueError, PermissionError) as exc:
-                            opportunity_denial = getattr(exc, "code", "near_contact_authority_changed")
-                try:
+                            await guard_linked_plan_provider_contact(db, run)
+                        except OpportunityError as exc:
+                            opportunity_denial = exc.code
+                    if run.job_kind == "guardian_opportunity_assess":
+                        from src.guardian.opportunity_runtime import guard_provider_contact
+                        from src.guardian.opportunity_contracts import OpportunityError
+                        try:
+                            await guard_provider_contact(db, run)
+                        except OpportunityError as exc:
+                            opportunity_denial = exc.code
+                    # Reservations can predate another call's actual settlement.
+                    # Recheck the canonical ledger under this SAME writer and
+                    # witness lock before recording contact, including prefunding.
+                    from src.model_fabric.effective_policy import current_inference_policy
+                    from src.model_fabric.configuration import deployment_spend_ceiling
+                    from src.workspace.accounting_witness import period_state, unreviewed_overruns
                     if row.runtime_path == "near_text_native":
-                        from src.model_fabric.effective_policy import current_near_text_policy
-                        configured, current_digest = current_near_text_policy()
-                    else:
-                        configured, current_digest = current_inference_policy()
-                except PermissionError:
-                    configured, current_digest = None, None
-                owner_data = account.model_dump(mode="json")
-                operations = [_operation_payload(item) for item in rows]
-                period = period_id(_utc(now))
-                period_status = period_state(owner_data, operations, period)
-                def held(item):
-                    return item.bound_microusd if item.state in {"reserved", "contact_started", "unknown"} else (
-                        (item.actual_cost_microusd or 0) if item.state == "settled" and item.period_id >= period else 0)
-                denial = (opportunity_denial or ("provider_contact_denied" if _provider_contact_denied(row)
-                    else "provider_policy_revision_changed" if current_digest != policy_digest
-                    else "accounting_settings_revision_unavailable" if (
-                        account.ceiling_microusd != deployment_spend_ceiling(configured)
-                        or row.settings_revision != account.settings_revision)
-                    else period_status["reason_code"]
-                    or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, operations) else None)
-                    or ("deployment_cost_budget_exhausted" if sum(held(item) for item in rows) > account.ceiling_microusd else None)
-                    or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
-                        and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None)))
-                if not _provider_contact_denied(row):
-                    history = json.loads(row.evidence_json)
+                        from src.work_board.near_text_native import recheck_provider_contact
+                        from src.work_board.repository import BoardError
+                        if row.profile_id != "near.text" or near_contact_witness is None:
+                            opportunity_denial = "near_contact_authority_required"
+                        else:
+                            try:
+                                await recheck_provider_contact(
+                                    db, run, witness=near_contact_witness,
+                                    contact_operation_id=row.operation_id,
+                                )
+                            except (BoardError, ValueError, PermissionError) as exc:
+                                opportunity_denial = getattr(exc, "code", "near_contact_authority_changed")
+                    try:
+                        if row.runtime_path == "near_text_native":
+                            from src.model_fabric.effective_policy import current_near_text_policy
+                            configured, current_digest = current_near_text_policy()
+                        else:
+                            configured, current_digest = current_inference_policy()
+                    except PermissionError:
+                        configured, current_digest = None, None
+                    owner_data = account.model_dump(mode="json")
+                    operations = [_operation_payload(item) for item in rows]
+                    period = period_id(_utc(now))
+                    period_status = period_state(owner_data, operations, period)
+                    def held(item):
+                        return item.bound_microusd if item.state in {"reserved", "contact_started", "unknown"} else (
+                            (item.actual_cost_microusd or 0) if item.state == "settled" and item.period_id >= period else 0)
+                    denial = (opportunity_denial or ("provider_contact_denied" if _provider_contact_denied(row)
+                        else "provider_policy_revision_changed" if current_digest != policy_digest
+                        else "accounting_settings_revision_unavailable" if (
+                            account.ceiling_microusd != deployment_spend_ceiling(configured)
+                            or row.settings_revision != account.settings_revision)
+                        else period_status["reason_code"]
+                        or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, operations) else None)
+                        or ("deployment_cost_budget_exhausted" if sum(held(item) for item in rows) > account.ceiling_microusd else None)
+                        or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
+                            and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None)))
+                    if not _provider_contact_denied(row):
+                        history = json.loads(row.evidence_json)
+                        if denial:
+                            row.recovery_reason = "provider_contact_denied"
+                            history.append({"kind": "provider_contact_denied", "reason": denial,
+                                "accounting_revision": account.revision, "fencing_token": fencing_token,
+                                "never_contacted": True, "recorded_at": now.isoformat(), "memory_status": "no_learning"})
+                        else:
+                            row.state = "contact_started"
+                            row.contact_started_at = now
+                            history.append({"kind": "provider_contact_started", "fencing_token": fencing_token, "recorded_at": now.isoformat()})
+                        row.updated_at = now
+                        row.revision += 1
+                        row.evidence_json = _json(history)
+                        db.add(row)
+                        await self._persist_accounting_witness(db, workspace, account, rows)
+                    result = _operation_payload(row)
                     if denial:
-                        row.recovery_reason = "provider_contact_denied"
-                        history.append({"kind": "provider_contact_denied", "reason": denial,
-                            "accounting_revision": account.revision, "fencing_token": fencing_token,
-                            "never_contacted": True, "recorded_at": now.isoformat(), "memory_status": "no_learning"})
-                    else:
-                        row.state = "contact_started"
-                        row.contact_started_at = now
-                        history.append({"kind": "provider_contact_started", "fencing_token": fencing_token, "recorded_at": now.isoformat()})
-                    row.updated_at = now
-                    row.revision += 1
-                    row.evidence_json = _json(history)
-                    db.add(row)
-                    await self._persist_accounting_witness(db, workspace, account, rows)
-                result = _operation_payload(row)
-                if denial:
-                    denial_binding = (row.operation_id, row.job_id, row.owner_id,
-                        row.payload_digest, row.policy_digest, owner, fencing_token)
-                    denial_witness = _witness(account)
-                    denial_root_job_id = run.root_run_identity
-                    from src.workspace import canonical_workspace_root_identity
-                    denial_live_root_digest = _digest(canonical_workspace_root_identity(settings.workspace_dir))
-        # Raising inside the session would roll back the durable denial while
-        # its external witness had already advanced. Commit before reporting it.
-        if denial:
-            raise InferenceProviderContactDenied(denial, _seal=_CONTACT_DENIAL_SEAL,
-                _binding=denial_binding, _witness=denial_witness, _root_job_id=denial_root_job_id,
-                _live_root_digest=denial_live_root_digest)
-        return result
+                        denial_binding = (row.operation_id, row.job_id, row.owner_id,
+                            row.payload_digest, row.policy_digest, owner, fencing_token)
+                        denial_witness = _witness(account)
+                        denial_root_job_id = run.root_run_identity
+                        from src.workspace import canonical_workspace_root_identity
+                        denial_live_root_digest = _digest(canonical_workspace_root_identity(settings.workspace_dir))
+            # Raising inside the session would roll back the durable denial while
+            # its external witness had already advanced. Commit before reporting it.
+            if denial:
+                raise InferenceProviderContactDenied(denial, _seal=_CONTACT_DENIAL_SEAL,
+                    _binding=denial_binding, _witness=denial_witness, _root_job_id=denial_root_job_id,
+                    _live_root_digest=denial_live_root_digest)
+            return result
 
     async def settle_inference_cost(self, operation_id: str, *, payload: object = None,
                                     near_billing_evidence: object = None,

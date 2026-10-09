@@ -94,6 +94,36 @@ async def revoke_goal_programme(goal_id: str, programme_id: str, body: GoalProgr
     return await _programme_call(request, "control", goal_id=goal_id, programme_id=programme_id, request=body, action="revoke")
 
 
+async def _discovery_call(request: Request, method: str, **kwargs):
+    from src.guardian.goal_discovery import goal_discovery_service
+    from src.guardian.goal_programmes import GoalProgrammeError
+    from src.auth.service import AuthFailure
+    from src.work_board.repository import BoardError
+    operator = _require_authenticated_operator(request)
+    try:
+        return await getattr(goal_discovery_service, method)(operator=operator, **kwargs)
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+    except GoalProgrammeError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    except PermissionError:
+        raise HTTPException(status_code=403, detail={"code": "programme_discovery_current_readback_denied"}) from None
+    except (ValueError, OSError, BoardError):
+        raise HTTPException(status_code=409, detail={"code": "programme_discovery_readback_requires_review"}) from None
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail={"code": "goal_discovery_service_unavailable"}) from None
+
+
+@router.get("/goals/{goal_id}/programmes/discovery")
+async def goal_discovery_history(goal_id: str, request: Request):
+    return await _discovery_call(request, "inspect", goal_id=goal_id)
+
+
+@router.get("/goals/{goal_id}/programmes/{programme_id}/discovery/{job_id}/brief")
+async def goal_discovery_brief(goal_id: str, programme_id: str, job_id: str, request: Request):
+    return await _discovery_call(request, "read_brief", goal_id=goal_id, programme_id=programme_id, job_id=job_id)
+
+
 class GoalCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

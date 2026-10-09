@@ -499,7 +499,15 @@ class NativeNotificationQueue:
         self._lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def _session(self):
+    async def _session(self, db=None):
+        if db is not None:
+            # Internal callers may atomically publish their canonical passive
+            # receipt and this native outbox intent in one existing writer.
+            # The caller owns commit/rollback; validation below stays identical.
+            if not isinstance(db, AsyncSession):
+                raise ValueError("native notification caller writer must be an AsyncSession")
+            yield db
+            return
         async with db_engine.get_session() as db:
             await _ensure_outbox_tables(db)
             yield db
@@ -533,6 +541,7 @@ class NativeNotificationQueue:
         goal_revision: int | None = None,
         budget_period_key: str | None = None,
         budget_limit: int | None = None,
+        _db: AsyncSession | None = None,
     ) -> NativeNotification:
         """Persist one notification or return the matching idempotent row.
 
@@ -724,12 +733,12 @@ class NativeNotificationQueue:
                         raise
 
         async with self._lock:
-            async with self._session() as db:
+            async with self._session(_db) as db:
                 # A goal notification budget is a durable reservation, not an
                 # advisory count. SQLite's immediate transaction serializes
                 # distinct idempotency keys across queue instances/processes;
                 # the normal outer session commit persists the reservation.
-                if budget_limit is not None or intervention_type == "opportunity":
+                if _db is None and (budget_limit is not None or intervention_type == "opportunity"):
                     if db.in_transaction():
                         await db.commit()
                     bind = db.get_bind()
@@ -1247,6 +1256,22 @@ class NativeNotificationQueue:
                 )
                 row = None
                 for candidate in result.scalars().all():
+                    if candidate.intervention_type in {"programme_digest", "programme_deadline"}:
+                        from src.guardian.programme_digest import notice_claim_reason
+                        reason = await notice_claim_reason(db, candidate, now)
+                        if reason == "programme_quiet_hours":
+                            continue
+                        if reason:
+                            terminal = "unknown" if candidate.status in CLAIMED_STATUSES else "cancelled"
+                            await db.execute(update(NativeNotificationOutbox).where(
+                                NativeNotificationOutbox.id == candidate.id,
+                                NativeNotificationOutbox.status == candidate.status,
+                                NativeNotificationOutbox.fencing_token == candidate.fencing_token).values(
+                                    status=terminal, last_error=reason, degraded_state=reason,
+                                    cancelled_at=now if terminal == "cancelled" else None,
+                                    lease_owner=None, lease_expires_at=None, updated_at=now))
+                            await self._finish_attempt(db, candidate, status=terminal, now=now, error_code=reason)
+                            continue
                     if candidate.intervention_type == "opportunity":
                         reason = await _opportunity_claim_reason(db, candidate, now)
                         if reason:

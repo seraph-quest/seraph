@@ -10,6 +10,10 @@ from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import re
+import weakref
+import asyncio
+import threading
+from types import MappingProxyType
 from typing import Any
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -526,9 +530,174 @@ def _repository_record(run, identity):
     return records[0]["payload"]
 
 
-def _append_repository_record(run, identity, payload, *, inventory):
+class _RepositoryCompletionAppendPending:
+    """Identity-only ticket for one of two Source-owned completion appends."""
+    __slots__ = ("__weakref__",)
+
+
+_COMPLETION_APPENDS = weakref.WeakKeyDictionary()
+_COMPLETION_APPEND_STAGES = weakref.WeakKeyDictionary()
+
+
+def _completion_append_state(pending, *, service=None, jobs=None, fence=None):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    data = _COMPLETION_APPENDS.get(pending) if type(pending) is _RepositoryCompletionAppendPending else None
+    if (data is None or data["thread"] != threading.get_ident()
+            or data["task"] is not asyncio.current_task()
+            or service is not None and data["service"] is not service
+            or jobs is not None and data["jobs"] is not jobs
+            or fence is not None and data["fence"] is not fence):
+        raise DurableJobLeaseError("actual Source completion append ticket required")
+    from src.workflows.repo_repair_source_recovery import assert_repository_completion_append_stage
+    assert_repository_completion_append_stage(data["stage"], service=data["service"],
+        jobs=data["jobs"], fence=data["fence"])
+    return data
+
+
+def _completion_append_pair(pending, *, service, jobs, fence):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if type(pending) is not tuple or len(pending) != 2:
+        raise DurableJobLeaseError("exact two Source completion append tickets required")
+    data = _completion_append_state(pending[0], service=service, jobs=jobs, fence=fence)
+    if (data is not _completion_append_state(pending[1], service=service, jobs=jobs, fence=fence)
+            or data["pending"] != pending):
+        raise DurableJobLeaseError("Source completion append ticket pair changed")
+    return data
+
+
+@asynccontextmanager
+async def stage_repository_completion_appends(service, jobs, *, stage, owner, fence):
+    """Capture two exact Source constructor times in a genuine physical epoch."""
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _utc_now
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_completion_append_stage, repository_completion_append_stage,
+        assert_repository_recovery_fence)
+    assert_repository_completion_append_stage(stage, service=service, jobs=jobs, fence=fence)
+    binding = repository_completion_append_stage(stage)
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=binding["job_id"], owner=owner)
+    if service.jobs is not jobs or binding["owner"] is not owner:
+        raise DurableJobLeaseError("original completion append owner changed")
+    if stage in _COMPLETION_APPEND_STAGES:
+        raise DurableJobLeaseError("original completion append constructor already issued")
+    from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
+    if (read_repository_inventory(binding["root"])["schema"] != "repository.checkpoint_inventory.v3"
+            or _canonical(binding["root"].model_dump(mode="json")) != binding["root_json"]
+            or read_registered_repository_producer(binding["root"], iteration_index=binding["iteration_index"])
+                != binding["registration"]):
+        raise DurableJobLeaseError("original completion append registration changed")
+    root = json.loads(binding["root_json"])
+    if (root["run_identity"] != binding["job_id"] or root["revision"] != binding["before_revision"]
+            or root["checkpoint_receipts_json"] != binding["journal_prefix"]
+            or binding["registration"]["iteration_id"] != binding["iteration_id"]):
+        raise DurableJobLeaseError("original completion append Root changed")
+    identities = tuple("repository:" + role + ":" + binding["iteration_id"] for role in ("cleanup", "readback"))
+    history = json.loads(binding["journal_prefix"] or "[]")
+    if (any(identity not in binding["inventory"] for identity in identities)
+            or any(item.get("checkpoint_id") in identities for item in history)
+            or len(history) + 2 > 50):
+        raise DurableJobLeaseError("original completion append inventory changed")
+    retry = binding["retry_metadata"]
+    metadata = tuple({"checkpoint_id": identity, "safe": True, "created_at": _utc_now().isoformat()}
+        for identity in identities) if retry is None else tuple(dict(item) for item in retry)
+    if len(metadata) != 2:
+        raise DurableJobLeaseError("original completion append metadata changed")
+    for identity, item in zip(identities, metadata):
+        try:
+            valid_time = (isinstance(item["created_at"], str)
+                and TaskProposalGroupV1.utc_timestamp(item["created_at"]).isoformat() == item["created_at"])
+        except (KeyError, ValueError, TypeError):
+            valid_time = False
+        if (set(item) != {"checkpoint_id", "safe", "created_at"}
+                or item.get("checkpoint_id") != identity or item.get("safe") is not True or not valid_time):
+            raise DurableJobLeaseError("original completion append metadata changed")
+    pending = (_RepositoryCompletionAppendPending(), _RepositoryCompletionAppendPending())
+    data = {"service": service, "jobs": jobs, "stage": stage, "owner": owner, "fence": fence,
+        "task": asyncio.current_task(), "thread": threading.get_ident(), "pending": pending,
+        "metadata": tuple(_canonical(item) for item in metadata), "binding": binding,
+        "root": root, "ordinal": 0, "payloads": None, "wrappers": None}
+    for token in pending:
+        _COMPLETION_APPENDS[token] = data
+    _COMPLETION_APPEND_STAGES[stage] = True
+    try:
+        yield pending
+    finally:
+        for token in pending:
+            _COMPLETION_APPENDS.pop(token, None)
+
+
+def repository_completion_append_metadata(pending, *, service, jobs, fence):
+    data = _completion_append_pair(pending, service=service, jobs=jobs, fence=fence)
+    return tuple(MappingProxyType(json.loads(raw)) for raw in data["metadata"])
+
+
+def bind_repository_completion_append_payloads(stage, pending, *, service, jobs, fence):
+    """Derive the fixed payloads; caller mappings cannot select their contents."""
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest
+    data = _completion_append_pair(pending, service=service, jobs=jobs, fence=fence)
+    if data["stage"] is not stage or data["payloads"] is not None or data["ordinal"]:
+        raise DurableJobLeaseError("original completion append payload binding changed")
+    binding = data["binding"]
+    result, identity = binding["result"], binding["iteration_id"]
+    outputs, manifest = result["outputs"], result["manifest"]
+    prefix = "artifacts/repo-repair/model/iteration-" + identity
+    metadata = [json.loads(raw) for raw in data["metadata"]]
+    envelope = {"physical_projection": binding["physical_projection"],
+        "source_completion_cas": binding["cas"], "source_append_metadata": metadata}
+    envelope_raw = _canonical(envelope).encode()
+    if len(envelope_raw) > 1048576:
+        raise DurableJobLeaseError("original completion artifact exceeds its bound")
+    diagnostics = {"iteration_id": identity,
+        "stdout": outputs["pytest.stdout"].decode("utf-8", errors="replace"),
+        "stderr": outputs["pytest.stderr"].decode("utf-8", errors="replace"),
+        "stdout_raw_sha256": hashlib.sha256(outputs["pytest.stdout"]).hexdigest(),
+        "stderr_raw_sha256": hashlib.sha256(outputs["pytest.stderr"]).hexdigest(),
+        "cumulative_diff": outputs["diff.patch"].decode("utf-8", errors="strict"),
+        "cumulative_diff_sha256": hashlib.sha256(outputs["diff.patch"]).hexdigest()}
+    complete = result["original_producer_completion"]["outcome"] in {
+        "completed_requested_checks", "completed_requested_check_failure"}
+    payloads = ({"artifact_ref": "workspace-json:" + prefix + "-cleanup.json",
+        "artifact_digest": hashlib.sha256(envelope_raw).hexdigest(), "cleanup_proven": True,
+        "iteration_id": identity, "status": binding["status"], "source_completion_cas": binding["cas"]},
+        {"artifact_ref": "workspace-json:" + prefix + "-readback.json", "artifact_digest": hashlib.sha256(outputs["readback.json"]).hexdigest(),
+        "status": binding["status"], "manifest_digest": _source_digest(manifest),
+        "patch_sha256": binding["execution"]["patch_sha256"],
+        "diagnostics_artifact_ref": "workspace-json:" + prefix + "-diagnostics.json",
+        "diagnostics_artifact_digest": hashlib.sha256(_canonical(diagnostics).encode()).hexdigest(),
+        "command_results": _repository_command_results(manifest,
+            node=binding["work"].language_profile == "test_node") if complete else [],
+        "source_completion_cas": binding["cas"]})
+    if any(len(_canonical(payload).encode()) > 16384 for payload in payloads):
+        raise DurableJobLeaseError("original completion metadata exceeds its bound")
+    data["payloads"] = tuple(_canonical(payload) for payload in payloads)
+    data["wrappers"] = tuple(_canonical({**item, "payload": payload, "state_digest": _digest(payload)})
+        for item, payload in zip(metadata, payloads))
+    return tuple(json.loads(raw) for raw in data["payloads"])
+
+
+def _append_repository_record(run, identity, payload, *, inventory, _completion_append=None):
     from src.workflows.general_task_guard import _history
     from src.workflows.job_runtime import DurableJobTransitionError, _canonical, _digest, _utc_now
+    if _completion_append is not None:
+        data = _completion_append_state(_completion_append)
+        ordinal = data["ordinal"]
+        if (ordinal >= 2 or data["pending"][ordinal] is not _completion_append
+                or data["payloads"] is None or _canonical(payload) != data["payloads"][ordinal]
+                or tuple(inventory) != tuple(data["binding"]["inventory"])):
+            raise DurableJobTransitionError("original completion append sequence or payload changed")
+        expected_root = dict(data["root"])
+        expected_history = json.loads(data["binding"]["journal_prefix"] or "[]")
+        if ordinal:
+            expected_history.append(json.loads(data["wrappers"][0]))
+            expected_root["checkpoint_receipts_json"] = _canonical(expected_history)
+        wrapper = json.loads(data["wrappers"][ordinal])
+        if (identity != wrapper["checkpoint_id"] or run.model_dump(mode="json") != expected_root
+                or identity not in inventory or len(expected_history) >= 50):
+            raise DurableJobTransitionError("original completion append Root or prefix changed")
+        expected_history.append(wrapper)
+        run.checkpoint_receipts_json = _canonical(expected_history)
+        data["ordinal"] += 1
+        return True
     if identity not in inventory:
         raise DurableJobTransitionError("unreserved repository checkpoint identity")
     existing = _repository_record(run, identity)
@@ -2341,17 +2510,30 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
         if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
             from src.workflows.repo_repair_source_recovery import (
                 assert_repository_completion_witness, repository_completion_result,
-                repository_completion_post_cas)
+                repository_completion_post_cas, repository_completion_cleanup_envelope)
             assert_repository_completion_witness(completion_witness, service=service, jobs=jobs)
             actual_result = repository_completion_result(completion_witness)
             cas = repository_completion_post_cas(completion_witness)
             actual_projection = actual_cleanup.projection()
             recorded_projection = json.loads(cleanup_bytes)
+            actual_envelope = repository_completion_cleanup_envelope(completion_witness)
+            from src.workflows.general_task_guard import _history
+            from src.workflows.job_runtime import _digest
+            metadata = actual_envelope.get("source_append_metadata", [])
+            expected_ids = ["repository:cleanup:" + identity, "repository:readback:" + identity]
+            expected_wrappers = [{**item, "payload": payload, "state_digest": _digest(payload)}
+                for item, payload in zip(metadata, (cleanup_record, readback))]
+            actual_wrappers = [item for item in _history(run) if item.get("checkpoint_id") in expected_ids]
             cleanup_matches = (cas["iteration_id"] == identity and cas["post_revision"] == run.revision
                 and cleanup_record.get("source_completion_cas") == cas
                 and readback.get("source_completion_cas") == cas
                 and actual_result["manifest"] == manifest
-                and recorded_projection == actual_projection)
+                and recorded_projection == actual_envelope
+                and set(actual_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
+                and actual_envelope["physical_projection"] == actual_projection
+                and actual_envelope["source_completion_cas"] == cas
+                and len(metadata) == 2 and [item.get("checkpoint_id") for item in metadata] == expected_ids
+                and actual_wrappers == expected_wrappers)
         else:
             cleanup_matches = json.loads(cleanup_bytes) == actual_cleanup.projection()
         if (not cleanup_matches or not checks_passed

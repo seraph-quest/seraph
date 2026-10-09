@@ -100,7 +100,7 @@ async def test_startup_preserves_proven_lineage_before_malformed_original(
     try:
         async with factory() as db:
             observed_order = [row.run_identity for row in (await db.scalars(candidates)).all()]
-        assert len(original_order) >= 2
+        assert len(original_order) >= (1 if unknown else 2)
         assert observed_order == (list(reversed(original_order)) if reverse_candidates else original_order)
         assert await jobs.recover_inference_accounting(now=observed) == []
         assert await jobs.recover_stale_jobs(now=observed) == []

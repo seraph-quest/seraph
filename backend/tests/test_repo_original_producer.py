@@ -278,6 +278,30 @@ async def test_actual_three_iteration_group_keeps_same_live_guard_and_scope(
                 run = await jobs._fetch(db, kwargs["job_id"])
                 registrations = [recovery.read_registered_repository_producer(run, iteration_index=index)
                     for index in (1, 2, 3)]
+            guard_path = Path(registrations[2]["guard_path"])
+            retained_path = guard_path.with_name(guard_path.name + ".retained-test")
+            original_identity = os.fstat(owner.guard_fd)
+            guard_path.rename(retained_path)
+            try:
+                for replacement in ("missing", "regular", "symlink"):
+                    if replacement == "regular":
+                        descriptor = os.open(guard_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                        os.close(descriptor)
+                    elif replacement == "symlink":
+                        guard_path.symlink_to(retained_path)
+                    try:
+                        with pytest.raises(ValueError, match="original_producer_guard_changed"):
+                            producer.original_producer_live_owner(service, jobs, result)
+                        with pytest.raises(ValueError, match="original_producer_guard_changed"):
+                            with producer.stage_original_producer_completion(registrations[2], owner=owner, result=result):
+                                pytest.fail("changed named guard was accepted")
+                        assert os.fstat(owner.guard_fd).st_ino == original_identity.st_ino
+                    finally:
+                        if replacement != "missing":
+                            guard_path.unlink()
+            finally:
+                retained_path.rename(guard_path)
+            assert producer.original_producer_live_owner(service, jobs, result) is owner
             with pytest.raises(ValueError):
                 with producer.stage_original_producer_completion(registrations[2], owner=replace(owner), result=result):
                     pytest.fail("copied original owner was accepted")

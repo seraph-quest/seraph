@@ -24,6 +24,7 @@ _FENCES = weakref.WeakKeyDictionary()
 _FENCE_SEAL = object()
 _COMPLETIONS = weakref.WeakKeyDictionary()
 _STOP_COMPLETIONS = weakref.WeakKeyDictionary()
+_APPEND_STAGES = weakref.WeakKeyDictionary()
 _REGISTRATION_KEYS = frozenset({"schema", "job_id", "iteration_id", "iteration_index",
     "repository_attempt_id", "owner_principal_id", "owner_session_id", "root_fence",
     "root_authority_digest", "original_source_digest", "native_binding", "execution_digest",
@@ -151,6 +152,94 @@ class _RepositoryRecoveryFence:
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class _OriginalRepositoryProducerCompletionWitness:
     """Registered only after current Source and actual original bundle checks."""
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _RepositoryCompletionAppendStage:
+    """Actual active publication inputs; never a deserialized row grant."""
+
+
+def assert_repository_completion_append_stage(stage, *, service=None, jobs=None, fence=None):
+    data = _APPEND_STAGES.get(stage) if type(stage) is _RepositoryCompletionAppendStage else None
+    if (data is None or data["task"] is not asyncio.current_task()
+            or service is not None and data["service"] is not service
+            or jobs is not None and data["jobs"] is not jobs
+            or fence is not None and data["fence"] is not fence):
+        raise RepositorySourceRecoveryError("original_repository_append_stage_required")
+    from src.execution.repo_original_producer import assert_original_producer_completion_scope
+    from src.workflows.job_runtime import _canonical
+    assert_repository_recovery_fence(data["fence"], service=data["service"], jobs=data["jobs"],
+        job_id=data["job_id"], owner=data["owner"])
+    assert_original_producer_completion_scope(data["physical"])
+    result = data["result"]
+    if (_canonical(data["root"].model_dump(mode="json")) != data["root_json"]
+            or _source()._source_digest(data["work"].model_dump(mode="json")) != data["work_digest"]
+            or result["status"] != data["result_status"]
+            or _source()._source_digest(result["original_producer_completion"]) != data["body_digest"]
+            or result["manifest"] != result["original_producer_completion"]["manifest"]
+            or result["readback"] != result["manifest"]
+            or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()} != data["output_digests"]):
+        raise RepositorySourceRecoveryError("original_repository_append_stage_changed")
+
+
+def repository_completion_append_stage(stage):
+    """Protected Source inputs; the stage identity supplies all authority."""
+    assert_repository_completion_append_stage(stage)
+    data = _APPEND_STAGES[stage]
+    values = {key: data[key] for key in ("root", "root_json", "owner", "work", "job_id", "iteration_id",
+        "iteration_index", "before_revision", "journal_prefix", "inventory", "result", "status",
+        "context_rows", "accounting_rows", "proposal_json", "approval_json")}
+    for key in ("registration", "execution", "cas", "physical_projection", "retry_metadata"):
+        values[key] = json.loads(data[key]) if data[key] is not None else None
+    return MappingProxyType(values)
+
+
+@asynccontextmanager
+async def _stage_repository_completion_append_publication(service, jobs, *, context, owner, fence,
+        physical, registration, execution, cas, result, physical_projection, status,
+        proposal_json, approval_json, accounting_rows, retry_metadata=None):
+    """Issue only from this original publisher's freshly rechecked epoch."""
+    from src.workflows.job_runtime import _canonical
+    from src.workflows import repo_repair_stop as stop
+    from src.execution.repo_original_producer import original_producer_completion_result
+    source = _source()
+    run = context["run"]
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=run.run_identity, owner=owner)
+    if original_producer_completion_result(physical) is not result:
+        raise RepositorySourceRecoveryError("original_repository_append_stage_changed")
+    # A caller dictionary is not provenance: obtain the protected current
+    # context again through the actual Source reader before issuing identity.
+    if source._repository_record(run, stop.STOP_ID) is not None:
+        fresh = (await stop._context(service, jobs, job_id=run.run_identity, owner=owner)).data
+    else:
+        fresh = await source._repository_precontact(service, jobs, job_id=run.run_identity, owner=owner)
+    if (fresh["rows"] != context["rows"]
+            or _canonical(fresh["run"].model_dump(mode="json")) != _canonical(run.model_dump(mode="json"))
+            or read_registered_repository_producer(fresh["run"], iteration_index=registration["iteration_index"]) != registration):
+        raise RepositorySourceRecoveryError("original_repository_append_stage_epoch_changed")
+    stage = _RepositoryCompletionAppendStage()
+    data = {"service": service, "jobs": jobs, "owner": owner, "fence": fence,
+        "task": asyncio.current_task(), "physical": physical, "root": run,
+        "root_json": _canonical(run.model_dump(mode="json")), "work": context["work"],
+        "work_digest": source._source_digest(context["work"].model_dump(mode="json")),
+        "job_id": run.run_identity, "iteration_id": registration["iteration_id"],
+        "iteration_index": registration["iteration_index"], "before_revision": run.revision,
+        "journal_prefix": run.checkpoint_receipts_json,
+        "inventory": tuple(source.repository_checkpoint_inventory(run, context["work"])),
+        "context_rows": tuple(context["rows"]), "accounting_rows": tuple(sorted(accounting_rows.items())),
+        "proposal_json": _canonical(proposal_json), "approval_json": _canonical(approval_json),
+        "result": result, "result_status": result["status"], "status": status,
+        "body_digest": source._source_digest(result["original_producer_completion"]),
+        "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}}
+    for key, value in (("registration", registration), ("execution", execution), ("cas", cas),
+            ("physical_projection", physical_projection), ("retry_metadata", retry_metadata)):
+        data[key] = _canonical(value) if value is not None else None
+    _APPEND_STAGES[stage] = data
+    try:
+        assert_repository_completion_append_stage(stage, service=service, jobs=jobs, fence=fence)
+        yield stage
+    finally:
+        _APPEND_STAGES.pop(stage, None)
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
@@ -291,6 +380,12 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
             cleanup_body = json.loads(service._read_private_artifact(cleanup["artifact_ref"], expected_digest=cleanup["artifact_digest"]))
             manifest_raw = service._read_private_artifact(readback["artifact_ref"], expected_digest=readback["artifact_digest"])
+            if "physical_projection" in cleanup_body:
+                if (set(cleanup_body) != {"physical_projection", "source_completion_cas", "source_append_metadata"}
+                        or cleanup_body["source_completion_cas"] != cas):
+                    raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+                _assert_source_completion_append_metadata(run, identity, cleanup_body["source_append_metadata"])
+                cleanup_body = cleanup_body["physical_projection"]
             if (body["outcome"] not in {"completed_requested_checks", "completed_requested_check_failure"}
                     or result["status"] != cleanup["status"] or manifest_raw != outputs["readback.json"]
                     or json.loads(manifest_raw) != manifest or source._source_digest(manifest) != readback["manifest_digest"]
@@ -342,6 +437,15 @@ def repository_completion_result(witness):
     """Literal verified original outputs, used only by existing final owners."""
     assert_repository_completion_witness(witness)
     return _COMPLETIONS[witness]["result"]
+
+
+def repository_completion_cleanup_envelope(witness):
+    """Exact Source-written artifact bytes, bound to an authentic completion."""
+    assert_repository_completion_witness(witness)
+    raw = _COMPLETIONS[witness].get("cleanup_envelope")
+    if raw is None:
+        raise RepositorySourceRecoveryError("original_repository_cleanup_envelope_required")
+    return json.loads(raw)
 
 
 def repository_completion_post_cas(witness):
@@ -601,6 +705,69 @@ async def recover_original_repository_cleanup(service, jobs, *, job_id, owner,
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
 
 
+def _assert_source_completion_append_metadata(run, identity, metadata):
+    """Literal constructor metadata binds the existing two journal wrappers."""
+    from src.workflows.job_runtime import _digest
+    history = json.loads(run.checkpoint_receipts_json or "[]")
+    if type(metadata) is not list or len(metadata) != 2:
+        raise RepositorySourceRecoveryError("original_repository_append_metadata_changed")
+    for role, item in zip(("cleanup", "readback"), metadata):
+        wrappers = [wrapper for wrapper in history
+            if wrapper.get("checkpoint_id") == "repository:" + role + ":" + identity]
+        if (type(item) is not dict or set(item) != {"checkpoint_id", "safe", "created_at"}
+                or len(wrappers) != 1 or set(wrappers[0]) != {
+                    "checkpoint_id", "safe", "created_at", "payload", "state_digest"}
+                or {key: wrappers[0][key] for key in item} != item
+                or item["safe"] is not True
+                or wrappers[0]["state_digest"] != _digest(wrappers[0]["payload"])):
+            raise RepositorySourceRecoveryError("original_repository_append_metadata_changed")
+
+
+def _read_original_cleanup_envelope_if_present(service, relative_path):
+    """Bounded literal existing artifact read; absence alone permits first issue."""
+    import os
+    import stat
+    from pathlib import PurePosixPath
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(service._workspace(), flags | os.O_DIRECTORY)
+        for component in PurePosixPath(relative_path).parts[:-1]:
+            child = os.open(component, flags | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            metadata = os.fstat(fd)
+            if metadata.st_mode & 0o077 or metadata.st_uid != os.getuid():
+                raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+        child = os.open(PurePosixPath(relative_path).name, flags, dir_fd=fd)
+        os.close(fd)
+        fd = child
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077
+                or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
+                or metadata.st_size > 1048576):
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(1048577)
+        if len(raw) > 1048576:
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+        from src.workflows.job_runtime import _canonical
+        envelope = json.loads(raw)
+        if (type(envelope) is not dict or set(envelope) != {
+                "physical_projection", "source_completion_cas", "source_append_metadata"}
+                or _canonical(envelope).encode() != raw):
+            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+        return envelope
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError) as exc:
+        raise RepositorySourceRecoveryError("original_producer_artifact_changed") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 async def publish_original_repository_completion(service, jobs, *, job_id, owner, iteration_index,
         producer_owner=None, actual_result=None, expected_job_revision=None):
     """One Source-owned publication for live and authentic original restart.
@@ -700,104 +867,143 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
                 "stop_digest": source._source_digest(stop) if stop else None,
                 "unknown_projection_digest": source._source_digest({key: getattr(unknown, key)
                     for key in unknown.__dataclass_fields__}) if unknown else None,
-                "rows_digest": source._source_digest([expected for _, _, expected in context["rows"]])}
+                "rows_digest": source._source_digest({
+                    "domain": "repository.source_completion_rows.v1",
+                    "context": [[model.__tablename__, str(key), expected]
+                        for model, key, expected in context["rows"]],
+                    "proposal": [RepoRepairProposal.__tablename__, execution["proposal_id"], _canonical(proposal_json)],
+                    "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
+                    "reservations": [[InferenceCostReservation.__tablename__, key, raw]
+                        for key, raw in sorted(accounting_rows.items())]})}
             projection = {"iteration_binding": registration["process_binding"],
                 "process_cleanup": manifest["process_cleanup"], "artifact_digests": {
                     name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()},
-                "source_completion_cas": cas}
+                }
             if producer_owner is not None:
                 # Preserve the actual original live witness bytes required by
                 # the existing final writer, rather than inventing its shape.
                 projection = result["iteration_cleanup_witness"].projection()
             prefix = "artifacts/repo-repair/model/iteration-" + identity
-            cleanup_ref, cleanup_digest = service._write_private_artifact(prefix + "-cleanup.json", _canonical(projection).encode())
-            readback_ref, readback_digest = service._write_private_artifact(prefix + "-readback.json", outputs["readback.json"])
-            diagnostics = {"iteration_id": identity, "stdout": outputs["pytest.stdout"].decode("utf-8", errors="replace"),
-                "stderr": outputs["pytest.stderr"].decode("utf-8", errors="replace"),
-                "stdout_raw_sha256": hashlib.sha256(outputs["pytest.stdout"]).hexdigest(),
-                "stderr_raw_sha256": hashlib.sha256(outputs["pytest.stderr"]).hexdigest(),
-                "cumulative_diff": outputs["diff.patch"].decode("utf-8", errors="strict"),
-                "cumulative_diff_sha256": hashlib.sha256(outputs["diff.patch"]).hexdigest()}
-            diagnostics_raw = _canonical(diagnostics).encode()
-            diagnostics_ref, diagnostics_digest = service._write_private_artifact(prefix + "-diagnostics.json", diagnostics_raw)
-            for ref, digest, raw in ((cleanup_ref, cleanup_digest, _canonical(projection).encode()),
-                    (readback_ref, readback_digest, outputs["readback.json"]),
-                    (diagnostics_ref, diagnostics_digest, diagnostics_raw)):
-                if service._read_private_artifact(ref, expected_digest=digest) != raw:
-                    raise RepositorySourceRecoveryError("original_producer_artifact_changed")
-            assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
-            async with jobs._session() as db:
-                await _begin_sqlite_immediate(db)
-                for model, key, expected in context["rows"]:
-                    current_row = await db.get(model, key, populate_existing=True)
-                    if current_row is None or _canonical(current_row.model_dump(mode="json")) != expected:
-                        raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
-                    if isinstance(current_row, OperatorSession) and (current_row.revoked_at is not None
-                            or _as_utc(current_row.idle_expires_at) <= _utc_now()
-                            or _as_utc(current_row.absolute_expires_at) <= _utc_now()):
-                        raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
-                    if isinstance(current_row, WorkBoardInputArtifact) and _as_utc(current_row.expires_at) <= _utc_now():
-                        raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
-                current = await jobs._fetch(db, job_id)
-                current_unknown = source._repository_unknown_root_projection(current) if source._repository_record(
-                    current, "repository:stop-uncertainty-successor:v1") is not None else None
-                if (current.revision != before or read_registered_repository_producer(current,
-                        iteration_index=iteration_index) != registration or current_unknown != unknown):
-                    raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
-                current_accounting = await accounting_rows_for_original(db, context)
-                if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
-                    raise RepositorySourceRecoveryError("original_producer_accounting_changed")
-                live_proposal = await db.get(RepoRepairProposal, execution["proposal_id"], populate_existing=True)
-                live_approval = await db.get(ApprovalRequest, execution["approval_id"], populate_existing=True)
-                if (live_proposal is None or live_approval is None or live_proposal.model_dump(mode="json") != proposal_json
-                        or live_approval.model_dump(mode="json") != approval_json):
-                    raise RepositorySourceRecoveryError("original_producer_approval_changed")
-                inventory = source.repository_checkpoint_inventory(current, context["work"])
-                source._append_repository_record(current, "repository:cleanup:" + identity,
-                    {"artifact_ref": cleanup_ref, "artifact_digest": cleanup_digest, "cleanup_proven": True,
-                        "iteration_id": identity, "status": status, "source_completion_cas": cas}, inventory=inventory)
-                source._append_repository_record(current, "repository:readback:" + identity,
-                    {"artifact_ref": readback_ref, "artifact_digest": readback_digest, "status": status,
-                        "manifest_digest": source._source_digest(manifest), "patch_sha256": execution["patch_sha256"],
-                        "diagnostics_artifact_ref": diagnostics_ref, "diagnostics_artifact_digest": diagnostics_digest,
-                        "command_results": command_results, "source_completion_cas": cas}, inventory=inventory)
-                current.revision += 1
-                live_proposal.status = "execution_verified" if complete else "execution_partial"
-                live_proposal.last_receipt_id = "repository:readback:" + identity
-                live_proposal.revision += 1
-                expected_journal = current.checkpoint_receipts_json
-                expected_proposal = live_proposal.model_dump(mode="json")
-                await db.commit()
-                # Exact committed bytes are captured inside the same fence,
-                # while the physical owner's guard is still held.
-                committed_rows = []
-                for model, key, original_row in context["rows"]:
-                    row = await db.get(model, key, populate_existing=True)
-                    if row is None:
-                        raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
-                    await db.refresh(row)
-                    row_json = row.model_dump(mode="json")
-                    if getattr(row, "run_identity", None) == job_id:
-                        original_json = json.loads(original_row)
-                        bookkeeping = {"revision", "checkpoint_receipts_json", "updated_at"}
-                        if (row.revision != before + 1 or row.checkpoint_receipts_json != expected_journal
-                                or {key: value for key, value in row_json.items() if key not in bookkeeping}
-                                    != {key: value for key, value in original_json.items() if key not in bookkeeping}):
+            existing_envelope = _read_original_cleanup_envelope_if_present(service, prefix + "-cleanup.json")
+            retry_metadata = None
+            if existing_envelope is not None:
+                original_cas = existing_envelope["source_completion_cas"]
+                if (type(original_cas) is not dict or set(original_cas) != set(cas)
+                        or any(original_cas[key] != value for key, value in cas.items() if key != "rows_digest")
+                        or type(original_cas["rows_digest"]) is not str
+                        or not source._SHA.fullmatch(original_cas["rows_digest"])
+                        or existing_envelope["physical_projection"] != projection
+                        or unknown is None and original_cas["rows_digest"] != cas["rows_digest"]):
+                    raise RepositorySourceRecoveryError("original_producer_orphan_epoch_changed")
+                # Rows digest is the first staging audit receipt, never a current
+                # authority grant. Unknown's immutable full Root anchor proves
+                # unchanged prefix; current rows are freshly checked below.
+                cas = original_cas
+                retry_metadata = existing_envelope["source_append_metadata"]
+            async with _stage_repository_completion_append_publication(service, jobs,
+                    context=context, owner=owner, fence=fence, physical=physical,
+                    registration=registration, execution=execution, cas=cas, result=result,
+                    physical_projection=projection, status=status, proposal_json=proposal_json,
+                    approval_json=approval_json, accounting_rows=accounting_rows,
+                    retry_metadata=retry_metadata) as stage:
+                async with source.stage_repository_completion_appends(service, jobs,
+                        stage=stage, owner=owner, fence=fence) as pending:
+                    metadata = source.repository_completion_append_metadata(pending, service=service, jobs=jobs, fence=fence)
+                    envelope = {"physical_projection": projection, "source_completion_cas": cas,
+                        "source_append_metadata": [dict(item) for item in metadata]}
+                    envelope_raw = _canonical(envelope).encode()
+                    cleanup_payload, readback_payload = source.bind_repository_completion_append_payloads(
+                        stage, pending, service=service, jobs=jobs, fence=fence)
+                    cleanup_ref, cleanup_digest = service._write_private_artifact(prefix + "-cleanup.json", envelope_raw)
+                    readback_ref, readback_digest = service._write_private_artifact(prefix + "-readback.json", outputs["readback.json"])
+                    diagnostics = {"iteration_id": identity, "stdout": outputs["pytest.stdout"].decode("utf-8", errors="replace"),
+                        "stderr": outputs["pytest.stderr"].decode("utf-8", errors="replace"),
+                        "stdout_raw_sha256": hashlib.sha256(outputs["pytest.stdout"]).hexdigest(),
+                        "stderr_raw_sha256": hashlib.sha256(outputs["pytest.stderr"]).hexdigest(),
+                        "cumulative_diff": outputs["diff.patch"].decode("utf-8", errors="strict"),
+                        "cumulative_diff_sha256": hashlib.sha256(outputs["diff.patch"]).hexdigest()}
+                    diagnostics_raw = _canonical(diagnostics).encode()
+                    diagnostics_ref, diagnostics_digest = service._write_private_artifact(prefix + "-diagnostics.json", diagnostics_raw)
+                    for ref, digest, raw in ((cleanup_ref, cleanup_digest, envelope_raw),
+                            (readback_ref, readback_digest, outputs["readback.json"]),
+                            (diagnostics_ref, diagnostics_digest, diagnostics_raw)):
+                        if service._read_private_artifact(ref, expected_digest=digest) != raw:
+                            raise RepositorySourceRecoveryError("original_producer_artifact_changed")
+                    assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
+                    async with jobs._session() as db:
+                        await _begin_sqlite_immediate(db)
+                        for model, key, expected in context["rows"]:
+                            current_row = await db.get(model, key, populate_existing=True)
+                            if current_row is None or _canonical(current_row.model_dump(mode="json")) != expected:
+                                raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
+                            if isinstance(current_row, OperatorSession) and (current_row.revoked_at is not None
+                                    or _as_utc(current_row.idle_expires_at) <= _utc_now()
+                                    or _as_utc(current_row.absolute_expires_at) <= _utc_now()):
+                                raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+                            if isinstance(current_row, WorkBoardInputArtifact) and _as_utc(current_row.expires_at) <= _utc_now():
+                                raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
+                        current = await jobs._fetch(db, job_id)
+                        current_unknown = source._repository_unknown_root_projection(current) if source._repository_record(
+                            current, "repository:stop-uncertainty-successor:v1") is not None else None
+                        if (current.revision != before or read_registered_repository_producer(current,
+                                iteration_index=iteration_index) != registration or current_unknown != unknown):
+                            raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
+                        current_accounting = await accounting_rows_for_original(db, context)
+                        if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
+                            raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+                        live_proposal = await db.get(RepoRepairProposal, execution["proposal_id"], populate_existing=True)
+                        live_approval = await db.get(ApprovalRequest, execution["approval_id"], populate_existing=True)
+                        if (live_proposal is None or live_approval is None or live_proposal.model_dump(mode="json") != proposal_json
+                                or live_approval.model_dump(mode="json") != approval_json):
+                            raise RepositorySourceRecoveryError("original_producer_approval_changed")
+                        inventory = source.repository_checkpoint_inventory(current, context["work"])
+                        source._append_repository_record(current, "repository:cleanup:" + identity,
+                            cleanup_payload, inventory=inventory, _completion_append=pending[0])
+                        source._append_repository_record(current, "repository:readback:" + identity,
+                            readback_payload, inventory=inventory, _completion_append=pending[1])
+                        current.revision += 1
+                        live_proposal.status = "execution_verified" if complete else "execution_partial"
+                        live_proposal.last_receipt_id = "repository:readback:" + identity
+                        live_proposal.revision += 1
+                        # Flush the exact intended mutations, then explicitly
+                        # preserve the actual pre-SQL Root timestamp.
+                        await db.flush()
+                        from sqlalchemy import update
+                        await db.execute(update(type(current)).where(type(current).id == current.id)
+                            .values(updated_at=run.updated_at))
+                        expected_journal = current.checkpoint_receipts_json
+                        expected_proposal = live_proposal.model_dump(mode="json")
+                        await db.commit()
+                        # Exact committed bytes are captured inside the same fence,
+                        # while the physical owner's guard is still held.
+                        committed_rows = []
+                        for model, key, original_row in context["rows"]:
+                            row = await db.get(model, key, populate_existing=True)
+                            if row is None:
+                                raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
+                            await db.refresh(row)
+                            row_json = row.model_dump(mode="json")
+                            if getattr(row, "run_identity", None) == job_id:
+                                original_json = json.loads(original_row)
+                                bookkeeping = {"revision", "checkpoint_receipts_json"}
+                                if (row.revision != before + 1 or row.checkpoint_receipts_json != expected_journal
+                                        or {key: value for key, value in row_json.items() if key not in bookkeeping}
+                                            != {key: value for key, value in original_json.items() if key not in bookkeeping}):
+                                    raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
+                            elif _canonical(row_json) != original_row:
+                                raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
+                            committed_rows.append((model, key, _canonical(row.model_dump(mode="json"))))
+                        await db.refresh(live_proposal)
+                        if live_proposal.model_dump(mode="json") != expected_proposal:
                             raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
-                    elif _canonical(row_json) != original_row:
-                        raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
-                    committed_rows.append((model, key, _canonical(row.model_dump(mode="json"))))
-                await db.refresh(live_proposal)
-                if live_proposal.model_dump(mode="json") != expected_proposal:
-                    raise RepositorySourceRecoveryError("original_producer_completion_readback_changed")
-                committed_rows.append((RepoRepairProposal, execution["proposal_id"],
-                    _canonical(live_proposal.model_dump(mode="json"))))
-                committed_rows.append((ApprovalRequest, execution["approval_id"], _canonical(approval_json)))
-                committed_rows.extend((InferenceCostReservation, key, raw) for key, raw in accounting_rows.items())
+                        committed_rows.append((RepoRepairProposal, execution["proposal_id"],
+                            _canonical(live_proposal.model_dump(mode="json"))))
+                        committed_rows.append((ApprovalRequest, execution["approval_id"], _canonical(approval_json)))
+                        committed_rows.extend((InferenceCostReservation, key, raw) for key, raw in accounting_rows.items())
             witness = _OriginalRepositoryProducerCompletionWitness()
             _COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
                 "result": result, "post_cas": cas, "status": status,
-                "committed_rows": tuple(committed_rows),
+                "committed_rows": tuple(committed_rows), "cleanup_envelope": _canonical(envelope),
                 "completion_digest": source._source_digest(body),
                 "result_status": result["status"],
                 "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()},

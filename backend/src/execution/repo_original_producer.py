@@ -152,6 +152,29 @@ def original_producer_live_owner(service, jobs, result):
     metadata = os.fstat(owner.guard_fd)
     if (metadata.st_dev, metadata.st_ino) != ready.guard_identity:
         raise ValueError("original_producer_guard_changed")
+    # The retained descriptor must still be the canonical named private guard.
+    # This comparison opens no new lock and never closes the original lane FD.
+    from src.execution.repo_sandbox import _open_trusted_directory
+    guard_path = Path(owned[2])
+    parent = _open_trusted_directory(guard_path.parent)
+    comparison = None
+    try:
+        before = os.stat(guard_path.name, dir_fd=parent, follow_symlinks=False)
+        comparison = os.open(guard_path.name,
+            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent)
+        opened = os.fstat(comparison)
+        after = os.stat(guard_path.name, dir_fd=parent, follow_symlinks=False)
+        for current in (metadata, before, opened, after):
+            if (not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid()
+                    or stat.S_IMODE(current.st_mode) != 0o600 or current.st_nlink != 1
+                    or (current.st_dev, current.st_ino) != ready.guard_identity):
+                raise ValueError("original_producer_guard_changed")
+    except OSError as exc:
+        raise ValueError("original_producer_guard_changed") from exc
+    finally:
+        if comparison is not None:
+            os.close(comparison)
+        os.close(parent)
     return owner
 
 

@@ -77,7 +77,11 @@ async def prepare(client, monkeypatch, async_db, fmt="csv", *, action=True, file
 @pytest.mark.parametrize("fmt", ["csv", "docx"])
 async def test_actual_original_event_quota_before_http_physical_first_seal_and_explicit_local_read(client, async_db, setup_workspace, monkeypatch, fmt):
     adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db, fmt)
+    from src.work_board.historical_method import historical_method_service
+    from tests.general_task_method_lifecycle import AdmissionSignerLifetime
+    admission_lifetime = AdmissionSignerLifetime(historical_method_service)
     try:
+        await admission_lifetime.start()
         receipt = await adapter._ingest_update(event, owner_principal_id=owner.principal_id, operator_session_id=owner.session_id)
         assert receipt["channel_task_capture"]["document_acquisition"]["provider_file_id"] == "actual_downloadable_id"
         event_key = receipt["idempotency_key"]
@@ -174,6 +178,7 @@ async def test_actual_original_event_quota_before_http_physical_first_seal_and_e
         assert denied_original_acceptance.json()["detail"]["code"] == "channel_document_source_unsealed"
         assert contacts == ["POST", "GET"]
     finally:
+        await admission_lifetime.close()
         await service.stop(); await boundary.http.aclose(); adapter.document_service = None
 
 

@@ -22,7 +22,7 @@ from src.work_board.pipelines import root_binding
 
 
 @pytest.mark.asyncio
-async def test_positive_parent_journal_rejects_copy_foreign_scope_and_metadata_drift(task_runtime):
+async def test_positive_parent_journal_rejects_copy_foreign_scope_and_metadata_drift(task_runtime, native_admission_lifecycle):
     from src.workflows import general_task_guard as guard
     from src.work_board.repository import BoardError
     from src.db.models import WorkBoardInputArtifact

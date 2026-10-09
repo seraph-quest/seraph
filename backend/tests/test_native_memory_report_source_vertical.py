@@ -4,6 +4,7 @@ This proves canonical pipeline provenance, not Chromium or native Memory success
 """
 import hashlib
 import json
+import os
 import traceback
 from html.parser import HTMLParser
 from pathlib import Path
@@ -20,7 +21,8 @@ from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth
 
 
-NODE = Path('/home/pawel/repos/seraph/.agent-worktrees/986-a1-host/.agent-evidence/986/a1-upstream/node-v24.13.1-linux-x64/bin/node')
+_configured_node = os.environ.get("SERAPH_TEST_NODE_RUNTIME")
+NODE = Path(_configured_node) if _configured_node else None
 
 
 class FulfilledText(HTMLParser):

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Context, FiberState } from 'cordis';
+import { Context, FiberState, symbols } from 'cordis';
 import { readFileSync } from 'node:fs';
 import { Composition, validateProfile } from '../src/composition.js';
 import { decodeJson, validateFrame } from '../src/protocol.js';
 import { invokeService, servicePlugins, SERVICE_KEYS } from '../src/plugins/index.js';
 import { SERVICE_METHODS, validateInput, validateResult, type Input, type ServiceMethod } from '../src/contracts/methods.js';
 import type { ScopedRequestClient } from '../src/contracts/client.js';
+import { ref, digest } from '../src/contracts/schema.js';
 
 const blocked = {status: 'blocked', reason_code: 'native_variant_not_supported', memory_status: 'no_learning'};
 const profile = () => validateProfile(decodeJson(readFileSync(new URL('../../profile.json', import.meta.url))));
@@ -23,6 +24,52 @@ const input: Record<ServiceMethod, unknown> = {
   'agent-loop.startTurn':{turn_ref:'native-1'}, 'agent-loop.cancelTurn':{turn_ref:'native-1',expected_revision:1}, 'agent-loop.inspectTurn':{turn_ref:'native-1'},
   'source-extraction.extract':{artifact_ref:'native-1',acquisition_receipt_ref:'receipt-1',source_slot:0,first_line:1,last_line:3},
 };
+test('canonical refs and digests reject terminal line separators and preserve exact bounds', () => {
+  for (const value of ['A', 'a'.repeat(128), 'AZaz09_.:-']) assert.equal(ref.parse(value), value);
+  for (const value of ['a'.repeat(64), '0123456789abcdef'.repeat(4)]) assert.equal(digest.parse(value), value);
+  for (const suffix of ['\n', '\r', '\u2028', '\u2029']) {
+    assert.throws(() => ref.parse('native-1' + suffix), /canonical reference/);
+    assert.throws(() => digest.parse('a'.repeat(64) + suffix), /service digest/);
+    assert.throws(() => validateResult('artifacts.read', {status:'succeeded', memory_status:'no_learning', value:{artifact_ref:'native-1', digest:'a'.repeat(64) + suffix, size_bytes:2, content:'ok'}}), /service digest/);
+  }
+  for (const value of ['', 'a'.repeat(129), 'a/b', 'é', null, 1, true, [], {}, new String('native-1')]) assert.throws(() => ref.parse(value));
+  for (const value of ['', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), null, 1, true, [], {}, new String('a'.repeat(64))]) assert.throws(() => digest.parse(value));
+});
+test('real scoped proxies reject terminal reference separators before IPC and preserve composition readiness', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive:()=>true, request:async()=>{contacts++;return blocked;}};
+  const states = composition.states();
+  const remaining = composition.resources.remaining;
+  try {
+    const hostServices = SERVICE_KEYS.map(key => {
+      const original = (composition.context.get(key) as unknown as Record<symbol, unknown>)[symbols.original];
+      assert.ok(original !== null && original !== undefined, `${key} must have an original registered service`);
+      return original;
+    });
+    for (const method of SERVICE_METHODS) {
+      for (const [field, value] of Object.entries(input[method] as Record<string, unknown>)) {
+        if (typeof value !== 'string') continue;
+        for (const suffix of ['\n', '\r', '\u2028', '\u2029']) {
+          const invalid = {...input[method] as object, [field]:value + suffix};
+          await assert.rejects(composition.invoke(method, invalid as Input<typeof method>, client), /canonical reference/);
+          assert.equal(contacts, 0, `${method}.${field} must not contact native IPC`);
+          composition.assertReady();
+          assert.deepEqual(composition.states(), states);
+          assert.equal(composition.resources.remaining, remaining);
+          for (const [index, key] of SERVICE_KEYS.entries()) {
+            const original = (composition.context.get(key) as unknown as Record<symbol, unknown>)[symbols.original];
+            assert.equal(original === hostServices[index], true, `${key} registered service must be unchanged`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(await composition.invoke('goals.read', {}, client), blocked);
+    assert.equal(contacts, 1, 'unrelated valid work remains usable');
+  } finally {
+    assert.deepEqual(await composition.dispose(), {resources_remaining:0, cordis_disposal:'confirmed'});
+  }
+});
 for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards ${method} once and preserves native block`, async () => {
   const calls: unknown[] = [];
   const client: ScopedRequestClient = {isActive: () => true, request: async (name, value) => {calls.push([name,value]); return blocked;}};

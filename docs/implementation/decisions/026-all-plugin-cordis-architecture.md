@@ -143,11 +143,15 @@ canonical references and 1,048,576 bytes**. Schema metadata, complete row
 appearances, repeated reads, file bytes and prospective output/retention copies
 share that budget. Numeric spent and reserved capacity survives phase changes;
 there is no renewed allowance after staging, snapshot rollback or a later claim.
-The conservative SQL read set is the fixed **33-table superset** of existing
-Core15, inventory, native.v3, nine Memory tables and actual accounting,
-operator-session and Secret dependencies. All retained rows count regardless of
-owner, status or selected-graph membership. These bounds confer no authority and
-add no table, index, ledger or retained-field extension.
+The conservative SQL read set retains the unchanged **33-table common superset**
+of existing Core15, inventory, native.v3, nine Memory tables and actual
+accounting, operator-session and Secret dependencies. All retained common rows
+count regardless of owner, status or selected-graph membership. Solely when the
+exact original goal_public_discovery_v1 programme closure requires it, the
+bounded programme component below additionally certifies the existing selected
+operator_identities(id, created_at, revoked_at) bodies in the same original
+frame. This is the only retained-field exception; it adds no table, index,
+ledger, grant or authority. All other R1G restrictions remain in force.
 
 Before snapshot row bodies, certify the complete superset on the original current
 SQLite connection under the existing maintenance lock. Bound all schema-object
@@ -201,8 +205,11 @@ uses the existing validated unique locator and preserves genuine absence.
 Snapshot certification cannot stand in for those earlier reads.
 
 Immediately after every actual fresh `BEGIN IMMEDIATE`, the original native
-writer recertifies the whole 33-table superset before returning to any
-body-reading caller, including current Root and Memory-owner validation.
+writer recertifies the unchanged whole 33-table common superset and, when the
+exact original programme closure requires it, the named conditional Identity
+certificate below, before returning to any body-reading caller, including
+current Root and Memory-owner validation. Both use the same remaining original
+numeric frame; Identity certification supplies no new capacity or authority.
 Rollback, writes or schema changes invalidate certificates; a new transaction
 requires fresh certification without resetting the numeric budget. Current
 original Root, Goal, grants, fence, epoch and deadline remain independently
@@ -270,7 +277,10 @@ independent architecture review SHA-256 is
 `b657e3092f9acab4b4f8ed61e81589f645b84a774005120f24f8859c211f57f8`.
 
 Before Original exists, bounded read-only retention may recognize the complete
-Memory job universe under the same current 33-table certificate and frame.
+Memory job universe under the same current common33 certificate and original
+frame, additionally requiring the named conditional Identity certificate below
+when the exact original programme closure needs it. This does not broaden the
+Memory pre-Original classifier or permit missing Original/Current after effect.
 Require a closed candidate/context, original serialized arguments and execution
 fingerprint, native binding and actual claim journal when claimed, an inert
 pre-effect state, `result = null`, and no Original, Current or effect receipts.
@@ -284,6 +294,45 @@ is mandatory; Unknown grants no success or replay. Generic cancellation and
 recovery cannot leave stale validated Current or reconstruct original capacity
 from snapshot counts. Missing genuine owner or original capacity blocks mutation
 while preserving Original, fences and liabilities.
+
+### Bounded goal-programme continuity exception (#1007)
+
+This accepted-target amendment supersedes the fixed33/no-field-extension rule,
+the fresh-BEGIN certification wording and the pre-Original same33 wording above
+only as specified here. It also supersedes the accepted #1007 R1G no-field-extension
+clause only for this named programme component. The prior FTS metadata amendment
+(adoption SHA256 044aa6742494234dae8e6e0d0f627d1f007661631e57f6cf5ff68e7e32823432)
+already owns the 1354-object ceiling and unfiltered LIMIT1355; this exception
+adds no metadata allowance and leaves its metadata-only FTS restrictions intact.
+All other R1G contracts, ADR-027's Python programme owner and ADR-030 remain unchanged.
+
+**1. One original capacity frame.** Each applicable operation retains one original maximum of128 distinct canonical references and1,048,576 bytes. The common33 superset remains unchanged. Only when the actual original programme closure requires it, an additional explicitly named certificate covers the existing operator_identities table's exact `(id,created_at,revoked_at)` body for the original selected identity IDs. Those rows, schema metadata, repeated reads, raw tuples, prospective copies and outputs spend the **same original** frame. No reset/renewal, cap increase, identity-specific pool or renewed phase budget. If common33 certification or Current construction already overflows, this allowance does not rescue it: block honestly before the next body/effect and preserve original recovery debt.
+
+**2. Conditional selection and metadata before bodies.** Certify unchanged common33 first on the original current SQLite connection/transaction, preserving its current unfiltered row census and source-derived metadata ceiling1354/LIMIT1355. Obtain candidate identity IDs only from already certified exact original DISCOVERY_KIND declared authority and the selected canonical Goal's matching stored programme generation/issuer binding. Deduplicate original IDs; no name prefix/wildcard/all-identity scan or active/current-status filter. ID possession alone is not authority.
+
+Before any selected Identity body, certify table metadata against the actual three-column SQLModel owner: exact columns id,created_at,revoked_at; hidden0/no generated fields; original nullable/storage/PK layout and existing primary-key single BINARY ascending unique locator; exact source-owned supported indexes. Bounded table_xinfo4, index metadata and the original schema census provide overflow witnesses; debit complete accepted metadata before bodies. Unknown column/index/trigger/locator, unsupported schema or insufficient original budget blocks before private bodies. `_rowid_`, typeof and octet_length headers for each exact original identity determine complete raw-body upper cost; actual genuine int64 physical references and full three-field appearances enroll/spend the same original budget before fetching strings/timestamps. Missing or duplicate selected row blocks; genuine absent/revoked identity never becomes a new grant.
+
+**3. Current certificate binding.** Bind both certificates to identical original connection/driver/transaction/schema/data-change state and numeric budget instance. Immediately after each actual fresh BEGIN IMMEDIATE recertify common33 and any required named identities before body-reading callers. Rollback/write/schema change invalidates both; recertification does not reset spent/reserved numbers. Current Goal/programme/grant/capability/identity/route/budget/expiry, original lease/fence/epoch/boot/deadline and actual Source remain independent checks. Certificate/header/hash proves neither execution nor adoption/learning authority.
+
+**4. Finite programme continuity component.** Add an explicitly versioned `native-composition-programme.v1` component for exact original composed goal_public_discovery_v1 occurrences and their canonical closure. Seed every such composed job, including historical/terminal/unknown originals; use original service identity, null execution sessions, immutable GoalDiscoveryAuthority and actual plan/brief/checkpoint/artifact/effect identities. Retain complete selected Goal.goal_programmes_json raw bytes, all generations/preview and actual Goal owner/revision/status. Include original issuer provenance and selected Identity revocation, exact Goal parent FK closure when physically needed, and original discovery files through the original programme reader. No generic retain-all selector or independent grant store.
+
+Reuse existing complete common33 raw Goal/OperatorSession tuple certification/codec where the original closure already needs these rows; do not introduce a second hand-maintained full Root field manifest. Full Root body is private accounting/provenance and contains token_hash; external witness carries only hashes/counts, never bearer hash/body. Full Goal raw tuple is justified by preserving the indivisible existing programmes/history and canonical row/FK ownership during original restore, rather than copying selected JSON grants into a fragment. Identity adds exactly its source-owned three fields. Whole row/repeated appearances charge honestly; shared physical references deduplicate only the distinct-reference count, not repeated byte spending.
+
+Every complete selected raw row and original physical file must match source/destination/provenance readback and be retained under existing bounds. Missing target bytes or unsupported original row/file blocks; neither synthetic data nor a digest replaces physical retention. Original programme files are allowed only through exact goal-programmes/<original programme ID>/… reader, kind/slot/job ID/artifact-ID/digest/size/effect provenance. No arbitrary prefix fallback or new file store.
+
+**5. Version compatibility.** Preserve bit-for-bit existing Core15, native.v3, Memory Original/Current and common33 raw tuple codecs/digests. New programme rows/relations/component are domain-separated by a frozen explicit programme manifest version/digest. A new explicit witness envelope version includes the unchanged native.v3 component plus present/absent programme component, its exact selected rows/relations/file digest counts. Old receipts/checkpoints remain exact old version; never reinterpret an old digest as new, insert a default component into history or silently upgrade while work is live. Stopped maintenance under the existing lifecycle/accounting lock validates exact prior witness/closure and no pending gap before publishing explicit transition. Unsupported old-reader rollback while programme component exists remains blocked with original liabilities retained. Existing64KiB receipt/1MiB checkpoint/delta128 limits still gate before publication.
+
+**6. Restore and rollback original authority.** Integrate actual original restore/rollback issuer revocation **before** calculating/publishing final target witness, through the existing authority invalidation/continuity owner. Retain issuer principal/identity/tombstone provenance unchanged; revoke restored browser authentication, never mint or alias a session. Original finite programme validator continues to ignore issuer browser expiry/logout/revoked_at for standing grant validity, while requiring canonical non-tombstone issuer provenance, unrevoked Identity, current exact active Goal/programme/grant/capability/route/budget and programme expiry. Explicit programme/Identity revocation is not weakened by restoration.
+
+**Source/destination authority conflicts — fail closed before mutation.** Before any retained SQL mutation, issuer invalidation, checkpoint/delta publication or promotion, compare every selected existing source and destination complete raw Goal tuple and complete raw Identity tuple under the same original frame. Any differing raw field blocks the entire restore or rollback with no partial target write, occurrence or contact. Goal comparison is deliberately all22 current source-owned fields, including the complete raw goal_programmes_json, owner_principal_id, owner_session_id, revision and status; Identity comparison is exactly id,created_at,revoked_at. Harmless Goal metadata differences also block: this is an explicit conservative limitation until a narrower safe comparator is separately proved and reviewed. Identical tuples may be retained. A genuinely absent destination may retain the verified original complete source tuple unchanged, including paused/revoked state; missing source blocks. Never overwrite either direction's non-null Identity revocation or paused/revoked programme generation with an active/unrevoked value. Do not synthesize JSON, merge histories, choose a maximum timestamp, add a grant ledger, drop a generation or silently relax the rule to obtain restoration. Later current programme validation still denies retained source revocation. Existing session invalidation remains the original authority owner and must precede final witness publication; jobs stay blocked with higher fences/epochs and no restored Source.
+
+Required additional restore/rollback negatives: source Identity unrevoked/destination revoked and source revoked/destination unrevoked; unequal non-null Identity revoke timestamps; source active/destination paused or revoked and source paused or revoked/destination active; full-history/ownership/revision/status conflicts and conservative harmless Goal metadata conflict. Every existing-tuple mismatch stops before the first retained write and promotion, admits no new occurrence/contact and leaves the entire target unchanged. Equal revoked/paused rows and destination-absent revoked/paused original source copy remain denied by the current validator. No synthetic history union or partial recovery is permitted.
+
+All restored original jobs remain blocked, leases cleared, higher revision/fence and all14 composition owners blocked with higher epoch/current recovery receipts. Restored claim/start/effect/output receipts are historical proof only; original live Source is absent. No Source/lease replay or original deadline/grant renewal. Fresh current programme checks cannot make an old restored attempt executable. New occurrences use the existing native issuance/idempotency/outstanding-debt contract only after current independent policy/readiness/authority requirements hold; restoring a programme never itself grants route consent or learning.
+
+**7. Focused START owner.** Accept only the R34 exact same-journal protected `runtime-service-invocation:programme-start:<claim_ref>` receipt/payload and original Source-sealed publication interface. Actual started GoalDiscoveryService registration binds identical original NativeServiceClaim/scope/host/boot/run task. Consumer in actual bridge task stages new original physical witness, obtains fresh short policy writer, checks current programme/claim/composition/lease/fence/deadline and absence of start receipt, and publishes one exact original CAS with unchanged earlier protected entries. Publication proof binds DB/session/statement/raw prior/new journal/receipt and identical live Source; generic checkpoint mint, copy or replacement denies.
+
+Only original positive commit plus matching delivered start response permits that same original run task to execute once. Lost ACK retains the immutable start receipt and held original state; restart cannot reconstruct Source or replay. Ordinary executeAccepted RPC stays≤30/earlier original invocation deadline; original occurrence remains≤300/earlier programme expiry. This amendment adds no inference result contract or money settlement permission.
 
 A small selected Memory graph can therefore be blocked by excessive unrelated
 retained history. This is an explicit native Memory capability limit. Ordinary

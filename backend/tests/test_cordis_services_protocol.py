@@ -2,7 +2,7 @@
 import copy
 import pytest
 
-from src.runtime_plugins.contracts import SERVICE_METHODS, validate_request, validate_result
+from src.runtime_plugins.contracts import SERVICE_METHODS, ref, sha, validate_request, validate_result
 from src.runtime_plugins.protocol import ProtocolError, encode_frame, decode_json, validate_frame
 
 
@@ -32,6 +32,32 @@ def test_service_wire_preserves_literal_canonical_identity():
     original = frame("artifacts.read", {"artifact_ref": "art_abc", "max_bytes": 65536})
     assert validate_frame(decode_json(encode_frame(original)[4:])) == original
     assert len(SERVICE_METHODS) == 34
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\u2028", "\u2029"])
+def test_canonical_ref_and_digest_reject_terminal_line_separators(suffix):
+    with pytest.raises(ProtocolError):
+        ref("native-1" + suffix)
+    with pytest.raises(ProtocolError):
+        sha("a" * 64 + suffix)
+    with pytest.raises(ProtocolError):
+        validate_request("artifacts.read", {"artifact_ref": "native-1" + suffix, "max_bytes": 2})
+    with pytest.raises(ProtocolError):
+        validate_result("artifacts.read", {"status": "succeeded", "memory_status": "no_learning",
+            "value": {"artifact_ref": "native-1", "digest": "a" * 64 + suffix, "size_bytes": 2, "content": "ok"}})
+
+
+def test_canonical_ref_and_digest_preserve_exact_bounds_and_types():
+    for value in ("A", "a" * 128, "AZaz09_.:-"):
+        ref(value)
+    for value in ("a" * 64, "0123456789abcdef" * 4):
+        sha(value)
+    for value in ("", "a" * 129, "a/b", "é", None, 1, True, [], {}):
+        with pytest.raises(ProtocolError):
+            ref(value)
+    for value in ("", "a" * 63, "a" * 65, "A" * 64, None, 1, True, [], {}):
+        with pytest.raises(ProtocolError):
+            sha(value)
 
 
 @pytest.mark.parametrize("payload", [

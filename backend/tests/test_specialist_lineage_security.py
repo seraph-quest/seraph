@@ -1,4 +1,5 @@
 """Canonical child publication rollback; display receipts grant no execution."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 import pytest
 from sqlalchemy import select,func
@@ -7,7 +8,7 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_specialist_evidence_runtime import copied_evidence_fixture,reserve_evidence_specialist
 
 @pytest.mark.asyncio
-async def test_existing_lineage_key_collision_rolls_back_actual_child_publication(task_runtime,monkeypatch):
+async def test_existing_lineage_key_collision_rolls_back_actual_child_publication(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.db.models import WorkBoardEvent,WorkBoardTask,WorkBoardAttempt,WorkflowRunState
     from src.workflows.specialist_delegation import execute_specialist,current_delegation
     from src.workflows.specialist_lineage import SpecialistLineage,lineage_event_key

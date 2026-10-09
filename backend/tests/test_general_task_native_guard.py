@@ -1,4 +1,5 @@
 """Real disposable SQLite native-child phase fences; no tool/provider contact."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -119,7 +120,7 @@ async def admitted_child(task_runtime, *, tamper_input=False):
 
 
 @pytest.mark.asyncio
-async def test_admitted_zero_claim_positive_and_missing_receipt_never_contacts(task_runtime):
+async def test_admitted_zero_claim_positive_and_missing_receipt_never_contacts(task_runtime, native_admission_lifecycle):
     sessions, jobs, binding, admitted = await admitted_child(task_runtime)
     assert admitted["attempt_count"] == 0 and admitted["lease"]["fencing_token"] == 0
     parent = await jobs.get_job(binding.parent_job_id)
@@ -146,7 +147,7 @@ async def test_admitted_zero_claim_positive_and_missing_receipt_never_contacts(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['deadline', 'authority', 'phase', 'root', 'cancel'])
-async def test_original_native_claim_denies_canonical_drift(task_runtime, change):
+async def test_original_native_claim_denies_canonical_drift(task_runtime, change, native_admission_lifecycle):
     from src.db.models import OperatorSession
     from sqlalchemy import update
     sessions, jobs, binding, admitted = await admitted_child(task_runtime)
@@ -177,7 +178,7 @@ def test_protected_manifest_corruption_never_becomes_empty_history():
 
 
 @pytest.mark.asyncio
-async def test_missing_claim_receipt_blocks_journal_and_private_artifact_mutation(task_runtime):
+async def test_missing_claim_receipt_blocks_journal_and_private_artifact_mutation(task_runtime, native_admission_lifecycle):
     sessions, jobs, binding, admitted = await admitted_child(task_runtime)
     await jobs.queue_job(binding.invocation_id)
     await jobs.claim_job(binding.invocation_id, owner='native-worker')
@@ -202,7 +203,7 @@ async def test_missing_claim_receipt_blocks_journal_and_private_artifact_mutatio
 
 
 @pytest.mark.asyncio
-async def test_paired_operator_pause_fences_old_child_and_generic_resume(task_runtime):
+async def test_paired_operator_pause_fences_old_child_and_generic_resume(task_runtime, native_admission_lifecycle):
     sessions, jobs, binding, admitted = await admitted_child(task_runtime)
     await jobs.queue_job(binding.invocation_id)
     parent = await jobs.get_job(binding.parent_job_id)
@@ -235,7 +236,7 @@ async def test_paired_operator_pause_fences_old_child_and_generic_resume(task_ru
 
 
 @pytest.mark.asyncio
-async def test_native_original_cutoff_is_narrower_and_not_renewed(task_runtime):
+async def test_native_original_cutoff_is_narrower_and_not_renewed(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     manifest = GeneralTaskCurrentManifestV1.model_validate(original['manifest'])
     assert manifest.native_deadline_at < manifest.original_deadline_at
@@ -247,7 +248,7 @@ async def test_native_original_cutoff_is_narrower_and_not_renewed(task_runtime):
 
 
 @pytest.mark.asyncio
-async def test_no_child_operator_resume_keeps_same_attempt_and_original_cutoff(task_runtime):
+async def test_no_child_operator_resume_keeps_same_attempt_and_original_cutoff(task_runtime, native_admission_lifecycle):
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     jobs = dispatcher.jobs
     previous = GeneralTaskCurrentManifestV1.model_validate(original['manifest'])
@@ -269,7 +270,7 @@ async def test_no_child_operator_resume_keeps_same_attempt_and_original_cutoff(t
 
 
 @pytest.mark.asyncio
-async def test_protected_checkpoint_capacity_and_missing_proof_fail_closed(task_runtime):
+async def test_protected_checkpoint_capacity_and_missing_proof_fail_closed(task_runtime, native_admission_lifecycle):
     from src.workflows.job_runtime import _digest
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
     manifest = GeneralTaskCurrentManifestV1.model_validate(original['manifest'])
@@ -292,7 +293,7 @@ async def test_protected_checkpoint_capacity_and_missing_proof_fail_closed(task_
 
 
 @pytest.mark.asyncio
-async def test_rejected_input_admission_keeps_parent_board_and_manifest_atomic(task_runtime):
+async def test_rejected_input_admission_keeps_parent_board_and_manifest_atomic(task_runtime, native_admission_lifecycle):
     sessions, _workspace = task_runtime
     with pytest.raises(DurableJobLeaseError, match='private native tool input binding'):
         await admitted_child(task_runtime, tamper_input=True)
@@ -313,7 +314,7 @@ async def test_rejected_input_admission_keeps_parent_board_and_manifest_atomic(t
 
 
 @pytest.mark.asyncio
-async def test_parent_publication_rechecks_original_authority_before_private_write(task_runtime):
+async def test_parent_publication_rechecks_original_authority_before_private_write(task_runtime, native_admission_lifecycle):
     from sqlalchemy import update
     from src.work_board.repository import BoardError
     sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
@@ -331,7 +332,7 @@ async def test_parent_publication_rechecks_original_authority_before_private_wri
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('contact_intent', [False, True])
-async def test_claimed_child_cancel_without_original_callback_receipt_keeps_native_wait(task_runtime, contact_intent):
+async def test_claimed_child_cancel_without_original_callback_receipt_keeps_native_wait(task_runtime, contact_intent, native_admission_lifecycle):
     from src.work_board.general_task_native import publish_positive_claim
     sessions, jobs, binding, admitted = await admitted_child(task_runtime)
     await jobs.queue_job(binding.invocation_id)
@@ -365,7 +366,7 @@ async def test_claimed_child_cancel_without_original_callback_receipt_keeps_nati
 
 
 @pytest.mark.asyncio
-async def test_generic_checkpoint_and_caller_closure_cannot_forge_native_transition(task_runtime):
+async def test_generic_checkpoint_and_caller_closure_cannot_forge_native_transition(task_runtime, native_admission_lifecycle):
     from src.work_board.general_task_native import publish_positive_claim
     from src.work_board.contracts import GeneralTaskToolClosureV1
     sessions, jobs, binding, _ = await admitted_child(task_runtime)
@@ -390,7 +391,7 @@ async def test_generic_checkpoint_and_caller_closure_cannot_forge_native_transit
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['capability', 'source_ref', 'input_owner'])
-async def test_wrong_native_capability_denies_before_private_input_read(task_runtime, monkeypatch, drift):
+async def test_wrong_native_capability_denies_before_private_input_read(task_runtime, monkeypatch, drift, native_admission_lifecycle):
     from src.work_board.general_task_native import publish_positive_claim
     from src.work_board import general_task_runtime_artifacts as artifacts
     sessions, jobs, binding, _ = await admitted_child(task_runtime)
@@ -453,7 +454,7 @@ async def test_wrong_native_capability_denies_before_private_input_read(task_run
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['missing', 'malformed', 'foreign', 'stale_fence', 'expired_approval', 'descriptor_before_resume'])
-async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, drift, request, monkeypatch):
+async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, drift, request, monkeypatch, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.approval.repository import ApprovalRepository
     from src.db.models import ApprovalRequest
@@ -576,7 +577,7 @@ async def test_resumed_approval_drift_denies_every_native_writer(task_runtime, d
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tamper_output', [False, True])
-async def test_verified_terminal_receipt_never_reopens_contact_and_requires_physical_output(task_runtime, monkeypatch, tamper_output, request):
+async def test_verified_terminal_receipt_never_reopens_contact_and_requires_physical_output(task_runtime, monkeypatch, tamper_output, request, native_admission_lifecycle):
     from dataclasses import replace
     from src.auth.service import authenticate_session
     from src.work_board.general_task_native import admit_native_step, run_native_step
@@ -638,7 +639,7 @@ async def test_verified_terminal_receipt_never_reopens_contact_and_requires_phys
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('attachment_failure', ['refused', 'crash'])
-async def test_actual_precontact_wait_attachment_failure_rolls_back_paired_state(task_runtime, monkeypatch, request, attachment_failure):
+async def test_actual_precontact_wait_attachment_failure_rolls_back_paired_state(task_runtime, monkeypatch, request, attachment_failure, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.native_tools.registry import ToolRegistry
     from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, PlanSpec

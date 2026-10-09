@@ -1,4 +1,5 @@
 """Original allowance/deadline mechanics, without inference or credentials."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -50,7 +51,7 @@ def test_expired_root_cannot_mint_task_clock():
 
 
 @pytest.mark.asyncio
-async def test_charged_native_child_publication_uses_bounded_reads_and_preserves_denials(task_runtime, monkeypatch):
+async def test_charged_native_child_publication_uses_bounded_reads_and_preserves_denials(task_runtime, monkeypatch, native_admission_lifecycle):
     import inspect
     from dataclasses import replace
     from sqlalchemy import select

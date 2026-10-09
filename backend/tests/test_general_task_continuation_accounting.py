@@ -1,4 +1,5 @@
 """Real bounded continuation reservation/contact with literal HTTP transport."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from dataclasses import replace
 import json
 
@@ -38,7 +39,7 @@ async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2):
 
 
 @pytest.mark.asyncio
-async def test_manual_group_two_continuations_share_original_clock_and_call_ceiling(task_runtime, monkeypatch):
+async def test_manual_group_two_continuations_share_original_clock_and_call_ceiling(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     assert manifest.native_deadline_at < manifest.original_deadline_at
     for key in ("continuation-one", "continuation-two"):
@@ -65,7 +66,7 @@ async def test_manual_group_two_continuations_share_original_clock_and_call_ceil
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["lease", "fence", "deadline"])
-async def test_parent_drift_after_reservation_denies_actual_provider_contact(task_runtime, monkeypatch, drift):
+async def test_parent_drift_after_reservation_denies_actual_provider_contact(task_runtime, monkeypatch, drift, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     from src.workflows.job_runtime import DurableJobRepository
     from datetime import timedelta
@@ -96,7 +97,7 @@ async def test_parent_drift_after_reservation_denies_actual_provider_contact(tas
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corruption", ["foreign_job", "duplicate", "extra_field", "wrong_role"])
-async def test_corrupted_canonical_reservation_evidence_denies_contact(task_runtime, monkeypatch, corruption):
+async def test_corrupted_canonical_reservation_evidence_denies_contact(task_runtime, monkeypatch, corruption, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     from src.workflows.job_runtime import DurableJobRepository
     original = DurableJobRepository.contact_inference_provider
@@ -146,7 +147,7 @@ async def test_corrupted_canonical_reservation_evidence_denies_contact(task_runt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("liability", ["unknown", "missing_settled_cost", "prior_period_cost"])
-async def test_group_liability_survives_accounting_period_change(task_runtime, monkeypatch, liability):
+async def test_group_liability_survives_accounting_period_change(task_runtime, monkeypatch, liability, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,

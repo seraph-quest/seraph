@@ -1,4 +1,5 @@
 """Original paused attempt revision: no execution lease or authority renewal."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from datetime import datetime, timezone
 import json
 
@@ -33,7 +34,7 @@ def revision_request(envelope, paused, *, key='paused-edit'):
 
 
 @pytest.mark.asyncio
-async def test_paused_overlay_keeps_original_input_attempt_fences_clocks_and_no_leases(task_runtime):
+async def test_paused_overlay_keeps_original_input_attempt_fences_clocks_and_no_leases(task_runtime, native_admission_lifecycle):
     sessions, jobs, service, envelope, paused = await paused_task(task_runtime)
     previous = paused['manifest']
     async with sessions() as db:
@@ -74,7 +75,7 @@ async def test_paused_overlay_keeps_original_input_attempt_fences_clocks_and_no_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('drift', ['stale', 'goal', 'root', 'source', 'phase', 'cancel'])
-async def test_paused_revision_drift_denies_before_private_staging(task_runtime, monkeypatch, drift):
+async def test_paused_revision_drift_denies_before_private_staging(task_runtime, monkeypatch, drift, native_admission_lifecycle):
     sessions, jobs, service, envelope, paused = await paused_task(task_runtime)
     manifest = paused['manifest']
     request = revision_request(envelope, paused)
@@ -111,7 +112,7 @@ async def test_paused_revision_drift_denies_before_private_staging(task_runtime,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('late_drift', ['journal', 'input_owner'])
-async def test_paused_revision_final_exact_cas_rolls_back_task_and_overlay(task_runtime, monkeypatch, late_drift):
+async def test_paused_revision_final_exact_cas_rolls_back_task_and_overlay(task_runtime, monkeypatch, late_drift, native_admission_lifecycle):
     from src.db.models import WorkBoardInputArtifact
     from src.work_board import general_task_native as native
     sessions, jobs, service, envelope, paused = await paused_task(task_runtime)

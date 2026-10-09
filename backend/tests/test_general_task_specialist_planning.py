@@ -1,4 +1,5 @@
 """Actual native delegate claim/reservation and literal governed planning."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import json
 
 import pytest
@@ -75,7 +76,7 @@ async def specialist_fixture(task_runtime, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_actual_specialist_reserve_contact_and_restart_keep_original_group(task_runtime, monkeypatch):
+async def test_actual_specialist_reserve_contact_and_restart_keep_original_group(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, binding, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         result = await planner.propose_specialist(db, owner, group=group, binding=binding,
@@ -100,7 +101,7 @@ async def test_actual_specialist_reserve_contact_and_restart_keep_original_group
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["callback", "request_digest", "fence"])
-async def test_foreign_original_specialist_binding_denies_before_reservation_or_contact(task_runtime, monkeypatch, drift):
+async def test_foreign_original_specialist_binding_denies_before_reservation_or_contact(task_runtime, monkeypatch, drift, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, binding, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     changed = {**binding, **({"delegation_invocation_id":"foreign-original-callback"} if drift=="callback"
         else {"delegation_request_digest":"f"*64} if drift=="request_digest" else {"parent_fence":binding["parent_fence"]+1})}
@@ -115,7 +116,7 @@ async def test_foreign_original_specialist_binding_denies_before_reservation_or_
 
 
 @pytest.mark.asyncio
-async def test_actual_callback_drift_after_reserve_denies_scripted_contact(task_runtime, monkeypatch):
+async def test_actual_callback_drift_after_reserve_denies_scripted_contact(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, binding, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     from src.workflows.job_runtime import DurableJobRepository
     original = DurableJobRepository.contact_inference_provider
@@ -137,7 +138,7 @@ async def test_actual_callback_drift_after_reserve_denies_scripted_contact(task_
 
 
 @pytest.mark.asyncio
-async def test_actual_specialist_child_cap_and_unknown_debt_cannot_reset_group(task_runtime, monkeypatch):
+async def test_actual_specialist_child_cap_and_unknown_debt_cannot_reset_group(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, binding, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         await planner.propose_specialist(db, owner, group=group, binding=binding,

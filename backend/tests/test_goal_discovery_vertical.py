@@ -108,6 +108,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
         source_preferences=["official", "dated"], required_evidence_fields=["url", "date", "excerpt", "limitation"],
         draft_sections=["Evidence summary", "Limitations and next local checks"],
         stop_conditions=["Stop when no selected source has verifiable attribution"]).model_dump(mode="json")
+    expected_strategy_version = "1"
     class ModelBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             assert request.url.host == "openrouter.ai" and request.method == "POST"
@@ -121,9 +122,11 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                     raise httpx.ReadTimeout("owned scripted contact response lost", request=request)
                 supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
                 method = supplied.get("research_strategy")
+                projected_data = strategy_data if expected_strategy_version == "1" else {**strategy_data,
+                    "query_templates": ["Changed accepted public query"]}
                 if method is not None:
                     assert supplied["strategy_ref"] == {"status": "active", "method_id": "accepted-public-method",
-                        "version": "1", "digest": _digest(strategy_data)}
+                        "version": expected_strategy_version, "digest": _digest(projected_data)}
                 else:
                     assert "research_strategy" not in supplied
                     if supplied.get("task") == "plan_queries" or "manifest_ref" in supplied:
@@ -133,7 +136,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                         assert "strategy_ref" not in supplied
                 if supplied.get("task") == "plan_queries":
                     if method is not None:
-                        assert method == {"schema_version": "ResearchStrategy.v1", "query_templates": strategy_data["query_templates"]}
+                        assert method == {"schema_version": "ResearchStrategy.v1", "query_templates": projected_data["query_templates"]}
                     answer = json.dumps({"queries": method["query_templates"] if method else ["public product release evidence"]})
                     if scenario == "narrow_queries":
                         assert supplied["max_queries"] == 1
@@ -195,8 +198,8 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
         assert host in {"html.duckduckgo.com", "example.com"} and port == 443
         return ["93.184.216.34"]
     transport = PublicFixtureBoundary()
-    strategy_state = {"changed": False}
-    resolver_calls = []
+    strategy_state = {"changed": False, "selection_changed": False}
+    resolver_calls, pinned_validator_calls = [], []
     if scenario == "strategy_malformed":
         strategy_data = {"kind": "public_research_method", "origin": "operator_accepted"}
     elif scenario == "strategy_task_method":
@@ -219,6 +222,8 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     elif scenario in {"strategy_oversize", "strategy_late_oversize"}:
         strategy_data["draft_sections"] = ["x" * 1000] * (9 if scenario == "strategy_oversize" else 7)
     class AcceptedStrategy:
+        # Synthetic consumer protocol only; canonical signed source/adoption
+        # authority is exercised separately by the genuine method vertical.
         def resolve(self, owner, goal_ref, family, programme_grant=None):
             from src.work_board.contracts import TaskStrategyBinding
             assert owner.principal_id == "service:guardian-goal-programmes" and owner.session_id == ""
@@ -226,9 +231,28 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             resolver_calls.append((goal_ref, programme_grant.programme_id))
             if scenario == "strategy_blocked":
                 return TaskStrategyBinding(status="blocked", reason="method_review_required")
-            current_data = {**strategy_data, "query_templates": ["Changed accepted public query"]} if strategy_state["changed"] else strategy_data
-            return TaskStrategyBinding(status="active", method_id="accepted-public-method", version="1",
+            current_data = {**strategy_data, "query_templates": ["Changed accepted public query"]} if strategy_state["selection_changed"] else strategy_data
+            return TaskStrategyBinding(status="active", method_id="accepted-public-method", version="2" if strategy_state["selection_changed"] else "1",
                 digest=_digest(current_data), typed_data=current_data)
+
+        def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
+            from src.work_board.contracts import TaskStrategyBinding
+            assert owner.principal_id == "service:guardian-goal-programmes" and owner.session_id == ""
+            assert programme_grant.goal_id == goal_ref
+            assert binding.version in {"1", "2"}
+            # Each immutable version has fixed bytes, independently of which
+            # version the current pointer selects for the next admission.
+            pinned_data = strategy_data if binding.version == "1" else {**strategy_data, "query_templates": ["Changed accepted public query"]}
+            original = TaskStrategyBinding(status="active", method_id="accepted-public-method", version=binding.version,
+                digest=_digest(pinned_data), typed_data=pinned_data)
+            assert binding == original
+            pinned_validator_calls.append((goal_ref, programme_grant.programme_id))
+            if strategy_state["changed"]:
+                # Deliberately invalid immutable-version replacement. This is
+                # distinct from a later current-pointer selection/rollback.
+                changed = {**strategy_data, "query_templates": ["Changed immutable pinned query"]}
+                return original.model_copy(update={"digest": _digest(changed), "typed_data": changed})
+            return binding
     service = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport),
         resolver=resolver, transport=transport,
         strategy_resolver=AcceptedStrategy() if scenario == "active_strategy" or scenario.startswith("strategy_") else None)
@@ -354,9 +378,10 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert len(calls) == expected_calls and len(contacts) == expected_contacts
                 return
             if scenario == "strategy_changed_after_query":
-                with pytest.raises(ValueError):
+                with pytest.raises(ValueError, match="programme accepted strategy binding changed"):
                     await service.run(job["job_id"])
                 assert len(calls) == 1 and contacts == [] and physical_contacts == []
+                assert len(resolver_calls) == 1 and len(pinned_validator_calls) > 1
                 assert (await jobs.get_job(job["job_id"]))["declared_authority"] == job["declared_authority"]
                 return
             if scenario == "strategy_late_oversize":
@@ -474,6 +499,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 with pytest.raises(ValueError, match="programme accepted strategy binding changed"):
                     await service.run(job["job_id"])
                 assert calls == [] and contacts == [] and physical_contacts == []
+                assert len(resolver_calls) == 1 and pinned_validator_calls
                 return
             if scenario in {"goal_before_claim", "identity_before_claim"}:
                 if scenario == "goal_before_claim":
@@ -572,6 +598,10 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 await run_goal_discovery_tick()
                 done = await jobs.get_job(job["job_id"])
             else:
+                if scenario == "active_strategy":
+                    # A later selection changes only new admissions. Every
+                    # current physical stage must retain the original pin.
+                    strategy_state["selection_changed"] = True
                 done = await service.run(job["job_id"])
             if scenario in {"empty_search", "normalized_oversize", "unsupported_pdf", "unsupported_brief"}:
                 assert done["status"] == "degraded", done
@@ -617,7 +647,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             assert len(calls) == 3 and len(contacts) == 2
             if scenario == "active_strategy":
                 assert witness.plan.strategy_binding.status == "active" and witness.plan.strategy_binding.digest == _digest(strategy_data)
-                assert len(resolver_calls) > 3
+                assert len(resolver_calls) == 1 and len(pinned_validator_calls) > 3
                 assert physical_contacts[0][2]["q"] == strategy_data["query_templates"]
                 assert physical_contacts[1] == ("GET", "/official-release")
                 assert brief["findings"][0]["text"].startswith("Evidence summary:")
@@ -658,6 +688,13 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 await run_goal_discovery_tick()  # actual next-slot native admission and quiet execution
             second = await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
             assert second["job_id"] != job["job_id"]
+            if scenario == "active_strategy":
+                second_plan = await physical_discovery_inputs(jobs, second["job_id"])
+                assert second_plan.plan.strategy_binding.version == "2"
+                assert second_plan.plan.strategy_binding.typed_data["query_templates"] == ["Changed accepted public query"]
+                assert witness.plan.strategy_binding.version == "1"
+                assert len(resolver_calls) == 2
+                expected_strategy_version = "2"
             if scenario == "generation_ceiling":
                 with pytest.raises(Exception):
                     await service.run(second["job_id"])

@@ -67,6 +67,30 @@ def test_public_schema_and_payload_do_not_export_private_context():
     assert "credential_refs" not in serialized
 
 
+def test_reviewed_method_projection_excludes_private_parameters_and_memory_binding():
+    from src.work_board.general_task import method_constraints, digest
+    from src.work_board.contracts import TaskStrategyBinding
+    from src.native_tools.registry import ToolRegistry
+    from src.memory.task_lessons import TaskMethod
+    registry = ToolRegistry()
+    registry.start()
+    try:
+        candidate = TaskMethod(family='general', steps=[{'kind': 'guard', 'check': 'source_exists'},
+            {'kind': 'registered_tool', 'tool_id': 'read_file'}], registered_tool_ids=['read_file'],
+            input_parameters={'selected_path': 'private-method-source.txt'},
+            output_contract={'artifact_type': 'text', 'required_fields': ['content']})
+        binding = TaskStrategyBinding(status='active', method_id='private-proposal', version='private-version',
+            digest=digest(candidate.model_dump(mode='json')), typed_data=candidate.model_dump(mode='json'))
+        projection = method_constraints(binding, registry.descriptors())
+        messages = planner_messages(task_input(), registry.descriptors(), method_constraints=projection)
+        payload = json.loads(messages[1]['content'])
+        assert payload['reviewed_plan_constraints'] == {'tool_sequence': ['read_file'], 'guards': ['source_exists']}
+        for private in ('private-method-source.txt', 'private-proposal', 'private-version', 'TaskMethod.v1', 'input_parameters'):
+            assert private not in messages[1]['content']
+    finally:
+        registry.stop()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changes,reason", [
     ({"inference_egress_acknowledged": False}, "general_task_planning_consent_required"),

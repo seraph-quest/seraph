@@ -342,6 +342,10 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
 
             async def invoke():
                 nonlocal started
+                # The serial broker may have waited since preparation. Reopen
+                # the original inputs and validate their admitted method pin
+                # before publishing a contact attempt or sending the request.
+                await physical_discovery_inputs(jobs, job_id)
                 hooks.attempt_started(decision, capability_proof_hashes=proofs)
                 started = True
                 remaining = context.deadline_at - time.time()

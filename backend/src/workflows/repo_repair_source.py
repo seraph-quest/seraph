@@ -2639,7 +2639,7 @@ async def _recheck_recovered_finalizer_rows(db, jobs, state, witness):
     root = await jobs._fetch(db, bound["job_id"])
     context = bound["context"]
     if (root.status != "running" or _repository_record(root, "repository:stop-intent:v1") is not None
-            or root.cancel_requested_at is not None or _as_utc(root.deadline_at) <= _utc_now()
+            or _as_utc(root.deadline_at) <= _utc_now()
             or _as_utc(root.lease_expires_at) is None or _as_utc(root.lease_expires_at) <= _utc_now()):
         raise DurableJobLeaseError("recovered finalizer original Root is not current Running authority")
     if _utc_now() >= context["binding"].native_deadline_at:

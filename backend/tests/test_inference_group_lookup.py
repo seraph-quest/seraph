@@ -32,6 +32,29 @@ def reservation(group, ordinal=1, *, owner=None, evidence=None):
         job_fencing_token=1, evidence_json=evidence or json.dumps([{"kind":"reservation"}, entry]))
 
 
+@pytest.mark.parametrize("later_corruption", [False, True])
+def test_accounting_continuity_validates_all_original_evidence_before_lookup_drift(later_corruption):
+    from src.workflows.job_runtime import DurableJobRepository
+    group = original_group()
+    rows = [reservation(group, ordinal) for ordinal in (1, 2)]
+    for row in rows:
+        row.group_lookup_key = classify_group_lookup(row)
+    # The first row's evidence is valid, but its derived projection has drifted.
+    # It must not mask a later row's original evidence failure.
+    rows[0].group_lookup_key = "none"
+    if later_corruption:
+        entries = json.loads(rows[1].evidence_json)
+        entries[1]["original_job_id"] = "foreign-original-job"
+        rows[1].evidence_json = json.dumps(entries)
+    before = [row.model_dump(mode="json") for row in rows]
+    expected = "general_task_group_evidence_invalid" if later_corruption else "general_task_group_lookup_invalid"
+    with pytest.raises(InferenceAccountingError) as denied:
+        DurableJobRepository()._assert_accounting_continuity(None, None, rows)
+    assert str(denied.value) == expected
+    assert [row.model_dump(mode="json") for row in rows] == before
+    assert all(row.contact_started_at is None and row.bound_microusd == 100 for row in rows)
+
+
 @pytest.mark.asyncio
 async def test_populated_old_migration_rerun_preserves_all_financial_bytes_and_seeks(tmp_path, monkeypatch):
     from src.db import engine as db_owner

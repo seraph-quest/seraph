@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { WorkBoardTask } from "../../types";
+import { TaskMethodReview } from "./TaskMethodReview";
 
 interface Policy { enabled: boolean; policy_revision: number | null; daily_cap: number; inference_egress: "not_permitted"; adoption: "requires_separate_review" }
 interface AutomaticOutcome { status: string; result: "candidate_inert" | "no_change"; reason_code: string;
@@ -132,7 +133,8 @@ export function TaskLessonReview({ task, ownerPrincipalId, ownerSessionId, propo
       {lesson.mirror?.status === "degraded" && <p role="status">Evolution receipt mirror degraded. The canonical private candidate remains inspectable. {typeof lesson.mirror.recovery_action === "string" ? lesson.mirror.recovery_action : "Repair the evolution state using its existing owner, then inspect again."}</p>}
       <h4>Old method</h4><pre aria-label="Old task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.old_method, null, 2)}</pre>
       <h4>Proposed method</h4><pre aria-label="Proposed task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.new_method, null, 2)}</pre>
-      <p>No method adoption or quality improvement is established by this candidate.</p>
+      <p>This candidate alone establishes no method adoption or measured quality improvement.</p>
+      {lesson.new_method && <TaskMethodReview key={`${ownerSessionId}:${lesson.proposal_id}`} task={task} proposalId={lesson.proposal_id} owned={owned} />}
     </div>}
   </section>;
 }

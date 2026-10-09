@@ -738,6 +738,11 @@ async def _current(jobs, db, parent_id, *, manifest=None):
         owner_kind=parent.owner_kind, owner_principal_id=parent.owner_principal_id,
         session_id=parent.session_id, authority=parent.declared_authority_json)
     envelope = await verify_general_task_manifest(db, parent, task, attempt, selected)
+    if envelope.strategy.status == "active":
+        from src.memory.task_methods import current_method
+        from src.work_board.contracts import WorkBoardOwner
+        await current_method.validate_pinned(WorkBoardOwner(principal_id=task.owner_principal_id,
+            session_id=task.owner_session_id), envelope.task_input.goal_ref, envelope.strategy, db=db)
     return parent, task, attempt, selected, envelope
 
 

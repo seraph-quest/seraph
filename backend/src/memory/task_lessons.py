@@ -375,6 +375,22 @@ class LessonRequest(ClosedModel):
         return values
 
 
+class ResearchMethodRequest(ClosedModel):
+    task_id: Identifier
+    attempt_id: Identifier
+    source_refs: list[Annotated[str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")]] = Field(min_length=1, max_length=16)
+    scope: LessonScope
+    expected_revision: int = Field(ge=1)
+    strategy: ResearchStrategy
+
+    @field_validator("scope")
+    @classmethod
+    def research_scope(cls, value):
+        if value.family != "research":
+            raise ValueError("Structured research methods require the research family")
+        return value
+
+
 class LessonAutoPolicyRequest(ClosedModel):
     enabled: bool
     expected_revision: int = Field(ge=1)
@@ -506,8 +522,18 @@ async def _source(db, operator, request: LessonRequest, *, automatic=False, stag
     return task, attempt, run, token
 
 
-async def _observed_method(db, task, run, family):
+async def _observed_method(db, task, run, family, *, structured_research=False):
     """Project only recorded tool identities, never source bodies or arguments."""
+    if task.capability_id == "agent.task.v1":
+        from src.memory.task_lesson_native import project_completed_native_method
+        return await project_completed_native_method(db, task, run, family)
+    if structured_research and task.capability_id == "work.research-dossier.v1":
+        if family != "research" or run.capability_version != "1" or run.status != "succeeded":
+            return None, None
+        return None, {"research_capability": "work.research-dossier.v1", "capability_version": "1",
+            "typed_input_digest": task.typed_input_digest, "run_input_digest": run.input_digest,
+            "artifact_receipts_digest": digest(run.artifact_receipts_json),
+            "effect_receipts_digest": digest(run.effect_receipts_json)}
     if task.capability_id == "work.json-format.v1":
         from src.work_board.dispatcher import REGISTERED_CAPABILITIES
         from src.work_board.tool_package_contracts import JsonFormatInput
@@ -547,6 +573,17 @@ async def _observed_method(db, task, run, family):
     return method, {"step_refs": [row.id for row in rows], "steps_digest": digest(steps)}
 
 
+async def _observed_method_after_stage(db, task, run, family, staged, *, structured_research=False):
+    """Final original-source metadata check; never perform physical I/O."""
+    if task.capability_id == "agent.task.v1":
+        from src.memory.task_lesson_native import native_source_metadata
+        _, _, audit = await native_source_metadata(db, task, run)
+        return staged.method, audit
+    if task.capability_id == "work.json-format.v1":
+        return staged.method, staged.method_token
+    return await _observed_method(db, task, run, family, structured_research=structured_research)
+
+
 def _correct_method(old: TaskMethod | None, correction: str):
     """Finite deterministic lesson grammar; arbitrary prose remains evidence only."""
     if old is None or not correction.strip():
@@ -566,7 +603,14 @@ def _correct_method(old: TaskMethod | None, correction: str):
         else [*[step.model_dump() for step in old.steps], added.model_dump()]})
 
 
-async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bool = False):
+async def create_research_method(operator, request: ResearchMethodRequest):
+    source = LessonRequest(task_id=request.task_id, attempt_id=request.attempt_id, correction="",
+        source_refs=request.source_refs, scope=request.scope, expected_revision=request.expected_revision)
+    return await create_task_lesson(operator, source, _structured_strategy=request.strategy)
+
+
+async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bool = False,
+                             _structured_strategy: ResearchStrategy | None = None):
     """Draft locally from an explicit correction; never contact any provider."""
     from src.memory.m5 import sanitize_m5_memory_text_async
     # Vault-aware sanitization is staged before the SQLite writer lock.
@@ -584,12 +628,23 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
         policy = await _automatic_policy(db, operator, task) if _automatic else None
         if _automatic and not policy["enabled"]:
             return {"status": "blocked", "reason_code": "automatic_lessons_not_opted_in", "result": "no_change", "behavior_changed": False}
-        old, audit_token = await _observed_method(db, task, run, request.scope.family)
+        old, audit_token = await _observed_method(db, task, run, request.scope.family,
+            structured_research=_structured_strategy is not None)
+        if _structured_strategy is not None:
+            if (_automatic or task.capability_id != "work.research-dossier.v1" or run.capability_version != "1"
+                or token["observed"]["status"] != "completed" or request.scope.family != "research" or audit_token is None):
+                raise BoardError("research_method_source_unsupported", "Use the completed native research dossier and its verified source references")
+            candidate_text = canonical(_structured_strategy.model_dump(mode="json"))
+            if await sanitize_m5_memory_text_async(candidate_text) != candidate_text:
+                raise BoardError("research_method_candidate_unsafe", "Remove private secrets from the typed strategy", status_code=422)
         token["method_receipt"] = audit_token
         staged = _SourceStage(_STAGE_SEAL, token, old, audit_token)
-        binding = digest({"owner": task.owner_principal_id, "root": task.owner_session_id,
+        binding_data = {"owner": task.owner_principal_id, "root": task.owner_session_id,
             "request": request.model_dump(), "correction_digest": digest(correction), "source": token,
-            "automatic_policy": policy})
+            "automatic_policy": policy}
+        if _structured_strategy is not None:
+            binding_data["structured_strategy"] = _structured_strategy.model_dump(mode="json")
+        binding = digest(binding_data)
         previous = (await db.execute(select(MemoryProposal).where(
             MemoryProposal.schema_version == PROPOSAL_SCHEMA,
             MemoryProposal.owner_principal_id == task.owner_principal_id,
@@ -600,7 +655,7 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             if not _automatic:
                 mirror = await _repair_lesson_mirror(previous)
             return {**proposal_projection(previous), "idempotent_replay": True, "mirror": mirror}
-        candidate = _correct_method(old, correction)
+        candidate = _structured_strategy if _structured_strategy is not None else _correct_method(old, correction)
         reason = ("observed_failure_candidate" if _automatic else "explicit_correction") if candidate else "insufficient_method_evidence" if old is None else "no_explicit_correction" if not correction else "unsupported_correction_no_change"
         envelope = {"schema_version": PROPOSAL_SCHEMA, "old_method": old.model_dump() if old else None,
             "new_method": candidate.model_dump() if candidate else None, "correction": correction,
@@ -609,6 +664,10 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             "observed": token["observed"], "source_token": token, "source_refs": request.source_refs,
             "scope": request.scope.model_dump(), "behavior_changed": False, "positive_preference_vote": False,
             "reflection": {"mode": "local_projection", "provider_contacts": 0, "spend_microusd": 0}}
+        if _structured_strategy is not None:
+            reason = "explicit_structured_research_method"
+            envelope["correction_provenance"] = "explicit_operator_structured_data"
+            envelope["lesson_provenance"] = "verified_completed_research_strategy"
         raw = canonical(envelope).encode()
         sha = hashlib.sha256(raw).hexdigest()
         relative = f"artifacts/memory/task-lessons/{binding}.json"
@@ -665,10 +724,8 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
     async with db_engine.get_session() as db:
         await _begin_sqlite_immediate(db)
         task, attempt, run, current = await _source(db, operator, request, automatic=_automatic, staged=staged)
-        if task.capability_id == "work.json-format.v1":
-            current_method, current_audit = staged.method, staged.method_token
-        else:
-            current_method, current_audit = await _observed_method(db, task, run, request.scope.family)
+        current_method, current_audit = await _observed_method_after_stage(db, task, run, request.scope.family,
+            staged, structured_research=_structured_strategy is not None)
         current["method_receipt"] = current_audit
         if current != token or task.task_revision != staged_task_revision:
             raise BoardError("lesson_source_changed", "The exact ordinary task evidence changed; request a new lesson")
@@ -869,10 +926,15 @@ async def inspect_task_lesson(operator, proposal_id):
 
 
 def proposal_projection(row):
+    stored_scope = json.loads(row.memory_scope_json or "{}")
+    if stored_scope.get("schema_version") == "task_method_scope.v1":
+        scope = {key: stored_scope[key] for key in ("goal_id", "goal_revision", "family")}
+    else:
+        scope = stored_scope
     return {"proposal_id": row.proposal_id, "schema_version": row.schema_version,
         "task_id": row.source_task_id, "attempt_id": row.source_attempt_id,
         "revision": row.revision, "status": row.status.value, "reason_code": row.reason_code,
-        "source_refs": json.loads(row.source_refs_json), "scope": json.loads(row.memory_scope_json or "{}"),
+        "source_refs": json.loads(row.source_refs_json), "scope": scope,
         "candidate_digest": row.artifact_digest, "behavior_changed": False,
         "result": "candidate_inert" if row.reason_code in {"explicit_correction", "observed_failure_candidate"} else "no_change",
         "provider_contact_count": row.provider_contact_count, "quality_evidence": "unmeasured"}

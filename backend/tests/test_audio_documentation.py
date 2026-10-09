@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx,pytest
 from pydantic import ValidationError
 from sqlmodel import select
+from sqlalchemy import text,event
 from config.settings import settings
 from src.auth.service import create_session,revoke_session
 from src.db.models import ModelAudioDocumentationAttestationRecord as Bundle,ModelAudioDocumentationSourceRecord as Source
@@ -231,3 +232,240 @@ async def test_nonpublic_or_multicast_resolution_never_contacts(documentary,monk
     with pytest.raises(doc.DocumentationError,match='destination_invalid'):
         await repository.stage_audio_documentation(operator,request)
     assert calls==[]
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('surface',['get','accept','reject','stage'])
+@pytest.mark.parametrize('target,column',[
+    ('bundle','binding_json'),('bundle','profile_hash'),('bundle','created_at'),
+    ('bundle','expires_at'),('bundle','reserved_bytes'),
+    ('source','source_url'),('source','acquired_at'),('source','size_bytes')])
+@pytest.mark.parametrize('fault',['oversize','blob'])
+async def test_http_documentary_corruption_never_materializes_or_renews(client,documentary,async_db,monkeypatch,surface,target,column,fault):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:sources=(await db.execute(select(Source).order_by(Source.ordinal))).scalars().all()
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before={source.object_id:(objects/source.object_id).read_bytes() for source in sources}
+    table='model_audio_documentation_attestations' if target=='bundle' else 'model_audio_documentation_sources'
+    identifier=staged['staged_ref'] if target=='bundle' else sources[0].id
+    async with async_db() as db:
+        await db.execute(text(f'UPDATE {table} SET {column}=:value WHERE id=:id'),
+            {'value':'x'*1000000 if fault=='oversize' else b'corrupt','id':identifier})
+        engine=db.bind.sync_engine
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement or 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('corrupt documentary body materialized')
+    def no_private_access(*args,**kwargs):raise AssertionError('corrupt documentary storage opened')
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    event.listen(engine,'before_cursor_execute',trap)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    try:
+        if surface=='get':response=await client.get('/api/settings/model-fabric/audio-documentation')
+        else:
+            body=request.model_dump() if surface=='stage' else {'action':('accept' if surface=='accept' else 'reject')+'_staged_documentation',
+                'staged_ref':staged['staged_ref'],'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']}
+            response=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=body)
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    assert response.status_code==409,response.text
+    assert response.json()['detail']['code']==('audio_documentation_quota_full' if surface=='stage' else 'audio_documentation_cleanup_unknown')
+    assert len(calls)==2
+    async with async_db() as db:
+        assert (await db.execute(text('SELECT count(*) FROM model_audio_documentation_attestations'))).scalar_one()==1
+        header=(await db.execute(text('SELECT revision,state,typeof(reserved_bytes),octet_length(reserved_bytes) FROM model_audio_documentation_attestations'))).one()
+        assert header[:2]==(1,'staged')
+        if target=='bundle' and column=='reserved_bytes':
+            assert header[2:]==(('text',1000000) if fault=='oversize' else ('blob',7))
+        else:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+    assert {name:(objects/name).read_bytes() for name in before}==before
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_http_corrupt_manual_owner_and_revision_fences_precede_bodies(client,documentary,async_db,monkeypatch):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:
+        await db.execute(text('UPDATE model_audio_documentation_attestations SET binding_json=:value WHERE id=:id'),
+            {'value':'x'*1000000,'id':staged['staged_ref']})
+        engine=db.bind.sync_engine
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement or 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('body loaded before owner/revision fence')
+    def no_private_access(*args,**kwargs):raise AssertionError('private storage opened before owner/revision fence')
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    token,_=await create_session()
+    event.listen(engine,'before_cursor_execute',trap)
+    try:
+        client.cookies.set(settings.operator_auth_cookie_name,token)
+        assert (await client.get('/api/settings/model-fabric/audio-documentation')).json()=={'staged':[]}
+        for action in ['accept_staged_documentation','reject_staged_documentation']:
+            body={'action':action,'staged_ref':staged['staged_ref'],'expected_staged_revision':staged['revision'],
+                'expected_bundle_digest':staged['bundle_digest']}
+            denied=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=body)
+            assert denied.status_code==404 and denied.json()['detail']['code']=='audio_documentation_not_found'
+            client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+            stale=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+                json={**body,'expected_staged_revision':staged['revision']+1})
+            assert stale.status_code==409 and stale.json()['detail']['code']=='audio_documentation_revision_changed'
+            client.cookies.set(settings.operator_auth_cookie_name,token)
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    async with async_db() as db:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('surface',['get','accept','reject','stage'])
+async def test_http_extra_source_blocks_readback_review_and_new_stage(client,documentary,async_db,monkeypatch,surface):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:
+        sources=(await db.execute(select(Source))).scalars().all()
+        db.add(Source(attestation_id=staged['staged_ref'],ordinal=2,source_id='extra',source_url='https://openrouter.ai',
+            object_id='f'*32+'.source',sha256='a'*64,size_bytes=1))
+        engine=db.bind.sync_engine
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before={source.object_id:(objects/source.object_id).read_bytes() for source in sources}
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement or 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('body loaded with extra Source rows')
+    def no_private_access(*args,**kwargs):raise AssertionError('private storage opened with extra Source rows')
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    event.listen(engine,'before_cursor_execute',trap)
+    try:
+        if surface=='get':response=await client.get('/api/settings/model-fabric/audio-documentation')
+        else:
+            body=request.model_dump() if surface=='stage' else {'action':('accept' if surface=='accept' else 'reject')+'_staged_documentation',
+                'staged_ref':staged['staged_ref'],'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']}
+            response=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},json=body)
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    assert response.status_code==409,response.text
+    assert response.json()['detail']['code']==('audio_documentation_quota_full' if surface=='stage' else 'audio_documentation_cleanup_unknown')
+    async with async_db() as db:
+        assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+        assert (await db.execute(text('SELECT count(*) FROM model_audio_documentation_attestations'))).scalar_one()==1
+    assert len(calls)==2 and {name:(objects/name).read_bytes() for name in before}==before
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_stage_scalar_quota_admits_sixteenth_and_denies_seventeenth(documentary,async_db):
+    repository,operator,request,calls=documentary
+    # Capacity-only crash-state fixtures: initial rev-0 charged headers, not
+    # documentary authority or completed acquisitions. No Sources are issued.
+    binding={'inventory_schema':'audio-documentary-inventory.v1','selection_digest':request.expected_metadata_selection_digest,
+        'model':'vendor/audio','endpoint_tag':'deepinfra/turbo','configuration_revision':2,'catalog_id':doc.CATALOG,'sources':[]}
+    from datetime import datetime,timedelta,timezone
+    async with async_db() as db:
+        for index in range(15):
+            db.add(Bundle(owner_principal_id=operator.principal.principal_id,original_root_id=f'{index%7:032x}',
+                profile_hash=request.expected_audio_profile_hash,binding_json=doc.canonical(binding),bundle_digest=doc.digest(binding),
+                expires_at=datetime.now(timezone.utc)+timedelta(minutes=10)))
+        engine=db.bind.sync_engine
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement:
+            raise AssertionError('quota scan materialized full Bundle bodies')
+    event.listen(engine,'before_cursor_execute',trap)
+    try:staged=await repository.stage_audio_documentation(operator,request)
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    assert staged['revision']==1 and len(calls)==2
+    with pytest.raises(doc.DocumentationError,match='quota_full'):await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:
+        assert (await db.execute(text('SELECT count(*) FROM model_audio_documentation_attestations'))).scalar_one()==16
+        assert (await db.execute(text('SELECT sum(reserved_bytes) FROM model_audio_documentation_attestations'))).scalar_one()==16*doc.RESERVED_BYTES
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_http_known_manual_readback_rejection_and_original_idempotence(client,documentary,async_db):
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    readback=await client.get('/api/settings/model-fabric/audio-documentation')
+    assert readback.status_code==200 and readback.json()=={'staged':[staged]}
+    body={'staged_ref':staged['staged_ref'],'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']}
+    accepted=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+        json={**body,'action':'accept_staged_documentation'})
+    assert accepted.status_code==409 and accepted.json()['detail']['code']=='audio_documentation_source_incomplete'
+    rejected=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+        json={**body,'action':'reject_staged_documentation'})
+    assert rejected.status_code==200 and rejected.json()['state']=='rejected'
+    assert rejected.json()['revision']==2 and rejected.json()['bundle_digest']==staged['bundle_digest']
+    repeated=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+        json={**body,'action':'reject_staged_documentation','expected_staged_revision':2})
+    assert repeated.status_code==200 and repeated.json()==rejected.json()
+    assert (await client.get('/api/settings/model-fabric/audio-documentation')).json()=={'staged':[]}
+    async with async_db() as db:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==0
+    assert not list((Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects').iterdir())
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('target',['bundle','source'])
+async def test_http_storage_changed_after_preflight_is_not_returned_by_body_select(client,documentary,async_db,monkeypatch,target):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    async with async_db() as db:sources=(await db.execute(select(Source).order_by(Source.ordinal))).scalars().all()
+    original_execute=AsyncSession.execute
+    changed=False
+    async def changed_before_body(db,statement,*args,**kwargs):
+        nonlocal changed
+        prefix='SELECT model_audio_documentation_'+('attestations' if target=='bundle' else 'sources')+'.id,'
+        if not changed and prefix in str(statement):
+            changed=True
+            table='model_audio_documentation_attestations' if target=='bundle' else 'model_audio_documentation_sources'
+            column='binding_json' if target=='bundle' else 'source_url'
+            identifier=staged['staged_ref'] if target=='bundle' else sources[0].id
+            await original_execute(db,text(f'UPDATE {table} SET {column}=:value WHERE id=:id'),
+                {'value':'x'*1000000,'id':identifier})
+            result=await original_execute(db,statement,*args,**kwargs)
+            frozen=result.freeze()
+            rows=frozen().scalars().all()
+            # Assert actual SQL readback excluded the just-corrupted body;
+            # checking an eventual 409 alone would miss materialization.
+            if target=='bundle':assert rows==[]
+            else:assert len(rows)==1 and rows[0].id==sources[1].id
+            return frozen()
+        return await original_execute(db,statement,*args,**kwargs)
+    def no_private_access(*args,**kwargs):raise AssertionError('changed storage opened private objects')
+    monkeypatch.setattr(AsyncSession,'execute',changed_before_body)
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    if target=='bundle':response=await client.get('/api/settings/model-fabric/audio-documentation')
+    else:
+        response=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+            json={'action':'accept_staged_documentation','staged_ref':staged['staged_ref'],
+                'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']})
+    assert changed and response.status_code==409,response.text
+    assert response.json()['detail']['code']=='audio_documentation_cleanup_unknown'
+    async with async_db() as db:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_http_accept_refreshes_owner_changed_between_bounded_body_reads(client,documentary,async_db,monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    repository,operator,request,calls=documentary
+    staged=await repository.stage_audio_documentation(operator,request)
+    _,other=await create_session()
+    execute=AsyncSession.execute
+    bodies=0
+    async def change_owner_on_second_body(db,statement,*args,**kwargs):
+        nonlocal bodies
+        if 'SELECT model_audio_documentation_attestations.id,' in str(statement):
+            bodies+=1
+            if bodies==2:
+                await execute(db,text('UPDATE model_audio_documentation_attestations SET owner_principal_id=:owner,original_root_id=:root WHERE id=:id'),
+                    {'owner':other.principal.principal_id,'root':other.session_id,'id':staged['staged_ref']})
+        return await execute(db,statement,*args,**kwargs)
+    def no_private_access(*args,**kwargs):raise AssertionError('stale ORM owner opened private objects')
+    monkeypatch.setattr(AsyncSession,'execute',change_owner_on_second_body)
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    response=await client.post('/api/settings/model-fabric/audio-documentation',headers={'Origin':'http://localhost:3001'},
+        json={'action':'accept_staged_documentation','staged_ref':staged['staged_ref'],
+            'expected_staged_revision':staged['revision'],'expected_bundle_digest':staged['bundle_digest']})
+    assert bodies==2 and response.status_code==404,response.text
+    assert response.json()['detail']['code']=='audio_documentation_not_found'
+    async with async_db() as db:assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+    assert len(calls)==2

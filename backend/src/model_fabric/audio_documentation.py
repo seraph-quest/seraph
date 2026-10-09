@@ -34,6 +34,33 @@ MISSING_FACTS = ('exact_codec_container_media_type', 'audio_context_rounding_and
     'complete_charge_inventory_minimum_rounding_cache', 'exact_endpoint_zdr_applicability')
 CATALOG = 'openrouter-audio-guide.v1'
 RESERVED_BYTES = 16384 + 2 * 262144
+# Fixed storage shapes for this documentary producer only. Partial acquisition
+# and rejected readback are bounded too; they never become cleanup authority.
+BUNDLE_STORAGE = ("typeof(id)='text' AND octet_length(id)=32 "
+    "AND typeof(revision)='integer' AND revision BETWEEN 0 AND 2 "
+    "AND typeof(reserved_bytes)='integer' AND reserved_bytes IN (0,540672) "
+    "AND typeof(owner_principal_id)='text' AND octet_length(owner_principal_id) BETWEEN 1 AND 128 "
+    "AND typeof(original_root_id)='text' AND octet_length(original_root_id) BETWEEN 1 AND 128 "
+    "AND typeof(profile_hash)='text' AND octet_length(profile_hash)=64 "
+    "AND typeof(state)='text' AND state IN ('staged','deleting','rejected','accepted') "
+    "AND typeof(binding_json)='text' AND octet_length(binding_json) BETWEEN 1 AND 16384 "
+    "AND typeof(bundle_digest)='text' AND octet_length(bundle_digest)=64 "
+    "AND (error_code IS NULL OR (typeof(error_code)='text' AND octet_length(error_code) BETWEEN 1 AND 64)) "
+    "AND typeof(created_at)='text' AND octet_length(created_at) BETWEEN 1 AND 32 "
+    "AND typeof(expires_at)='text' AND octet_length(expires_at) BETWEEN 1 AND 32 "
+    "AND ((revision=0 AND state='staged' AND reserved_bytes=540672 AND (error_code IS NULL OR error_code='audio_documentation_acquisition_incomplete')) "
+    "OR (revision=1 AND state IN ('staged','deleting') AND reserved_bytes=540672 AND error_code='audio_documentation_source_incomplete') "
+    "OR (revision=2 AND state='rejected' AND reserved_bytes=0 AND error_code='audio_documentation_source_incomplete'))")
+SOURCE_STORAGE = ("typeof(id)='text' AND octet_length(id)=32 "
+    "AND typeof(attestation_id)='text' AND octet_length(attestation_id)=32 "
+    "AND typeof(source_id)='text' AND octet_length(source_id) BETWEEN 1 AND 15 "
+    "AND typeof(source_url)='text' AND octet_length(source_url) BETWEEN 1 AND 320 "
+    "AND typeof(object_id)='text' AND octet_length(object_id)=39 "
+    "AND typeof(sha256)='text' AND octet_length(sha256)=64 "
+    "AND typeof(acquired_at)='text' AND octet_length(acquired_at) BETWEEN 1 AND 32 "
+    "AND typeof(ordinal)='integer' AND ordinal IN (0,1) "
+    "AND typeof(size_bytes)='integer' AND size_bytes BETWEEN 1 AND 262144")
+OPEN_RESERVATION = "NOT (typeof(reserved_bytes)='integer' AND reserved_bytes=0 AND state='rejected')"
 
 
 def canonical(value):
@@ -387,40 +414,37 @@ def successful_inventory(row, sources):
         raise DocumentationError('audio_documentation_cleanup_unknown')
 
 
-async def cleanup_witness(db, identifier):
-    # SQL headers only: corrupt storage must not materialize unbounded ORM
-    # bodies. These fixed bounds cover the current two-source producer, not
-    # future source catalogs. SQLite datetime columns are stored as text too.
-    size=(await db.execute(select(Bundle.id).where(Bundle.id==identifier,
-        text("typeof(id)='text' AND octet_length(id) BETWEEN 1 AND 32 "
-            "AND typeof(revision)='integer' AND revision=1 "
-            "AND typeof(reserved_bytes)='integer' AND reserved_bytes=540672 "
-            "AND typeof(owner_principal_id)='text' AND octet_length(owner_principal_id) BETWEEN 1 AND 128 "
-            "AND typeof(original_root_id)='text' AND octet_length(original_root_id) BETWEEN 1 AND 128 "
-            "AND typeof(profile_hash)='text' AND octet_length(profile_hash)=64 "
-            "AND typeof(state)='text' AND octet_length(state) BETWEEN 1 AND 8 "
-            "AND typeof(binding_json)='text' AND octet_length(binding_json) BETWEEN 1 AND 16384 "
-            "AND typeof(bundle_digest)='text' AND octet_length(bundle_digest)=64 "
-            "AND typeof(error_code)='text' AND octet_length(error_code) BETWEEN 1 AND 38 "
-            "AND typeof(created_at)='text' AND octet_length(created_at) BETWEEN 1 AND 32 "
-            "AND typeof(expires_at)='text' AND octet_length(expires_at) BETWEEN 1 AND 32")))).scalar_one_or_none()
-    if size is None: raise DocumentationError('audio_documentation_cleanup_unknown')
-    count,valid=(await db.execute(text("SELECT count(*), sum(CASE WHEN "
-        "typeof(id)='text' AND octet_length(id)=32 "
-        "AND typeof(attestation_id)='text' AND octet_length(attestation_id)=32 "
-        "AND typeof(source_id)='text' AND octet_length(source_id) BETWEEN 1 AND 15 "
-        "AND typeof(source_url)='text' AND octet_length(source_url) BETWEEN 1 AND 320 "
-        "AND typeof(object_id)='text' AND octet_length(object_id)=39 "
-        "AND typeof(sha256)='text' AND octet_length(sha256)=64 "
-        "AND typeof(acquired_at)='text' AND octet_length(acquired_at) BETWEEN 1 AND 32 "
-        "AND typeof(ordinal)='integer' AND ordinal IN (0,1) "
-        "AND typeof(size_bytes)='integer' AND size_bytes BETWEEN 1 AND 262144 "
-        "THEN 1 ELSE 0 END) FROM model_audio_documentation_sources WHERE attestation_id=:id"),
+async def source_storage_count(db, identifier, *, partial=False):
+    count,valid=(await db.execute(text("SELECT count(*), sum(CASE WHEN "+SOURCE_STORAGE+
+        " THEN 1 ELSE 0 END) FROM model_audio_documentation_sources WHERE attestation_id=:id"),
         {'id':identifier})).one()
-    if count!=2 or valid!=2: raise DocumentationError('audio_documentation_cleanup_unknown')
-    row=await db.get(Bundle,identifier)
-    sources=(await db.execute(select(Source).where(Source.attestation_id==identifier)
-        .order_by(Source.ordinal).limit(4))).scalars().all()
+    if not (0<=count<=2 if partial else count==2) or (valid or 0)!=count:
+        raise DocumentationError('audio_documentation_cleanup_unknown')
+
+
+async def bounded_bundle(db, identifier, *, settled_only=False):
+    condition=BUNDLE_STORAGE
+    if settled_only:
+        condition+=" AND revision=1 AND reserved_bytes=540672 AND state IN ('staged','deleting') AND error_code='audio_documentation_source_incomplete'"
+    revision=(await db.execute(select(Bundle.revision).where(Bundle.id==identifier,text(condition)))).scalar_one_or_none()
+    if revision is None:raise DocumentationError('audio_documentation_cleanup_unknown')
+    await source_storage_count(db,identifier,partial=revision==0)
+    # Repeat the predicate on the actual body SELECT: preflight must not be a
+    # byte-bound TOCTOU if another writer changes storage between these reads.
+    try:
+        row=(await db.execute(select(Bundle).where(Bundle.id==identifier,text(condition))
+            .execution_options(populate_existing=True))).scalar_one_or_none()
+        if row is None:raise DocumentationError('audio_documentation_cleanup_unknown')
+        return row
+    except (ValueError,TypeError):raise DocumentationError('audio_documentation_cleanup_unknown') from None
+
+
+async def cleanup_witness(db, identifier):
+    row=await bounded_bundle(db,identifier,settled_only=True)
+    try:
+        sources=(await db.execute(select(Source).where(Source.attestation_id==identifier,text(SOURCE_STORAGE))
+            .order_by(Source.ordinal).limit(4))).scalars().all()
+    except (ValueError,TypeError):raise DocumentationError('audio_documentation_cleanup_unknown') from None
     successful_inventory(row,sources)
     return row,sources
 
@@ -540,11 +564,22 @@ async def stage(repository, operator, request):
         expires_at=min(cutoff,now+timedelta(minutes=10)))
     async with repository._session() as db:
         await db.execute(text('BEGIN IMMEDIATE'))
-        rows=(await db.execute(select(Bundle).where(Bundle.reserved_bytes>0).limit(17))).scalars().all()
-        pairs={(item.original_root_id,item.profile_hash) for item in rows}
+        rows=(await db.execute(text("SELECT CASE WHEN "+BUNDLE_STORAGE+" THEN 1 ELSE 0 END, "
+            "CASE WHEN typeof(id)='text' AND octet_length(id)=32 THEN id END, "
+            "CASE WHEN typeof(original_root_id)='text' AND octet_length(original_root_id) BETWEEN 1 AND 128 THEN original_root_id END, "
+            "CASE WHEN typeof(profile_hash)='text' AND octet_length(profile_hash)=64 THEN profile_hash END, "
+            "CASE WHEN typeof(state)='text' AND state IN ('staged','deleting','rejected','accepted') THEN state END, "
+            "CASE WHEN typeof(revision)='integer' AND revision BETWEEN 0 AND 2 THEN revision END "
+            "FROM model_audio_documentation_attestations WHERE "+OPEN_RESERVATION+" LIMIT 17"))).all()
+        if any(not valid for valid,*_ in rows):raise DocumentationError('audio_documentation_quota_full')
+        try:
+            for _,identifier,_,_,_,revision in rows:
+                await source_storage_count(db,identifier,partial=revision==0)
+        except DocumentationError:raise DocumentationError('audio_documentation_quota_full') from None
+        pairs={(original_root,profile_hash) for _,_,original_root,profile_hash,_,_ in rows}
         if (len(rows)>=16 or ((access.original_root_id,profile.contract_hash) not in pairs and len(pairs)>=8)
-            or any(item.original_root_id==access.original_root_id and item.profile_hash==profile.contract_hash
-                and item.state in {'staged','deleting'} for item in rows)):
+            or any(original_root==access.original_root_id and profile_hash==profile.contract_hash
+                and state in {'staged','deleting'} for _,_,original_root,profile_hash,state,_ in rows)):
             raise DocumentationError('audio_documentation_quota_full')
         db.add(row); await db.flush()
     try:
@@ -590,17 +625,31 @@ async def stage(repository, operator, request):
 async def review(repository, operator, request):
     owner,root,_=await current_owner(repository,operator)
     async with repository._session() as db:
-        row=await db.get(Bundle,request.staged_ref)
-        if row is None or row.owner_principal_id!=owner or row.original_root_id!=root:
+        header=(await db.execute(text("SELECT "
+            "CASE WHEN typeof(owner_principal_id)='text' AND octet_length(owner_principal_id) BETWEEN 1 AND 128 THEN owner_principal_id END, "
+            "CASE WHEN typeof(original_root_id)='text' AND octet_length(original_root_id) BETWEEN 1 AND 128 THEN original_root_id END, "
+            "CASE WHEN typeof(revision)='integer' AND revision BETWEEN 0 AND 2 THEN revision END, "
+            "CASE WHEN typeof(bundle_digest)='text' AND octet_length(bundle_digest)=64 THEN bundle_digest END "
+            "FROM model_audio_documentation_attestations WHERE id=:id"),{'id':request.staged_ref})).one_or_none()
+        if header is None or header[0]!=owner or header[1]!=root:
+            raise DocumentationError('audio_documentation_not_found',404)
+        if header[2] is None or header[3] is None:raise DocumentationError('audio_documentation_cleanup_unknown')
+        if header[2]!=request.expected_staged_revision or header[3]!=request.expected_bundle_digest:
+            raise DocumentationError('audio_documentation_revision_changed')
+        row=await bounded_bundle(db,request.staged_ref)
+        if row.owner_principal_id!=owner or row.original_root_id!=root:
             raise DocumentationError('audio_documentation_not_found',404)
         if row.revision!=request.expected_staged_revision or row.bundle_digest!=request.expected_bundle_digest:
             raise DocumentationError('audio_documentation_revision_changed')
         if isinstance(request,AcceptStagedDocumentationV1):
-            sources=(await db.execute(select(Source).where(Source.attestation_id==row.id).order_by(Source.ordinal).limit(4))).scalars().all()
-            if len(sources)>3: raise DocumentationError('audio_documentation_source_count_invalid')
             if row.state!='staged' or utc(row.expires_at)<=datetime.now(timezone.utc):
                 raise DocumentationError('audio_documentation_staging_expired')
-            binding=json.loads(row.binding_json)
+            row,sources=await cleanup_witness(db,row.id)
+            if row.owner_principal_id!=owner or row.original_root_id!=root:
+                raise DocumentationError('audio_documentation_not_found',404)
+            if row.revision!=request.expected_staged_revision or row.bundle_digest!=request.expected_bundle_digest:
+                raise DocumentationError('audio_documentation_revision_changed')
+            binding=strict_json(row.binding_json)
             await current_access(repository,operator,expected=binding['selection_digest'])
             for source in sources: private_read(source)
             # There is deliberately no operator Boolean/extracted-JSON escape.
@@ -622,6 +671,12 @@ async def require_execution_documentation(repository, operator, reference, expec
 async def owned_staging(repository, operator):
     owner, root, _ = await current_owner(repository, operator)
     async with repository._session() as db:
-        rows = (await db.execute(select(Bundle).where(Bundle.owner_principal_id==owner,
-            Bundle.original_root_id==root, Bundle.reserved_bytes>0).order_by(Bundle.created_at.desc()).limit(2))).scalars().all()
+        identifiers=(await db.execute(text("SELECT CASE WHEN typeof(id)='text' AND octet_length(id)=32 THEN id END "
+            "FROM model_audio_documentation_attestations WHERE owner_principal_id=:owner AND original_root_id=:root AND "+OPEN_RESERVATION+
+            " ORDER BY CASE WHEN typeof(created_at)='text' AND octet_length(created_at) BETWEEN 1 AND 32 THEN created_at END DESC LIMIT 2"),
+            {'owner':owner,'root':root})).scalars().all()
+        rows=[]
+        for identifier in identifiers:
+            if identifier is None:raise DocumentationError('audio_documentation_cleanup_unknown')
+            rows.append(await bounded_bundle(db,identifier))
         return [staged_readback(row) for row in rows]

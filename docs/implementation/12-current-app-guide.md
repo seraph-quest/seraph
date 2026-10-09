@@ -1561,9 +1561,9 @@ native macOS execution remain unverified.
 
 ### Reusable general procedures (#1002)
 
-**Intended Shipped scope after independently reviewed milestone merge:** the
-flow below requires an installed `develop` revision containing the complete
-[#1002](https://github.com/seraph-quest/seraph/issues/1002) merge. Earlier revisions
+**Shipped in `develop` through [#1053](https://github.com/seraph-quest/seraph/pull/1053):** the
+flow below requires an installed revision containing the complete
+[#1002](https://github.com/seraph-quest/seraph/issues/1002) milestone. Earlier revisions
 do not acquire it from branch-local receipts. The existing Python/FastAPI
 owners and React Task Inspector implement this
 [ADR-028](./decisions/028-reviewed-task-methods.md#reusable-general-procedures-v3)

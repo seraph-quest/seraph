@@ -356,7 +356,7 @@ def main(request_file: Path) -> int:
     patch=read_regular(stage,"patch.diff",job["limits"]["max_patch_bytes"])
     patch_paths=_patch_paths_from_diff(patch,job["allowed_paths"])
     if any(immutable(path) for path in patch_paths):raise ValueError("node_immutable_patch_target")
-    env=job["environment"];commands=[];reason=None
+    env=job["environment"];commands=[];reason=None;snapshot=None
     def command(argv: list[str]) -> dict[str,Any]:
         result=run_command(argv,workspace,env,deadline,stream_limit=job["limits"]["max_stream_bytes"])
         if result["cancelled"] or result["timed_out"] or result["leftover_descendant"] or result["stdout_truncated"]:
@@ -417,6 +417,12 @@ def main(request_file: Path) -> int:
             "status":"cancelled" if CANCELLED else "failed" if reason else "succeeded","reason":reason,"commands":commands,
             "diff_sha256":hash_file(output/"diff.patch"),"cleanup_proven":proof["cleanup_proven"],"process_cleanup":proof,
             **({"iteration_binding":job["iteration_binding"]} if job.get("iteration_binding") else {})}
+    if job.get("iteration_binding") and snapshot is not None:
+        result.update(after_digest=snapshot.digest, tested_file_hash_metadata=[
+            {"path": entry.relative_path, "size_bytes": entry.size_bytes, "sha256": entry.sha256}
+            for entry in snapshot.entries])
+        if len(json.dumps(result, sort_keys=True).encode()) > job["limits"]["max_output_bytes"]:
+            raise ValueError("node_iterative_readback_metadata_limit")
     _write_private_output(output,"supervisor-result.json",json.dumps(result,sort_keys=True).encode())
     return 0 if proof["cleanup_proven"] else 2
 

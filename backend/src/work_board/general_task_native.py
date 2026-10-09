@@ -147,7 +147,7 @@ async def publish_positive_claim(jobs, binding, *, child_owner, child_fence):
 
 
 async def _run_repository_native_step(service, jobs, binding, *, child_owner,
-    principal, approved_resume=False):
+    principal, approved_resume=False, repository_first_start=None):
     """Run the one fixed repository adapter without the generic callback path.
 
     The adapter is intentionally a private seam supplied by the source owner
@@ -169,7 +169,13 @@ async def _run_repository_native_step(service, jobs, binding, *, child_owner,
     if remaining <= 0:
         raise BoardError("general_task_deadline", "Original native cutoff expired", status_code=409)
 
-    if approved_resume:
+    if repository_first_start is not None:
+        if approved_resume:
+            raise DurableJobLeaseError("initial repository start is not a postcontact resume")
+        from src.workflows.repo_repair_source import consume_repository_first_start
+        child = await consume_repository_first_start(repository_first_start,
+            service=service, jobs=jobs, binding=binding, child_owner=child_owner)
+    elif approved_resume:
         async with jobs._session() as db:
             row = await jobs._fetch(db, binding.invocation_id)
             parent = await jobs._fetch(db, binding.parent_job_id)
@@ -207,7 +213,7 @@ async def _run_repository_native_step(service, jobs, binding, *, child_owner,
     fence = child["lease"]["fencing_token"]
     if type(fence) is not int or fence < 1:
         raise DurableJobLeaseError("original repository child claim fence required")
-    if not approved_resume:
+    if not approved_resume and repository_first_start is None:
         await publish_positive_claim(jobs, binding, child_owner=child_owner, child_fence=fence)
 
     async with jobs._session() as db:
@@ -262,9 +268,16 @@ async def _run_repository_native_step(service, jobs, binding, *, child_owner,
     result = adapter(jobs=jobs, binding=binding, descriptor=descriptor,
         inputs=private.inputs, step=step, child_owner=child_owner,
         principal=principal, fencing_token=fence, approved_resume=approved_resume,
-        original_deadline=deadline, phase_timeout=phase_budget)
+        original_deadline=deadline, phase_timeout=phase_budget,
+        **({"repository_first_start": repository_first_start} if repository_first_start is not None else {}))
     if inspect.isawaitable(result):
         result = await result
+    if repository_first_start is not None:
+        # Certify the real awaited adapter return before issuing the durable
+        # C1 wait witness. Provider return alone is not callback quiescence.
+        from src.workflows.repo_repair_source import certify_repository_callback_return
+        result = await certify_repository_callback_return(repository_first_start,
+            result, service=service, jobs=jobs)
     if not isinstance(result, dict):
         raise BoardError("repository_native_adapter_invalid",
             "The fixed repository adapter returned no sealed transition", status_code=409)
@@ -323,11 +336,15 @@ async def _run_repository_native_step(service, jobs, binding, *, child_owner,
         "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True}, records[0], reference
 
 
-async def run_native_step(service, jobs, binding, *, child_owner, principal, approved_resume=False):
+async def run_native_step(service, jobs, binding, *, child_owner, principal, approved_resume=False,
+    repository_first_start=None):
     """Execute through the existing registry after positive durable admission."""
     if await _binding_is_repository_work(jobs, binding):
         return await _run_repository_native_step(service, jobs, binding,
-            child_owner=child_owner, principal=principal, approved_resume=approved_resume)
+            child_owner=child_owner, principal=principal, approved_resume=approved_resume,
+            repository_first_start=repository_first_start)
+    if repository_first_start is not None:
+        raise BoardError("repository_first_start_scope", "Initial source start is fixed to repository_work", status_code=409)
     import asyncio
     import json
     from dataclasses import replace
@@ -588,6 +605,12 @@ async def continue_native_wait(service, jobs, parent_id, *, principal):
             raise DurableJobLeaseError("original native child has prior claim or contact; never replay")
         await assert_general_task_child_phase_current(db, child)
         binding = child_binding(child)
+        repository_child = _is_repository_work_child(child)
+    if repository_child:
+        from src.workflows.repo_repair_source import prepare_repository_native_source
+        prepared = await prepare_repository_native_source(service, jobs, binding,
+            child_owner="general-task-native:" + binding.invocation_id, principal=principal)
+        return prepared, None, None
     return await _execute_interpreter_child(service, jobs, binding,
         child_owner="general-task-native:" + binding.invocation_id, principal=principal)
 
@@ -672,6 +695,13 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
                 manifest, envelope, ready)
         binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
             step=ready, descriptor=descriptor, inputs=inputs, service=service)
+        if _is_repository_work_descriptor(descriptor):
+            # Source preparation is control-plane work, before the first
+            # adapter invocation. No generic wait/approval/failure callback
+            # path may consume this already-claimed original child.
+            from src.workflows.repo_repair_source import prepare_repository_native_source
+            return await prepare_repository_native_source(service, jobs, binding,
+                child_owner="general-task-native:" + binding.invocation_id, principal=principal)
         output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
             child_owner="general-task-native:" + binding.invocation_id, principal=principal)
         if _artifact is None:

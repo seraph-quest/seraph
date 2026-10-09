@@ -1043,7 +1043,8 @@ async def _repository_current_pure(jobs, db, parent_id, *, manifest=None,
         or _as_utc(parent.deadline_at) <= now):
         raise DurableJobLeaseError("general task original parent binding is unavailable")
     if (envelope is not None
-        and _digest(envelope.model_dump(mode="json")) != selected.original_envelope_digest):
+        and _digest({"schema_version": 1, "capability_id": "agent.task.v1",
+            "input": envelope.model_dump(mode="json", exclude_none=True)}) != selected.original_envelope_digest):
         raise DurableJobLeaseError("repository canonical parent envelope changed")
     active_root = await db.scalar(select(OperatorSession.id).where(
         OperatorSession.id == parent.operator_session_id,
@@ -1209,6 +1210,41 @@ async def publish_tool_closure(jobs, child_id, *, owner, fencing_token,
 def assert_child_closed(parent, child, receipt):
     from src.workflows.job_runtime import DurableJobLeaseError, _digest
     binding = child_binding(child)
+    if json.loads(child.arguments_json).get("tool_id") == "repository_work":
+        # This proof is usable only after the source-specific final CAS has
+        # closed the child. A contacted wait or provider return alone cannot
+        # qualify for ordinary parent assembly or cancellation cleanup.
+        finals = [item for item in _history(parent)
+            if item.get("checkpoint_id", "").startswith(_REPOSITORY_CHILD_FINAL_PREFIX)
+            and item.get("payload", {}).get("witness", {}).get("wait_witness", {}).get("native_binding")
+                == binding.model_dump(mode="json")]
+        if len(finals) != 1:
+            raise DurableJobLeaseError("repository child requires its one original final closure")
+        record = finals[0]
+        payload, witness = record["payload"], record["payload"]["witness"]
+        wait = witness["wait_witness"]
+        wait_id = repository_child_wait_checkpoint_id(binding, wait["iteration_id"])
+        wait_records = [item for item in _history(parent) if item.get("checkpoint_id") == wait_id]
+        artifacts = json.loads(child.artifact_receipts_json)
+        if (record.get("safe") is not True or record.get("state_digest") != _digest(payload)
+                or payload.get("schema_version") != "repository.child_final_witness.v1"
+                or payload.get("phase") != "final_verified" or payload.get("no_learning") is not True
+                or payload.get("witness_digest") != _digest(witness)
+                or record["checkpoint_id"] != repository_child_final_checkpoint_id(binding, wait["iteration_id"])
+                or len(wait_records) != 1 or wait_records[0].get("safe") is not True
+                or wait_records[0].get("state_digest") != _digest(wait_records[0].get("payload"))
+                or wait_records[0]["payload"].get("witness") != wait
+                or child.status != "succeeded" or child.lease_owner or child.lease_expires_at
+                or child.result_digest != witness["final_artifact_digest"]
+                or receipt.status != "verified" or receipt.contact_state != "settled"
+                or receipt.child_job_id != child.run_identity or receipt.child_fence != child.fencing_token
+                or receipt.cleanup_receipt_digest != witness["final_cleanup_digest"]
+                or not any(ref.artifact_id == witness["final_artifact_id"]
+                    and ref.digest == witness["final_artifact_digest"] for ref in receipt.artifact_refs)
+                or not any(item.get("artifact_id") == witness["final_artifact_id"]
+                    and item.get("content_sha256") == witness["final_artifact_digest"] for item in artifacts)):
+            raise DurableJobLeaseError("repository original final callback/process closure changed")
+        return
     closure = _protected_payload(parent, cleanup_checkpoint_id(binding, child.fencing_token), GeneralTaskToolClosureV1)
     if (closure.invocation_id != child.run_identity or closure.child_fence != child.fencing_token
         or closure.original_binding_digest != _digest(binding.model_dump(mode="json"))

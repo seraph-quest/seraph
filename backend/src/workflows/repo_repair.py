@@ -936,6 +936,13 @@ class RepoRepairService:
             raise RepoRepairError("iteration_redaction_unavailable", "Restore diagnostics redaction before consent", status_code=409)
         redaction_version = "repo-diagnostics-v1:" + _digest_bytes(
             Path(__file__).read_bytes())
+        # Recheck original selected bytes against the current vault policy;
+        # an earlier packet acknowledgement does not authorize a new secret.
+        for item in source_payload.get("files", []):
+            if isinstance(item, Mapping) and isinstance(item.get("text"), str):
+                if await self._scan_secrets(item["text"]) != item["text"]:
+                    raise RepoRepairError("iteration_source_secret_detected",
+                        "Current source redaction policy blocks the selected bytes", status_code=409)
         diagnostics = {"stdout": redacted_stdout, "stderr": redacted_stderr,
                        "redaction_version": redaction_version}
         envelope = {"schema": "seraph.repo_iteration_egress.v1",
@@ -1072,6 +1079,7 @@ class RepoRepairService:
         session_factory: Callable[[], Any] | None = None,
         workspace_dir: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        jobs: Any | None = None,
     ) -> None:
         # The factory is the only production selector.  Tests and the legacy
         # engineering.repo-change path may still inject the strict rootless
@@ -1082,6 +1090,14 @@ class RepoRepairService:
         self.session_factory = session_factory or get_session
         self.workspace_dir = workspace_dir or settings.workspace_dir
         self.clock = clock or _now
+        self.jobs = jobs or durable_job_repository
+        self._iterative_lanes: dict[str, Any] = {}
+        self._iterative_model_callbacks: dict[str, Any] = {}
+        self._iterative_process_callbacks: dict[str, Any] = {}
+
+    async def native_iteration_adapter(self, **kwargs):
+        from src.workflows.repo_repair_source import run_repository_iteration
+        return await run_repository_iteration(self, **kwargs)
 
     async def _scan_secrets(self, value: str) -> str:
         try:
@@ -1750,7 +1766,7 @@ class RepoRepairService:
         """Record a bounded metadata-only recovery checkpoint through the job repo."""
 
         try:
-            return await durable_job_repository.record_checkpoint(
+            return await self.jobs.record_checkpoint(
                 job_id,
                 checkpoint_id=checkpoint_id,
                 state=dict(state),
@@ -1770,7 +1786,7 @@ class RepoRepairService:
         """Read one metadata-only publication checkpoint without trusting a DTO."""
 
         try:
-            projection = await durable_job_repository.get_job(job_id)
+            projection = await self.jobs.get_job(job_id)
         except Exception as exc:
             raise RepoRepairError(
                 "repair_checkpoint_unavailable",

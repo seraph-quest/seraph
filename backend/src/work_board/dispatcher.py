@@ -11374,6 +11374,19 @@ class WorkBoardDispatcher:
                         recovered.append(job_id)
                         continue
                     try:
+                        # A fixed repository preparation has already claimed
+                        # its original child. Only its exact consent/start CAS
+                        # may invoke that child; generic recovery must not
+                        # reclaim it or use the postcontact resume path.
+                        from src.workflows.repo_repair_source import repository_review_projection
+                        async with self.session_provider() as review_db:
+                            review = await repository_review_projection(review_db,
+                                task=task, attempt=attempt,
+                                owner=WorkBoardOwner(principal_id=task.owner_principal_id,
+                                    session_id=task.owner_session_id))
+                        if review is not None:
+                            recovered.append(job_id)
+                            continue
                         task, attempt, _owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
                         outcome = await self._execute_registered(task, attempt, inputs, job_id=job_id,
                             parent_runtime_owner=f"{self.runner_id}:{attempt.attempt_id}",

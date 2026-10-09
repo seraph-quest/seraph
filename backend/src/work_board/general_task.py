@@ -45,6 +45,11 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
         raise RuntimeError("general task lifecycle already owned")
     try:
         registry.start()
+        if any(item.tool_id == "repository_work" for item in registry.descriptors()):
+            from src.workflows.repo_repair import RepoRepairService
+            source = RepoRepairService(session_factory=dispatcher.session_provider, jobs=dispatcher.jobs)
+            service.repository_source_service = source
+            service.repository_work_adapter = source.native_iteration_adapter
         service.start()
         dispatcher.general_tasks = service
         yield service
@@ -199,6 +204,8 @@ class GeneralTaskService:
         self.strategy_resolver = strategy_resolver
         self.planner = planner
         self.repository_source_service = repository_source_service
+        self.repository_work_adapter = (repository_source_service.native_iteration_adapter
+            if repository_source_service is not None else None)
         self.started = False
         # Ephemeral original callback handles, never execution authority. They
         # remain inspectable after waiter cancellation until the callback exits.

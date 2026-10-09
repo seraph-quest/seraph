@@ -22,7 +22,7 @@ from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
 
-async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None):
+async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python'):
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:
@@ -45,10 +45,25 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None):
     (repository / 'tests').mkdir(parents=True)
     (repository / 'calculator.py').write_text('def add(a, b):\n    return a - b\n')
     (repository / 'tests/test_calculator.py').write_text('from calculator import add\ndef test_add():\n    assert add(1, 2) == 3\n')
+    if language == 'test_node':
+        from pathlib import Path
+        node = Path('/home/pawel/repos/seraph/.agent-worktrees/986-a1-host/.agent-evidence/986/a1-upstream/node-v24.13.1-linux-x64/bin/node')
+        assert node.is_file(), 'Required cached fixed Node24 runtime must exist; no ambient fallback or download'
+        monkeypatch.setattr(settings, 'repo_sandbox', RepoSandboxSettings(enabled=True,
+            executor_kind='local', profile='repo-node24-npm-v1', node_runtime_path=str(node)))
+        persist_repo_sandbox_settings(settings.repo_sandbox)
+        (repository / 'calculator.py').unlink()
+        (repository / 'tests/test_calculator.py').unlink()
+        (repository / 'calculator.js').write_text('exports.add = (a, b) => a - b;\n')
+        (repository / 'tests/calculator.test.js').write_text("require('node:assert/strict').equal(require('../calculator.js').add(1, 2), 3);\n")
+        (repository / 'package.json').write_text(json.dumps({'name': 'actual-source', 'version': '1.0.0',
+            'scripts': {'test': 'node --test tests/calculator.test.js'}}))
+        (repository / 'package-lock.json').write_text(json.dumps({'name': 'actual-source', 'lockfileVersion': 3, 'packages': {}}))
     git(repository, 'init', '--template=', '--initial-branch=develop')
     git(repository, 'add', '.')
     git(repository, 'commit', '-m', 'actual source')
-    work = RepoWorkInput.model_validate(selection(repository_ref='example',
+    work = RepoWorkInput.model_validate(selection(repository_ref='example', language_profile=language,
+        allowed_paths=(['calculator.js', 'tests/calculator.test.js'] if language == 'test_node' else ['calculator.py', 'tests/test_calculator.py']),
         base_commit=git(repository, 'rev-parse', 'HEAD').decode().strip()))
     source = RepoRepairService(session_factory=factory)
     assert source.sandbox.config.model_dump(mode='json') == settings.repo_sandbox.model_dump(mode='json')
@@ -164,9 +179,9 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None):
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python'):
     factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
-        goal_capacity=goal_capacity)
+        goal_capacity=goal_capacity, language=language)
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_native import (
@@ -212,6 +227,8 @@ async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None
         step=envelope.plan.steps[0], descriptor=envelope.descriptors[0],
         inputs=envelope.plan.steps[0].input, service=service)
     child_id = binding.invocation_id
+    if not claim_child:
+        return factory, owner, service, jobs, binding, request
     await jobs.queue_job(child_id)
     claimed_child = await jobs.claim_job(child_id, owner='actual-repository-native-worker', lease_seconds=900)
     async with factory.accounting_sessions() as db:
@@ -234,6 +251,339 @@ async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None
 @pytest.mark.asyncio
 async def test_actual_source_task_original_native_child_binding(accounting_db, monkeypatch):
     await actual_native_source(accounting_db, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_actual_precontact_owner_prepares_original_child_once(accounting_db, monkeypatch):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import (prepare_repository_native_source,
+        repository_review_projection, repository_source_preview, read_repository_original)
+    from src.db.models import WorkBoardAttempt
+    factory, owner, service, jobs, binding, _request = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    before = await jobs.get_job(binding.invocation_id)
+    assert before['attempt_count'] == 0
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-source-preparation-worker', principal=operator.principal)
+    assert prepared['awaiting_repository_consent'] is True
+    child = await jobs.get_job(binding.invocation_id)
+    assert child['attempt_count'] == 1 and child['lease']['fencing_token'] == 1
+    async with factory() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+        attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+        review = await repository_review_projection(db, task=task, attempt=attempt, owner=owner)
+        assert review['native_child_id'] == binding.invocation_id
+        root = await jobs._fetch(db, review['repository_job_id'])
+        original = read_repository_original(root)[0]
+        assert original['native_binding'] == binding.model_dump(mode='json')
+        assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == 2
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+    preview = await repository_source_preview(service.repository_source_service, jobs,
+        job_id=review['repository_job_id'], owner=owner)
+    assert preview['provider_contacted'] is False
+    assert preview['egress']['diagnostics']['stdout'] == ''
+    assert preview['egress']['diagnostics']['stderr'] == ''
+    assert preview['egress']['combined_input_bytes'] <= 65536
+    replay = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-source-preparation-worker', principal=operator.principal)
+    assert replay == prepared
+    after = await jobs.get_job(binding.invocation_id)
+    assert after['lease'] == child['lease'] and after['attempt_count'] == 1
+
+
+async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
+        node_readback_drift=None):
+    import httpx
+    from src.auth.service import authenticate_session
+    from src.api.workflows import RepoRepairEgressConsentRequest
+    from src.workflows.repo_repair_source import (prepare_repository_native_source,
+        repository_source_preview, grant_repository_iteration_consent)
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-consent-callback-worker', principal=operator.principal)
+    root_id = prepared['repository_job_id']
+    preview = await repository_source_preview(service.repository_source_service, jobs,
+        job_id=root_id, owner=owner)
+    review, egress, packet = preview['repository_review'], preview['egress'], preview['source_packet']
+    request = RepoRepairEgressConsentRequest(expected_job_revision=preview['revision'],
+        source_packet_digest=packet['artifact_sha256'],
+        expected_source_manifest_digest=packet['source_manifest_sha256'],
+        expected_profile_id=egress['effective_profile_id'], acknowledged_selected_source=True,
+        idempotency_key='actual-first-contact', expected_iteration_index=review['iteration_index'],
+        expected_iteration_id=review['iteration_id'], expected_preparation_digest=review['preparation_digest'],
+        expected_request_body_digest=egress['request_body_digest'],
+        expected_request_route_digest=egress['request_route_digest'],
+        expected_egress_envelope_digest=egress['egress_envelope_digest'],
+        expected_diagnostics_digest=egress['diagnostics_digest'],
+        expected_redaction_version=egress['redaction_version'], acknowledged_diagnostics=True)
+    messages = egress['request_body']['messages']
+    source = json.loads(messages[1]['content'])
+    output = {'summary': 'Correct addition',
+        'base_snapshot_sha256': source['source_packet']['base_snapshot_sha256'],
+        'patch_unified_diff': '--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n',
+        'allowed_paths': ['calculator.py', 'tests/test_calculator.py'],
+        'test_args': ['pytest', '-q', 'tests/test_calculator.py'],
+        'expected_outcome': 'The addition check passes'}
+    if three_iterations:
+        output['patch_unified_diff'] = output['patch_unified_diff'].replace('+    return a + b', '+    return a - b + 0')
+    if language == 'test_node':
+        output.update(allowed_paths=['calculator.js', 'tests/calculator.test.js'], test_args=['npm', 'test'],
+            patch_unified_diff='--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n+exports.add = (a, b) => ' + ('a - b + 0' if three_iterations else 'a + b') + ';\n')
+    contacted = []
+    def final_http(request):
+        assert str(request.url) == 'https://openrouter.ai/api/v1/chat/completions'
+        assert json.loads(request.content) == egress['request_body']
+        contacted.append(request)
+        return httpx.Response(200, json={'id': 'scripted-source-final-transport',
+            'usage': {'cost': '0', 'prompt_tokens': 1, 'completion_tokens': 1},
+            'choices': [{'message': {'role': 'assistant', 'content': json.dumps(output)}}]})
+    real_client = httpx.Client
+    def owned_client(*args, **kwargs):
+        return real_client(*args, **kwargs, transport=httpx.MockTransport(final_http))
+    monkeypatch.setattr(httpx, 'Client', owned_client)
+    before_child = await jobs.get_job(binding.invocation_id)
+    from src.workflows.repo_repair import RepoRepairError
+    with pytest.raises(RepoRepairError, match='preparation'):
+        await grant_repository_iteration_consent(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner,
+            request=request.model_copy(update={'expected_request_body_digest': 'f' * 64}),
+            general_task_service=service, principal=operator.principal)
+    assert contacted == []
+    async with factory() as db:
+        assert list((await db.scalars(select(InferenceCostReservation))).all()) == []
+    assert (await jobs.get_job(binding.invocation_id))['lease'] == before_child['lease']
+    result = await grant_repository_iteration_consent(service.repository_source_service, jobs,
+        job_id=root_id, owner=owner, request=request, general_task_service=service,
+        principal=operator.principal)
+    assert result['repository_outcome']['awaiting_repository_wait'] is True
+    assert len(contacted) == 1
+    after_child = await jobs.get_job(binding.invocation_id)
+    assert after_child['status'] == 'paused'
+    for key in ('owner', 'fencing_token', 'expires_at'):
+        assert after_child['lease'][key] == before_child['lease'][key]
+    assert after_child['lease']['revision'] == before_child['lease']['revision'] + 1
+    assert after_child['attempt_count'] == 1
+    async with factory() as db:
+        rows = list((await db.scalars(select(InferenceCostReservation))).all())
+        assert len(rows) == 1 and rows[0].state == 'settled'
+        assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == 0
+        assert rows[0].job_id == root_id
+    from src.workflows.repo_repair_source import recover_repository_wait_witness
+    restarted_source = RepoRepairService(session_factory=factory, jobs=jobs)
+    from src.workflows.job_runtime import DurableJobLeaseError
+    async with factory() as db:
+        native_child = await jobs._fetch(db, binding.invocation_id)
+        original_priority = native_child.priority
+        native_child.priority += 1
+        await db.commit()
+    def forbidden_private_read(*args, **kwargs):
+        raise AssertionError('Changed unknown child fields must deny before private snapshot read')
+    with monkeypatch.context() as boundary:
+        boundary.setattr(restarted_source, '_read_private_artifact', forbidden_private_read)
+        with pytest.raises(DurableJobLeaseError, match='before private read'):
+            await recover_repository_wait_witness(restarted_source, jobs,
+                job_id=root_id, owner=owner, iteration_index=1)
+    async with factory() as db:
+        native_child = await jobs._fetch(db, binding.invocation_id)
+        native_child.priority = original_priority
+        await db.commit()
+    from datetime import datetime, timezone
+    async with factory() as db:
+        session = await db.get(OperatorSession, owner.session_id)
+        session.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
+    with monkeypatch.context() as boundary:
+        boundary.setattr(restarted_source, '_read_private_artifact', forbidden_private_read)
+        with pytest.raises((DurableJobLeaseError, BoardError)):
+            await recover_repository_wait_witness(restarted_source, jobs,
+                job_id=root_id, owner=owner, iteration_index=1)
+    async with factory() as db:
+        session = await db.get(OperatorSession, owner.session_id)
+        session.revoked_at = None
+        await db.commit()
+        from src.workflows.repo_repair_source import _repository_record
+        original_run = await jobs._fetch(db, root_id)
+        closure = _repository_record(original_run, 'repository:proposal:' + review['iteration_id'])
+    snapshot = accounting_db[0] / closure['canonical_source_artifact_ref'].removeprefix('workspace-json:')
+    snapshot_bytes = snapshot.read_bytes()
+    snapshot.unlink()
+    with pytest.raises(RepoRepairError):
+        await recover_repository_wait_witness(restarted_source, jobs,
+            job_id=root_id, owner=owner, iteration_index=1)
+    snapshot.write_bytes(snapshot_bytes)
+    snapshot.chmod(0o600)
+    recovered = await recover_repository_wait_witness(restarted_source, jobs,
+        job_id=root_id, owner=owner, iteration_index=1)
+    parent = await jobs.get_job(binding.parent_job_id)
+    with pytest.raises(DurableJobLeaseError):
+        await jobs.resume_repository_child_wait(binding.invocation_id,
+            owner=after_child['lease']['owner'], expected_parent_revision=parent['revision'],
+            expected_child_revision=after_child['revision'], producer_witness=recovered.projection())
+    resumed = await jobs.resume_repository_child_wait(binding.invocation_id,
+        owner=after_child['lease']['owner'], expected_parent_revision=parent['revision'],
+        expected_child_revision=after_child['revision'], producer_witness=recovered)
+    assert resumed['child']['status'] == 'running'
+    for key in ('owner', 'fencing_token', 'expires_at'):
+        assert resumed['child']['lease'][key] == before_child['lease'][key]
+    assert resumed['child']['attempt_count'] == 1
+    assert len(contacted) == 1
+    from src.api.workflows import RepoRepairResumeRequest
+    from src.approval.repository import approval_repository, approval_decision_digest
+    from src.workflows.repo_repair_source import execute_repository_iteration
+    from src.db.models import RepoRepairProposal
+    async with factory() as db:
+        proposal = await db.get(RepoRepairProposal, 'repository-proposal:' + review['iteration_id'])
+    current = await jobs.get_job(root_id)
+    execution_request = RepoRepairResumeRequest(approval_id=proposal.approval_id,
+        proposal_id=proposal.proposal_id, expected_proposal_revision=proposal.revision,
+        expected_job_revision=current['revision'], idempotency_key='actual-approved-iteration')
+    with pytest.raises(DurableJobLeaseError, match='manual patch approval'):
+        await execute_repository_iteration(restarted_source, jobs, job_id=root_id,
+            owner=owner, request=execution_request, principal=operator.principal)
+    approval = await approval_repository.get(proposal.approval_id)
+    approved = await approval_repository.resolve_exact(approval.id, 'approved',
+        expected_digest=approval_decision_digest(approval), owner_principal_id=owner.principal_id,
+        operator_session_id=owner.session_id)
+    assert approved.status == 'approved'
+    if node_readback_drift is not None:
+        sandbox = service.repository_source_service.sandbox
+        original_read = sandbox._read_private_output
+        def changed_result(directory, name):
+            raw = original_read(directory, name)
+            if name == 'supervisor-result.json':
+                result = json.loads(raw)
+                if node_readback_drift == 'missing':
+                    result.pop('tested_file_hash_metadata')
+                elif node_readback_drift == 'tampered':
+                    result['tested_file_hash_metadata'][0]['sha256'] = 'f' * 64
+                else:
+                    result['token'] = '0' * 64
+                return json.dumps(result).encode()
+            return raw
+        monkeypatch.setattr(sandbox, '_read_private_output', changed_result)
+        from src.execution.repo_sandbox import RepoSandboxError
+        with pytest.raises(RepoSandboxError):
+            await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
+                owner=owner, request=execution_request, principal=operator.principal)
+        assert (await jobs.get_job(root_id))['status'] == 'unknown_external_effect'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'running'
+        assert root_id in service.repository_source_service._iterative_lanes
+        assert len(contacted) == 1
+        return
+    executed = await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
+        owner=owner, request=execution_request, principal=operator.principal)
+    assert executed['status'] == ('failed' if three_iterations else 'succeeded') and executed['cleanup_proven'] is True
+    if not three_iterations:
+        assert executed['original_child_final']['child']['status'] == 'succeeded'
+        assert (await jobs.get_job(root_id))['status'] == 'succeeded'
+        assert root_id not in service.repository_source_service._iterative_lanes
+        final_receipt = executed['original_child_final']['receipt']
+        assert final_receipt['status'] == 'verified' and final_receipt['contact_state'] == 'settled'
+        assert final_receipt['child_attempt_count'] == 1 and final_receipt['child_fence'] == before_child['lease']['fencing_token']
+    original_path, original_bytes = (('calculator.js', 'exports.add = (a, b) => a - b;\n') if language == 'test_node'
+        else ('calculator.py', 'def add(a, b):\n    return a - b\n'))
+    assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes
+    assert len(contacted) == 1
+    if three_iterations:
+        from src.workflows.repo_repair_source import prepare_repository_iteration
+        for index in (2, 3):
+            original_child = await jobs.get_job(binding.invocation_id)
+            await prepare_repository_iteration(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, iteration_index=index)
+            preview = await repository_source_preview(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner)
+            review, egress, packet = preview['repository_review'], preview['egress'], preview['source_packet']
+            source_envelope = json.loads(egress['request_body']['messages'][1]['content'])
+            prior = source_envelope['source_packet']['prior_tested_iteration']
+            assert prior['hashes_are_file_bodies'] is False
+            assert ('+exports.add = (a, b) => a - b' if language == 'test_node' else '+    return a - b') in prior['cumulative_diff']
+            assert ('ERR_ASSERTION' if language == 'test_node' else 'FAILED') in egress['diagnostics']['stdout']
+            output['patch_unified_diff'] = ('--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return ' + ('a - b + 1' if index == 2 else 'a + b') + '\n')
+            if language == 'test_node':
+                output['patch_unified_diff'] = ('--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n+exports.add = (a, b) => ' + ('a - b + 1' if index == 2 else 'a + b') + ';\n')
+            request = request.model_copy(update={'expected_job_revision': preview['revision'],
+                'source_packet_digest': packet['artifact_sha256'],
+                'expected_source_manifest_digest': packet['source_manifest_sha256'],
+                'expected_iteration_index': index, 'expected_iteration_id': review['iteration_id'],
+                'expected_preparation_digest': review['preparation_digest'],
+                'expected_request_body_digest': egress['request_body_digest'],
+                'expected_request_route_digest': egress['request_route_digest'],
+                'expected_egress_envelope_digest': egress['egress_envelope_digest'],
+                'expected_diagnostics_digest': egress['diagnostics_digest'],
+                'expected_redaction_version': egress['redaction_version'],
+                'idempotency_key': 'actual-contact-' + str(index)})
+            result = await grant_repository_iteration_consent(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, request=request, general_task_service=service,
+                principal=operator.principal)
+            assert result['repository_outcome']['awaiting_repository_wait'] is True
+            assert len(contacted) == index
+            async with factory() as db:
+                proposal = await db.get(RepoRepairProposal, 'repository-proposal:' + review['iteration_id'])
+            approval = await approval_repository.get(proposal.approval_id)
+            await approval_repository.resolve_exact(approval.id, 'approved',
+                expected_digest=approval_decision_digest(approval), owner_principal_id=owner.principal_id,
+                operator_session_id=owner.session_id)
+            execution_request = execution_request.model_copy(update={
+                'proposal_id': proposal.proposal_id, 'approval_id': proposal.approval_id,
+                'expected_proposal_revision': proposal.revision,
+                'expected_job_revision': (await jobs.get_job(root_id))['revision'],
+                'idempotency_key': 'actual-process-' + str(index)})
+            executed = await execute_repository_iteration(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, request=execution_request, principal=operator.principal)
+            assert executed['status'] == ('failed' if index == 2 else 'succeeded')
+            current_child = await jobs.get_job(binding.invocation_id)
+            assert current_child['attempt_count'] == 1
+            if index == 2:
+                for key in ('owner', 'fencing_token', 'expires_at'):
+                    assert current_child['lease'][key] == original_child['lease'][key]
+            else:
+                assert executed['original_child_final']['child']['status'] == 'succeeded'
+                assert current_child['lease']['fencing_token'] == original_child['lease']['fencing_token']
+                assert current_child['lease']['owner'] is None and current_child['lease']['expires_at'] is None
+        async with factory() as db:
+            costs = list((await db.scalars(select(InferenceCostReservation))).all())
+            assert len(costs) == 3 and all(row.state == 'settled' for row in costs)
+            assert len({row.operation_id for row in costs}) == 3
+        assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes
+        assert (await jobs.get_job(root_id))['status'] == 'succeeded'
+        assert root_id not in service.repository_source_service._iterative_lanes
+    from src.workflows.general_task_guard import read_manifest
+    async with factory() as db:
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        manifest = read_manifest(parent)
+    resumed_parent = await jobs.resume_general_task_native_parent(binding.parent_job_id,
+        owner='actual-original-parent-assembly', expected_revision=parent.revision,
+        expected_manifest_revision=manifest.manifest_revision)
+    assert resumed_parent['manifest']['phase'] == 'assembly'
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    parent_runtime = resumed_parent['job']
+    parent_outcome = await service.execute(jobs, job_id=binding.parent_job_id,
+        owner=parent_runtime['lease']['owner'], fence=parent_runtime['lease']['fencing_token'],
+        envelope=None, principal=operator.principal)
+    assert parent_outcome['verified'] is True and parent_outcome['step_count'] == 1
+    dispatcher = WorkBoardDispatcher(session_provider=factory.accounting_sessions, general_tasks=service)
+    dispatcher.jobs = jobs
+    await dispatcher._settle_parent(binding.parent_job_id, parent_runtime['lease']['owner'],
+        parent_runtime['lease']['fencing_token'], parent_outcome)
+    parent_terminal = await jobs.get_job(binding.parent_job_id)
+    assert parent_terminal['status'] == 'succeeded'
+    assert len(contacted) == (3 if three_iterations else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('three_iterations', [False, True])
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_consent_callback_and_settled_c1_wait(accounting_db, monkeypatch, three_iterations, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('drift', ['missing', 'tampered', 'copied'])
+async def test_actual_node_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, False, 'test_node', node_readback_drift=drift)
 
 
 @pytest.mark.asyncio
@@ -301,7 +651,12 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
         # Admission is a real new row; execution/start and all iteration
         # witnesses are deliberately not asserted by this admission test.
         journal = json.loads(run.checkpoint_receipts_json)
-        assert len(journal) == 1 and journal[0]['checkpoint_id'] == 'repository:original:v1'
+        assert len(journal) == 2 and journal[0]['checkpoint_id'] == 'repository:original:v1'
+        inventory = journal[1]['payload']['identities']
+        assert journal[1]['checkpoint_id'] == 'repository:inventory:v1'
+        assert len(inventory) == len(set(inventory)) <= 50
+        assert sum(identity.startswith('repository:prepared:') for identity in inventory) == 3
+        assert sum(identity.startswith('repository:callback-start:') for identity in inventory) == 3
         payload = journal[0]['payload']
         assert journal[0]['state_digest'] == _digest(payload)
         assert payload['native_binding'] == binding.model_dump(mode='json')

@@ -587,6 +587,24 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                     raise RepoSandboxError("Node supervisor terminal cleanup is unproven",terminal_status="unknown_external_effect")
                 if job.iteration_binding is not None and result.get("iteration_binding") != iteration_process_projection(job.iteration_binding):
                     raise RepoSandboxError("Original Node iteration readback changed", terminal_status="unknown_external_effect")
+                if job.iteration_binding is not None:
+                    tested = result.get("tested_file_hash_metadata")
+                    if (not isinstance(result.get("after_digest"), str)
+                            or re.fullmatch(r"[0-9a-f]{64}", result["after_digest"]) is None
+                            or not isinstance(tested, list) or not tested
+                            or len(tested) > self.limits.max_files + MAX_DEP_FILES
+                            or any(not isinstance(entry, dict) or set(entry) != {"path", "size_bytes", "sha256"}
+                                or not isinstance(entry["path"], str) or entry["path"].startswith("/")
+                                or ".." in entry["path"].split("/")
+                                or type(entry["size_bytes"]) is not int or not 0 <= entry["size_bytes"] <= (
+                                    MAX_DEP_FILE_BYTES if entry["path"].startswith("node_modules/") else self.limits.max_file_bytes)
+                                or not isinstance(entry["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None
+                                for entry in tested)
+                            or len({entry["path"] for entry in tested}) != len(tested)):
+                        raise RepoSandboxError("Actual Node tested snapshot readback missing or changed", terminal_status="unknown_external_effect")
+                    if _digest_entries(SnapshotEntry(entry["path"], entry["size_bytes"], entry["sha256"])
+                            for entry in tested) != result["after_digest"]:
+                        raise RepoSandboxError("Actual Node tested tree and file hashes disagree", terminal_status="unknown_external_effect")
                 outputs={name:self._read_private_output(stage/"out",name) for name in ("diff.patch","pytest.stdout","pytest.stderr","build.stdout","build.stderr")}
                 if hashlib.sha256(outputs["diff.patch"]).hexdigest()!=result.get("diff_sha256"):
                     raise RepoSandboxError("Node exported diff readback hash changed",terminal_status="unknown_external_effect")

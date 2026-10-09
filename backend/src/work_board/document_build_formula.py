@@ -37,7 +37,7 @@ def located_error(error, sheet, cell):
 
 
 class Parser:
-    def __init__(self, expression, sheet, sheets):
+    def __init__(self, expression, sheet, sheets, *, range_budget=16384):
         text = expression[1:] if expression.startswith('=') else expression
         self.tokens = []
         offset = 0
@@ -52,6 +52,7 @@ class Parser:
         self.index = 0
         self.sheet, self.sheets = sheet, sheets
         self.range_cells = 0
+        self.range_budget = range_budget
 
     def take(self, expected=None):
         if self.index >= len(self.tokens):
@@ -78,8 +79,11 @@ class Parser:
         endrow, endcol = coordinate(self.take())
         if endrow < row or endcol < col:
             raise FormulaError('document_formula_range_invalid')
+        area = (endrow - row + 1) * (endcol - col + 1)
+        if self.range_cells + area > self.range_budget:
+            raise FormulaError('document_formula_range_bound')
+        self.range_cells += area
         keys = tuple((sheet, r, c) for r in range(row, endrow + 1) for c in range(col, endcol + 1))
-        self.range_cells += len(keys)
         return ('range', keys)
 
     def parse(self, minimum=0, depth=0):
@@ -149,7 +153,8 @@ def calculate(spec: SpreadsheetSpec):
     expansions = 0
     for formula in spec.formulas:
         try:
-            parser = Parser(formula.expression, formula.sheet, spec.sheet_names)
+            parser = Parser(formula.expression, formula.sheet, spec.sheet_names,
+                            range_budget=16384 - expansions)
             tree = parser.parse()
             if parser.peek() is not None:
                 raise FormulaError('document_formula_extra_tokens')

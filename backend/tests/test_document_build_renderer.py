@@ -196,3 +196,61 @@ def test_actual_confined_child_roundtrip_positive_reap():
             process.wait(timeout=5)
         for stream in (process.stdin, process.stdout, process.stderr):
             stream.close()
+
+
+@pytest.mark.parametrize('entry', ['calculate', 'spec_validation'])
+def test_range_budget_denies_second_full_expansion_before_iterator(entry, monkeypatch):
+    import builtins
+    import src.work_board.document_build_formula as formulas
+    sheet = SpreadsheetSpec.model_validate({'sheet_names': ['Data', 'Output'],
+        'cells': [{'sheet': 'Data', 'cell': 'A1', 'value': 4}],
+        'formulas': [{'sheet': 'Output', 'cell': 'A1', 'expression': '=SUM(Data!A1:BL256,Data!A1:BL256)'}],
+        'formats': []})
+    entries = []
+    def bounded_range(*args):
+        if args == (0, 256):
+            entries.append(args)
+            if len(entries) > 1:
+                raise AssertionError('over-budget full range began allocation')
+        return builtins.range(*args)
+    monkeypatch.setattr(formulas, 'range', bounded_range, raising=False)
+    if entry == 'calculate':
+        with pytest.raises(FormulaError) as caught:
+            calculate(sheet)
+        assert (caught.value.code, caught.value.sheet, caught.value.cell) == ('document_formula_range_bound', 'Output', 'A1')
+    else:
+        with pytest.raises(ValidationError) as caught:
+            workbook(sheet)
+        assert caught.value.errors()[0]['ctx'] == {'sheet': 'Output', 'cell': 'A1', 'formula_code': 'document_formula_range_bound'}
+    assert len(entries) == 1
+
+
+def test_range_budget_is_shared_across_formulas_before_one_cell_allocation(monkeypatch):
+    import builtins
+    import src.work_board.document_build_formula as formulas
+    sheet = SpreadsheetSpec.model_validate({'sheet_names': ['Data', 'Output'],
+        'cells': [{'sheet': 'Data', 'cell': 'A1', 'value': 4}],
+        'formulas': [{'sheet': 'Output', 'cell': 'A1', 'expression': '=SUM(Data!A1:BL256)'},
+            {'sheet': 'Output', 'cell': 'A2', 'expression': '=SUM(Data!A1:A1)'}], 'formats': []})
+    def bounded_range(*args):
+        if args == (0, 1):
+            raise AssertionError('over-budget one-cell range began allocation')
+        return builtins.range(*args)
+    monkeypatch.setattr(formulas, 'range', bounded_range, raising=False)
+    with pytest.raises(FormulaError) as caught:
+        calculate(sheet)
+    assert (caught.value.code, caught.value.sheet, caught.value.cell) == ('document_formula_range_bound', 'Output', 'A2')
+
+
+@pytest.mark.parametrize('split_formulas', [False, True])
+def test_exact_total_range_budget_preserves_valid_calculation(split_formulas):
+    expressions = ['=SUM(Data!A1:AF256)', '=SUM(Data!AG1:BL256)'] if split_formulas else ['=SUM(Data!A1:AF256,Data!AG1:BL256)']
+    sheet = SpreadsheetSpec.model_validate({'sheet_names': ['Data', 'Output'],
+        'cells': [{'sheet': 'Data', 'cell': 'A1', 'value': 4}, {'sheet': 'Data', 'cell': 'AG1', 'value': 6}],
+        'formulas': [{'sheet': 'Output', 'cell': f'A{index+1}', 'expression': expression}
+            for index, expression in enumerate(expressions)], 'formats': []})
+    values = calculate(sheet)
+    assert values[('Output', 0, 0)] == (4 if split_formulas else 10)
+    if split_formulas:
+        assert values[('Output', 1, 0)] == 6
+    assert workbook(sheet).kind == 'table_workbook'

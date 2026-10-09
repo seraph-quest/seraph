@@ -111,8 +111,7 @@ async def test_authenticated_partial_overlay_preserves_stop_and_replays_after_re
         assert len(transport['contacts'])==contacts and not received and not (workspace/'parent.txt').exists()
         assert (workspace/'child-A.txt').read_bytes()==b'physical first\n'
         # Content-free real producer packet for the independent frontend parser.
-        from pathlib import Path
-        Path('/home/pawel/repos/seraph/.agent-evidence/986/c1-delegation/partial-r61-ui-wire.json').write_text(
+        (workspace.parent/'actual-partial-wire.json').write_text(
             json.dumps({'original_task_detail':original_detail,'issued_request':issued_request,
                 'original_plan':original_plan,
                 'native_execution':{key:original_plan['native_execution'][key] for key in ('partial_review_options','partial_review')

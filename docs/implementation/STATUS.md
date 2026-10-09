@@ -219,6 +219,16 @@ reviewed-method journey completes the original source and operator review, then
 brings both next-task children to Done and their parent to Review, awaiting its
 separate operator completion.
 
+The three specialist accounting readers use private indexed owner/classification
+checks and at most thirteen group rows, preserving all original liabilities and
+detecting overflow beyond twelve. Startup strictly classifies legacy rows in
+batches of at most 128. Historical financial seals retain their original typed
+defaults and field presence without resealing. The private hint grants no
+authority and is not a direct-database-tamper integrity seal. Stopped stdlib
+workspace backup/restore accepts the sole added hint column; restored NULL hints
+require canonical startup migration before accounting readiness. This does not
+bound the existing global `_accounting_rows` deployment-ledger baseline.
+
 Original-root cancel and held pause fence further work while retaining Unknown
 callbacks, effects and contacted cost liabilities. A failed sibling does not
 discard an already verified output. The current authenticated owner can inspect

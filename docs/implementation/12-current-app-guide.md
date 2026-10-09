@@ -1202,6 +1202,25 @@ not regain an arbitrary source path or inherit credentials. Changed source or
 Vault metadata, missing or altered copied artifacts and unrelated pointers
 block the governed use.
 
+Specialist planning, stop compilation and partial-review cost readback use three
+private indexed queries: one-row checks for missing or invalid classification,
+then at most thirteen original-group rows to detect overflow beyond twelve.
+Released, settled and Unknown history remains included; original evidence,
+group, owner, Root, ordinal and deadline bindings still determine authority.
+Canonical startup strictly classifies legacy rows in batches of at most 128;
+malformed or unsupported evidence stays invalid for fail-closed admission.
+Historical financial membership seals retain their original typed defaults and
+field presence; migration neither normalizes retained evidence bytes nor reseals
+existing journals. The private lookup
+hint is not a grant or integrity seal against arbitrary direct database edits.
+
+The stopped workspace CLI accepts the old schema and its sole added private
+hint column for backup/restore and continuity readback. Restore leaves that hint
+NULL; canonical startup migration must classify it before governed accounting
+is ready. Other unexpected columns still fail closed. These bounded specialist
+reads do not bound the existing global `_accounting_rows` baseline, which still
+loads the deployment ledger.
+
 The parent enters a durable wait rather than holding an active callback while
 the child works. Reconciliation uses the original protected reservation and
 actual child execution/readback. Restart can continue that retained wait or

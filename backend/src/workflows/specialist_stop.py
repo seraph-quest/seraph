@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import Field
 from sqlalchemy import select
 
-from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact, WorkflowRunState, InferenceCostReservation
+from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact, WorkflowRunState
 from src.work_board.contracts import ClosedTaskModel, TaskDigest, TaskIdentity, GeneralTaskToolClosureV1
 from src.work_board.general_task import digest
 from src.work_board.repository import BoardError
@@ -93,8 +93,15 @@ async def compile_specialist_stops(jobs, db, parent, manifest, callbacks, *, act
     from src.db.models import Goal
     from src.workflows.job_runtime import _canonical
     costs = []
-    for row in (await db.execute(select(InferenceCostReservation).where(
-        InferenceCostReservation.owner_id == manifest.owner_principal_id))).scalars():
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
+    try:
+        rows = await group_reservation_rows(db, owner_id=manifest.owner_principal_id,
+            group_id=manifest.group_id, group_digest=manifest.group_digest,
+            original_root_id=manifest.original_root_id, original_deadline_at=manifest.original_deadline_at)
+    except InferenceAccountingError:
+        deny()
+    for row in rows:
         entry = entry_for(row)
         if entry is not None and entry["group"]["group_id"] == manifest.group_id:
             if entry["group_digest"] != manifest.group_digest:

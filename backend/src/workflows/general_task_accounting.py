@@ -1,6 +1,5 @@
 """Closed GeneralTask group checks inside the existing reservation writer."""
 from datetime import datetime, timezone
-import json
 from typing import Literal
 from pydantic import Field, ValidationError, model_validator, field_validator
 
@@ -85,9 +84,8 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
 
 def entry_for(row):
     try:
-        entries = json.loads(row.evidence_json)
-        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
-            raise ValueError()
+        from src.workflows.inference_group_lookup import strict_evidence_entries
+        entries = strict_evidence_entries(row.evidence_json)
         found = [entry for entry in entries if entry.get("kind") == KIND]
     except (ValueError, TypeError) as exc:
         raise InferenceAccountingError("general_task_group_evidence_invalid") from exc
@@ -101,7 +99,12 @@ def entry_for(row):
             or entry.group.owner_principal_id != row.owner_id or entry.group.goal_id != row.goal_id
             or entry.group.goal_revision != row.goal_revision):
             raise ValueError("reservation evidence belongs to another canonical row")
-        return entry.model_dump(mode="json")
+        # V1 specialist stop journals hash the original typed defaults. New
+        # role fields must not change those retained financial memberships.
+        # Explicit fields (including null) keep their original presence.
+        added = (("delegation_invocation_id", "delegation_request_digest")
+            if entry.role == "communication_preparation" else ("preparation",))
+        return entry.model_dump(mode="json", exclude={key for key in added if key not in found[0]})
     except (ValidationError, ValueError, TypeError) as exc:
         raise InferenceAccountingError("general_task_group_evidence_invalid") from exc
 

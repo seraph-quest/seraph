@@ -284,10 +284,16 @@ async def validate_specialist_accounting(db, group, binding, initial):
 
 async def validate_specialist_planning(db, group, binding, task_input, descriptors):
     """Only the reserved explicit instruction and intersected tools may plan."""
-    from src.db.models import InferenceCostReservation
+    from src.work_board.general_task import digest
     from src.workflows.general_task_accounting import entry_for
-    rows = list((await db.execute(select(InferenceCostReservation).where(
-        InferenceCostReservation.owner_id == group.owner_principal_id))).scalars())
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
+    try:
+        rows = await group_reservation_rows(db, owner_id=group.owner_principal_id,
+            group_id=group.group_id, group_digest=digest(group.model_dump(mode="json")),
+            original_root_id=group.owner_session_id, original_deadline_at=group.original_deadline_at, group=group)
+    except InferenceAccountingError:
+        _deny("specialist_delegation_accounting_changed")
     initial = next((row for row in rows if entry_for(row)
         and entry_for(row)["group"]["group_id"] == group.group_id
         and entry_for(row)["role"] == "initial_proposal"), None)

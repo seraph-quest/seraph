@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 from sqlalchemy import select
 
-from src.db.models import OperatorSession, WorkBoardTask, WorkBoardAttempt, WorkflowRunState, InferenceCostReservation
+from src.db.models import OperatorSession, WorkBoardTask, WorkBoardAttempt, WorkflowRunState
 from src.work_board.contracts import (GeneralTaskCheckpointReservationV1, SpecialistPartialDecisionV1,
     SpecialistPartialResultV1, SpecialistPartialOutputV1, SpecialistPartialEffectV1,
     SpecialistPartialCostV1, SpecialistPartialJobV1, GeneralTaskArtifactRef, SpecialistPartialArtifactProofV1)
@@ -74,8 +74,15 @@ async def current_costs(db,manifest):
     from src.workflows.general_task_accounting import entry_for
     costs=[]
     ordinals=[]
-    for row in (await db.execute(select(InferenceCostReservation).where(
-        InferenceCostReservation.owner_id==manifest.owner_principal_id))).scalars():
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
+    try:
+        rows = await group_reservation_rows(db, owner_id=manifest.owner_principal_id,
+            group_id=manifest.group_id, group_digest=manifest.group_digest,
+            original_root_id=manifest.original_root_id, original_deadline_at=manifest.original_deadline_at)
+    except InferenceAccountingError:
+        deny()
+    for row in rows:
         entry=entry_for(row)
         if entry is not None and entry['group']['group_id']==manifest.group_id:
             if (entry['group_digest']!=manifest.group_digest or entry['group']['owner_session_id']!=manifest.original_root_id

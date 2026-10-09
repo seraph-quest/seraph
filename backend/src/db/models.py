@@ -1915,6 +1915,7 @@ class InferenceCostReservation(SQLModel, table=True):
     """Accounting evidence for a canonical job, never a second job lifecycle."""
 
     __tablename__ = "inference_cost_reservations"
+    __table_args__ = (Index("ix_inference_cost_reservations_owner_group_lookup", "owner_id", "group_lookup_key"),)
     operation_id: str = Field(primary_key=True)
     deployment_id: str = Field(index=True)
     job_id: str = Field(index=True)
@@ -1939,6 +1940,7 @@ class InferenceCostReservation(SQLModel, table=True):
     actual_cost_microusd: Optional[int] = None
     provider_operation_id: Optional[str] = None
     evidence_json: str = Field(default="[]")
+    group_lookup_key: Optional[str] = Field(default=None, exclude=True)
     recovery_reason: Optional[str] = None
     revision: int = Field(default=1)
     created_at: datetime = Field(default_factory=_now)

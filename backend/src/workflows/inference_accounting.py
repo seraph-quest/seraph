@@ -163,7 +163,7 @@ def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
 
 
 @contextmanager
-def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None):
+def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None, header_budget=None):
     if held_workspace is None:
         from src.workspace.accounting_witness import _HELD_COMPOSITION_WORKSPACE
         held_workspace = _HELD_COMPOSITION_WORKSPACE.get()
@@ -171,7 +171,7 @@ def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=Non
         from src.workspace.accounting_witness import assert_deployment_binding
         if held_workspace.host_root != root:
             raise InferenceAccountingError("accounting_continuity_unavailable")
-        assert_deployment_binding(held_workspace)
+        assert_deployment_binding(held_workspace, header_budget=header_budget)
         yield held_workspace
         return
     workspace = ProductionWorkspace(host_root=root)
@@ -179,7 +179,7 @@ def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=Non
     try:
         from src.workspace.accounting_witness import assert_deployment_binding
         try:
-            assert_deployment_binding(workspace)
+            assert_deployment_binding(workspace, header_budget=header_budget)
         except (RuntimeError, ValueError) as exc:
             raise InferenceAccountingError(str(exc)) from exc
         if root == Path(CANONICAL_CONTAINER_WORKSPACE):
@@ -217,14 +217,18 @@ def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=Non
 class InferenceAccountingRepositoryMixin:
     """Focused storage operations inherited by the canonical job repository."""
 
-    async def _accounting_begin(self, db: Any) -> None:
+    async def _accounting_begin(self, db: Any, *, header_budget=None) -> None:
         if db.get_bind().dialect.name != "sqlite":
             raise InferenceAccountingError("accounting_storage_unsupported")
         if getattr(db, "info", {}).get("composition_read_guard") is not None:
             from src.workspace.accounting_witness import prepare_composition_session
-            await prepare_composition_session(db)
+            await prepare_composition_session(db, **(
+                {"header_budget": header_budget} if header_budget is not None else {}))
             db.info["composition_writer_owner"] = "durable_jobs"
         await db.execute(text("BEGIN IMMEDIATE"))
+        if header_budget is not None:
+            from src.memory.composition_headers import certify_composition_superset
+            await certify_composition_superset(db, header_budget)
         if getattr(db, "info", {}).get("composition_guard") is not None:
             db.info["native_writer_started"] = True
 
@@ -268,18 +272,63 @@ class InferenceAccountingRepositoryMixin:
         observed = _utc(now or datetime.now(timezone.utc))
         recovered = []
         async with self._session() as db:
-            await self._accounting_begin(db)
+            # This is a separate original recovery operation, never a restored
+            # native Memory allowance. Every upcoming snapshot sees all retained
+            # Memory, including when this caller targets an unrelated job.
+            memory_present = await db.scalar(text(
+                "SELECT EXISTS (SELECT 1 FROM workflow_run_states "
+                "WHERE job_kind COLLATE BINARY='runtime_service_memory_v1')"))
+            target_shape = None
+            if job_id is not None:
+                target_shape = await self._accounting_recovery_job_shape(db, job_id)
+            await db.rollback()
+            budget = None
+            from src.workflows.job_runtime import _original_memory_maintenance_scope
+            maintenance = _original_memory_maintenance_scope(self)
+            if maintenance is not None:
+                budget = maintenance.header_budget
+                if memory_present and budget is None:
+                    raise InferenceAccountingError("accounting_recovery_memory_route_changed")
+            elif memory_present:
+                from src.memory.header_bounds import HeaderReadBudget
+                budget = HeaderReadBudget()
+            await self._accounting_begin(db, header_budget=budget)
+            if job_id is not None and await self._accounting_recovery_job_shape(db, job_id) != target_shape:
+                raise InferenceAccountingError("accounting_recovery_target_changed")
+            if budget is None and await db.scalar(text(
+                    "SELECT EXISTS (SELECT 1 FROM workflow_run_states "
+                    "WHERE job_kind COLLATE BINARY='runtime_service_memory_v1')")):
+                raise InferenceAccountingError("accounting_recovery_memory_route_changed")
             account, rows = await self._accounting_rows(db)
             if account is None:
                 return []
-            with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+            with _continuity_lock(Path(settings.workspace_dir).resolve(), header_budget=budget) as workspace:
+                self._assert_accounting_continuity(workspace, account, rows, header_budget=budget)
                 changed = False
+                protected = []
+                memory_operations = set()
+                if budget is not None:
+                    for row in rows:
+                        if await self._accounting_recovery_job_shape(db, row.job_id) == [("text", 1)]:
+                            protected.append((row, row.model_dump(mode="json")))
+                            memory_operations.add(row.operation_id)
                 for row in rows:
                     if job_id is not None and row.job_id != job_id:
                         continue
                     if row.state not in {"reserved", "contact_started", "unknown"}:
                         continue
+                    if row.operation_id in memory_operations:
+                        continue
+                    shape = await self._accounting_recovery_job_shape(db, row.job_id)
+                    if shape == [("text", 1)]:
+                        # Preserve the real liability in continuity and never
+                        # materialize its WRS or mutate/release/resume either
+                        # owner. Missing/malformed links are not this exemption.
+                        protected.append((row, row.model_dump(mode="json")))
+                        continue
+                    if budget is not None:
+                        from src.memory.composition_headers import certify_composition_superset
+                        await certify_composition_superset(db, budget)
                     run = await self._fetch(db, row.job_id)
                     if run.status != "running" or (run.lease_expires_at is not None and _utc(run.lease_expires_at) > observed):
                         continue
@@ -372,8 +421,22 @@ class InferenceAccountingRepositoryMixin:
                     recovered.append({"job_id": row.job_id, "operation_id": row.operation_id,
                         "status": run.status, "reason": row.recovery_reason})
                 if changed:
-                    await self._persist_accounting_witness(db, workspace, account, rows)
+                    if any(inspect(row).modified or row.model_dump(mode="json") != before
+                           for row, before in protected):
+                        raise InferenceAccountingError("accounting_memory_liability_changed")
+                    await self._persist_accounting_witness(db, workspace, account, rows, header_budget=budget)
         return recovered
+
+    async def _accounting_recovery_job_shape(self, db, job_id):
+        if type(job_id) is not str or not job_id or len(job_id.encode("utf-8")) > 512:
+            raise InferenceAccountingError("accounting_recovery_identity_invalid")
+        rows = (await db.execute(text(
+            "SELECT typeof(job_kind), job_kind COLLATE BINARY='runtime_service_memory_v1' "
+            "FROM workflow_run_states WHERE run_identity COLLATE BINARY=:identity LIMIT 2"
+        ), {"identity": job_id})).all()
+        if len(rows) > 1 or any(kind != "text" or flag not in (0, 1) for kind, flag in rows):
+            raise InferenceAccountingError("accounting_recovery_identity_ambiguous")
+        return [tuple(row) for row in rows]
 
     async def _accounting_resume_claim_allowed(self, db, run) -> bool:
         from src.model_fabric.effective_policy import current_inference_policy
@@ -393,16 +456,16 @@ class InferenceAccountingRepositoryMixin:
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
         return account, rows
 
-    def _assert_accounting_continuity(self, workspace, account, rows):
+    def _assert_accounting_continuity(self, workspace, account, rows, *, header_budget=None):
         from src.workflows.inference_group_lookup import assert_group_lookup
         for row in rows:
             assert_group_lookup(row)
-        receipt = read_lifecycle_receipt(workspace)
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget)
         expected = receipt.get("inference_accounting") if receipt is not None else None
         if account is None or expected != _witness(account) or account.ledger_digest != _ledger_digest(account, rows):
             raise InferenceAccountingError("accounting_continuity_unavailable")
 
-    async def _persist_accounting_witness(self, db, workspace, account, rows):
+    async def _persist_accounting_witness(self, db, workspace, account, rows, *, header_budget=None):
         from src.workflows.inference_group_lookup import assert_group_lookup, classify_group_lookup
         for row in rows:
             # This also covers the existing atomic research-group writer.
@@ -420,7 +483,7 @@ class InferenceAccountingRepositoryMixin:
         account.ledger_digest = _ledger_digest(account, rows)
         db.add(account)
         await db.flush()
-        receipt = read_lifecycle_receipt(workspace) or {"secret_values_included": False}
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {"secret_values_included": False}
         receipt["inference_accounting"] = _witness(account)
         payload = {"schema_version": 1, "base": base,
             "account": account.model_dump(mode="json"), "operations": [_operation_payload(row) for row in changed],

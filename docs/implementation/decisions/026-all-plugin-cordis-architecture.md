@@ -271,9 +271,12 @@ independent architecture review SHA-256 is
 
 Before Original exists, bounded read-only retention may recognize the complete
 Memory job universe under the same current 33-table certificate and frame.
-Require a closed candidate/context, native binding and actual claim journal
-when claimed, a nonterminal pre-effect state, `result = null`, and no Original,
-Current or effect receipts. Retain the entire unnormalized WRS with its existing
+Require a closed candidate/context, original serialized arguments and execution
+fingerprint, native binding and actual claim journal when claimed, an inert
+pre-effect state, `result = null`, and no Original, Current or effect receipts.
+Negative terminal states `cancelled`, `failed`, `unknown_external_effect` and
+`cost_liability` may remain readable under these same checks; `succeeded` and
+`degraded` cannot use this classifier. Retain the entire unnormalized WRS with its existing
 Core codec and joins. Foreign, unbound, terminal, corrupt and overflowing
 members cannot be omitted. Readability grants no execution, adoption or future
 Source permission. After effect, Source-independent Original/Current validation

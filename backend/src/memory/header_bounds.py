@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 import json
 import math
 from types import MappingProxyType
+from contextlib import contextmanager
+from contextvars import ContextVar
+from weakref import WeakValueDictionary
 
 from sqlalchemy import Boolean, Float, Integer, text
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
@@ -17,6 +20,10 @@ from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 MAX_ROWS = 128
 MAX_BYTES = 1_048_576
 _SEAL = object()
+_MEMORY_LEDGER_SEAL = object()
+_MEMORY_LEDGERS = WeakValueDictionary()
+_MEMORY_LEDGER_PHASE = ContextVar("native_memory_numeric_phase", default=None)
+_MEMORY_CHARGE_TRACE = ContextVar("native_memory_charge_trace", default=None)
 
 
 class HeaderBoundsError(RuntimeError):
@@ -134,17 +141,30 @@ class HeaderReadBudget:
         if not any(descriptor is item for item in _DESCRIPTORS):
             raise HeaderBoundsError("header_descriptor_unavailable")
         refs = {(descriptor.table, descriptor.key, identity) for identity in row_ids}
-        certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.remaining)
+        appearance = ("exact-header", descriptor.table, descriptor.key, tuple(row_ids))
+        certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.available(appearance))
         physical = {(descriptor.table, rowid) for rowid in certificate.rowids}
         for identity,rowid in zip(certificate.row_ids,certificate.rowids):
             self.resolve_future(descriptor,identity,rowid)
         self.enroll(physical)
         self.references |= refs
-        self.debit(certificate.upper_bytes)
+        self.debit(certificate.upper_bytes, appearance=appearance)
         await validate_certificate(db, certificate)
         return certificate
 
-    def debit(self, amount):
+    def available(self, appearance=None):
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is not None and active[0].budget is self:
+            return self.remaining + active[0].available(active[1], appearance)
+        return self.remaining
+
+    def debit(self, amount, *, appearance=None):
+        trace = _MEMORY_CHARGE_TRACE.get()
+        if trace is not None and trace[0] is self:
+            trace[1].append((appearance, amount))
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is not None and active[0].budget is self and active[0].consume(active[1], appearance, amount):
+            return
         if type(amount) is not int or amount < 0 or amount > self.remaining:
             raise HeaderBoundsError("canonical_bound_not_certified")
         self.remaining -= amount
@@ -181,6 +201,116 @@ class HeaderReadBudget:
         from src.memory.composition_headers import discover_rows
         ids = await discover_rows(db, descriptor, self)
         return await self.certify(db, descriptor, ids)
+
+
+@contextmanager
+def _trace_memory_numeric_charges(budget):
+    """Record real original read mechanics; never enroll or grant a Source."""
+    charges = []
+    token = _MEMORY_CHARGE_TRACE.set((budget, charges))
+    try:
+        yield charges
+    finally:
+        _MEMORY_CHARGE_TRACE.reset(token)
+
+
+@dataclass(eq=False)
+class _NativeMemoryNumericLedger:
+    budget: HeaderReadBudget
+    operation: object
+    prepared: object
+    source: object
+    entries: dict
+    seal: object
+    bindings: dict = field(default_factory=dict)
+    consumed: list = field(default_factory=list)
+    closed: bool = False
+
+    def _checked(self):
+        if (self.closed or self.seal is not _MEMORY_LEDGER_SEAL
+                or _MEMORY_LEDGERS.get(id(self)) is not self
+                or self.operation._prepared is not self.prepared
+                or self.operation.source is not self.source
+                or self.source.admission.header_budget is not self.budget
+                or not self.source._live.is_set()):
+            raise HeaderBoundsError("memory_numeric_ledger_unavailable")
+
+    def available(self, phase, appearance):
+        self._checked()
+        pending = self.entries.get((phase, appearance), ())
+        return pending[0] if pending else 0
+
+    def consume(self, phase, appearance, amount):
+        self._checked()
+        if type(amount) is not int or amount < 0:
+            raise HeaderBoundsError("memory_numeric_ledger_charge_invalid")
+        pending = self.entries.get((phase, appearance))
+        if not pending:
+            return False
+        maximum = pending[0]
+        if amount > maximum:
+            raise HeaderBoundsError("memory_numeric_ledger_charge_exceeded")
+        # The full maximum was deducted at issuance. Never refund its slack.
+        del pending[0]
+        self.consumed.append((phase, appearance, maximum, amount))
+        return True
+
+    async def bind(self, db, phase, *, certificate=None):
+        self._checked()
+        transaction, driver, changes = await _connection_state(db)
+        if phase not in {"effect", "capture", "completion"}:
+            raise HeaderBoundsError("memory_numeric_ledger_phase_invalid")
+        prior = self.bindings.get(phase)
+        if prior is not None and (prior[0] is not db or prior[1] is not transaction or prior[2] is not driver):
+            raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+        if phase != "completion" and (db is not self.operation.db
+                or transaction is not self.operation.transaction or driver is not self.operation.driver):
+            raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+        if certificate is not None:
+            from src.memory.composition_headers import validate_composition_certificate
+            await validate_composition_certificate(db, certificate)
+            if certificate.budget is not self.budget:
+                raise HeaderBoundsError("memory_numeric_ledger_certificate_changed")
+        self.bindings[phase] = (db, transaction, driver, changes, certificate)
+
+    @contextmanager
+    def phase(self, phase):
+        self._checked()
+        binding = self.bindings.get(phase)
+        if binding is None or binding[0].sync_session.get_transaction() is not binding[1] or not binding[2].in_transaction:
+            raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+        token = _MEMORY_LEDGER_PHASE.set((self, phase))
+        try:
+            yield
+        finally:
+            _MEMORY_LEDGER_PHASE.reset(token)
+
+    def close(self):
+        self.closed = True
+        _MEMORY_LEDGERS.pop(id(self), None)
+
+
+async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, appearances):
+    """Actual Source/SAME plan enrollment; serializable data never enrolls it."""
+    from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+    from src.memory.m5 import validate_native_memory_mutation_plan
+    source = await _validate_memory_owner_source(db, run, operation)
+    await validate_native_memory_mutation_plan(prepared, db=db, candidate_digest=source.admission.candidate_digest)
+    if operation._prepared is not prepared or type(source.admission.header_budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("memory_numeric_ledger_plan_changed")
+    entries, total = {}, 0
+    for phase, appearance, amount in appearances:
+        if (phase not in {"effect", "capture", "completion"} or type(appearance) is not tuple
+                or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+            raise HeaderBoundsError("memory_numeric_ledger_entry_invalid")
+        entries.setdefault((phase, appearance), []).append(amount)
+        total += amount
+    source.admission.header_budget.debit(total)
+    ledger = _NativeMemoryNumericLedger(source.admission.header_budget, operation, prepared, source,
+        entries, _MEMORY_LEDGER_SEAL)
+    _MEMORY_LEDGERS[id(ledger)] = ledger
+    await ledger.bind(db, "effect")
+    return ledger
 
 
 @dataclass(frozen=True, eq=False)

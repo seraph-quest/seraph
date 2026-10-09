@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
@@ -1101,6 +1102,127 @@ async def prepare_input_artifact(
             allow_scheduler=allow_scheduler,
         )
         return _metadata(refreshed)
+
+
+@dataclass(frozen=True)
+class _PlanInputArtifactReservation:
+    """Complete original row binding; carries no execution authority."""
+
+    metadata: InputArtifactMetadata
+    row_binding: bytes
+    payload: bytes
+    requires_write: bool
+
+
+def _plan_input_row_binding(row: WorkBoardInputArtifact) -> bytes:
+    return _canonical_json({column.name: (
+        _utc(value).isoformat() if isinstance(value, datetime) else value
+    ) for column in row.__table__.columns
+        for value in (getattr(row, column.name),)})
+
+
+def _assert_plan_input_writer(db: AsyncSession) -> None:
+    if (not db.in_transaction() or not db.info.get("native_writer_started")
+            or db.info.get("composition_writer_owner") != "native_ingress"):
+        raise BoardError("artifact_transaction_boundary",
+            "Plan input transitions require the original native writer", status_code=409)
+
+
+async def _reserve_plan_input_artifact(db, owner, request) -> _PlanInputArtifactReservation:
+    """SQL-only reservation under the caller's current original authority."""
+    _assert_plan_input_writer(db)
+    if request.capability_id != "browser.public-task.v1":
+        raise BoardError("typed_input_category_invalid", "Exact public plan input required", status_code=422)
+    inputs, _, payload_digest = await _validate_request(db, owner, request)
+    payload = _canonical_json({"schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
+        "capability_id": request.capability_id, "input": inputs})
+    artifact_id = _artifact_id(owner, request)
+    row = await db.get(WorkBoardInputArtifact, artifact_id, populate_existing=True)
+    if row is not None:
+        if (row.owner_principal_id != owner.principal_id or row.owner_session_id != owner.session_id
+                or row.capability_id != request.capability_id or row.goal_id != request.goal_id
+                or row.goal_revision != request.goal_revision or row.idempotency_key != request.idempotency_key
+                or row.payload_sha256 != payload_digest):
+            raise BoardError("input_artifact_idempotency_conflict",
+                "The idempotency key is bound to another input", status_code=409)
+    else:
+        row = WorkBoardInputArtifact(
+            artifact_id=artifact_id, owner_principal_id=owner.principal_id,
+            owner_session_id=owner.session_id, goal_id=request.goal_id,
+            goal_revision=request.goal_revision, capability_id=request.capability_id,
+            capability_version=capability_spec(request.capability_id).version,
+            idempotency_key=request.idempotency_key, payload_sha256=payload_digest,
+            typed_input_ref=f"workspace-json:{INPUT_ARTIFACT_ROOT}/{artifact_id}-{payload_digest}.json",
+            size_bytes=len(payload), state="pending", expires_at=_now() + INPUT_ARTIFACT_TTL,
+            revision=1, document_metadata_json=None,
+        )
+        db.add(row)
+        await db.flush()
+    terminal = row.state in {"expired", "revoked", "deleted"}
+    return _PlanInputArtifactReservation(_metadata(row), _plan_input_row_binding(row), payload,
+        not terminal and row.metadata_digest is None)
+
+
+def _stage_plan_input_artifact(reservation: _PlanInputArtifactReservation) -> bytes | None:
+    """Original physical owner, called only after the reservation writer exits."""
+    if type(reservation) is not _PlanInputArtifactReservation:
+        raise BoardError("pipeline_input_changed", "Original input reservation required", status_code=409)
+    row = SimpleNamespace(**json.loads(reservation.row_binding))
+    if row.state in {"expired", "revoked", "deleted"}:
+        return None
+    path = _payload_path(row)
+    if reservation.requires_write:
+        try:
+            _write_payload(path, reservation.payload)
+        except OSError as exc:
+            raise BoardError("input_artifact_write_failed",
+                "The input artifact could not be written", status_code=503) from exc
+    verified = _safe_file_bytes(path, expected_digest=row.payload_sha256, expected_size=row.size_bytes)
+    parsed = _decode_and_validate_payload(row, verified)
+    if verified != reservation.payload or _canonical_json(parsed) != _canonical_json(
+            json.loads(reservation.payload)["input"]):
+        raise BoardError("input_artifact_digest_mismatch", "The input artifact input changed", status_code=409)
+    return verified
+
+
+async def _finalize_plan_input_artifact(db, owner, request, *, reservation, staged) -> InputArtifactMetadata:
+    """SQL-only finalization; caller rechecks authority in this fresh writer."""
+    _assert_plan_input_writer(db)
+    if type(reservation) is not _PlanInputArtifactReservation or request.capability_id != "browser.public-task.v1":
+        raise BoardError("pipeline_input_changed", "Original public plan reservation required", status_code=409)
+    inputs, _, payload_digest = await _validate_request(db, owner, request)
+    row = await db.get(WorkBoardInputArtifact, _artifact_id(owner, request), populate_existing=True)
+    if (row is None or _plan_input_row_binding(row) != reservation.row_binding
+            or row.payload_sha256 != payload_digest):
+        raise BoardError("pipeline_input_changed", "The input reservation changed", status_code=409)
+    if row.state in {"expired", "revoked", "deleted"}:
+        if staged is not None:
+            raise BoardError("pipeline_input_changed", "Terminal input cannot be staged", status_code=409)
+        return _metadata(row)
+    if (type(staged) is not bytes or staged != reservation.payload
+            or len(staged) != row.size_bytes or hashlib.sha256(staged).hexdigest() != row.payload_sha256
+            or _decode_and_validate_payload(row, staged) != inputs):
+        raise BoardError("input_artifact_digest_mismatch", "Original input readback required", status_code=409)
+    if row.metadata_digest is not None:
+        if _metadata_digest(row) != row.metadata_digest:
+            raise BoardError("input_artifact_digest_mismatch", "The input metadata changed", status_code=409)
+        return _metadata(row)
+    if row.state != "pending" or row.bound_task_id is not None or _utc(row.expires_at) <= _now():
+        raise BoardError("input_artifact_expired", "The pending input is no longer available", status_code=409)
+    prior_revision = row.revision
+    row.revision = max(int(prior_revision), 1) + 1
+    metadata_digest = _metadata_digest(row)
+    row.revision = prior_revision
+    changed = await db.execute(update(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.artifact_id == row.artifact_id,
+        WorkBoardInputArtifact.state == "pending", WorkBoardInputArtifact.metadata_digest.is_(None),
+        WorkBoardInputArtifact.revision == prior_revision,
+    ).values(revision=max(int(prior_revision), 1) + 1, metadata_digest=metadata_digest)
+        .execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise BoardError("pipeline_input_changed", "The input reservation changed", status_code=409)
+    await db.refresh(row)
+    return _metadata(row)
 
 
 async def resolve_input_artifact_for_task(

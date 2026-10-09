@@ -15,6 +15,9 @@ import hashlib
 import json
 import math
 import re
+import asyncio
+from contextvars import ContextVar
+from functools import wraps
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -33,6 +36,156 @@ from src.db.models import ApprovalRequest, Goal, GuardianRoutine, GuardianRoutin
 from src.db.session_refs import ensure_sessions_exist
 from src.workflows.inference_accounting import InferenceAccountingRepositoryMixin
 from src.runtime_plugins.ownership import RuntimeCompositionBinding
+
+
+@dataclass(eq=False)
+class _OriginalMemoryMaintenanceScope:
+    repository: Any
+    task: Any
+    invocation: object
+    header_budget: Any
+    live: bool = True
+
+
+_MEMORY_MAINTENANCE_SCOPES = {}
+_CURRENT_MEMORY_MAINTENANCE = ContextVar("original_memory_maintenance", default=None)
+
+
+def _original_memory_maintenance_scope(repository):
+    scope = _CURRENT_MEMORY_MAINTENANCE.get()
+    if scope is None:
+        return None
+    if (type(scope) is not _OriginalMemoryMaintenanceScope
+            or _MEMORY_MAINTENANCE_SCOPES.get(id(scope)) is not scope
+            or not scope.live or scope.repository is not repository
+            or scope.task is not asyncio.current_task()):
+        raise DurableJobLeaseError("original_memory_maintenance_scope_unavailable")
+    return scope
+
+
+def _original_memory_maintenance_entry(method):
+    """One original call owns capacity across its existing nested transactions."""
+    @wraps(method)
+    async def scoped(self, *args, **kwargs):
+        if _original_memory_maintenance_scope(self) is not None:
+            return await method(self, *args, **kwargs)
+        budget = None
+        async with self._session() as db:
+            present = await db.scalar(text(
+                "SELECT EXISTS (SELECT 1 FROM workflow_run_states "
+                "WHERE job_kind COLLATE BINARY='runtime_service_memory_v1')"))
+            if present:
+                from src.memory.universe import native_memory_universe
+                from src.memory.header_bounds import HeaderReadBudget
+                connection = await db.connection()
+                if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+                    await db.execute(text("BEGIN"))
+                await native_memory_universe(db)
+                budget = HeaderReadBudget()
+            await db.rollback()
+        scope = _OriginalMemoryMaintenanceScope(self, asyncio.current_task(), object(), budget)
+        _MEMORY_MAINTENANCE_SCOPES[id(scope)] = scope
+        token = _CURRENT_MEMORY_MAINTENANCE.set(scope)
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            scope.live = False
+            _CURRENT_MEMORY_MAINTENANCE.reset(token)
+            _MEMORY_MAINTENANCE_SCOPES.pop(id(scope), None)
+    return scoped
+
+
+async def _original_memory_maintenance_snapshot(repository, db, *, writer=False):
+    scope = _original_memory_maintenance_scope(repository)
+    if scope is None or scope.header_budget is None:
+        if scope is not None and await db.scalar(text(
+                "SELECT EXISTS (SELECT 1 FROM workflow_run_states "
+                "WHERE job_kind COLLATE BINARY='runtime_service_memory_v1')")):
+            raise DurableJobLeaseError("original_memory_maintenance_route_changed")
+        return None
+    connection = await db.connection()
+    if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+        await db.execute(text("BEGIN IMMEDIATE" if writer else "BEGIN"))
+    from src.memory.universe import native_memory_universe
+    from src.memory.composition_headers import certify_composition_superset
+    await native_memory_universe(db)
+    return await certify_composition_superset(db, scope.header_budget)
+
+
+@dataclass(frozen=True, eq=False)
+class _OriginalMemoryNegativeOwner:
+    pending_changes: Mapping
+    statement: Any
+    outputs: tuple
+    header_budget: Any
+    before_values: Mapping
+    tx: Any
+    driver: Any
+    total_changes: int
+    _repository: Any = field(repr=False)
+    _task: Any = field(repr=False)
+    _scope: Any = field(repr=False)
+    _db: Any = field(repr=False)
+    _run: Any = field(repr=False)
+
+
+_MEMORY_NEGATIVE_OWNERS = {}
+
+
+async def _validate_original_memory_negative_owner(db, run, original_owner):
+    from src.memory.header_bounds import _connection_state
+    from src.workspace.accounting_witness import _native_memory_planned_sql_row
+    from sqlalchemy import inspect
+    owner = original_owner
+    if (type(owner) is not _OriginalMemoryNegativeOwner
+            or _MEMORY_NEGATIVE_OWNERS.get(id(owner)) is not owner
+            or owner._task is not asyncio.current_task() or owner._db is not db
+            or owner._run is not run or inspect(run).session is not db.sync_session
+            or inspect(run).modified
+            or _original_memory_maintenance_scope(owner._repository) is not owner._scope
+            or owner._scope.header_budget is not owner.header_budget
+            or _native_memory_planned_sql_row(run, {}) != dict(owner.before_values)):
+        raise DurableJobLeaseError("original_memory_negative_owner_unavailable")
+    tx, driver, changes = await _connection_state(db)
+    if tx is not owner.tx or driver is not owner.driver or changes != owner.total_changes:
+        raise DurableJobLeaseError("original_memory_negative_writer_changed")
+    return owner
+
+
+async def _execute_original_memory_negative(repository, db, run, conditions, pending_changes, *, receipt):
+    """Only the original gated negative branches call this private issuer."""
+    if run.job_kind != "runtime_service_memory_v1":
+        return await db.execute(update(WorkflowRunState).execution_options(
+            synchronize_session=False).where(*conditions).values(**pending_changes))
+    scope = _original_memory_maintenance_scope(repository)
+    if scope is None or scope.header_budget is None:
+        raise DurableJobLeaseError("original_memory_negative_scope_unavailable")
+    if pending_changes.get("status") not in {"failed", "cancelled", "blocked", "unknown_external_effect", "cost_liability"}:
+        raise DurableJobTransitionError("original_memory_negative_outcome_required")
+    forbidden = {"effect_receipts_json", "checkpoint_receipts_json", "checkpoint_context_json",
+        "artifact_receipts_json", "arguments_json", "declared_authority_json", "composition_binding_json"}
+    if forbidden.intersection(pending_changes):
+        raise DurableJobTransitionError("original_memory_negative_patch_unsupported")
+    changes = dict(pending_changes)
+    for column in ("revision", "fencing_token"):
+        if column in changes and type(changes[column]) is not int:
+            changes[column] = int(getattr(run, column) or 0) + 1
+    from src.memory.header_bounds import _connection_state
+    from src.workspace.accounting_witness import (_native_memory_planned_sql_row,
+        prepare_native_memory_unknown, apply_native_memory_unknown)
+    tx, driver, total_changes = await _connection_state(db)
+    statement = update(WorkflowRunState).execution_options(synchronize_session=False).where(
+        *conditions).values(**changes)
+    owner = _OriginalMemoryNegativeOwner(MappingProxyType(changes), statement,
+        (_native_memory_pending_output(run, changes, receipt=receipt),), scope.header_budget,
+        MappingProxyType(_native_memory_planned_sql_row(run, {})), tx, driver, total_changes,
+        repository, asyncio.current_task(), scope, db, run)
+    _MEMORY_NEGATIVE_OWNERS[id(owner)] = owner
+    try:
+        plan = await prepare_native_memory_unknown(db, run, original_owner=owner)
+        return await apply_native_memory_unknown(db, run, plan)
+    finally:
+        _MEMORY_NEGATIVE_OWNERS.pop(id(owner), None)
 
 
 @dataclass(frozen=True)
@@ -2426,6 +2579,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
 
     @asynccontextmanager
     async def _writer_session(self, *, header_budget=None):
+        maintenance = _original_memory_maintenance_scope(self)
+        if maintenance is not None and maintenance.header_budget is not None:
+            if header_budget is not None and header_budget is not maintenance.header_budget:
+                raise DurableJobLeaseError("original_memory_maintenance_frame_changed")
+            header_budget = maintenance.header_budget
         async with self._session() as db:
             if getattr(db, "info", {}).get("composition_read_guard") is not None:
                 from src.workspace.accounting_witness import prepare_composition_session
@@ -2436,8 +2594,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.memory.composition_headers import certify_composition_superset
                 connection = await db.connection()
                 if not (await connection.get_raw_connection()).driver_connection.in_transaction:
-                    await db.execute(text("BEGIN"))
+                    await db.execute(text("BEGIN IMMEDIATE" if maintenance is not None else "BEGIN"))
                 await certify_composition_superset(db, header_budget)
+            if maintenance is not None:
+                await _original_memory_maintenance_snapshot(self, db, writer=True)
             yield db
 
     async def reserve_native_physical_resource(
@@ -3827,7 +3987,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         return await revise_operator_paused_parent(self, parent_id, **bindings)
 
     async def get_job(self, job_id: str, *, header_budget=None) -> dict[str, Any] | None:
+        maintenance = _original_memory_maintenance_scope(self)
+        if maintenance is not None:
+            if header_budget is not None and header_budget is not maintenance.header_budget:
+                raise DurableJobLeaseError("original_memory_maintenance_frame_changed")
+            header_budget = maintenance.header_budget
         async with self._session() as db:
+            if maintenance is not None:
+                await _original_memory_maintenance_snapshot(self, db)
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 from src.memory.composition_headers import locate_exact_rows
@@ -3844,7 +4011,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if run is None:
                 return None
             db.expunge(run)
-            return _serialize(run)
+            output = _serialize(run)
+            if maintenance is not None and header_budget is not None:
+                header_budget.debit(len(_canonical(output).encode("utf-8")))
+            return output
 
     async def get_jobs(self, job_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Read a bounded set of typed jobs in one readonly session."""
@@ -4150,6 +4320,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 serialized.append(_serialize(run))
             return serialized
 
+    @_original_memory_maintenance_entry
     async def transition_job(
         self,
         job_id: str,
@@ -4239,6 +4410,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
+            maintenance = _original_memory_maintenance_scope(self)
+            if maintenance is not None and maintenance.header_budget is not None:
+                from src.workspace.accounting_witness import prepare_composition_session
+                if getattr(db, "info", {}).get("composition_guard") is not None:
+                    await prepare_composition_session(db, header_budget=maintenance.header_budget)
+                await _original_memory_maintenance_snapshot(self, db, writer=True)
             near_writer_started = False
             general_writer_started = False
             if header_budget is not None:
@@ -4657,12 +4834,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if to_status not in {"failed", "cancelled"}:
                 await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
-            result_update = await db.execute(
-                update(WorkflowRunState)
-                .execution_options(synchronize_session=False)
-                .where(*conditions)
-                .values(**values)
-            )
+            result_update = await _execute_original_memory_negative(self, db, run,
+                conditions, values, receipt={"kind": "transition", "status": "recorded",
+                    "from": current, "to": to_status, "reason": _text(reason) or None,
+                    "fencing_token": run.fencing_token, "revision": current_revision + 1,
+                    "operator_visible": True})
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("durable job changed or lease fencing token is stale")
             if header_budget is not None:
@@ -4715,6 +4891,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             result_summary=result_summary,
         )
 
+    @_original_memory_maintenance_entry
     async def cancel_job_tree(
         self,
         root_job_id: str,
@@ -4743,6 +4920,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             runs_by_id: dict[str, WorkflowRunState] = {}
             frontier = {root_job_id}
             while frontier:
+                await _original_memory_maintenance_snapshot(self, db, writer=True)
                 result = await db.execute(
                     select(WorkflowRunState).where(
                         or_(
@@ -5643,6 +5821,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             except ValueError as exc:
                 raise DurableJobTransitionError("job deadline metadata is malformed") from exc
             if persisted_deadline and persisted_deadline <= now:
+                if run.job_kind == "runtime_service_memory_v1":
+                    raise DurableJobLeaseError("original_memory_negative_claim_unavailable")
                 deadline_conditions = [
                     WorkflowRunState.run_identity == job_id,
                     WorkflowRunState.status == expected_state,
@@ -5693,6 +5873,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             try:
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
             except DurableJobTransitionError:
+                if run.job_kind == "runtime_service_memory_v1":
+                    raise DurableJobLeaseError("original_memory_negative_claim_unavailable")
                 malformed_conditions = [
                     WorkflowRunState.run_identity == job_id,
                     WorkflowRunState.status == expected_state,
@@ -5740,6 +5922,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.work_board.research_control import precontact_intent_reusable
                 research_resume = await precontact_intent_reusable(self, db, run, effect_ledger)
             if _job_has_unsafe_effects(effect_ledger) and not research_resume:
+                if run.job_kind == "runtime_service_memory_v1":
+                    raise DurableJobLeaseError("original_memory_negative_claim_unavailable")
                 recovery_status, recovery_reason = _effect_recovery_state(effect_ledger)
                 recovery_reason = f"queued_{recovery_reason}_requires_reconciliation"
                 recovery_conditions = [
@@ -5787,6 +5971,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 db, run
             )
             if dependency_state == "failed":
+                if run.job_kind == "runtime_service_memory_v1":
+                    raise DurableJobLeaseError("original_memory_negative_claim_unavailable")
                 dependency_failure_conditions = [
                     WorkflowRunState.run_identity == job_id,
                     WorkflowRunState.status == expected_state,
@@ -5832,6 +6018,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 db.expunge(failed_job)
                 return _serialize(failed_job, receipt=receipt)
             if dependency_state == "blocked":
+                if run.job_kind == "runtime_service_memory_v1":
+                    raise DurableJobLeaseError("original_memory_negative_claim_unavailable")
                 dependency_block_conditions = [
                     WorkflowRunState.run_identity == job_id,
                     WorkflowRunState.status == expected_state,
@@ -6016,6 +6204,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     _runtime_service_claim.host)
             return _serialize(claimed, receipt=receipt)
 
+    @_original_memory_maintenance_entry
     async def heartbeat_job(
         self,
         job_id: str,
@@ -6074,21 +6263,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 ]
                 await _verify_native_child_sql_scope(db, run)
                 _append_parent_fence_condition(deadline_conditions, run, now=now, writer_db=db)
-                expired = await db.execute(
-                    update(WorkflowRunState)
-                    .execution_options(synchronize_session=False)
-                    .where(*deadline_conditions)
-                    .values(
-                        status="failed",
-                        failure_reason="deadline_expired",
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        finished_at=now,
-                        updated_at=now,
-                        heartbeat_at=now,
-                        revision=WorkflowRunState.revision + 1,
-                    )
-                )
+                expired = await _execute_original_memory_negative(self, db, run,
+                    deadline_conditions, {"status": "failed", "failure_reason": "deadline_expired",
+                        "lease_owner": None, "lease_expires_at": None, "finished_at": now,
+                        "updated_at": now, "heartbeat_at": now, "revision": current_revision + 1},
+                    receipt={"kind": "heartbeat", "status": "failed", "reason": "deadline_expired",
+                        "owner": owner, "fencing_token": run.fencing_token,
+                        "revision": current_revision + 1, "operator_visible": True})
                 if not _rowcount_is_one(expired):
                     raise DurableJobLeaseError("job changed before deadline transition")
                 failed = await self._fetch(db, job_id)
@@ -6103,6 +6284,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 }
                 db.expunge(failed)
                 return _serialize(failed, receipt=receipt)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_positive_heartbeat_unavailable")
             expires = (
                 now + timedelta(seconds=int(lease_seconds))
                 if lease_seconds is not None
@@ -6181,6 +6364,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         now = _utc_now()
         async with self._writer_session() as db:
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             current_revision = _revision(run)
             if run.status != expected_state:
                 raise DurableJobTransitionError(
@@ -6298,6 +6483,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
                 await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             if run.job_kind == "memory.opportunity-preference.v1" and checkpoint_id == "opportunity-preference-source-use":
                 from src.work_board.opportunity_preference_native import recheck_native
                 await recheck_native(db,run,witness=opportunity_preference_witness)
@@ -7434,6 +7621,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
                 await _begin_legacy_aware_writer(db)
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -7613,6 +7802,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """
         async with self._writer_session() as db:
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
                 if native_report_witness is None:
                     raise DurableJobLeaseError("original report artifact source witness required")
@@ -7726,6 +7917,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobLeaseError("recovery owner identity is required")
         async with self._writer_session() as db:
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
                 raise DurableJobLeaseError("native general task recovery cannot adopt an unbound artifact")
@@ -8230,6 +8423,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
                 if native_report_witness is None or effect_type != "evidence_cpu_output":
                     raise DurableJobLeaseError("fixed original report effect source witness required")
@@ -8828,6 +9023,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         canonical_receipt, receipt_digest = _canonical_reconciliation_receipt(reconciliation_receipt)
         async with self._writer_session() as db:
             run = await self._fetch(db, job_id)
+            if run.job_kind == "runtime_service_memory_v1":
+                raise DurableJobLeaseError("original_memory_generic_mutation_unavailable")
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -9222,6 +9419,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     # Alias used by recovery adapters that call the operation by its shorter name.
     reconcile_job = reconcile_external_effect
 
+    @_original_memory_maintenance_entry
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()
         recovered: list[dict[str, Any]] = await self.recover_inference_accounting(now=observed_at)
@@ -9270,21 +9468,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         run,
                         observed_at=observed_at,
                     )
-                    updated = await db.execute(
-                        update(WorkflowRunState)
-                        .execution_options(synchronize_session=False)
-                        .where(*recovery_conditions)
-                        .values(
-                            status="blocked",
-                            failure_reason="stale_goal_revision",
-                            lease_owner=None,
-                            lease_expires_at=None,
-                            updated_at=observed_at,
-                            heartbeat_at=observed_at,
-                            revision=WorkflowRunState.revision + 1,
-                            fencing_token=WorkflowRunState.fencing_token + 1,
-                        )
-                    )
+                    updated = await _execute_original_memory_negative(self, db, run,
+                        recovery_conditions, {"status": "blocked", "failure_reason": "stale_goal_revision",
+                            "lease_owner": None, "lease_expires_at": None, "updated_at": observed_at,
+                            "heartbeat_at": observed_at, "revision": WorkflowRunState.revision + 1,
+                            "fencing_token": WorkflowRunState.fencing_token + 1},
+                        receipt={"kind": "restart_recovery", "status": "blocked", "reason": "stale_goal_revision",
+                            "recovery_state": "stale_goal_revision", "previous_owner": old_owner,
+                            "fencing_token": int(run.fencing_token or 0) + 1, "revision": expected_revision + 1,
+                            "operator_action": "discard_stale_goal_revision_before_new_admission",
+                            "stale_goal_revision": True, "operator_visible": True})
                     if not _rowcount_is_one(updated):
                         continue
                     refreshed = await self._fetch(db, run.run_identity)
@@ -9335,7 +9528,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                                 expected_job_id=run.run_identity,
                                 expected_owner_id=_text(run.owner_principal_id),
                             )
-                            if effects is not None and not _job_has_unsafe_effects(effects)
+                            if run.job_kind != "runtime_service_memory_v1" and effects is not None and not _job_has_unsafe_effects(effects)
                             else None
                         )
                         if terminal_settlement is not None:
@@ -9385,12 +9578,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.fencing_token == expected_token,
                 ]
                 _append_goal_fence_condition(recovery_conditions, run)
-                updated = await db.execute(
-                    update(WorkflowRunState)
-                    .execution_options(synchronize_session=False)
-                    .where(*recovery_conditions)
-                    .values(**recovery_values)
-                )
+                updated = await _execute_original_memory_negative(self, db, run,
+                    recovery_conditions, recovery_values,
+                    receipt={"kind": "restart_recovery", "status": recovered_status,
+                        "reason": recovery_reason, "recovery_state": recovered_status,
+                        "previous_owner": old_owner, "fencing_token": int(run.fencing_token or 0) + 1,
+                        "revision": expected_revision + 1,
+                        "operator_action": "deadline_expired_no_retry"
+                            if recovered_status == "failed" and recovery_reason == "deadline_expired"
+                            else ("resume_already_settled_remote_operation" if recovered_status == "succeeded"
+                                else ("reconcile_external_effect_and_cost_then_retry_or_cancel"
+                                    if recovered_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
+                                    else "reconcile_effects_then_retry_or_cancel")),
+                        "operator_visible": True})
                 if not _rowcount_is_one(updated):
                     continue
                 refreshed = await self._fetch(db, run.run_identity)
@@ -9421,6 +9621,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 recovered.append(_serialize(refreshed, receipt=receipt))
         return recovered
 
+    @_original_memory_maintenance_entry
     async def recover_stale_job(
         self,
         job_id: str,
@@ -9473,22 +9674,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.fencing_token == expected_fence,
             ]
             _append_goal_fence_condition(conditions, run)
-            updated = await db.execute(
-                update(WorkflowRunState)
-                .execution_options(synchronize_session=False)
-                .where(*conditions)
-                .values(
-                    status=recovery_status,
-                    failure_reason=recovery_reason,
-                    lease_owner=None,
-                    lease_expires_at=None,
-                    fencing_token=WorkflowRunState.fencing_token + 1,
-                    revision=WorkflowRunState.revision + 1,
-                    updated_at=observed_at,
-                    heartbeat_at=observed_at,
-                    finished_at=(observed_at if recovery_status == "failed" else None),
-                )
-            )
+            updated = await _execute_original_memory_negative(self, db, run, conditions,
+                {"status": recovery_status, "failure_reason": recovery_reason,
+                    "lease_owner": None, "lease_expires_at": None,
+                    "fencing_token": WorkflowRunState.fencing_token + 1,
+                    "revision": WorkflowRunState.revision + 1, "updated_at": observed_at,
+                    "heartbeat_at": observed_at, "finished_at": observed_at if recovery_status == "failed" else None},
+                receipt={"kind": "targeted_recovery", "status": recovery_status, "reason": recovery_reason,
+                    "previous_owner": None, "fencing_token": expected_fence + 1,
+                    "revision": expected_revision + 1, "operator_visible": True})
             if not _rowcount_is_one(updated):
                 raise DurableJobLeaseError("job changed during targeted recovery")
             refreshed = await self._fetch(db, job_id)
@@ -9517,6 +9711,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobLeaseError("job lease has expired")
 
     async def _fetch(self, db: Any, job_id: str, *, allow_closed=False) -> WorkflowRunState:
+        await _original_memory_maintenance_snapshot(self, db, writer=True)
         from src.workflows.durable_state import (_CURRENT_LEGACY_RECOVERY,
             _begin_legacy_aware_writer, _legacy_writer_budget)
         source = _CURRENT_LEGACY_RECOVERY.get()

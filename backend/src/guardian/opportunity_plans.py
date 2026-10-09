@@ -870,25 +870,93 @@ async def _finalize_plan(owner, proposal_id, *, operator, server_witness=None):
         value = json.loads(proposal.proposal_json)
         model = validate_plan_result(json_bytes(value["model_result"]).decode(), source.evidence,
             value["generation_binding"]["offered_blueprints"])
-        artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
+        artifact_request = WorkBoardInputArtifactCreate(schema_version=1,
             capability_id="browser.public-task.v1", goal_id=opportunity.goal_id, goal_revision=opportunity.goal_revision,
-            input=fixed_browser_input(source.target), idempotency_key=f"opportunity-plan:{proposal_id}"))
-        request = WorkBoardTaskCreate(title=model.title, body=model.reason, capability_id="browser.public-task.v1",
-            goal_id=opportunity.goal_id, goal_revision=opportunity.goal_revision, input_artifact_id=artifact.artifact_id,
-            status=WorkBoardStatus.todo, priority=50, idempotency_scope="opportunity-plan", idempotency_key=proposal.idempotency_key)
-        staged_input = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
-            capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
-        safe = await stage_safe_task_text(db, owner, request)
+            input=fixed_browser_input(source.target), idempotency_key=f"opportunity-plan:{proposal_id}")
         original_json, original_digest, original_revision = proposal.proposal_json, proposal.proposal_digest, proposal.revision
+        composed = db.info.get("composition_read_guard") is not None
+        if not composed:
+            artifact = await prepare_input_artifact(db, owner, artifact_request)
+            request = WorkBoardTaskCreate(title=model.title, body=model.reason, capability_id="browser.public-task.v1",
+                goal_id=opportunity.goal_id, goal_revision=opportunity.goal_revision, input_artifact_id=artifact.artifact_id,
+                status=WorkBoardStatus.todo, priority=50, idempotency_scope="opportunity-plan", idempotency_key=proposal.idempotency_key)
+            staged_input = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
+                capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
+            safe = await stage_safe_task_text(db, owner, request)
+            original_json, original_digest, original_revision = proposal.proposal_json, proposal.proposal_digest, proposal.revision
+    if composed:
+        from src.workspace.accounting_witness import CompositionReadGuard
+        from src.runtime_plugins.ownership import begin_native_writer
+        from src.work_board.input_artifacts import (_reserve_plan_input_artifact,
+            _stage_plan_input_artifact, _finalize_plan_input_artifact)
+        async with db_engine.get_session() as db:
+            read_guard = db.info.get("composition_read_guard")
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            await begin_native_writer(db, owner="native_ingress")
+            await _recheck_plan_operator(db, owner, operator, source.opportunity_id, server_witness=server_witness)
+            proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
+            opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+            await recheck_plan_source(db, opportunity, source_witness=source)
+            await _assert_generated_native_sql(db, proposal, opportunity)
+            if (proposal.status not in {"pending_inference", "blocked"} or proposal.revision != original_revision
+                    or proposal.proposal_json != original_json or proposal.proposal_digest != original_digest
+                    or utc(proposal.expires_at) <= now()):
+                raise OpportunityError("proposal_stale")
+            card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
+            if (card is None or card.status != WorkBoardStatus.triage
+                    or card.task_revision != proposal.parent_revision or card.input_artifact_id):
+                raise OpportunityError("proposal_stale")
+            reservation = await _reserve_plan_input_artifact(db, owner, artifact_request)
+        staged_artifact = _stage_plan_input_artifact(reservation)
+        async with db_engine.get_session() as db:
+            read_guard = db.info.get("composition_read_guard")
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            await begin_native_writer(db, owner="native_ingress")
+            await _recheck_plan_operator(db, owner, operator, source.opportunity_id, server_witness=server_witness)
+            proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
+            opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+            await recheck_plan_source(db, opportunity, source_witness=source)
+            await _assert_generated_native_sql(db, proposal, opportunity)
+            if (proposal.status not in {"pending_inference", "blocked"} or proposal.revision != original_revision
+                    or proposal.proposal_json != original_json or proposal.proposal_digest != original_digest
+                    or utc(proposal.expires_at) <= now()):
+                raise OpportunityError("proposal_stale")
+            card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
+            if (card is None or card.status != WorkBoardStatus.triage
+                    or card.task_revision != proposal.parent_revision or card.input_artifact_id):
+                raise OpportunityError("proposal_stale")
+            artifact = await _finalize_plan_input_artifact(db, owner, artifact_request,
+                reservation=reservation, staged=staged_artifact)
+        async with db_engine.get_session() as db:
+            request = WorkBoardTaskCreate(title=model.title, body=model.reason, capability_id="browser.public-task.v1",
+                goal_id=opportunity.goal_id, goal_revision=opportunity.goal_revision, input_artifact_id=artifact.artifact_id,
+                status=WorkBoardStatus.todo, priority=50, idempotency_scope="opportunity-plan", idempotency_key=proposal.idempotency_key)
+            staged_input = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
+                capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
+            safe = await stage_safe_task_text(db, owner, request)
     async with db_engine.get_session() as db:
-        await db.execute(text("BEGIN IMMEDIATE"))
+        from src.workspace.accounting_witness import CompositionReadGuard
+        read_guard = db.info.get("composition_read_guard")
+        if read_guard is not None:
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            from src.runtime_plugins.ownership import begin_native_writer
+            await begin_native_writer(db, owner="native_ingress")
+        else:
+            await db.execute(text("BEGIN IMMEDIATE"))
         await _recheck_plan_operator(db, owner, operator, source.opportunity_id, server_witness=server_witness)
         proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
         await _assert_generated_native_sql(db, proposal, opportunity)
         if (proposal.status not in {"pending_inference", "blocked"} or proposal.revision != original_revision
-                or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now()):
+                or proposal.proposal_json != original_json or proposal.proposal_digest != original_digest
+                or utc(proposal.expires_at) <= now()):
             raise OpportunityError("proposal_stale")
         card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
         if card.status != WorkBoardStatus.triage or card.task_revision != proposal.parent_revision or card.input_artifact_id:
@@ -955,7 +1023,16 @@ async def accept_browser_plan(*, owner, proposal_id, request, operator):
         source = await stage_plan_source(db, opportunity, allow_planned=proposal.status == "accepted")
         await _assert_generated_native_sql(db, proposal, opportunity)
     async with db_engine.get_session() as db:
-        await db.execute(text("BEGIN IMMEDIATE"))
+        from src.workspace.accounting_witness import CompositionReadGuard
+        read_guard = db.info.get("composition_read_guard")
+        if read_guard is not None:
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            from src.runtime_plugins.ownership import begin_native_writer
+            await begin_native_writer(db, owner="native_ingress")
+        else:
+            await db.execute(text("BEGIN IMMEDIATE"))
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
@@ -1023,7 +1100,16 @@ async def accept_report_plan(*, operator, owner, operation_id, request):
         await _assert_generated_native_sql(db, proposal, opportunity)
         context = await pipelines.stage_accept(db, owner, operation_id, request, source_witness=source)
     async with db_engine.get_session() as db:
-        await db.execute(text("BEGIN IMMEDIATE"))
+        from src.workspace.accounting_witness import CompositionReadGuard
+        read_guard = db.info.get("composition_read_guard")
+        if read_guard is not None:
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            from src.runtime_plugins.ownership import begin_native_writer
+            await begin_native_writer(db, owner="native_ingress")
+        else:
+            await db.execute(text("BEGIN IMMEDIATE"))
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, operation_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)

@@ -278,7 +278,7 @@ async def test_exact_reference_body_reader_certifies_before_private_body(model_d
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("inventory", ("empty", "absent"))
+@pytest.mark.parametrize("inventory", ("empty", "absent", "present"))
 async def test_memory_census_cannot_be_skipped_by_missing_composition_inventory(model_db, inventory):
     from src.db.models import WorkflowRunState
     from src.workspace.accounting_witness import composition_closure
@@ -289,6 +289,11 @@ async def test_memory_census_cannot_be_skipped_by_missing_composition_inventory(
     await model_db.flush()
     if inventory == "absent":
         await model_db.execute(text("DROP TABLE runtime_composition_states"))
+    elif inventory == "present":
+        from src.db.models import RuntimeCompositionState
+        model_db.add(RuntimeCompositionState(runtime_domain="unread-inventory", owner_kind="unread-owner",
+            epoch=1, composition_digest="f" * 64, state="ready"))
+        await model_db.flush()
     statements = []
     connection = await model_db.connection()
     def observe(_c, _cursor, statement, _params, _context, _many):
@@ -302,3 +307,53 @@ async def test_memory_census_cannot_be_skipped_by_missing_composition_inventory(
         event.remove(connection.sync_connection, "before_cursor_execute", observe)
     assert any("INDEXED BY ix_workflow_run_states_job_kind" in statement for statement in statements)
     assert not any("checkpoint_context_json" in statement for statement in statements)
+    assert not any("SELECT runtime_domain,owner_kind,epoch,composition_digest,state,recovery_receipt_ref"
+                   in statement for statement in statements)
+
+
+@pytest.mark.asyncio
+async def test_inert_preoriginal_negative_rows_require_exact_original_input_bindings(model_db):
+    """Read-only retained row shapes convey no native Source or publication grant."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from src.db.models import WorkflowRunState
+    from src.runtime_plugins.ownership import (RuntimeCompositionBinding, CompositionDependency,
+        METHOD_DOMAINS, method_closure, method_dependencies)
+    from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission, candidate_context
+    from src.workflows.job_runtime import _canonical, _digest, _safe_durable_inputs, _composition_fingerprint
+    from src.workspace.accounting_witness import _checked_preoriginal_memory_row
+    from src.workspace.production import ProductionWorkspaceReconciliationError
+    method = "memory.forget"
+    binding = RuntimeCompositionBinding(METHOD_DOMAINS[method], method, "base", method_closure(method, "base"),
+        tuple(CompositionDependency(domain, "cordis", 1, "a" * 64)
+              for domain in sorted(method_dependencies(method))), "b" * 64, "c" * 64)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=30)
+    admission = NativeMemoryMutationAdmission.from_candidate({"schema_version": 1, "method": method,
+        "operator_principal_id": "retained-owner", "operator_session_id": "retained-session",
+        "opaque_ref": "native-memory:inert", "idempotency_key": "inert", "original_deadline": deadline.isoformat(),
+        "host_boot_nonce": "d" * 64, "composition_binding_digest": binding.binding_digest,
+        "record_ref": "address-only", "mode": "archive", "privacy_boundary": "private",
+        "reason": None, "prepared_reason": None})
+    candidate = admission.candidate()
+    _, inputs = _safe_durable_inputs(candidate)
+    authority = {"principal": "retained-owner", "owner_kind": "user", "session_id": "retained-session", "grants": []}
+    run = WorkflowRunState(run_identity="inert-retained", root_run_identity="inert-retained", workflow_name="retained",
+        job_kind="runtime_service_memory_v1", capability_version="1", owner_kind="user", owner_principal_id="retained-owner",
+        operator_session_id="retained-session", session_id="retained-session", conversation_id="retained-session",
+        deadline_at=deadline, composition_binding_json=binding.to_json(), checkpoint_context_json=candidate_context(admission),
+        arguments_json=_canonical(inputs), input_digest=admission.candidate_digest, declared_authority_json=_canonical(authority),
+        authority_digest=_digest(authority), run_fingerprint=_composition_fingerprint(SimpleNamespace(
+            run_fingerprint=_digest({"candidate": admission.candidate_digest, "binding": binding.binding_digest}),
+            composition_binding=binding), admission.candidate_digest), status="cancelled")
+    model_db.add(run)
+    await model_db.flush()
+    actual = dict((await model_db.execute(text("SELECT * FROM workflow_run_states WHERE run_identity=:key"),
+        {"key": run.run_identity})).one()._mapping)
+    for status in ("queued", "cancelled", "failed", "unknown_external_effect", "cost_liability"):
+        assert _checked_preoriginal_memory_row(dict(actual, status=status)) == candidate
+    for patch in ({"arguments_json": "{}"}, {"arguments_json": actual["arguments_json"] + " "},
+                  {"arguments_json": '{"duplicate":1,"duplicate":2}'}, {"run_fingerprint": "e" * 64},
+                  {"authority_digest": "e" * 64}, {"status": "succeeded"}, {"status": "degraded"},
+                  {"effect_receipts_json": '[{"effect":"unowned"}]'}):
+        with pytest.raises(ProductionWorkspaceReconciliationError, match="composition_native_memory_preoriginal_invalid"):
+            _checked_preoriginal_memory_row(dict(actual, **patch))

@@ -4,6 +4,7 @@ This proves canonical pipeline provenance, not Chromium or native Memory success
 """
 import hashlib
 import json
+import traceback
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,7 +55,7 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
     from src.api import auth
     from src.db import engine as original
     from src.db.engine import override_session_factory
-    from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardStatus, WorkflowRunState
+    from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardStatus, WorkBoardProposal, WorkflowRunState
     from src.browser.task_runner import BrowserTaskRunner
     from src.runtime_plugins.bridge import CordisHost
     from src.runtime_plugins.composition import reviewed_composition
@@ -66,6 +67,8 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
     from src.work_board import pipelines
     from src.work_board.pipeline_cpu import read_output
     from src.work_board.review import native_report_memory_metadata
+    from src.guardian import opportunity_plans
+    import httpx
 
     root, engine, factory = accounting_db
     monkeypatch.setattr(original, 'engine', engine)
@@ -87,6 +90,33 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
         names = set((await db.execute(text('SELECT name FROM sqlite_schema'))).scalars())
         assert {'operator_principal_required_insert', 'operator_principal_required_update'} <= names
         assert len([name for name in names if name.startswith('session_recall_')]) == 15
+
+    finalizer = opportunity_plans._finalize_plan
+    async def observe_original_finalizer(*args, **kwargs):
+        try:
+            return await finalizer(*args, **kwargs)
+        except BaseException as exc:
+            diagnostic = root / 'report-source-finalizer-diagnostic.json'
+            diagnostic.write_text(json.dumps({'type': type(exc).__name__,
+                'code': getattr(exc, 'code', None), 'message': str(exc),
+                'traceback': traceback.format_exc()}, indent=2))
+            diagnostic.chmod(0o600)
+            raise
+    monkeypatch.setattr(opportunity_plans, '_finalize_plan', observe_original_finalizer)
+    original_once = opportunity_plans._generate_plan_once
+    original_arguments = []
+    async def observe_original_once(**kwargs):
+        original_arguments.append(kwargs)
+        return await original_once(**kwargs)
+    monkeypatch.setattr(opportunity_plans, '_generate_plan_once', observe_original_once)
+    transport_calls = []
+    client_type = httpx.AsyncClient
+    send = client_type.send
+    async def observe_original_transport(client, request, **kwargs):
+        if request.url.host == 'openrouter.ai':
+            transport_calls.append((request.method, request.url.path))
+        return await send(client, request, **kwargs)
+    monkeypatch.setattr(client_type, 'send', observe_original_transport)
 
     sessions, browsers = [], []
     create = auth.create_session
@@ -117,7 +147,33 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
                 await initialize_fresh_deployment(db, composition_digests={domain: reviewed.composition_digest for domain in DOMAINS})
         try:
             assert await host.start(), host.snapshot()
-            await _actual_plan_journey(accounting_db, real_auth, monkeypatch, 'public-evidence-report')
+            try:
+                await _actual_plan_journey(accounting_db, real_auth, monkeypatch, 'public-evidence-report')
+            except BaseException:
+                # If a later original owner fails, prove replay of the actual
+                # committed card without restarting or fabricating generation.
+                async with canonical_session() as db:
+                    cards = list((await db.scalars(select(WorkBoardTask))).all())
+                    proposals = list((await db.scalars(select(WorkBoardProposal))).all())
+                    before = [row.model_dump() for row in (*cards, *proposals)]
+                if len(cards) == len(proposals) == len(original_arguments) == 1:
+                    contacts = len(transport_calls)
+                    replay = await original_once(**original_arguments[0])
+                    assert replay['proposal_ref']['proposal_id'] == proposals[0].proposal_id
+                    assert replay['proposal_ref']['parent_task_id'] == cards[0].task_id
+                    assert len(transport_calls) == contacts
+                    async with canonical_session() as db:
+                        after = [row.model_dump() for row in (
+                            *list((await db.scalars(select(WorkBoardTask))).all()),
+                            *list((await db.scalars(select(WorkBoardProposal))).all()))]
+                    assert after == before
+                    diagnostic = root / 'report-source-card-replay.json'
+                    diagnostic.write_text(json.dumps({'task_count': len(cards), 'proposal_count': len(proposals),
+                        'task_id': cards[0].task_id, 'proposal_id': proposals[0].proposal_id,
+                        'contact_count_before': contacts, 'contact_count_after': len(transport_calls),
+                        'rows_unchanged': after == before}, indent=2))
+                    diagnostic.chmod(0o600)
+                raise
             assert len(sessions) == 1 and browsers and all(browser.closed for browser in browsers)
             token, operator = sessions[0]
             assert token

@@ -354,12 +354,8 @@ async def _validate_memory_owner_source(db, run, operation, *, effect=None):
     return source
 
 
-async def _validate_memory_lifecycle_source(db, run, original_claim):
-    """Resolve the still-live original dispatcher issuer, never a copied claim.
-
-    execute_native_memory retains this registered source through completion and
-    closes it in finally. Restart/recovery cannot reconstruct that registration.
-    """
+def _memory_live_claim_source(original_claim):
+    """Issuer identity only, before body reads; numeric routing, never consent."""
     from src.workflows.job_runtime import NativeServiceClaim
     if type(original_claim) is not NativeServiceClaim:
         raise NativeServiceBlocked("native_memory_actual_claim_source_required")
@@ -367,8 +363,20 @@ async def _validate_memory_lifecycle_source(db, run, original_claim):
                     if source.claim is original_claim and source._live.is_set())
     if len(sources) != 1:
         raise NativeServiceBlocked("native_memory_actual_claim_source_unavailable")
-    source = await _validate_memory_dispatch_source(db, run, sources[0]._scope)
-    if source is not sources[0]:
+    source = sources[0]
+    if (source._seal is not _MEMORY_SOURCE_SEAL or source._issued_id != id(source)
+            or source._scope.native_memory_source is not source
+            or source.host is not original_claim._host or not source.host.admitting
+            or source.host.boot_nonce != original_claim.host_boot_nonce):
+        raise NativeServiceBlocked("native_memory_actual_claim_source_unavailable")
+    return source
+
+
+async def _validate_memory_lifecycle_source(db, run, original_claim):
+    """Current original checks remain mandatory after issuer-only routing."""
+    source = _memory_live_claim_source(original_claim)
+    current = await _validate_memory_dispatch_source(db, run, source._scope)
+    if source is not current:
         raise NativeServiceBlocked("native_memory_actual_claim_source_changed")
     return source
 

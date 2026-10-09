@@ -119,7 +119,7 @@ def _headers(connection, descriptor, identities):
 
 
 def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None):
-    budget.debit(validate_descriptor_schema(connection,descriptor))
+    budget.debit(validate_descriptor_schema(connection,descriptor), appearance=("descriptor-schema", descriptor.table))
     if tombstone:
         name=_validate_locator(connection,descriptor.table,"memory_id")
         suffix=f' INDEXED BY "{name}" WHERE memory_id=?'
@@ -148,7 +148,7 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
     for identity,row in zip(ids,rows):
         budget.resolve_future(descriptor,identity,row[0])
     budget.enroll((descriptor.table,r[0]) for r in rows)
-    budget.debit(_metadata_cost([list(r) for r in rows]))
+    budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("locator-metadata", descriptor.table, key, tombstone, tuple(ids)))
     return tuple(ids)
 
 
@@ -200,7 +200,7 @@ def _validate_fts_metadata(connection,budget,objects):
         header=list(_sql(connection,"SELECT typeof(sql),octet_length(sql) FROM sqlite_schema WHERE name=? LIMIT 2",(name,)))
         if len(header)!=1 or tuple(header[0])!=("text",len(expected_sql.encode("utf-8"))):
             raise HeaderBoundsError("header_fts_metadata_changed")
-        budget.debit(6*header[0][1]+2)
+        budget.debit(6*header[0][1]+2, appearance=("fts-sql", name))
         actual=_sql(connection,"SELECT sql FROM sqlite_schema WHERE name=? LIMIT 2",(name,)).scalar_one()
         if actual!=expected_sql:raise HeaderBoundsError("header_fts_metadata_changed")
     for name,expected in _FTS_META.items():
@@ -211,14 +211,14 @@ def _validate_fts_metadata(connection,budget,objects):
         layout=list(_sql(connection,'SELECT type,ncol,wr,strict FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2',(name,)))
         indexes=list(_sql(connection,'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
             'CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?',(name,len(expected["indexes"])+1)))
-        budget.debit(_metadata_cost([list(x) for x in (*columns,*layout,*indexes)]))
+        budget.debit(_metadata_cost([list(x) for x in (*columns,*layout,*indexes)]), appearance=("fts-schema", name))
         if ([list(x) for x in columns]!=expected["columns"] or [list(x) for x in layout]!=[expected["table"]]
                 or [list(x) for x in indexes]!=expected["indexes"]):
             raise HeaderBoundsError("header_fts_metadata_changed")
         for index,parts in expected["index_columns"].items():
             actual=list(_sql(connection,'SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,'
                 'desc,CASE WHEN octet_length(coll)<=128 THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?',(index,len(parts)+1)))
-            budget.debit(_metadata_cost([list(x) for x in actual]))
+            budget.debit(_metadata_cost([list(x) for x in actual]), appearance=("fts-index", index))
             if [list(x) for x in actual]!=parts:raise HeaderBoundsError("header_fts_metadata_changed")
 
 
@@ -242,13 +242,13 @@ def preflight_composition_superset(connection,budget):
         elif kind=="trigger":valid=(table=="operator_sessions" and name in {"operator_principal_required_insert","operator_principal_required_update"}) or (name in _FTS_SQL and _FTS_SQL[name][:2]==("trigger",table))
         else:valid=False
         if not valid:raise HeaderBoundsError("header_schema_object_unavailable")
-    budget.debit(_metadata_cost([list(r) for r in objects]))
+    budget.debit(_metadata_cost([list(r) for r in objects]), appearance=("complete-schema",))
     _validate_fts_metadata(connection,budget,objects)
     allrows={}
     for descriptor in COMPOSITION_DESCRIPTORS.values():
         ids=_discover(connection,descriptor,budget,remaining=MAX_ROWS-len(allrows))
         rows=_headers(connection,descriptor,ids)
-        budget.debit(sum(cost for _,cost in rows.values()))
+        budget.debit(sum(cost for _,cost in rows.values()), appearance=("complete-headers", descriptor.table, tuple(ids)))
         allrows.update(rows)
     if _state(connection)!=state:raise HeaderBoundsError("header_snapshot_changed")
     cert=CompositionHeaderCertificate(connection,*state,MappingProxyType(allrows),budget,_SEAL)
@@ -280,7 +280,7 @@ def charge_row(connection,table,key):
         key=int(key)
     row=certificate.rows.get((table,key))
     if row is None:raise HeaderBoundsError("header_row_unavailable")
-    certificate.budget.debit(row[1])
+    certificate.budget.debit(row[1], appearance=("body", table, key))
 
 
 def charge_table(connection,table):
@@ -289,7 +289,9 @@ def charge_table(connection,table):
     if certificate is None:return
     _validate(connection,certificate)
     if table not in COMPOSITION_DESCRIPTORS:raise HeaderBoundsError("header_descriptor_unavailable")
-    certificate.budget.debit(sum(cost for (name,_key),(_rowid,cost) in certificate.rows.items() if name==table))
+    identities = tuple(key for name, key in certificate.rows if name == table)
+    certificate.budget.debit(sum(cost for (name,_key),(_rowid,cost) in certificate.rows.items() if name==table),
+        appearance=("table-body", table, identities))
 
 
 def current_budget():

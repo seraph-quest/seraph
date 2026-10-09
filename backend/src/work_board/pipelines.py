@@ -1021,7 +1021,243 @@ async def verified_output(db: Any, owner: WorkBoardOwner, producer: WorkBoardTas
     raise BoardError("pipeline_output_unverified", "No exact settled artifact/readback pair is available", status_code=409)
 
 
+async def _begin_pipeline_advance_writer(db, owner, operation_id, index, *, artifact_id=None):
+    """Original advance's finite Source/producer stage and fresh SQL gate."""
+    from src.db.models import OperatorSession, OperatorIdentity
+    from src.guardian.opportunity_plans import stage_accepted_plan_task
+    from src.goals.repository import deserialize_admission_budget
+    from src.work_board.review import stage_pipeline_producer_readback, recheck_pipeline_producer_readback
+    from src.security.site_policy import evaluate_site_access
+    from src.workflows.job_runtime import _serialize
+    from src.workspace.accounting_witness import CompositionReadGuard
+    from src.runtime_plugins.ownership import begin_native_writer
+    from src.work_board.input_artifacts import stage_input_artifact
+    from src.work_board.dispatcher import registered_executor_id
+
+    guard = db.info.get("composition_read_guard")
+    if (type(guard) is not CompositionReadGuard or guard.db is not db or guard.closed
+            or db.new or db.dirty or db.deleted):
+        raise BoardError("composition_provider_invalid", "Original clean pipeline session required")
+    if index not in (1, 2):
+        raise BoardError("pipeline_materialization_conflict", "Original finite consumer required")
+    row, value = await owned(db, owner, operation_id)
+    if row.status != "accepted":
+        raise BoardError("pipeline_review_required", "Actual accepted operation required")
+    producer_id = value["steps"][index - 1]["task_ref"]
+    consumer_id = value["steps"][index]["task_ref"]
+    producer = await WorkBoardRepository().get_task(db, owner, producer_id)
+    consumer = await WorkBoardRepository().get_task(db, owner, consumer_id)
+    if (producer.capability_id != CAPABILITIES[index - 1]
+            or consumer.capability_id != CAPABILITIES[index] or consumer.pipeline_slot != SLOTS[index]
+            or consumer.pipeline_operation_id != operation_id
+            or consumer.status != WorkBoardStatus.triage or consumer.input_artifact_id):
+        raise BoardError("pipeline_task_changed", "Original deferred consumer required")
+    source = await stage_accepted_plan_task(db, consumer)
+    if row.opportunity_id and source is None:
+        raise BoardError("pipeline_source_changed", "Original accepted Source required")
+    producer_witness = await stage_pipeline_producer_readback(db, owner, producer)
+    producer_run = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == producer_witness.run_identity)
+        .execution_options(populate_existing=True))
+    if (producer_run is None or producer_run.status != "succeeded"
+            or producer_run.finished_at is None or row_token(producer_run) != producer_witness.run_token):
+        raise BoardError("pipeline_output_unverified", "The actual finished producer Run is required")
+    input_witness = None
+    artifact_token = None
+    if artifact_id is not None:
+        input_witness = await stage_input_artifact(db, owner, artifact_id=artifact_id,
+            capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision)
+        artifact = await db.get(WorkBoardInputArtifact, artifact_id, populate_existing=True)
+        artifact_token = row_token(artifact)
+    link = await db.scalar(select(WorkBoardLink).where(
+        WorkBoardLink.parent_task_id == producer_id, WorkBoardLink.child_task_id == consumer_id))
+    if (link is None or (link.owner_principal_id, link.owner_session_id) !=
+            (owner.principal_id, owner.session_id)):
+        raise BoardError("pipeline_handoff_changed", "Original fixed dependency required")
+    handoff_id = link.current_handoff_id
+    handoff = await db.get(WorkBoardHandoff, handoff_id, populate_existing=True) if handoff_id else None
+    root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+    goal = await db.get(Goal, consumer.goal_id, populate_existing=True)
+    identity_id = root.operator_identity_id if root else None
+    identity = await db.get(OperatorIdentity, identity_id, populate_existing=True) if identity_id else None
+    if root is None or goal is None or (identity_id and identity is None):
+        raise BoardError("pipeline_root_changed", "Actual original authority required")
+    authority = (row_token(root), row_token(goal), row_token(identity) if identity else None)
+    goal_id, link_id = goal.id, link.link_id
+    operation_token, consumer_token, link_token = row_token(row), row_token(consumer), row_token(link)
+    handoff_token = row_token(handoff) if handoff else None
+    workspace = canonical_bytes(value["live_root"])
+    await db.rollback()
+    await begin_native_writer(db, owner="native_ingress")
+    row, value = await owned(db, owner, operation_id, workspace_identity=workspace)
+    consumer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == consumer_id)
+        .execution_options(populate_existing=True))
+    if consumer is None:
+        raise BoardError("pipeline_task_changed", "Original consumer unavailable")
+    failure = None
+    try:
+        await task_guard(db, consumer, workspace_identity=workspace, source_witness=source)
+    except BoardError as exc:
+        if not db.info.get("pipeline_authority_frozen"):
+            raise
+        failure = exc
+    if failure is not None:
+        return None, failure
+    root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+    goal = await db.get(Goal, goal_id, populate_existing=True)
+    identity = await db.get(OperatorIdentity, identity_id, populate_existing=True) if identity_id else None
+    if (root is None or root.principal_id != owner.principal_id or root.is_bearer_tombstone
+            or root.revoked_at is not None or root.replaced_by_id is not None
+            or utc(root.idle_expires_at) <= now() or utc(root.absolute_expires_at) <= now()
+            or identity_id and (identity is None or identity.revoked_at is not None)):
+        raise BoardError("pipeline_root_changed", "Current original authority is unavailable", status_code=403)
+    if (root is None or goal is None or (identity_id and identity is None)
+            or authority != (row_token(root), row_token(goal), row_token(identity) if identity else None)
+            or row_token(row) != operation_token or row_token(consumer) != consumer_token):
+        raise BoardError("pipeline_task_changed", "Original staged authority changed")
+    output = await recheck_pipeline_producer_readback(db, owner, witness=producer_witness)
+    producer_run = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == producer_witness.run_identity)
+        .execution_options(populate_existing=True))
+    if (producer_run is None or producer_run.status != "succeeded"
+            or producer_run.finished_at is None or row_token(producer_run) != producer_witness.run_token):
+        raise BoardError("pipeline_output_unverified", "The actual finished producer Run changed")
+    producer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == producer_id)
+        .execution_options(populate_existing=True))
+    link = await db.get(WorkBoardLink, link_id, populate_existing=True)
+    handoff = await db.get(WorkBoardHandoff, handoff_id, populate_existing=True) if handoff_id else None
+    if (link is None or row_token(link) != link_token
+            or (row_token(handoff) if handoff else None) != handoff_token):
+        raise BoardError("pipeline_handoff_changed", "Original fixed dependency changed")
+    if artifact_id is not None:
+        artifact = await db.get(WorkBoardInputArtifact, artifact_id, populate_existing=True)
+        if artifact is None or row_token(artifact) != artifact_token:
+            raise BoardError("pipeline_input_changed", "Original staged consumer input changed")
+    return (row, value, producer, consumer, link, output, producer_witness, input_witness), None
+
+
+async def _reserve_advance_consumer(owner, operation_id, expected_revision, index):
+    """The original reservation commits through its canonical session owner."""
+    from src.db import engine as db_engine
+    from src.work_board.review import _materialize_pipeline_handoff_locked
+    selected = None
+    failure = None
+    async with db_engine.get_session() as db:
+        row, value = await owned(db, owner, operation_id)
+        retained = value.get("advance_request")
+        if row.revision != expected_revision and (not isinstance(retained, dict)
+                or retained.get("expected_revision") != expected_revision
+                or retained.get("plan_version") != value["plan_version"]):
+            raise BoardError("pipeline_revision_conflict", "The materialization request belongs to another operation version", status_code=409)
+        consumer = await WorkBoardRepository().get_task(db, owner, value["steps"][index]["task_ref"])
+        producer = await WorkBoardRepository().get_task(db, owner, value["steps"][index - 1]["task_ref"])
+        if consumer.input_artifact_id or consumer.status != WorkBoardStatus.triage or producer.status != WorkBoardStatus.done:
+            return None
+        context, failure = await _begin_pipeline_advance_writer(db, owner, operation_id, index)
+        if failure is None:
+            row, value, producer, consumer, link, output, producer_witness, _ = context
+            handoff = await _materialize_pipeline_handoff_locked(db, owner, producer, consumer, link,
+                witness=producer_witness)
+            inputs = EvidenceConsumerInput(schema_version=1, operation_ref=operation_id,
+                plan_version=value["plan_version"], producer_task_ref=producer.task_id,
+                producer_attempt_ref=output["attempt_id"], handoff_ref=handoff.handoff_id,
+                producer_sha256=output["content_sha256"],
+                producer_schema="browser_public_task_result" if index == 1 else "evidence_dossier.v1",
+                quoted_source_data=output["quoted_source_data"], no_learning=True)
+            key = f"{operation_id}:{value['plan_version']}:{output['attempt_id']}:{SLOTS[index]}"
+            reservation = {"key": key, "input_sha256": digest(inputs.model_dump(mode="json")),
+                "producer_attempt_ref": output["attempt_id"], "consumer_revision": consumer.task_revision,
+                "state": "reserved"}
+            old = value["reservations"].get(SLOTS[index])
+            if old is not None and old != reservation:
+                raise BoardError("pipeline_materialization_conflict", "The durable reservation no longer has its exact binding", status_code=409)
+            value["reservations"][SLOTS[index]] = reservation
+            value["advance_request"] = {"expected_revision": expected_revision,
+                "plan_version": value["plan_version"], "state": "reserved"}
+            await store(db, row, value)
+            selected = {"consumer_task_id": consumer.task_id, "consumer_revision": consumer.task_revision,
+                "consumer_token": row_token(consumer), "plan_version": value["plan_version"],
+                "reservation_key": key, "reservation": dict(reservation),
+                "operation_revision": row.revision, "operation_digest": row.proposal_digest}
+    if failure is not None:
+        raise failure
+    return selected
+
+
+async def _bind_advance_consumer(owner, operation_id, index, selected, artifact_id):
+    """The original Input, Task and operation adoption remains one SQL phase."""
+    from src.db import engine as db_engine
+    from src.work_board.input_artifacts import bind_input_artifact, recheck_staged_input
+    from src.work_board.dispatcher import registered_executor_id
+    from src.work_board.review import _safe_verification_receipt
+    failure = None
+    async with db_engine.get_session() as db:
+        context, failure = await _begin_pipeline_advance_writer(db, owner, operation_id, index,
+            artifact_id=artifact_id)
+        if failure is None:
+            row, current, producer, consumer, link, output, _producer_witness, input_witness = context
+            reservation = current["reservations"].get(SLOTS[index])
+            if (row.revision != selected["operation_revision"] or row.proposal_digest != selected["operation_digest"]
+                    or current["plan_version"] != selected["plan_version"]
+                    or reservation != selected["reservation"]
+                    or consumer.task_id != selected["consumer_task_id"]
+                    or row_token(consumer) != selected["consumer_token"]
+                    or consumer.task_revision != selected["consumer_revision"]
+                    or link.current_handoff_id is None):
+                raise BoardError("pipeline_materialization_conflict", "The exact consumer reservation changed", status_code=409)
+            inputs = EvidenceConsumerInput(schema_version=1, operation_ref=operation_id,
+                plan_version=current["plan_version"], producer_task_ref=producer.task_id,
+                producer_attempt_ref=output["attempt_id"], handoff_ref=link.current_handoff_id,
+                producer_sha256=output["content_sha256"],
+                producer_schema="browser_public_task_result" if index == 1 else "evidence_dossier.v1",
+                quoted_source_data=output["quoted_source_data"], no_learning=True)
+            if (reservation["input_sha256"] != digest(inputs.model_dump(mode="json"))
+                    or reservation["producer_attempt_ref"] != output["attempt_id"]):
+                raise BoardError("pipeline_producer_changed", "The reserved producer changed", status_code=409)
+            handoff = await db.get(WorkBoardHandoff, link.current_handoff_id, populate_existing=True)
+            proof = _safe_verification_receipt(json.loads(_producer_witness.proof_bytes), require_complete=True)
+            if (handoff is None or (handoff.owner_principal_id, handoff.owner_session_id,
+                    handoff.parent_task_id, handoff.child_task_id, handoff.link_id,
+                    handoff.source_attempt_id, handoff.workflow_run_id, handoff.source_task_revision) !=
+                    (owner.principal_id, owner.session_id, producer.task_id, consumer.task_id, link.link_id,
+                    output["attempt_id"], _producer_witness.run_identity, producer.task_revision)
+                    or not proof or canonical_bytes(json.loads(handoff.verification_json)) != canonical_bytes(proof)):
+                raise BoardError("pipeline_handoff_changed", "The exact producer handoff changed", status_code=409)
+            expected_task_revision = selected["consumer_revision"]
+            next_revision = expected_task_revision + 1
+            request = WorkBoardTaskCreate(title=consumer.title, input_artifact_id=artifact_id,
+                capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision,
+                status=WorkBoardStatus.todo, idempotency_key=selected["reservation_key"])
+            resolved = await recheck_staged_input(db, owner, request, witness=input_witness)
+            if digest(resolved.input) != reservation["input_sha256"]:
+                raise BoardError("pipeline_input_changed", "The literal reserved input changed", status_code=409)
+            await bind_input_artifact(db, owner, artifact=resolved, task_id=consumer.task_id,
+                task_revision=next_revision)
+            changed = await db.execute(update(WorkBoardTask).where(WorkBoardTask.task_id == consumer.task_id,
+                WorkBoardTask.task_revision == expected_task_revision, WorkBoardTask.pipeline_operation_id == operation_id,
+                WorkBoardTask.status == WorkBoardStatus.triage, WorkBoardTask.input_artifact_id.is_(None))
+                .values(input_artifact_id=artifact_id, typed_input_ref=resolved.row.typed_input_ref,
+                    typed_input_digest=resolved.row.payload_sha256, executor_id=registered_executor_id(consumer.capability_id),
+                    status=WorkBoardStatus.todo, task_revision=next_revision, updated_at=now())
+                .execution_options(synchronize_session=False))
+            if changed.rowcount != 1:
+                raise BoardError("pipeline_materialization_conflict", "The consumer changed before adoption", status_code=409)
+            await db.refresh(consumer)
+            reservation["state"] = "bound"
+            reservation["artifact_ref"] = artifact_id
+            current["advance_request"]["state"] = "completed"
+            await store(db, row, current)
+    if failure is not None:
+        raise failure
+
+
 async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_revision: int) -> dict[str, Any]:
+    read_guard = db.info.get("composition_read_guard")
+    if read_guard is not None:
+        from src.workspace.accounting_witness import CompositionReadGuard
+        if (type(read_guard) is not CompositionReadGuard or read_guard.db is not db or read_guard.closed
+                or db.new or db.dirty or db.deleted):
+            raise BoardError("composition_provider_invalid", "Original clean pipeline caller required")
     from src.work_board.input_artifacts import prepare_input_artifact, bind_input_artifact, stage_input_artifact, recheck_staged_input
     from src.work_board.review import stage_pipeline_producer_readback, recheck_pipeline_producer_readback, _materialize_pipeline_handoff_locked
     from src.guardian.opportunity_plans import stage_accepted_plan_task
@@ -1036,6 +1272,21 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
             raise BoardError("pipeline_revision_conflict", "The materialization request belongs to another operation version", status_code=409)
         if retained.get("state") == "completed":
             return await read(db, owner, operation_id)
+    if db.info.get("composition_read_guard") is not None:
+        from src.work_board.input_artifacts import _prepare_pipeline_consumer_input
+        # This original inspection session stays read-only. Each retained phase
+        # publishes, commits and closes its canonical owner before physical work.
+        await db.rollback()
+        for index in (1, 2):
+            selected = await _reserve_advance_consumer(owner, operation_id, expected_revision, index)
+            if selected is None:
+                continue
+            artifact = await _prepare_pipeline_consumer_input(owner, operation_id=operation_id,
+                consumer_task_id=selected["consumer_task_id"],
+                expected_consumer_revision=selected["consumer_revision"],
+                reservation_key=selected["reservation_key"], plan_version=selected["plan_version"])
+            await _bind_advance_consumer(owner, operation_id, index, selected, artifact.artifact_id)
+        return await read(db, owner, operation_id, workspace_identity=workspace)
     changed_any = False
     for index in (1, 2):
         producer = await WorkBoardRepository().get_task(db, owner, value["steps"][index - 1]["task_ref"])

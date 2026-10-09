@@ -1496,6 +1496,13 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
         payload = resolved.read_bytes()
     except OSError as exc:
         raise TypedInputError("typed_input_unreadable", "typed input cannot be read") from exc
+    return _decode_typed_input_payload(task, payload)
+
+
+def _decode_typed_input_payload(task: WorkBoardTask, payload: bytes) -> dict[str, Any]:
+    """Validate the original full envelope; held bytes carry no authority."""
+    if type(payload) is not bytes:
+        raise TypedInputError("typed_input_invalid", "typed input payload must be bytes")
     if len(payload) > 64 * 1024:
         raise TypedInputError("typed_input_too_large", "typed input exceeds 64 KiB")
     expected_digest = _text(task.typed_input_digest).lower()
@@ -2689,7 +2696,7 @@ class WorkBoardDispatcher:
             if _status(result) == "succeeded" and isinstance(latest, Mapping) and cleanup:
                 proof = self._direct_readback({"status": "succeeded"}, latest, binding.child_job_id)
                 if proof is not None:
-                    await self._consume_v2_leaf_artifact(child_task)
+                    await self._consume_v2_leaf_artifact(child_task, child_attempt)
                     await self._project_v2_child(child_task, child_attempt, latest, result, proof=proof)
                     return dict(result)
             await self._project_v2_child(child_task, child_attempt, latest or {}, result, proof=None)
@@ -2754,11 +2761,11 @@ class WorkBoardDispatcher:
         await self._validate_procedure_child_binding(binding, projection=latest if isinstance(latest, Mapping) else None)
         proof = self._direct_readback(result, latest or {}, job_id)
         if proof is not None:
-            await self._consume_v2_leaf_artifact(child_task)
+            await self._consume_v2_leaf_artifact(child_task, child_attempt)
         await self._project_v2_child(child_task, child_attempt, latest or {}, result, proof=proof)
         return dict(result)
 
-    async def _consume_v2_leaf_artifact(self, task: WorkBoardTask) -> None:
+    async def _consume_v2_leaf_artifact(self, task: WorkBoardTask, attempt: WorkBoardAttempt) -> None:
         """Consume a native procedure leaf input exactly once after proof."""
 
         artifact_id = _text(task.input_artifact_id)
@@ -2795,6 +2802,11 @@ class WorkBoardDispatcher:
                 task_id=task.task_id,
                 task_revision=int(resolved.row.bound_task_revision),
                 artifact_id=resolved.row.artifact_id,
+                attempt_id=attempt.attempt_id,
+                expected_task_revision=task.task_revision,
+                expected_fencing_token=attempt.fencing_token,
+                expected_lease_owner=attempt.lease_owner,
+                expected_workflow_run_id=attempt.workflow_run_id,
             )
 
     async def _project_v2_child(
@@ -6663,7 +6675,7 @@ class WorkBoardDispatcher:
             and effect.get("content_sha256") == proof["content_sha256"] for effect in projection.get("effects", [])):
             raise BoardError("pipeline_output_unverified", "The CPU output needs exact independent readback")
         read_output(matching[0]["file_path"], proof["content_sha256"])
-        await self._consume_v2_leaf_artifact(task)
+        await self._consume_v2_leaf_artifact(task, attempt)
         return matching
 
     async def _execute_direct_adapter(

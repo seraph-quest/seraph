@@ -214,7 +214,7 @@ async def test_bounded_consume_actual_authority_negatives(accounting_db, real_au
             # outside this bounded consume test; every other error is fatal.
             if (terminal.tb_frame.f_code.co_name != "_actual_plan_journey"
                 or terminal.tb_lineno != 256
-                or not terminal.tb_frame.f_code.co_filename.endswith("/tests/test_guardian_opportunity_plan_vertical.py")
+                or Path(terminal.tb_frame.f_code.co_filename).resolve() != Path(__file__).with_name("test_guardian_opportunity_plan_vertical.py").resolve()
                 or "'tasks':" not in str(exc) or "'passes':" not in str(exc)):
                 raise
             # Pytest rewrites the assertion's dict message into a string.

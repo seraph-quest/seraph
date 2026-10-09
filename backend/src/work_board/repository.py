@@ -980,8 +980,28 @@ class WorkBoardRepository:
         if positive and action in {"link", "project"} and run is None:
             raise BoardError("pipeline_task_changed", "The actual original workflow is unavailable")
         run_token = token(run)
+        if positive:
+            # Resolve this finite original validation path before any physical stage
+            # or native writer. Imports and callables confer no Source authority.
+            from src.work_board.dispatcher import (
+                WorkBoardDispatcher, _decode_typed_input_payload, _typed_input_model, _safe_digest,
+            )
+            from src.work_board.review import _workflow_run_binds_board_attempt
+            from src.workflows.specialist_delegation import is_specialist_root
+            if _typed_input_model(task.capability_id) is None:
+                raise BoardError("capability_unregistered", "The original input model is unavailable")
+            if task.capability_id == "browser.public-task.v1":
+                from src.browser.task_runner import BrowserTaskInput, _browser_input_digests
+            else:
+                from src.work_board.pipeline_contracts import EvidenceConsumerInput
+                from src.work_board.pipeline_cpu import spec_for
         source = None
+        operation_token = None
+        workspace_identity = None
+        authority_tokens = None
+        identity_id = None
         input_token = None
+        input_payload = None
         handoffs = None
         denial = None
         denial_entry = action in {"promote", "claim", "project"}
@@ -990,8 +1010,29 @@ class WorkBoardRepository:
             from src.guardian.opportunity_contracts import OpportunityError
             try:
                 source = await stage_accepted_plan_task(db, task, attempt=attempt)
-                if source is None:
+                workspace_identity = source.workspace_identity if source is not None else None
+                if task.pipeline_operation_id:
+                    from src.work_board.pipelines import owned, canonical_bytes, task_guard
+                    from src.security.site_policy import evaluate_site_access
+                    operation, operation_value = await owned(db, owner, task.pipeline_operation_id)
+                    if (operation.status != "accepted" or operation_value.get("pending_revision")
+                        or operation_value.get("authority_frozen")
+                        or not any(step["task_ref"] == task.task_id and step["slot"] == task.pipeline_slot
+                                   for step in operation_value["steps"])
+                        or (operation.opportunity_id and source is None)):
+                        raise BoardError("pipeline_source_changed", "Original accepted operation changed")
+                    operation_token = token(operation)
+                    workspace_identity = canonical_bytes(operation_value["live_root"])
+                if source is None and operation_token is None:
                     raise BoardError("pipeline_source_changed", "Original accepted Source required")
+                from src.db.models import OperatorIdentity
+                root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+                goal = await db.get(Goal, task.goal_id, populate_existing=True)
+                identity_id = root.operator_identity_id if root is not None else None
+                identity = await db.get(OperatorIdentity, identity_id, populate_existing=True) if identity_id else None
+                if root is None or goal is None or (identity_id and identity is None):
+                    raise BoardError("evidence_owner_not_current", "The original authority is unavailable")
+                authority_tokens = (token(root), token(goal), token(identity))
             except (OpportunityError, BoardError) as exc:
                 if not denial_entry:
                     raise
@@ -1019,6 +1060,7 @@ class WorkBoardRepository:
                 or resolved.row.bound_task_id != task_id):
                 raise BoardError("pipeline_input_changed", "Original task input changed")
             input_token = token(resolved.row)
+            input_payload = resolved.payload
             if action in {"promote", "claim"}:
                 from src.work_board.review import _stage_dispatch_handoffs
                 handoffs = await _stage_dispatch_handoffs(db, owner, task)
@@ -1038,12 +1080,15 @@ class WorkBoardRepository:
         if positive and denial is None:
             try:
                 current_session = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+                current_goal = await db.get(Goal, current_task.goal_id, populate_existing=True)
+                current_identity = await db.get(OperatorIdentity, identity_id, populate_existing=True) if identity_id else None
                 observed = _now()
                 if (current_session is None or current_session.principal_id != owner.principal_id
                     or current_session.revoked_at is not None or current_session.replaced_by_id is not None
                     or current_session.is_bearer_tombstone
                     or _utc_datetime(current_session.idle_expires_at) <= observed
-                    or _utc_datetime(current_session.absolute_expires_at) <= observed):
+                    or _utc_datetime(current_session.absolute_expires_at) <= observed
+                    or (identity_id and (current_identity is None or current_identity.revoked_at is not None))):
                     raise BoardError("evidence_owner_not_current", "The original authenticated Root is no longer current")
                 artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
                 if token(artifact) != input_token:
@@ -1051,11 +1096,19 @@ class WorkBoardRepository:
                 from src.guardian.opportunity_plans import recheck_accepted_plan_task
                 await recheck_accepted_plan_task(db, current_task, attempt=current_attempt, source_witness=source)
                 if current_task.pipeline_operation_id:
-                    from src.work_board.pipelines import task_guard
+                    current_operation, current_value = await owned(db, owner, current_task.pipeline_operation_id,
+                        workspace_identity=workspace_identity)
+                    if (token(current_operation) != operation_token
+                        or current_operation.status != "accepted" or current_value.get("pending_revision")
+                        or current_value.get("authority_frozen")
+                        or (current_operation.opportunity_id and source is None)):
+                        raise BoardError("pipeline_source_changed", "The exact accepted operation changed")
                     await task_guard(db, current_task, attempt=current_attempt,
-                        workspace_identity=source.workspace_identity, source_witness=source)
+                        workspace_identity=workspace_identity, source_witness=source)
                 else:
                     await self.validate_task_goal(db, owner, current_task)
+                if (token(current_session), token(current_goal), token(current_identity)) != authority_tokens:
+                    raise BoardError("evidence_owner_not_current", "The exact original authority changed")
             except (OpportunityError, BoardError) as exc:
                 if not denial_entry:
                     raise
@@ -1066,9 +1119,8 @@ class WorkBoardRepository:
                     # A new immutable link has no attempt.workflow_run_id yet.
                     # Recompute its native identity from the actual rows/input,
                     # rather than manufacturing an already-linked Attempt DTO.
-                    from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
                     from src.workflows.job_runtime import _serialize
-                    inputs = _parse_typed_input(current_task)
+                    inputs = _decode_typed_input_payload(current_task, input_payload)
                     actual = _serialize(current_run)
                     if current_task.capability_id == "browser.public-task.v1":
                         limits = json.loads(current_run.declared_authority_json).get("limits", {})
@@ -1076,7 +1128,6 @@ class WorkBoardRepository:
                             actual, limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
                         _validate_linked_workflow_projection(current_task, current_attempt, run_id, actual, expected)
                     else:
-                        from src.work_board.pipeline_cpu import spec_for
                         spec = spec_for(current_task, current_attempt, inputs, deadline=current_run.deadline_at)
                         if (current_run.run_identity != spec.identity.job_id
                             or current_run.input_digest != _safe_digest(spec.inputs)
@@ -1090,8 +1141,8 @@ class WorkBoardRepository:
                             or current_run.idempotency_key != f"{task_id}:{attempt_id}"):
                             raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
                 else:
-                    from src.work_board.review import _workflow_run_binds_board_attempt
-                    if not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run):
+                    if not _workflow_run_binds_board_attempt(current_task, current_attempt, current_run,
+                        _staged_literalbytes=input_payload):
                         raise BoardError("pipeline_task_changed", "The actual original workflow binding changed")
             if action == "project":
                 from src.work_board.review import _recheck_dispatch_projection

@@ -624,6 +624,8 @@ def _workflow_run_binds_board_attempt(
     task: WorkBoardTask,
     attempt: WorkBoardAttempt,
     run: WorkflowRunState,
+    *,
+    _staged_literalbytes: bytes | None = None,
 ) -> bool:
     """Validate the durable root identity consumed by review and handoff.
 
@@ -671,6 +673,10 @@ def _workflow_run_binds_board_attempt(
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
 
     capability_id = str(task.capability_id or "").strip()
+    if _staged_literalbytes is not None and capability_id not in {
+        "browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"
+    }:
+        return False
     if capability_id == "inference.near-text.v1":
         from src.work_board.near_text_native import binds
         return binds(task,attempt,run)
@@ -685,8 +691,9 @@ def _workflow_run_binds_board_attempt(
         return binds(task, attempt, run)
     if capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         try:
-            from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
-            inputs = _parse_typed_input(task)
+            from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _decode_typed_input_payload, _safe_digest
+            inputs = (_parse_typed_input(task) if _staged_literalbytes is None
+                else _decode_typed_input_payload(task, _staged_literalbytes))
             if capability_id == "browser.public-task.v1":
                 authority = _decode_object(run.declared_authority_json)
                 limits = authority.get("limits", {})

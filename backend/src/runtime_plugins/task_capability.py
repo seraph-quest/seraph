@@ -46,7 +46,7 @@ def _source_digest(value):
     if type(value) is ReportAdmissionCandidate:
         spec = value.original_spec
         contract = {item.name: getattr(spec, item.name) for item in fields(spec)}
-        contract.update(identity=spec.identity.__dict__, deadline_at=spec.deadline_at.isoformat(),
+        contract.update(identity={item.name: getattr(spec.identity, item.name) for item in fields(spec.identity)}, deadline_at=spec.deadline_at.isoformat(),
             composition_binding=spec.composition_binding.binding_digest)
         return digest({"metadata": hashlib.sha256(value.metadata_bytes).hexdigest(), "spec": contract})
     if type(value) is _ReportPublicationPermission:
@@ -580,15 +580,21 @@ async def stage_report_current(db, task, attempt, inputs: Mapping[str, Any], *, 
         if attempt.cancel_requested_at is None or attempt.ended_at is not None:
             raise BoardError("pipeline_task_changed", "Original cancellation intent required", status_code=409)
         await task_guard(db, task, attempt=attempt, source_witness=source)
-    current = await db.get(WorkBoardTask, task.task_id, populate_existing=True)
+    current = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id)
+        .execution_options(populate_existing=True))
     active = await db.get(WorkBoardAttempt, attempt.attempt_id, populate_existing=True)
+    if current is None or active is None:
+        raise BoardError("pipeline_task_changed", "Original report Task or Attempt unavailable", status_code=409)
     owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
     resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=current.input_artifact_id,
         capability_id=REPORT, goal_id=current.goal_id, goal_revision=current.goal_revision)
     if canonical_bytes(resolved.input) != canonical_bytes(dict(inputs)):
         raise BoardError("pipeline_input_changed", "Original report input changed", status_code=409)
     model = EvidenceConsumerInput.model_validate(dict(inputs))
-    producer = await db.get(WorkBoardTask, model.producer_task_ref, populate_existing=True)
+    producer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == model.producer_task_ref)
+        .execution_options(populate_existing=True))
+    if producer is None:
+        raise BoardError("pipeline_source_changed", "Original report dossier unavailable", status_code=409)
     producer_witness = await stage_pipeline_producer_readback(db, owner, producer)
     if (producer_witness.content_sha256 != model.producer_sha256
         or producer_witness.output_bytes.decode("utf-8") != model.quoted_source_data
@@ -621,7 +627,9 @@ async def recheck_report_witness(db, *, witness: ReportCurrentWitness):
         (WorkBoardInputArtifact, witness.input_id, witness.input_token),
         (WorkBoardLink, witness.link_id, witness.link_token),
         (WorkBoardHandoff, witness.handoff_id, witness.handoff_token)):
-        row = await db.get(cls, identifier, populate_existing=True)
+        row = (await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == identifier)
+            .execution_options(populate_existing=True)) if cls is WorkBoardTask
+            else await db.get(cls, identifier, populate_existing=True))
         if row is None or row_token(row) != token:
             raise BoardError("pipeline_input_changed", "Staged original report changed", status_code=409)
         rows.append(row)
@@ -975,8 +983,11 @@ async def _raise_original_cancel_interruption(db, run, resource, artifact, phase
     from src.work_board.pipelines import row_token, task_guard
     from src.work_board.review import recheck_pipeline_producer_readback
     current = artifact.current_witness
-    task = await db.get(WorkBoardTask, current.task_id, populate_existing=True)
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == current.task_id)
+        .execution_options(populate_existing=True))
     attempt = await db.get(WorkBoardAttempt, current.attempt_id, populate_existing=True)
+    if task is None or attempt is None:
+        raise BoardError("pipeline_task_changed", "Original report cancellation Task or Attempt unavailable", status_code=409)
     await _recheck_report_birth_link(db, task, attempt, resource.candidate.metadata(), cancel_identity=True)
     for cls, identifier, token in ((WorkBoardInputArtifact, current.input_id, current.input_token),
         (WorkBoardLink, current.link_id, current.link_token), (WorkBoardHandoff, current.handoff_id, current.handoff_token)):
@@ -1062,7 +1073,9 @@ async def _recheck_report_cancel_source(db, run, witness, scope):
         (WorkBoardAttempt, current.attempt_id, current.attempt_token),
         (WorkBoardInputArtifact, current.input_id, current.input_token), (WorkBoardLink, current.link_id, current.link_token),
         (WorkBoardHandoff, current.handoff_id, current.handoff_token)):
-        row = await db.get(cls, identifier, populate_existing=True)
+        row = (await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == identifier)
+            .execution_options(populate_existing=True)) if cls is WorkBoardTask
+            else await db.get(cls, identifier, populate_existing=True))
         if row is None or row_token(row) != token:
             raise BoardError("pipeline_task_changed", "Original report cancellation source changed", status_code=409)
         rows.append(row)

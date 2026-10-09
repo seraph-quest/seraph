@@ -58,6 +58,9 @@ def assert_deployment_binding(workspace):
 
 def ledger_record(values):
     record = dict(values)
+    # Canonical writers own this unhashed private lookup projection. Raw
+    # SQLite reads and archived checkpoints retain the existing financial wire.
+    record.pop("group_lookup_key", None)
     for field in ("created_at", "updated_at", "deadline_at", "contact_started_at"):
         value = record.get(field)
         if isinstance(value, str):

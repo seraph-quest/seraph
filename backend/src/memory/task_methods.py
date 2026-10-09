@@ -478,6 +478,35 @@ async def _accepted_preview(db, row, owner, key):
     return await validator._version(db, selected, owner.identity_id, scope, allow_rollback=True)
 
 
+def _consumer_supported(candidate, scope, proposal_id):
+    """Current descriptor compatibility is data, never execution authority."""
+    if isinstance(candidate, ResearchStrategy):
+        return scope.family == "research"
+    if not isinstance(candidate, TaskMethod) or scope.family != "general":
+        return False
+    from src.native_tools.registry import ToolRegistry
+    from src.work_board.general_task import method_constraints
+    from src.work_board.dispatcher import _dispatcher
+    service = _dispatcher.general_tasks
+    registry = None
+    try:
+        if service is not None and service.started and getattr(service.registry, "started", False):
+            descriptors, _ = service.snapshot()
+        else:
+            registry = ToolRegistry()
+            registry.start()
+            descriptors = registry.descriptors()
+        method_constraints(TaskStrategyBinding(status="active", method_id=proposal_id,
+            version="candidate-preview", digest=digest(candidate.model_dump(mode="json")),
+            typed_data=candidate.model_dump(mode="json")), descriptors)
+        return True
+    except BoardError:
+        return False
+    finally:
+        if registry is not None:
+            registry.stop()
+
+
 async def _stage(operator, proposal_id, *, acceptance):
     from src.memory import task_lessons as lessons
     from src.memory.repository import _effect_mac_key
@@ -505,21 +534,7 @@ async def _stage(operator, proposal_id, *, acceptance):
     if ((scope.goal_id, scope.goal_revision) != source_scope or envelope["source_refs"] != source_refs):
         _fail("method_original_scope_changed")
     candidate = CANDIDATE.validate_python(envelope["new_method"])
-    consumer_supported = isinstance(candidate, ResearchStrategy) and scope.family == "research"
-    if isinstance(candidate, TaskMethod) and scope.family == "general":
-        from src.native_tools.registry import ToolRegistry
-        from src.work_board.general_task import method_constraints
-        registry = ToolRegistry()
-        registry.start()
-        try:
-            method_constraints(TaskStrategyBinding(status="active", method_id=proposal_id,
-                version="candidate-preview", digest=digest(candidate.model_dump(mode="json")),
-                typed_data=candidate.model_dump(mode="json")), registry.descriptors())
-            consumer_supported = True
-        except BoardError:
-            consumer_supported = False
-        finally:
-            registry.stop()
+    consumer_supported = _consumer_supported(candidate, scope, proposal_id)
     text = canonical(candidate.model_dump(mode="json"))
     from src.memory.m5 import sanitize_m5_memory_text_async
     if await sanitize_m5_memory_text_async(text) != text:
@@ -628,6 +643,8 @@ async def _review_method(operator, request: TaskMethodReview):
             _fail("method_review_stale")
         now = datetime.now(timezone.utc)
         if request.action == "accept":
+            if not _consumer_supported(witness.candidate, witness.scope, request.proposal_id):
+                _fail("method_consumer_schema_unsupported")
             if row.status != MemoryProposalStatus.proposed:
                 _fail("method_not_proposed")
             duplicate = await db.scalar(select(MemoryProposal.proposal_id).where(

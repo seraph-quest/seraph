@@ -197,8 +197,58 @@ restart boundaries, full-capacity cancellation and `no_learning`; macOS executio
 and live external/provider usefulness remain unverified. The current Python
 managed lifecycle remains the execution owner before the separately owned
 [#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
-Specialist delegation in
-[#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
+**Bounded specialist delegation (#999): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#999](https://github.com/seraph-quest/seraph/issues/999)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-specialist-delegation-999)
+extends an accepted native task with actual specialist Work cards, private
+copied handoffs, durable wait and physically verified child outputs. The original
+group admits at most two active and four retained specialist children, depth
+one, and shares its twelve-call ceiling, explicit cost allowance and original
+deadline. Parent/child navigation is informational; reserved identities do not
+mean that a child has been claimed or executed. Completion remains no-learning.
+
+An authenticated private child reservation preserves and revalidates the
+parent's original immutable reviewed-method authority while executing only its
+narrower reserved plan. Ordinary public admission still selects the current
+method and enforces its complete sequence. Lesson projection matches each
+callback to its verified admitted continuation revision and unchanged frozen
+step; method acceptance rechecks compatibility against the actual started
+registry when available. Descriptor projection grants no authority. The genuine
+reviewed-method journey completes the original source and operator review, then
+brings both next-task children to Done and their parent to Review, awaiting its
+separate operator completion.
+
+The four proposal and specialist accounting readers use private indexed
+owner/classification checks and at most thirteen group rows, preserving all original liabilities and
+detecting overflow beyond twelve. Startup strictly classifies legacy rows in
+batches of at most 128. Historical financial seals retain their original typed
+defaults and field presence without resealing. The private hint grants no
+authority and is not a direct-database-tamper integrity seal. Stopped stdlib
+workspace backup/restore accepts the sole added hint column; restored NULL hints
+require canonical startup migration before accounting readiness. This does not
+bound the existing global `_accounting_rows` deployment-ledger baseline.
+
+Private handoff publication derives at most twelve specialist callback identities
+from validated original-group reservations and uses exact unique run-identity
+lookups with the original owner, Root, reservation and current-delegation gates.
+The existing full Vault fingerprint still scales with secret rows and bytes;
+the entire publication path is not claimed independent of global workspace size.
+
+Original-root cancel and held pause fence further work while retaining Unknown
+callbacks, effects and contacted cost liabilities. A failed sibling does not
+discard an already verified output. The current authenticated owner can inspect
+eligible physical child outputs and explicitly accept an immutable partial
+review, including after the execution cutoff. This preserves the original
+Task, Attempt and stop state; it cannot complete the task, settle liabilities
+or resume work. Current unresolved job/effect/cost counts remain separate from
+the accepted decision's historical debt. Exact action replay requires current
+paired-owner authorization; recovered read-only access cannot issue or replay
+the decision. Isolated Linux native/API/stock-MCP, accounting and UI receipts
+cover copied-evidence boundaries, durable waits, failed-sibling retention,
+stop races, physical selection and authenticated restart replay. They establish
+neither model quality nor general callback recovery; native macOS execution and
+live external/provider usefulness remain unverified.
 
 **Communication preparation (#1016): intended Partial scope after independently
 reviewed merge.** This is source-branch behavior until the installed `develop`

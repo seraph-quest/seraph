@@ -22,6 +22,21 @@ _SHA = re.compile(r"^[0-9a-f]{64}$")
 _task_publication = ContextVar("repository_task_publication", default=None)
 
 
+def assert_repository_stop_witness(witness):
+    from src.workflows.repo_repair_stop import assert_repository_stop_witness as verify
+    return verify(witness)
+
+
+async def validate_repository_stop_witness(db, witness, **current):
+    from src.workflows.repo_repair_stop import validate_repository_stop_witness as verify
+    return await verify(db, witness, **current)
+
+
+async def complete_repository_stop_in_writer(db, witness, *, jobs):
+    from src.workflows.repo_repair_stop import complete_repository_stop_in_writer as complete
+    return await complete(db, witness, jobs=jobs)
+
+
 def _source_digest(value):
     from src.security.trust_contract import canonical_digest
     return canonical_digest(value)
@@ -49,7 +64,8 @@ def repository_checkpoint_inventory(run, work):
     second capacity ledger.
     """
     original, *_ = read_repository_original(run)
-    ids = ["repository:original:v1", "repository:inventory:v1", "repository:terminal:v1"]
+    ids = ["repository:original:v1", "repository:inventory:v1", "repository:terminal:v1",
+        "repository:stop-intent:v1"]
     for index in range(1, work.limits.max_iterations + 1):
         identity = iteration_identity(run.run_identity, original["repository_attempt_id"],
             _source_digest(original["original_input"]), index)
@@ -243,6 +259,8 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
     async with jobs._session() as db:
         run = await jobs._fetch(db, job_id)
         original, work, compiled, group, binding, source = read_repository_original(run)
+        if _repository_record(run, "repository:stop-intent:v1") is not None:
+            raise DurableJobLeaseError("original repository stop prevents further execution")
         if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
             raise DurableJobLeaseError("original repository owner changed")
         child = await jobs._fetch(db, binding.invocation_id)
@@ -281,14 +299,43 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
             "source": source, "authority": authority, "rows": rows}
 
 
-async def _recheck_repository_sql(db, context):
+async def _recheck_repository_sql(db, context, *, allow_stop_cleanup=False):
     """Current original SQL rows only; never reopen an artifact in the writer."""
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
     from src.workflows.general_task_accounting import validate_group_owner
     for model, key, expected in context["rows"]:
         row = await db.get(model, key, populate_existing=True)
-        if row is None or _canonical(row.model_dump(mode="json")) != expected:
+        matches = row is not None and _canonical(row.model_dump(mode="json")) == expected
+        if not matches and allow_stop_cleanup and row is not None:
+            old = json.loads(expected)
+            actual = row.model_dump(mode="json")
+            if getattr(row, "run_identity", None) == context["run"].run_identity:
+                stop = _repository_record(row, "repository:stop-intent:v1")
+                history = json.loads(row.checkpoint_receipts_json or "[]")
+                known = {"revision", "updated_at", "checkpoint_receipts_json"}
+                matches = bool(stop and stop.get("native_binding_digest") == _source_digest(
+                    context["binding"].model_dump(mode="json"))
+                    and row.revision == old["revision"] + 1
+                    and [item for item in history if item["checkpoint_id"] != "repository:stop-intent:v1"] ==
+                        json.loads(old["checkpoint_receipts_json"] or "[]")
+                    and {k: v for k, v in actual.items() if k not in known} ==
+                        {k: v for k, v in old.items() if k not in known})
+            elif type(row).__name__ == "OperatorSession":
+                known = {"last_seen_at", "idle_expires_at", "updated_at"}
+                matches = ({k: v for k, v in actual.items() if k not in known} ==
+                    {k: v for k, v in old.items() if k not in known}
+                    and row.revoked_at is None and _as_utc(row.idle_expires_at) > _utc_now()
+                    and _as_utc(row.absolute_expires_at) > _utc_now())
+        if not matches:
             raise DurableJobLeaseError("original repository preparation authority changed")
+    current_root = await db.get(type(context["run"]), context["run"].id, populate_existing=True)
+    stopping = _repository_record(current_root, "repository:stop-intent:v1") is not None
+    if stopping and not allow_stop_cleanup:
+        raise DurableJobLeaseError("original repository stop prevents further execution")
+    if allow_stop_cleanup and stopping:
+        # Only the already-owned, positively closed physical producer calls
+        # this branch. It writes cleanup evidence and grants no new effect.
+        return
     await validate_group_owner(db, context["group"])
     for row in (context["run"], context["child"], context["authority"].attempt):
         if (_as_utc(row.lease_expires_at) is None or _as_utc(row.lease_expires_at) <= _utc_now()
@@ -396,15 +443,28 @@ async def prepare_repository_iteration(service, jobs, *, job_id, owner, iteratio
             diff = prior_diagnostics["cumulative_diff"]
             if await service._scan_secrets(diff) != diff:
                 raise DurableJobLeaseError("fresh source scan blocks prior cumulative patch secrets")
+            tested_metadata = (prior_manifest["tested_file_hash_metadata"] if work.language_profile == "test_node"
+                else prior_manifest["publication_test_input"]["tested_files"])
+            metadata_scope = {}
+            if work.language_profile == "test_node":
+                selected_paths = sorted(item["path"] for item in packet_payload["files"])
+                if selected_paths != sorted(context["compiled"].source_paths):
+                    raise DurableJobLeaseError("original acknowledged source selection changed")
+                tested_metadata = [item for item in tested_metadata if item["path"] in selected_paths]
+                metadata_scope = {"tested_file_hash_metadata_scope": {
+                    "kind": "original_acknowledged_source_paths_present_in_tested_tree",
+                    "selected_source_paths": selected_paths,
+                    "missing_selected_source_paths": sorted(set(selected_paths) -
+                        {item["path"] for item in tested_metadata}),
+                    "full_metadata_retained_in_physical_readback": True}}
             packet_payload = {**packet_payload,
                 "source_bytes_provenance": "original_acknowledged_frozen_base",
                 "prior_tested_iteration": {"iteration_id": prior_diagnostics["iteration_id"],
                     "cumulative_diff": diff, "cumulative_diff_sha256": prior_manifest["diff_sha256"],
                     "diff_provenance": "actual_supervised_checkout_cumulative_diff_against_original_base",
                     "tested_tree_digest": prior_manifest["after_digest"],
-                    "tested_file_hash_metadata": (prior_manifest["tested_file_hash_metadata"]
-                        if work.language_profile == "test_node" else prior_manifest["publication_test_input"]["tested_files"]),
-                    "hashes_are_file_bodies": False}}
+                    "tested_file_hash_metadata": tested_metadata,
+                    "hashes_are_file_bodies": False, **metadata_scope}}
             input_tree_digest = prior_manifest["after_digest"]
             stdout, stderr = prior_diagnostics["stdout"], prior_diagnostics["stderr"]
         candidate = await service.prepare_iteration_egress(iteration_id=iteration,
@@ -558,6 +618,113 @@ async def repository_source_preview(service, jobs, *, job_id, owner):
                 "redaction_version": prepared["redaction_version"], "combined_input_bytes": prepared["combined_input_bytes"],
                 "original_deadline_at": prepared["original_deadline_at"], **remaining},
             "provider_contacted": False, "operator_visible": True}
+
+
+async def repository_operator_projection(service, jobs, *, job_id, owner):
+    """Owner-scoped canonical metadata; never read private source/model bytes."""
+    from src.db.models import RepoRepairProposal, ApprovalRequest, InferenceCostReservation
+    from sqlalchemy import select
+    from src.workflows.job_runtime import DurableJobLeaseError, _as_utc
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        original, work, compiled, group, binding, task_source = read_repository_original(run)
+        if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
+            raise DurableJobLeaseError("original repository metadata owner changed")
+        # This projection grants no contact, process, resume or private read.
+        # Each corresponding action independently stages its current source.
+        projection = await _prepared_repository_projection(None, run, owner=owner)
+        identity = projection["iteration_id"]
+        proposal = await db.get(RepoRepairProposal, "repository-proposal:" + identity)
+        approval = await db.get(ApprovalRequest, proposal.approval_id) if proposal is not None else None
+        if proposal is not None and (proposal.workflow_run_id != job_id
+                or (proposal.owner_principal_id, proposal.owner_session_id) != (owner.principal_id, owner.session_id)):
+            raise DurableJobLeaseError("original repository proposal metadata owner changed")
+        if approval is not None and (approval.owner_principal_id, approval.operator_session_id) != (owner.principal_id, owner.session_id):
+            raise DurableJobLeaseError("original repository approval metadata owner changed")
+        from src.workflows.repo_repair import RepoIteration
+        iterations, iteration_states = [], []
+        for index in range(1, work.limits.max_iterations + 1):
+            iteration = iteration_identity(job_id, original["repository_attempt_id"],
+                _source_digest(original["original_input"]), index)
+            readback = _repository_record(run, "repository:readback:" + iteration)
+            cleanup = _repository_record(run, "repository:cleanup:" + iteration)
+            if readback is not None:
+                prepared = _repository_record(run, "repository:prepared:" + iteration)
+                executed = _repository_record(run, "repository:execution:" + iteration)
+                if (prepared is None or executed is None or cleanup is None
+                        or cleanup.get("cleanup_proven") is not True
+                        or readback.get("status") not in {"succeeded", "failed"}):
+                    raise DurableJobLeaseError("complete actual original iteration metadata required")
+                iterations.append(RepoIteration(index=index, input_tree_digest=prepared["input_tree_digest"],
+                    patch_digest=executed["patch_sha256"], command_refs=["repository:execution:" + iteration],
+                    result_artifacts=["repository:cleanup:" + iteration,
+                        "repository:readback:" + iteration]).model_dump(mode="json"))
+                command_results = readback.get("command_results")
+                if command_results is not None:
+                    _validate_repository_command_results(command_results)
+                iteration_states.append({"index": index, "iteration_id": iteration, "status": readback["status"],
+                    "manifest_artifact_ref": readback["artifact_ref"], "manifest_artifact_digest": readback["artifact_digest"],
+                    "cleanup_proven": True, "command_results": command_results,
+                    "command_results_status": "unknown" if command_results is None else "recorded"})
+        action = "review_code_egress" if projection["contact_state"] == "not_started" else "refresh_repair_status"
+        stop = _repository_record(run, "repository:stop-intent:v1")
+        terminal = _repository_record(run, "repository:terminal:v1")
+        if stop is not None:
+            if stop.get("stop_reason") not in {"operator_cancelled", "iterations_exhausted"}:
+                raise DurableJobLeaseError("original repository stop metadata is malformed")
+            action = ("original_iterations_exhausted" if stop["stop_reason"] == "iterations_exhausted" else "repository_stopped") if (
+                terminal and terminal.get("schema") == "repository.stop_terminal.v1"
+                and run.status in {"cancelled", "failed"}) else "repository_stop_pending"
+        elif run.status == "unknown_external_effect":
+            action = "reconcile_original_repository"
+        elif run.status == "succeeded":
+            action = "review_verified_local_patch"
+        elif proposal is not None and proposal.status == "awaiting_approval":
+            action = "review_patch_approval" if approval is None or approval.status == "pending" else "execute_approved_patch"
+        elif (iteration_states and iteration_states[-1]["status"] == "failed"
+                and iteration_states[-1]["index"] == work.limits.max_iterations):
+            action = "original_iterations_exhausted"
+        provider_contacted = await db.scalar(select(InferenceCostReservation.operation_id).where(
+            InferenceCostReservation.job_id == job_id,
+            InferenceCostReservation.contact_started_at.is_not(None)).limit(1)) is not None
+        return {"job_id": job_id, "status": run.status, "revision": run.revision,
+            "repository_review": {key: value for key, value in projection.items() if key not in
+                {"awaiting_repository_consent", "native_execution", "verified", "no_learning"}},
+            "patch_proposal": None if proposal is None else {"proposal_id": proposal.proposal_id,
+                "revision": proposal.revision, "approval_id": proposal.approval_id, "status": proposal.status,
+                "summary": json.loads(proposal.safe_metadata_json).get("summary", ""),
+                "patch_artifact_ref": "workspace-json:" + proposal.patch_artifact_id,
+                "patch_sha256": proposal.patch_sha256, "expires_at": _as_utc(proposal.expires_at).isoformat(),
+                "allowed_paths": json.loads(proposal.allowed_paths_json), "test_args": json.loads(proposal.test_args_json)},
+            "approval": None if approval is None else {"id": approval.id, "status": approval.status,
+                "fingerprint": approval.fingerprint, "expires_at": _as_utc(approval.expires_at).isoformat()},
+            "iterations": iterations, "iteration_states": iteration_states, "recovery_action": action,
+            "provider_contacted": provider_contacted,
+            "no_learning": True, "operator_visible": True}
+
+
+def _validate_repository_command_results(values):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if (not isinstance(values, list) or not 1 <= len(values) <= 2
+            or any(not isinstance(item, dict) or set(item) != {"check", "status", "exit_code"}
+                or item["check"] not in {"build", "test"}
+                or item["status"] not in {"succeeded", "failed", "timed_out", "cancelled", "unknown"}
+                or (item["exit_code"] is not None and (type(item["exit_code"]) is not int
+                    or not -(2 ** 31) <= item["exit_code"] < 2 ** 31))
+                or (item["status"] == "succeeded" and item["exit_code"] != 0) for item in values)
+            or len({item["check"] for item in values}) != len(values)):
+        raise DurableJobLeaseError("actual bounded command metadata changed")
+
+
+def _repository_command_results(manifest, *, node):
+    commands = manifest["commands"] if node else [{**manifest, "script": "test"}]
+    values = [{"check": entry["script"], "exit_code": entry.get("exit_code"),
+        "status": "cancelled" if entry.get("cancelled") is True else
+            "timed_out" if entry.get("timed_out") is True else
+            "unknown" if entry.get("exit_code") is None else
+            "succeeded" if entry["exit_code"] == 0 else "failed"} for entry in commands]
+    _validate_repository_command_results(values)
+    return values
 
 
 @dataclass(frozen=True, slots=True)
@@ -1286,34 +1453,37 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
         loop = asyncio.get_running_loop()
         async def dispatch_sql_guard():
-            async with jobs._session() as db:
-                await _begin_sqlite_immediate(db)
-                await _recheck_repository_sql(db, context)
-                await db.commit()
+            async with configuration_mutation_lock:
+                _assert_task_publication_configuration(service)
+                async with jobs._session() as db:
+                    await _begin_sqlite_immediate(db)
+                    await _recheck_repository_sql(db, context)
+                    await db.commit()
         def before_dispatch():
             future = asyncio.run_coroutine_threadsafe(dispatch_sql_guard(), loop)
             future.result(timeout=min(10, max(1, remaining)))
         task = asyncio.create_task(asyncio.to_thread(service.sandbox.execute_job, job, before_dispatch=before_dispatch))
         service._iterative_process_callbacks[identity] = task
-        try:
-            result = await asyncio.shield(task)
-            assert_repo_iteration_cleanup_witness(result.get("iteration_cleanup_witness"), job)
-        except BaseException:
-            # The durable intent and owned transport survive HTTP cancellation.
-            # An absent cleanup witness never releases the original root lane.
-            service._iterative_lanes[job_id].quarantine(job_id)
-            async def quarantine_original():
-                current = await jobs.get_job(job_id)
-                if current and current["status"] == "running":
-                    await jobs.transition_job(job_id, "unknown_external_effect",
-                        owner=context["run"].lease_owner, fencing_token=context["run"].fencing_token,
-                        expected_revision=current["revision"], reason="repository_process_closure_unproven",
-                        result={"no_learning": True, "operator_action": "reconcile_original_process",
-                            "iteration_id": identity})
-            quarantine = asyncio.create_task(quarantine_original())
-            service._iterative_process_callbacks["quarantine:" + identity] = quarantine
-            await asyncio.shield(quarantine)
-            raise
+        service._iterative_process_jobs[identity] = job
+    try:
+        result = await asyncio.shield(task)
+        assert_repo_iteration_cleanup_witness(result.get("iteration_cleanup_witness"), job)
+    except BaseException:
+        # The durable intent and owned transport survive HTTP cancellation.
+        # An absent cleanup witness never releases the original root lane.
+        service._iterative_lanes[job_id].quarantine(job_id)
+        async def quarantine_original():
+            current = await jobs.get_job(job_id)
+            if current and current["status"] == "running":
+                await jobs.transition_job(job_id, "unknown_external_effect",
+                    owner=context["run"].lease_owner, fencing_token=context["run"].fencing_token,
+                    expected_revision=current["revision"], reason="repository_process_closure_unproven",
+                    result={"no_learning": True, "operator_action": "reconcile_original_process",
+                        "iteration_id": identity})
+        quarantine = asyncio.create_task(quarantine_original())
+        service._iterative_process_callbacks["quarantine:" + identity] = quarantine
+        await asyncio.shield(quarantine)
+        raise
     cleanup = result.get("iteration_cleanup_witness")
     assert_repo_iteration_cleanup_witness(cleanup, job)
     if not task.done() or task.cancelled() or task.exception() is not None:
@@ -1334,13 +1504,26 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         "stderr_raw_sha256": hashlib.sha256(outputs["pytest.stderr"]).hexdigest(),
         "cumulative_diff": outputs["diff.patch"].decode("utf-8", errors="strict"),
         "cumulative_diff_sha256": hashlib.sha256(outputs["diff.patch"]).hexdigest()}
+    if work.language_profile == "test_node":
+        # Retain every actually executed requested command, including a
+        # failed build that prevented the test command from starting.
+        commands = result["manifest"]["commands"]
+        diagnostics["stdout"] = "\n".join("[" + entry["script"] + " stdout]\n" + outputs[
+            ("pytest" if entry["script"] == "test" else "build") + ".stdout"].decode("utf-8", errors="replace")
+            for entry in commands)
+        diagnostics["stderr"] = "\n".join("[" + entry["script"] + " stderr]\n" + outputs[
+            ("pytest" if entry["script"] == "test" else "build") + ".stderr"].decode("utf-8", errors="replace")
+            for entry in commands)
+        diagnostics["command_output_sha256"] = {name: hashlib.sha256(raw).hexdigest()
+            for name, raw in outputs.items() if name in {"pytest.stdout", "pytest.stderr", "build.stdout", "build.stderr"}}
     diagnostics_ref, diagnostics_digest = service._write_private_artifact(prefix + "-diagnostics.json",
         _canonical(diagnostics).encode())
     if service._read_private_artifact(diagnostics_ref, expected_digest=diagnostics_digest) != _canonical(diagnostics).encode():
         raise DurableJobLeaseError("literal original command diagnostics readback changed")
+    command_results = _repository_command_results(result["manifest"], node=work.language_profile == "test_node")
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
-        await _recheck_repository_sql(db, context)
+        await _recheck_repository_sql(db, context, allow_stop_cleanup=True)
         current = await jobs._fetch(db, job_id)
         inventory = repository_checkpoint_inventory(current, work)
         _append_repository_record(current, "repository:cleanup:" + identity,
@@ -1349,7 +1532,8 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         _append_repository_record(current, "repository:readback:" + identity,
             {"artifact_ref": manifest_ref, "artifact_digest": manifest_digest, "status": result["status"],
              "manifest_digest": _source_digest(result["manifest"]), "patch_sha256": proposal.patch_sha256,
-             "diagnostics_artifact_ref": diagnostics_ref, "diagnostics_artifact_digest": diagnostics_digest}, inventory=inventory)
+             "diagnostics_artifact_ref": diagnostics_ref, "diagnostics_artifact_digest": diagnostics_digest,
+             "command_results": command_results}, inventory=inventory)
         current.revision += 1
         live = await db.get(RepoRepairProposal, proposal.proposal_id)
         live.status = "execution_verified"
@@ -1358,6 +1542,15 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         await db.commit()
     outcome = {"job_id": job_id, "iteration_id": identity, "status": result["status"], "cleanup_proven": True,
         "manifest_artifact_ref": manifest_ref, "manifest_artifact_digest": manifest_digest, "no_learning": True}
+    async with jobs._session() as db:
+        stopping = _repository_record(await jobs._fetch(db, job_id), "repository:stop-intent:v1")
+    if stopping is not None:
+        from src.workflows.repo_repair_stop import stop_repository_root
+        stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+            general_task_service=None, reason=stopping["stop_reason"])
+        outcome["stop_pending"] = stopped["pending"]
+        outcome["recovery_action"] = "repository_stop_pending" if stopped["pending"] else "repository_stopped"
+        return outcome
     if result["status"] == "succeeded":
         outcome["original_child_final"] = await finalize_repository_iteration(service, jobs,
             job_id=job_id, owner=owner, iteration_index=prepared["iteration_index"],
@@ -1366,7 +1559,11 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         outcome["repository_review"] = await prepare_repository_iteration(service, jobs,
             job_id=job_id, owner=owner, iteration_index=prepared["iteration_index"] + 1)
     elif result["status"] == "failed":
-        outcome["recovery_action"] = "original_iterations_exhausted"
+        from src.workflows.repo_repair_stop import stop_repository_root
+        stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+            general_task_service=None, reason="iterations_exhausted")
+        outcome["stop_pending"] = stopped["pending"]
+        outcome["recovery_action"] = "repository_stop_pending" if stopped["pending"] else "original_iterations_exhausted"
     return outcome
 
 
@@ -2252,6 +2449,10 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     now = datetime.now(timezone.utc)
     def blocked(code="repository_iteration_binding_changed"):
         raise InferenceAccountingError(code)
+    if _repository_record(run, "repository:stop-intent:v1") is not None:
+        existing = next((row for row in rows if row.operation_id == operation_id), None)
+        if not already_reserved or existing is None or existing.contact_started_at is None:
+            blocked("repository_stop_prevents_new_contact")
     contacted_wait = bool(source._contacted_wait_parent_json and source._contacted_wait_child_json)
     if contacted_wait and not already_reserved:
         blocked("repository_contacted_wait_cannot_reserve")

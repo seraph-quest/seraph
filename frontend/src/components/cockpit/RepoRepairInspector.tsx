@@ -344,6 +344,106 @@ function normalizeProcessCleanup(
   };
 }
 
+interface RepositoryReview {
+  native_child_id: string;
+  repository_job_id: string;
+  iteration_index: number;
+  iteration_id: string;
+  preparation_digest: string;
+  contact_state: "not_started" | "started" | "unknown" | "closed";
+  source_preview_path: string;
+}
+
+interface RepositorySourceStatus {
+  job_id: string;
+  status: string;
+  revision: number;
+  repository_review: RepositoryReview;
+  patch_proposal: null | { proposal_id: string; revision: number; approval_id: string; status: string; summary: string; patch_artifact_ref: string; patch_sha256: string; expires_at: string; allowed_paths: string[]; test_args: string[] };
+  approval: null | { id: string; status: string; fingerprint: string; expires_at: string };
+  iterations: { index: number; input_tree_digest: string; patch_digest: string; command_refs: string[]; result_artifacts: string[] }[];
+  iteration_states: { index: number; iteration_id: string; status: string; manifest_artifact_ref: string; manifest_artifact_digest: string; cleanup_proven: boolean; command_results_status: "recorded" | "unknown"; command_results: null | { check: "test" | "build"; status: "succeeded" | "failed" | "timed_out" | "cancelled" | "unknown"; exit_code: number | null }[] }[];
+  recovery_action: string;
+  provider_contacted: boolean;
+  no_learning: true;
+  operator_visible: true;
+}
+
+interface RepositorySourcePreview {
+  job_id: string;
+  revision: number;
+  repository_review: RepositoryReview;
+  source_packet: { packet_id: string; state: string; repository_ref: string; source_manifest_sha256: string; artifact_sha256: string; selected_files: { path: string; sha256: string; size_bytes: number; text: string }[]; omissions: unknown[] };
+  egress: { runtime_path: string; effective_profile_id: string; effective_upstream: string; maximum_input_bytes: number; maximum_output_tokens: number; request_body: Record<string, unknown>; request_body_digest: string; request_route_digest: string; egress_envelope_digest: string; diagnostics_digest: string; diagnostics: { redaction_version: string; stdout: string; stderr: string }; redaction_version: string; combined_input_bytes: number; original_deadline_at: string; remaining_inference_calls: number; remaining_cost_microusd: number };
+  provider_contacted: false;
+  operator_visible: true;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function safeArtifactRef(value: unknown): value is string {
+  return typeof value === "string" && /^workspace-json:artifacts\/[A-Za-z0-9._/-]+$/.test(value)
+    && value.length <= 512 && !value.split("/").includes("..");
+}
+
+function validateRepositoryReview(value: unknown, jobId: string): RepositoryReview {
+  if (!isRecord(value) || !exactKeys(value, ["native_child_id", "repository_job_id", "iteration_index", "iteration_id", "preparation_digest", "contact_state", "source_preview_path"])
+    || !isBoundedString(value.native_child_id, 128) || value.repository_job_id !== jobId
+    || !Number.isSafeInteger(value.iteration_index) || Number(value.iteration_index) < 1 || Number(value.iteration_index) > 3
+    || !isSha256Digest(value.iteration_id) || !isSha256Digest(value.preparation_digest)
+    || !["not_started", "started", "unknown", "closed"].includes(String(value.contact_state))
+    || value.source_preview_path !== `/api/workflows/repo-repair/${jobId}/source-preview`) throw new Error("The repository iteration binding is malformed.");
+  return value as unknown as RepositoryReview;
+}
+
+function validateRepositoryStatus(value: unknown, jobId: string): RepositorySourceStatus {
+  const reject = (): never => { throw new Error("The repository Source status is malformed or belongs to another job."); };
+  if (!isRecord(value) || !exactKeys(value, ["job_id", "status", "revision", "repository_review", "patch_proposal", "approval", "iterations", "iteration_states", "recovery_action", "provider_contacted", "no_learning", "operator_visible"])
+    || value.job_id !== jobId || !isBoundedString(value.status, 64) || !isSafeNonNegativeInteger(value.revision, Number.MAX_SAFE_INTEGER)
+    || !isBoundedString(value.recovery_action, 128) || typeof value.provider_contacted !== "boolean" || value.no_learning !== true || value.operator_visible !== true
+    || !Array.isArray(value.iterations) || value.iterations.length > 3 || !Array.isArray(value.iteration_states) || value.iteration_states.length !== value.iterations.length) return reject();
+  const review = validateRepositoryReview(value.repository_review, jobId);
+  const opaqueRefs = (refs: unknown, max: number): refs is string[] => Array.isArray(refs) && refs.length >= 1 && refs.length <= max
+    && new Set(refs).size === refs.length && refs.every((ref) => typeof ref === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(ref));
+  for (const [position, item] of value.iterations.entries()) {
+    if (!isRecord(item) || !exactKeys(item, ["index", "input_tree_digest", "patch_digest", "command_refs", "result_artifacts"])
+      || item.index !== position + 1 || !isSha256Digest(item.input_tree_digest) || !isSha256Digest(item.patch_digest)
+      || !opaqueRefs(item.command_refs, 8) || !opaqueRefs(item.result_artifacts, 16)) return reject();
+  }
+  for (const [position, item] of value.iteration_states.entries()) {
+    if (!isRecord(item) || !exactKeys(item, ["index", "iteration_id", "status", "manifest_artifact_ref", "manifest_artifact_digest", "cleanup_proven", "command_results_status", "command_results"])
+      || item.index !== position + 1 || !isSha256Digest(item.iteration_id) || !["succeeded", "failed"].includes(String(item.status))
+      || !safeArtifactRef(item.manifest_artifact_ref) || !isSha256Digest(item.manifest_artifact_digest) || item.cleanup_proven !== true) return reject();
+    if (item.command_results_status === "unknown") {
+      if (item.command_results !== null) return reject();
+    } else if (item.command_results_status === "recorded") {
+      if (!Array.isArray(item.command_results) || item.command_results.length < 1 || item.command_results.length > 2) return reject();
+      const checks = new Set<string>();
+      for (const command of item.command_results) {
+        if (!isRecord(command) || !exactKeys(command, ["check", "status", "exit_code"]) || !["test", "build"].includes(String(command.check))
+          || checks.has(String(command.check)) || !["succeeded", "failed", "timed_out", "cancelled", "unknown"].includes(String(command.status))
+          || (command.exit_code !== null && (!Number.isSafeInteger(command.exit_code) || Number(command.exit_code) < -(2 ** 31) || Number(command.exit_code) >= 2 ** 31))
+          || (command.status === "succeeded" && command.exit_code !== 0)) return reject();
+        checks.add(String(command.check));
+      }
+    } else return reject();
+  }
+  const proposal = value.patch_proposal;
+  const approval = value.approval;
+  if (proposal !== null && (!isRecord(proposal) || !exactKeys(proposal, ["proposal_id", "revision", "approval_id", "status", "summary", "patch_artifact_ref", "patch_sha256", "expires_at", "allowed_paths", "test_args"])
+    || proposal.proposal_id !== `repository-proposal:${review.iteration_id}` || proposal.approval_id !== `repository-approval:${review.iteration_id}` || !isSafeNonNegativeInteger(proposal.revision, Number.MAX_SAFE_INTEGER)
+    || !isBoundedString(proposal.status, 64) || typeof proposal.summary !== "string" || proposal.summary.length > 2000
+    || !safeArtifactRef(proposal.patch_artifact_ref) || !isSha256Digest(proposal.patch_sha256) || typeof proposal.expires_at !== "string" || !Number.isFinite(Date.parse(proposal.expires_at))
+    || !Array.isArray(proposal.allowed_paths) || proposal.allowed_paths.length > 32 || !proposal.allowed_paths.every((x) => isBoundedString(x, 512))
+    || !Array.isArray(proposal.test_args) || proposal.test_args.length > 16 || !proposal.test_args.every((x) => isBoundedString(x, 512)))) return reject();
+  if (approval !== null && (!isRecord(approval) || !exactKeys(approval, ["id", "status", "fingerprint", "expires_at"])
+    || !isBoundedString(approval.id, 128) || !isBoundedString(approval.status, 64) || !isSha256Digest(approval.fingerprint)
+    || typeof approval.expires_at !== "string" || !Number.isFinite(Date.parse(approval.expires_at)) || !isRecord(proposal) || proposal.approval_id !== approval.id)) return reject();
+  return value as unknown as RepositorySourceStatus;
+}
+
 class RepairRequestTimeout extends Error {
   constructor() {
     super("The repair request exceeded its deadline.");
@@ -433,6 +533,11 @@ export function RepoRepairInspector({
 }: RepoRepairInspectorProps) {
   const [projection, setProjection] = useState<WorkBoardRepoRepairProjection | null>(null);
   const [sourcePreview, setSourcePreview] = useState<WorkBoardRepoRepairSourcePreview | null>(null);
+  const [repositoryStatus, setRepositoryStatus] = useState<RepositorySourceStatus | null>(null);
+  const [repositoryPreview, setRepositoryPreview] = useState<RepositorySourcePreview | null>(null);
+  const [sourceMutationUncertain, setSourceMutationUncertain] = useState(false);
+  const [acknowledgedSource, setAcknowledgedSource] = useState(false);
+  const [acknowledgedDiagnostics, setAcknowledgedDiagnostics] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -488,6 +593,11 @@ export function RepoRepairInspector({
     invalidateRequests();
     ownerBindingRef.current = null;
     setProjection(null);
+    setRepositoryStatus(null);
+    setSourceMutationUncertain(false);
+    setRepositoryPreview(null);
+    setAcknowledgedSource(false);
+    setAcknowledgedDiagnostics(false);
     setSourcePreview(null);
     setSourceError(null);
     setNotice(null);
@@ -558,8 +668,23 @@ export function RepoRepairInspector({
     return { ...normalized, execution: { ...normalized.execution, process_cleanup: normalizeProcessCleanup(normalized.execution.process_cleanup, normalized) } };
   }
 
-  async function readProjection(generation: number): Promise<WorkBoardRepoRepairProjection> {
-    return validateProjection(await requestJson(endpoint, {}, generation));
+  async function readProjection(generation: number): Promise<WorkBoardRepoRepairProjection | null> {
+    const payload = await requestJson(endpoint, {}, generation);
+    if (isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, "repository_review")) {
+      const next = validateRepositoryStatus(payload, jobId);
+      if (isCurrent(generation)) {
+        setRepositoryStatus(next);
+        setSourceMutationUncertain(false);
+        setProjection(null);
+        setRepositoryPreview(null);
+        setAcknowledgedSource(false);
+        setAcknowledgedDiagnostics(false);
+      }
+      return null;
+    }
+    const next = validateProjection(payload);
+    if (isCurrent(generation)) setRepositoryStatus(null);
+    return next;
   }
 
   async function refresh(generation = generationRef.current): Promise<WorkBoardRepoRepairProjection | null> {
@@ -712,6 +837,11 @@ export function RepoRepairInspector({
     const generation = invalidateRequests();
     ownerBindingRef.current = null;
     setProjection(null);
+    setRepositoryStatus(null);
+    setSourceMutationUncertain(false);
+    setRepositoryPreview(null);
+    setAcknowledgedSource(false);
+    setAcknowledgedDiagnostics(false);
     setSourcePreview(null);
     setError(null);
     setSourceError(null);
@@ -741,6 +871,157 @@ export function RepoRepairInspector({
     // The job id is the owner-bound identity for this inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bindingKey, endpoint, hasCurrentBinding]);
+
+  function sourceMutationKey(kind: "consent" | "resume", fingerprint: string): string {
+    // Each original iteration retains its own key, including uncertain replies.
+    const storageKey = `${mutationStorageKey(jobId, kind)}:${bindingKey}:${fingerprint}`;
+    let key = mutationFallbackRef.current.get(storageKey)?.key;
+    try { key ??= window.sessionStorage.getItem(storageKey) ?? undefined; } catch { /* memory fallback */ }
+    key ??= makeRequestKey();
+    mutationFallbackRef.current.set(storageKey, { key, fingerprint });
+    try { window.sessionStorage.setItem(storageKey, key); } catch { /* memory fallback */ }
+    return key;
+  }
+
+  async function inspectRepositorySource() {
+    const current = repositoryStatus;
+    const generation = generationRef.current;
+    if (loading || busy || sourceMutationUncertain || !current || current.status !== "running" || current.recovery_action !== "review_code_egress" || current.repository_review.contact_state !== "not_started") return;
+    setSourceLoading(true);
+    setSourceError(null);
+    setRepositoryPreview(null);
+    setAcknowledgedSource(false);
+    setAcknowledgedDiagnostics(false);
+    try {
+      const payload = await requestJson(`${endpoint}/source-preview`, {}, generation);
+      const reject = (): never => { throw new Error("The exact source and diagnostics preview is unavailable or stale."); };
+      if (!isRecord(payload) || !exactKeys(payload, ["job_id", "status", "revision", "recovery_action", "repository_review", "source_packet", "egress", "provider_contacted", "operator_visible"])
+        || payload.job_id !== jobId || payload.status !== "running" || payload.revision !== current.revision || payload.recovery_action !== "review_code_egress"
+        || payload.provider_contacted !== false || payload.operator_visible !== true) return reject();
+      const review = validateRepositoryReview(payload.repository_review, jobId);
+      if (Object.keys(review).some((key) => review[key as keyof RepositoryReview] !== current.repository_review[key as keyof RepositoryReview])) return reject();
+      const packet = payload.source_packet;
+      const egress = payload.egress;
+      if (!isRecord(packet) || !exactKeys(packet, ["packet_id", "state", "repository_ref", "source_manifest_sha256", "artifact_sha256", "selected_files", "omissions"]) || !isSha256Digest(packet.artifact_sha256) || !isSha256Digest(packet.source_manifest_sha256)
+        || !isBoundedString(packet.packet_id, 128) || packet.state !== "verified" || !isBoundedString(packet.repository_ref, 512)
+        || !Array.isArray(packet.selected_files) || packet.selected_files.length < 1 || packet.selected_files.length > SOURCE_PREVIEW_MAX_FILES
+        || !Array.isArray(packet.omissions) || packet.omissions.length !== 0 || !isRecord(egress)
+        || !exactKeys(egress, ["runtime_path", "effective_profile_id", "effective_upstream", "maximum_input_bytes", "maximum_output_tokens", "request_body", "request_body_digest", "request_route_digest", "egress_envelope_digest", "diagnostics_digest", "diagnostics", "redaction_version", "combined_input_bytes", "original_deadline_at", "remaining_inference_calls", "remaining_cost_microusd"])) return reject();
+      for (const file of packet.selected_files) {
+        if (!isRecord(file) || !exactKeys(file, ["path", "sha256", "size_bytes", "text"]) || !isBoundedString(file.path, 512) || file.path.startsWith("/") || file.path.split("/").includes("..")
+          || !isSha256Digest(file.sha256) || typeof file.text !== "string" || !isSafeNonNegativeInteger(file.size_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+          || new TextEncoder().encode(file.text).length !== file.size_bytes) return reject();
+      }
+      for (const key of ["request_body_digest", "request_route_digest", "egress_envelope_digest", "diagnostics_digest"]) if (!isSha256Digest(egress[key])) return reject();
+      if (egress.runtime_path !== "strategist_agent" || !isBoundedString(egress.effective_profile_id, 128) || !isBoundedString(egress.effective_upstream, 128)
+        || !isSafeNonNegativeInteger(egress.maximum_input_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES) || Number(egress.maximum_input_bytes) < 1
+        || !isSafeNonNegativeInteger(egress.maximum_output_tokens, SOURCE_PREVIEW_MAX_OUTPUT_TOKENS) || Number(egress.maximum_output_tokens) < 1
+        || !isSafeNonNegativeInteger(egress.combined_input_bytes, Number(egress.maximum_input_bytes))
+        || !isRecord(egress.request_body) || egress.request_body.max_tokens !== egress.maximum_output_tokens
+        || !isBoundedString(egress.request_body.model, 256) || !isFiniteFutureTimestamp(egress.original_deadline_at)
+        || !isSafeNonNegativeInteger(egress.remaining_inference_calls, Number.MAX_SAFE_INTEGER) || Number(egress.remaining_inference_calls) < 1
+        || !isSafeNonNegativeInteger(egress.remaining_cost_microusd, Number.MAX_SAFE_INTEGER)
+        || !isBoundedString(egress.redaction_version, 256) || !isRecord(egress.diagnostics)
+        || !exactKeys(egress.diagnostics, ["redaction_version", "stdout", "stderr"])
+        || egress.diagnostics.redaction_version !== egress.redaction_version || typeof egress.diagnostics.stdout !== "string" || typeof egress.diagnostics.stderr !== "string"
+        || new TextEncoder().encode(JSON.stringify(egress.request_body)).length > Number(egress.maximum_input_bytes)) return reject();
+      const messages = egress.request_body.messages;
+      if (!Array.isArray(messages)) return reject();
+      const user = messages.find((message) => isRecord(message) && message.role === "user");
+      if (!isRecord(user) || typeof user.content !== "string") return reject();
+      const envelope: unknown = JSON.parse(user.content);
+      const selectedFiles = packet.selected_files as Record<string, unknown>[];
+      const diagnostics = egress.diagnostics as Record<string, unknown>;
+      if (!isRecord(envelope) || envelope.iteration_id !== review.iteration_id || !isRecord(envelope.source_packet)
+        || envelope.source_packet.owner_principal_id !== ownerPrincipalId || envelope.source_packet.owner_session_id !== ownerSessionId
+        || envelope.source_packet.workflow_run_id !== jobId || envelope.source_packet.packet_id !== packet.packet_id
+        || envelope.source_packet.source_manifest_sha256 !== packet.source_manifest_sha256
+        || !Array.isArray(envelope.source_packet.files) || envelope.source_packet.files.length !== packet.selected_files.length
+        || envelope.source_packet.files.some((file, index) => !isRecord(file) || !["path", "sha256", "size_bytes", "text"].every((key) => file[key] === selectedFiles[index][key]))
+        || !isRecord(envelope.diagnostics) || !["stdout", "stderr", "redaction_version"].every((key) => (envelope.diagnostics as Record<string, unknown>)[key] === diagnostics[key])) return reject();
+      if (isCurrent(generation)) setRepositoryPreview(payload as unknown as RepositorySourcePreview);
+    } catch (cause) {
+      if (isCurrent(generation) && !(cause instanceof StaleRepairRequest)) setSourceError(cause instanceof Error ? cause.message : "The private source preview is unavailable.");
+    } finally { if (isCurrent(generation)) setSourceLoading(false); }
+  }
+
+  async function continueRepository(kind: "consent" | "resume") {
+    const current = repositoryStatus;
+    const preview = repositoryPreview;
+    const generation = generationRef.current;
+    if (loading || busy || sourceMutationUncertain || !current || current.status !== "running") return;
+    if (kind === "consent" && (!preview || !acknowledgedSource || !acknowledgedDiagnostics || !isFiniteFutureTimestamp(preview.egress.original_deadline_at)
+      || current.recovery_action !== "review_code_egress" || current.repository_review.contact_state !== "not_started")) return;
+    const proposal = current.patch_proposal;
+    const approval = current.approval;
+    if (kind === "resume" && (!proposal || !approval || approval.status !== "approved" || proposal.status !== "awaiting_approval"
+      || current.recovery_action !== "execute_approved_patch" || !isFiniteFutureTimestamp(approval.expires_at) || !isFiniteFutureTimestamp(proposal.expires_at))) return;
+    setBusy(true);
+    setError(null);
+    setSourceError(null);
+    setNotice(null);
+    try {
+      const iteration = current.repository_review;
+      const fingerprint = [iteration.iteration_id, current.revision, preview?.egress.request_body_digest ?? proposal?.proposal_id, proposal?.revision ?? ""].join(":");
+      const body = kind === "consent" && preview ? {
+        expected_job_revision: current.revision, source_packet_digest: preview.source_packet.artifact_sha256,
+        expected_source_manifest_digest: preview.source_packet.source_manifest_sha256, expected_profile_id: preview.egress.effective_profile_id,
+        acknowledged_selected_source: true, expected_iteration_index: iteration.iteration_index, expected_iteration_id: iteration.iteration_id,
+        expected_preparation_digest: iteration.preparation_digest, expected_request_body_digest: preview.egress.request_body_digest,
+        expected_request_route_digest: preview.egress.request_route_digest, expected_egress_envelope_digest: preview.egress.egress_envelope_digest,
+        expected_diagnostics_digest: preview.egress.diagnostics_digest, expected_redaction_version: preview.egress.redaction_version, acknowledged_diagnostics: true,
+        idempotency_key: sourceMutationKey(kind, fingerprint),
+      } : { approval_id: approval!.id, proposal_id: proposal!.proposal_id, expected_proposal_revision: proposal!.revision,
+        expected_job_revision: current.revision, idempotency_key: sourceMutationKey(kind, fingerprint) };
+      const receipt = await requestJson(`${endpoint}/${kind === "consent" ? "code-egress-consent" : "resume"}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      }, generation);
+      if (!isRecord(receipt) || receipt.job_id !== jobId || (kind === "consent"
+        ? !isBoundedString(receipt.consent_id, 128) || receipt.operator_visible !== true
+        : receipt.iteration_id !== iteration.iteration_id || receipt.no_learning !== true || typeof receipt.cleanup_proven !== "boolean")) throw new Error("The continuation receipt is malformed; the exact request key is retained.");
+      if (kind === "consent") {
+        const outcome = receipt.repository_outcome;
+        const wait = isRecord(outcome) ? outcome.wait : null;
+        const witness = isRecord(wait) ? wait.witness : null;
+        const native = isRecord(witness) ? witness.native_binding : null;
+        if (!isRecord(outcome) || outcome.child_id !== iteration.native_child_id || !isRecord(witness)
+          || witness.repository_job_id !== jobId || witness.iteration_id !== iteration.iteration_id
+          || witness.request_body_digest !== preview!.egress.request_body_digest || !isRecord(native)
+          || native.invocation_id !== iteration.native_child_id || native.original_root_id !== ownerSessionId
+          || native.owner_principal_id !== ownerPrincipalId) throw new Error("The consent receipt changed the original source binding; the exact request key is retained.");
+      }
+      const next = validateRepositoryStatus(await requestJson(endpoint, {}, generation), jobId);
+      if (next.repository_review.native_child_id !== iteration.native_child_id || next.revision < current.revision
+        || next.repository_review.iteration_index < iteration.iteration_index) throw new Error("The continuation readback changed the original repository binding.");
+      if (kind === "resume") {
+        if (!safeArtifactRef(receipt.manifest_artifact_ref) || !isSha256Digest(receipt.manifest_artifact_digest)
+          || receipt.cleanup_proven !== true || !["failed", "succeeded"].includes(String(receipt.status))) throw new Error("Physical execution readback remains unverified.");
+        const continuation = receipt.repository_review;
+        if (isRecord(continuation)) {
+          if (Object.keys(next.repository_review).some((key) => continuation[key] !== next.repository_review[key as keyof RepositoryReview])) throw new Error("The execution readback changed its next original iteration.");
+        } else if (receipt.status === "succeeded" && (next.status !== "succeeded" || next.repository_review.iteration_id !== iteration.iteration_id)) {
+          throw new Error("The final local execution readback did not match the original iteration.");
+        }
+      }
+      if (kind === "consent" && (next.repository_review.iteration_id !== iteration.iteration_id || next.repository_review.contact_state === "not_started")) throw new Error("The source consent readback has not confirmed the original iteration contact.");
+      if (isCurrent(generation)) {
+        setRepositoryStatus(next);
+        setSourceMutationUncertain(false);
+        setRepositoryPreview(null);
+        setAcknowledgedSource(false);
+        setAcknowledgedDiagnostics(false);
+        setNotice(kind === "consent" ? "Source and diagnostics consent recorded for this iteration." : "Reviewed patch execution recorded. Review the current outcome.");
+      }
+    } catch (cause) {
+      if (isCurrent(generation) && !(cause instanceof StaleRepairRequest)) {
+        setSourceMutationUncertain(true);
+        setRepositoryPreview(null);
+        setAcknowledgedSource(false);
+        setAcknowledgedDiagnostics(false);
+        setError(cause instanceof Error ? cause.message : "Repository continuation failed.");
+      }
+    } finally { if (isCurrent(generation)) setBusy(false); }
+  }
 
   async function inspectSource() {
     const generation = generationRef.current;
@@ -906,6 +1187,56 @@ export function RepoRepairInspector({
     ? projection
     : null;
   const sourcePreviewForRender = projectionForRender ? sourcePreview : null;
+
+  const repositoryForRender = hasCurrentBinding && repositoryStatus?.job_id === jobId
+    && generationScopeRef.current.bindingKey === bindingKey ? repositoryStatus : null;
+  if (repositoryForRender) {
+    const current = repositoryForRender;
+    const review = current.repository_review;
+    const preview = repositoryPreview;
+    const canInspect = !sourceMutationUncertain && current.status === "running" && current.recovery_action === "review_code_egress" && review.contact_state === "not_started";
+    const canExecute = !sourceMutationUncertain && current.status === "running" && current.recovery_action === "execute_approved_patch" && current.patch_proposal?.status === "awaiting_approval"
+      && current.approval?.status === "approved" && isFiniteFutureTimestamp(current.approval.expires_at) && isFiniteFutureTimestamp(current.patch_proposal.expires_at);
+    return <section className="rounded border border-cyan-400/30 p-3" aria-label="Repository repair execution">
+      <div className="font-semibold">Repository repair</div>
+      <div>{statusLabel(current.status)} · iteration {review.iteration_index} of at most 3</div>
+      <div>Provider contact: {current.provider_contacted ? "recorded" : "not recorded"} · no learning</div>
+      <button type="button" disabled={busy || loading} onClick={() => void refresh()}>Refresh repair status</button>
+      {sourceMutationUncertain && <div role="status">Continuation outcome is uncertain. Refresh the original repair before another action.</div>}
+      {error && <div role="alert">{error}</div>}{sourceError && <div role="alert">{sourceError}</div>}{notice && <div role="status">{notice}</div>}
+      {canInspect && <button type="button" disabled={busy || loading || sourceLoading} onClick={() => void inspectRepositorySource()}>Inspect exact source and diagnostics</button>}
+      {canInspect && preview && <div>
+        <div>{preview.egress.effective_profile_id} via {preview.egress.effective_upstream} · {preview.egress.combined_input_bytes} / {preview.egress.maximum_input_bytes} input bytes · {preview.egress.maximum_output_tokens} output tokens</div>
+        <div>Original cutoff: {new Date(preview.egress.original_deadline_at).toLocaleString()} · {preview.egress.remaining_inference_calls} calls remaining</div>
+        <div>Redaction: {preview.egress.redaction_version}</div>
+        {preview.source_packet.selected_files.map((file) => <details key={file.path}><summary>{file.path} · {file.size_bytes} bytes · {safeDigest(file.sha256)}</summary><pre className="whitespace-pre-wrap break-all">{file.text}</pre></details>)}
+        <details><summary>Exact request body</summary><pre className="whitespace-pre-wrap break-all">{JSON.stringify(preview.egress.request_body, null, 2)}</pre></details>
+        <details><summary>Command diagnostics</summary><pre className="whitespace-pre-wrap break-all">{preview.egress.diagnostics.stdout || "No stdout"}{"\n"}{preview.egress.diagnostics.stderr || "No stderr"}</pre></details>
+        <label><input type="checkbox" checked={acknowledgedSource} onChange={(event) => setAcknowledgedSource(event.target.checked)} />I acknowledge the exact selected source</label>
+        <label><input type="checkbox" checked={acknowledgedDiagnostics} onChange={(event) => setAcknowledgedDiagnostics(event.target.checked)} />I acknowledge these command diagnostics</label>
+        <button type="button" disabled={busy || loading || sourceLoading || !acknowledgedSource || !acknowledgedDiagnostics || !isFiniteFutureTimestamp(preview.egress.original_deadline_at)} onClick={() => void continueRepository("consent")}>Allow this iteration's source and diagnostics</button>
+      </div>}
+      {current.patch_proposal && <div>
+        <div>Patch: {current.patch_proposal.summary}</div><div>Proposal {current.patch_proposal.proposal_id} · revision {current.patch_proposal.revision}</div>
+        <div>Approval: {statusLabel(current.approval?.status)} · {current.approval?.id ?? "unavailable"}</div>
+        <div>Patch artifact: {current.patch_proposal.patch_artifact_ref} · {safeDigest(current.patch_proposal.patch_sha256)}</div>
+        <div>Selected paths: {current.patch_proposal.allowed_paths.join(", ")} · named check arguments: {current.patch_proposal.test_args.join(" ")}</div>
+        {current.status === "running" && current.approval?.status === "pending" && onOpenApprovals && <button type="button" disabled={busy} onClick={onOpenApprovals}>Review exact patch approval</button>}
+        {canExecute && <button type="button" disabled={busy || loading} onClick={() => void continueRepository("resume")}>Execute this approved patch</button>}
+      </div>}
+      {current.iterations.map((iteration, position) => {
+        const outcome = current.iteration_states[position];
+        return <details key={iteration.index}><summary>Iteration {iteration.index}: {statusLabel(outcome.status)} · cleanup proven</summary>
+          <div>Input tree: {safeDigest(iteration.input_tree_digest)} · patch: {safeDigest(iteration.patch_digest)}</div>
+          <div>Command references: {iteration.command_refs.join(", ")}</div><div>Result references: {iteration.result_artifacts.join(", ")}</div>
+          <div>{outcome.manifest_artifact_ref} · {safeDigest(outcome.manifest_artifact_digest)}</div>
+          {outcome.command_results_status === "unknown" ? <div>Command outcomes: Unknown</div> : outcome.command_results?.map((command) => <div key={command.check}>{command.check}: {statusLabel(command.status)} · exit {command.exit_code ?? "unknown"}</div>)}
+        </details>;
+      })}
+      <div role="status">{current.status === "unknown_external_effect" ? "Unknown outcome. Reconcile the original repository execution; its lane remains held." : statusLabel(current.recovery_action)}</div>
+      {current.status === "succeeded" && <div>The recorded named checks passed. Review the local patch; passing checks do not establish patch quality or authorize publication.</div>}
+    </section>;
+  }
 
   if (loading && !projectionForRender) {
     return <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Repository repair execution"><div className="font-semibold">Repository repair</div><div className="mt-1 text-[11px] opacity-80">Loading owner-bound repair status…</div></section>;

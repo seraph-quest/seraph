@@ -224,6 +224,20 @@ class GeneralTaskService:
         """Reduce cancellation debt using retained original callbacks only."""
         from src.db.models import WorkBoardAttempt
         from src.workflows.job_runtime import DurableJobError
+        # Repository cancellation has a capability-specific source owner.  Let
+        # it reconcile a retained private stop witness before generic callback
+        # cleanup; a non-None result owns the whole observation and must not
+        # fall through to the ordinary closure path.
+        source = self.repository_source_service
+        observe_repository_stop = getattr(source, "observe_repository_stop", None) if source is not None else None
+        if callable(observe_repository_stop):
+            source_result = await observe_repository_stop(
+                general_task_service=self,
+                jobs=jobs,
+                parent_id=parent_id,
+            )
+            if source_result is not None:
+                return source_result
         bindings = [(child_id, binding, self._native_invocations.get(child_id))
             for child_id, binding in list(self._native_invocation_bindings.items())
             if binding.parent_job_id == parent_id]

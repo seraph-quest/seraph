@@ -2422,6 +2422,19 @@ async def get_work_board_task(request: Request, task_id: str):
                     projection = await get_plan_projection(db, linked)
                     task_payload.update({key: projection.get(key) for key in
                         ("opportunity_id", "opportunity_revision", "proposal_ref", "plan_preview")})
+            # Repository review is a read-only, source-owned projection.  The
+            # source owner validates the exact protected original journal and
+            # returns None for ordinary or legacy tasks; no private packet,
+            # envelope, or start capability is reconstructed here.
+            from src.workflows.repo_repair_source import repository_review_projection
+            repository_review = await repository_review_projection(
+                db,
+                task=detail["task"],
+                attempt=latest_attempt,
+                owner=read_owner,
+            )
+            if repository_review is not None:
+                task_payload["repository_review"] = repository_review
             attempts_payload = []
             for item in detail["attempts"]:
                 item_payload = _attempt_payload(item)

@@ -22,7 +22,7 @@ from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
 
-async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python'):
+async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False):
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:
@@ -59,10 +59,25 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
         (repository / 'package.json').write_text(json.dumps({'name': 'actual-source', 'version': '1.0.0',
             'scripts': {'test': 'node --test tests/calculator.test.js'}}))
         (repository / 'package-lock.json').write_text(json.dumps({'name': 'actual-source', 'lockfileVersion': 3, 'packages': {}}))
+        if node_build:
+            import shutil
+            typescript = Path('/home/pawel/repos/seraph/frontend/node_modules/typescript')
+            assert (typescript / 'package.json').is_file(), 'Existing cached TypeScript is required; no installation'
+            shutil.copytree(typescript, repository / 'node_modules/typescript')
+            version = json.loads((typescript / 'package.json').read_text())['version']
+            (repository / '.gitignore').write_text('node_modules/\ndist/\n')
+            (repository / 'tsconfig.json').write_text(json.dumps({'compilerOptions': {
+                'allowJs': True, 'outDir': 'dist'}, 'include': ['calculator.js']}))
+            package = json.loads((repository / 'package.json').read_text())
+            package['scripts']['build'] = 'tsc --project tsconfig.json'
+            (repository / 'package.json').write_text(json.dumps(package))
+            (repository / 'package-lock.json').write_text(json.dumps({'name': 'actual-source',
+                'lockfileVersion': 3, 'packages': {'node_modules/typescript': {'version': version}}}))
     git(repository, 'init', '--template=', '--initial-branch=develop')
     git(repository, 'add', '.')
     git(repository, 'commit', '-m', 'actual source')
     work = RepoWorkInput.model_validate(selection(repository_ref='example', language_profile=language,
+        requested_checks=['build', 'test'] if node_build else ['test'],
         allowed_paths=(['calculator.js', 'tests/calculator.test.js'] if language == 'test_node' else ['calculator.py', 'tests/test_calculator.py']),
         base_commit=git(repository, 'rev-parse', 'HEAD').decode().strip()))
     source = RepoRepairService(session_factory=factory)
@@ -179,9 +194,9 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python'):
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False):
     factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
-        goal_capacity=goal_capacity, language=language)
+        goal_capacity=goal_capacity, language=language, node_build=node_build)
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_native import (
@@ -292,15 +307,114 @@ async def test_actual_precontact_owner_prepares_original_child_once(accounting_d
     assert after['lease'] == child['lease'] and after['attempt_count'] == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+@pytest.mark.parametrize('entry', ['source', 'parent_task', 'repository_task'])
+async def test_actual_source_stop_before_contact_atomic_original(accounting_db, monkeypatch, language, entry):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source
+    from src.workflows.repo_repair_stop import stop_repository_root
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-stop-worker', principal=operator.principal)
+    root_id = prepared['repository_job_id']
+    actual_cancel = jobs.cancel_general_task_native_parent
+    async def sql_only_cancel(*args, **kwargs):
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError('Original stop writer must use staged Source, not private IO/projection')
+        with monkeypatch.context() as writer_boundary:
+            writer_boundary.setattr(service.repository_source_service, '_read_private_artifact', forbidden)
+            writer_boundary.setattr('src.work_board.pipelines.root_binding', forbidden)
+            writer_boundary.setattr('src.work_board.repository.WorkBoardRepository._project_attempt', forbidden)
+            return await actual_cancel(*args, **kwargs)
+    monkeypatch.setattr(jobs, 'cancel_general_task_native_parent', sql_only_cancel)
+    if entry == 'source':
+        stopped = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service)
+        assert stopped['pending'] is False
+    else:
+        from src.work_board.dispatcher import WorkBoardDispatcher
+        from src.workflows.repo_repair_source import read_repository_original
+        async with factory() as db:
+            original_scope = read_repository_original(await jobs._fetch(db, root_id))[0]
+            task_id = binding.task_id if entry == 'parent_task' else original_scope['repository_task_id']
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+        dispatcher = WorkBoardDispatcher(session_provider=factory.accounting_sessions, general_tasks=service)
+        dispatcher.jobs = jobs
+        projected = await dispatcher.cancel_task(owner, task_id, expected_revision=task.task_revision)
+        assert projected.task.task_id == task_id and projected.task.status.value == 'blocked'
+        assert projected.attempt.ended_at is not None
+    root = await jobs.get_job(root_id)
+    child = await jobs.get_job(binding.invocation_id)
+    parent = await jobs.get_job(binding.parent_job_id)
+    assert root['status'] == child['status'] == parent['status'] == 'cancelled'
+    assert child['attempt_count'] == 1
+    assert root_id not in service.repository_source_service._iterative_lanes
+    async with factory() as db:
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['second_cas', 'event'])
+async def test_actual_source_stop_writer_failure_retains_original(accounting_db, monkeypatch, failure):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source
+    from src.workflows import repo_repair_stop as stop
+    from src.workflows.job_runtime import DurableJobLeaseError
+    from src.work_board.repository import WorkBoardRepository
+    from src.db.models import WorkBoardAttempt
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-stop-rollback-worker', principal=operator.principal)
+    root_id = prepared['repository_job_id']
+    original = {identity: await jobs.get_job(identity) for identity in (root_id, binding.invocation_id, binding.parent_job_id)}
+    if failure == 'second_cas':
+        actual_cas = stop._cas_repository_stop_board_row
+        async def lose_second(db, row, values):
+            if isinstance(row, WorkBoardAttempt):
+                raise DurableJobLeaseError('injected actual second CAS loss')
+            return await actual_cas(db, row, values)
+        monkeypatch.setattr(stop, '_cas_repository_stop_board_row', lose_second)
+    else:
+        actual_event = WorkBoardRepository._event
+        async def fail_event(*args, **kwargs):
+            if kwargs['kind'] == 'attempt.repository_stopped':
+                raise DurableJobLeaseError('injected actual terminal event failure')
+            return await actual_event(*args, **kwargs)
+        monkeypatch.setattr(WorkBoardRepository, '_event', fail_event)
+    result = await stop.stop_repository_root(service.repository_source_service, jobs,
+        job_id=root_id, owner=owner, general_task_service=service)
+    assert result['pending'] is True
+    for identity, before in original.items():
+        after = await jobs.get_job(identity)
+        assert after['status'] == before['status']
+        if identity == root_id:
+            assert after['revision'] == before['revision'] + 1  # the retained stop intent
+            assert {key: value for key, value in after['lease'].items() if key != 'revision'} == {
+                key: value for key, value in before['lease'].items() if key != 'revision'}
+        else:
+            assert after['lease'] == before['lease']
+    assert root_id in service.repository_source_service._iterative_lanes
+    async with factory() as db:
+        repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id ==
+            stop._source().read_repository_original(await jobs._fetch(db, root_id))[0]['repository_task_id']))
+        assert repo_task.status.value == 'running'
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+
+
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
-        node_readback_drift=None):
+        node_readback_drift=None, node_build=False, stop_at=None):
     import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
         repository_source_preview, grant_repository_iteration_consent)
     factory, owner, service, jobs, binding, _ = await actual_native_source(
-        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language)
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language, node_build=node_build)
     operator = await authenticate_session(owner.session_id, touch=False)
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner='actual-consent-callback-worker', principal=operator.principal)
@@ -332,6 +446,14 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     if language == 'test_node':
         output.update(allowed_paths=['calculator.js', 'tests/calculator.test.js'], test_args=['npm', 'test'],
             patch_unified_diff='--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n+exports.add = (a, b) => ' + ('a - b + 0' if three_iterations else 'a + b') + ';\n')
+        if node_build:
+            output['test_args'] = ['npm', 'run', 'build', 'test']
+    if stop_at == 'active_process':
+        output['patch_unified_diff'] = (
+            '--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n'
+            '+exports.add = (a, b) => { while (true) {} };\n' if language == 'test_node' else
+            '--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n-    return a - b\n'
+            '+    while True:\n+        pass\n')
     contacted = []
     def final_http(request):
         assert str(request.url) == 'https://openrouter.ai/api/v1/chat/completions'
@@ -371,6 +493,18 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         assert len(rows) == 1 and rows[0].state == 'settled'
         assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == 0
         assert rows[0].job_id == root_id
+    if stop_at == 'contacted_wait':
+        from src.workflows.repo_repair_stop import stop_repository_root
+        stopped = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service)
+        assert stopped['pending'] is False
+        assert len(contacted) == 1
+        assert (await jobs.get_job(root_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.parent_job_id))['status'] == 'cancelled'
+        assert root_id not in service.repository_source_service._iterative_lanes
+        assert service.repository_source_service._iterative_process_callbacks == {}
+        return
     from src.workflows.repo_repair_source import recover_repository_wait_witness
     restarted_source = RepoRepairService(session_factory=factory, jobs=jobs)
     from src.workflows.job_runtime import DurableJobLeaseError
@@ -459,6 +593,8 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                     result.pop('tested_file_hash_metadata')
                 elif node_readback_drift == 'tampered':
                     result['tested_file_hash_metadata'][0]['sha256'] = 'f' * 64
+                elif node_readback_drift == 'body_hash':
+                    result['diff_sha256'] = 'f' * 64
                 else:
                     result['token'] = '0' * 64
                 return json.dumps(result).encode()
@@ -473,9 +609,51 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         assert root_id in service.repository_source_service._iterative_lanes
         assert len(contacted) == 1
         return
+    if stop_at == 'active_process':
+        import asyncio
+        from src.workflows.repo_repair_stop import stop_repository_root
+        source_owner = service.repository_source_service
+        executing = asyncio.create_task(execute_repository_iteration(source_owner, jobs, job_id=root_id,
+            owner=owner, request=execution_request, principal=operator.principal))
+        for _ in range(1000):
+            marker = source_owner.sandbox._read_job_marker(root_id)
+            if marker and type(marker.get('pid')) is int and marker.get('pid_start_identity'):
+                from pathlib import Path
+                children = Path('/proc/' + str(marker['pid']) + '/task/' + str(marker['pid']) + '/children')
+                if children.exists() and children.read_text().strip():
+                    # Observe a real supervisor-owned child, beyond the parent
+                    # Popen/handshake window. Startup ambiguity remains Unknown.
+                    await asyncio.sleep(0.3)
+                    break
+            if executing.done():
+                await executing
+                raise AssertionError('Actual process did not reach owned supervisor')
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError('Actual original supervisor was never observed')
+        stopped = await stop_repository_root(source_owner, jobs, job_id=root_id,
+            owner=owner, general_task_service=service)
+        actual = await asyncio.wait_for(executing, timeout=20)
+        assert actual['cleanup_proven'] is True and actual['recovery_action'] == 'repository_stopped'
+        assert (await jobs.get_job(root_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'cancelled'
+        assert root_id not in source_owner._iterative_lanes
+        assert len(contacted) == 1
+        return
     executed = await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
         owner=owner, request=execution_request, principal=operator.principal)
     assert executed['status'] == ('failed' if three_iterations else 'succeeded') and executed['cleanup_proven'] is True
+    if stop_at == 'failed_process':
+        from src.workflows.repo_repair_stop import stop_repository_root
+        stopped = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service)
+        assert stopped['pending'] is False
+        assert len(contacted) == 1
+        assert (await jobs.get_job(root_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.parent_job_id))['status'] == 'cancelled'
+        assert root_id not in service.repository_source_service._iterative_lanes
+        return
     if not three_iterations:
         assert executed['original_child_final']['child']['status'] == 'succeeded'
         assert (await jobs.get_job(root_id))['status'] == 'succeeded'
@@ -499,11 +677,30 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             source_envelope = json.loads(egress['request_body']['messages'][1]['content'])
             prior = source_envelope['source_packet']['prior_tested_iteration']
             assert prior['hashes_are_file_bodies'] is False
+            if node_build:
+                assert [item['path'] for item in prior['tested_file_hash_metadata']] == [
+                    'calculator.js', 'tests/calculator.test.js']
+                assert prior['tested_file_hash_metadata_scope'] == {
+                    'kind': 'original_acknowledged_source_paths_present_in_tested_tree',
+                    'selected_source_paths': ['calculator.js', 'tests/calculator.test.js'],
+                    'missing_selected_source_paths': [],
+                    'full_metadata_retained_in_physical_readback': True}
+                async with factory() as db:
+                    root = await jobs._fetch(db, root_id)
+                    from src.workflows.repo_repair_source import _repository_record
+                    previous_readback = _repository_record(root, 'repository:readback:' + prior['iteration_id'])
+                full_manifest = json.loads(service.repository_source_service._read_private_artifact(
+                    previous_readback['artifact_ref'], expected_digest=previous_readback['artifact_digest']))
+                assert full_manifest['after_digest'] == prior['tested_tree_digest']
+                assert len(full_manifest['tested_file_hash_metadata']) > len(prior['tested_file_hash_metadata'])
+                assert any(item['path'].startswith('node_modules/typescript/')
+                    for item in full_manifest['tested_file_hash_metadata'])
             assert ('+exports.add = (a, b) => a - b' if language == 'test_node' else '+    return a - b') in prior['cumulative_diff']
             assert ('ERR_ASSERTION' if language == 'test_node' else 'FAILED') in egress['diagnostics']['stdout']
-            output['patch_unified_diff'] = ('--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return ' + ('a - b + 1' if index == 2 else 'a + b') + '\n')
+            next_expression = 'a - b + 1' if index == 2 else 'a - b + 2' if stop_at == 'iterations_exhausted' else 'a + b'
+            output['patch_unified_diff'] = ('--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return ' + next_expression + '\n')
             if language == 'test_node':
-                output['patch_unified_diff'] = ('--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n+exports.add = (a, b) => ' + ('a - b + 1' if index == 2 else 'a + b') + ';\n')
+                output['patch_unified_diff'] = ('--- a/calculator.js\n+++ b/calculator.js\n@@ -1 +1 @@\n-exports.add = (a, b) => a - b;\n+exports.add = (a, b) => ' + next_expression + ';\n')
             request = request.model_copy(update={'expected_job_revision': preview['revision'],
                 'source_packet_digest': packet['artifact_sha256'],
                 'expected_source_manifest_digest': packet['source_manifest_sha256'],
@@ -533,9 +730,21 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 'idempotency_key': 'actual-process-' + str(index)})
             executed = await execute_repository_iteration(service.repository_source_service, jobs,
                 job_id=root_id, owner=owner, request=execution_request, principal=operator.principal)
-            assert executed['status'] == ('failed' if index == 2 else 'succeeded')
+            assert executed['status'] == ('failed' if index == 2 or stop_at == 'iterations_exhausted' else 'succeeded')
             current_child = await jobs.get_job(binding.invocation_id)
             assert current_child['attempt_count'] == 1
+            if index == 3 and stop_at == 'iterations_exhausted':
+                assert executed['stop_pending'] is False
+                assert executed['recovery_action'] == 'original_iterations_exhausted'
+                assert (await jobs.get_job(root_id))['status'] == 'failed'
+                assert current_child['status'] == 'cancelled'
+                assert (await jobs.get_job(binding.parent_job_id))['status'] == 'cancelled'
+                assert root_id not in service.repository_source_service._iterative_lanes
+                assert len(contacted) == 3
+                async with factory() as db:
+                    rows = list((await db.scalars(select(InferenceCostReservation))).all())
+                    assert len(rows) == 3 and all(row.state == 'settled' for row in rows)
+                return
             if index == 2:
                 for key in ('owner', 'fencing_token', 'expires_at'):
                     assert current_child['lease'][key] == original_child['lease'][key]
@@ -550,6 +759,23 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes
         assert (await jobs.get_job(root_id))['status'] == 'succeeded'
         assert root_id not in service.repository_source_service._iterative_lanes
+    from src.workflows.repo_repair_source import repository_operator_projection
+    with monkeypatch.context() as metadata_only:
+        def forbid_private_metadata_read(*args, **kwargs):
+            raise AssertionError('operator iteration metadata must not open private artifacts')
+        metadata_only.setattr(service.repository_source_service, '_read_private_artifact', forbid_private_metadata_read)
+        projected = await repository_operator_projection(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner)
+    assert len(projected['iterations']) == (3 if three_iterations else 1)
+    for item in projected['iterations']:
+        assert set(item) == {'index', 'input_tree_digest', 'patch_digest', 'command_refs', 'result_artifacts'}
+        assert len(item['command_refs']) == 1 and len(item['result_artifacts']) == 2
+    for state in projected['iteration_states']:
+        assert state['command_results_status'] == 'recorded'
+        assert state['command_results'] == ([{'check': 'build', 'status': 'succeeded', 'exit_code': 0}]
+            if node_build else []) + [{'check': 'test',
+            'status': 'succeeded' if state['status'] == 'succeeded' else 'failed',
+            'exit_code': 0 if state['status'] == 'succeeded' else 1}]
     from src.workflows.general_task_guard import read_manifest
     async with factory() as db:
         parent = await jobs._fetch(db, binding.parent_job_id)
@@ -578,6 +804,46 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
 async def test_actual_source_consent_callback_and_settled_c1_wait(accounting_db, monkeypatch, three_iterations, language):
     await _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language)
+
+
+@pytest.mark.asyncio
+async def test_actual_node_source_three_iterations_build_and_test(accounting_db, monkeypatch):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, 'test_node', node_build=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_stop_contacted_wait_settles_original(accounting_db, monkeypatch, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
+        stop_at='contacted_wait')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_stop_failed_process_full_readback(accounting_db, monkeypatch, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
+        stop_at='failed_process')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_stop_active_supervisor_keeps_original_until_reaped(accounting_db, monkeypatch, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
+        stop_at='active_process')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_three_failed_iterations_terminal_original(accounting_db, monkeypatch, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
+        stop_at='iterations_exhausted')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('drift', ['missing', 'tampered', 'body_hash'])
+async def test_actual_node_build_source_readback_drift_quarantines_original(accounting_db, monkeypatch, drift):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, False, 'test_node',
+        node_readback_drift=drift, node_build=True)
 
 
 @pytest.mark.asyncio

@@ -1094,10 +1094,16 @@ class RepoRepairService:
         self._iterative_lanes: dict[str, Any] = {}
         self._iterative_model_callbacks: dict[str, Any] = {}
         self._iterative_process_callbacks: dict[str, Any] = {}
+        self._iterative_process_jobs: dict[str, Any] = {}
 
     async def native_iteration_adapter(self, **kwargs):
         from src.workflows.repo_repair_source import run_repository_iteration
         return await run_repository_iteration(self, **kwargs)
+
+    async def observe_repository_stop(self, *, general_task_service, jobs, parent_id):
+        from src.workflows.repo_repair_stop import repository_stop_for_parent
+        return await repository_stop_for_parent(self, jobs, parent_id=parent_id,
+            general_task_service=general_task_service)
 
     async def _scan_secrets(self, value: str) -> str:
         try:

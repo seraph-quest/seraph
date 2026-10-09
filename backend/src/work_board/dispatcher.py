@@ -3502,6 +3502,17 @@ class WorkBoardDispatcher:
             latest = detail["attempts"][0] if detail["attempts"] else None
             if latest is None or not latest.workflow_run_id:
                 raise BoardError("admission_reconcile_required", "The original task admission must be reconciled before cancellation", status_code=409)
+            source = self.general_tasks.repository_source_service if self.general_tasks is not None else None
+            if source is not None:
+                from src.workflows.repo_repair_stop import repository_stop_for_parent
+                try:
+                    stopped = await repository_stop_for_parent(source, self.jobs,
+                        parent_id=latest.workflow_run_id, general_task_service=self.general_tasks,
+                        owner=owner, request_stop=True)
+                except Exception as exc:
+                    raise BoardError("repository_stop_blocked", "Inspect the original repository stop evidence", status_code=409) from exc
+                if stopped is not None:
+                    return stopped["projection"]
             try:
                 cancelled = await self.jobs.cancel_general_task_native_parent(latest.workflow_run_id,
                     operator_owner=owner, expected_task_revision=expected_revision)
@@ -3546,6 +3557,21 @@ class WorkBoardDispatcher:
                 "Cancellation waits for the pending admission binding to be reconciled",
                 status_code=409,
             )
+
+        if task.capability_id == "engineering.repo-repair.v1" and self.general_tasks is not None:
+            source = self.general_tasks.repository_source_service
+            if source is not None:
+                from src.workflows.repo_repair_source import repository_source_root
+                async with self.session_provider() as db:
+                    source_owned = await repository_source_root(db, job_id=job_id, owner=owner)
+                if source_owned:
+                    from src.workflows.repo_repair_stop import stop_repository_root
+                    try:
+                        stopped = await stop_repository_root(source, self.jobs, job_id=job_id,
+                            owner=owner, general_task_service=self.general_tasks)
+                    except Exception as exc:
+                        raise BoardError("repository_stop_blocked", "Inspect the original repository stop evidence", status_code=409) from exc
+                    return stopped["repository_projection"]
 
         # Validate the complete immutable binding before recording intent.  A
         # caller must never cancel a run merely because it guessed its ID.

@@ -450,6 +450,45 @@ class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
     no_learning: Literal[True] = True
 
 
+class RepositoryNativeStopClosureV1(ClosedTaskModel):
+    """Closed metadata for a source-owned repository stop.
+
+    The model is only the durable projection.  A source-private witness must
+    pass the repository source validator before this projection can be used by
+    the cancellation writer; constructing or copying this model grants no
+    authority.
+    """
+
+    schema_version: Literal["repository.native_stop_closure.v1"] = "repository.native_stop_closure.v1"
+    original_binding: GeneralTaskNativeChildBindingV1
+    repository_job_id: NativeInvocationIdentity
+    repository_attempt_id: TaskIdentity
+    repository_fence: int = Field(ge=1)
+    original_input_digest: TaskDigest
+    source_checkpoint_digest: TaskDigest
+    original_group_digest: TaskDigest
+    original_deadline_at: datetime
+    original_claim_fence: int = Field(ge=0)
+    iteration_ids: list[TaskIdentity] = Field(default_factory=list, max_length=3)
+    stop_reason: Literal["operator_cancelled", "iterations_exhausted"]
+    stop_intent_digest: TaskDigest
+    model_quiescence_digest: TaskDigest
+    process_quiescence_digest: TaskDigest
+    all_original_accounting_digest: TaskDigest
+    request_response_approval_digest: TaskDigest
+    source_binding_digest: TaskDigest
+    no_learning: Literal[True] = True
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @field_validator("iteration_ids")
+    @classmethod
+    def exact_iteration_identities(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("repository stop iteration identities must be unique")
+        return value
+
+
 class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
     original_binding: GeneralTaskNativeChildBindingV1
     original_binding_digest: TaskDigest
@@ -462,8 +501,29 @@ class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
     artifact_digest: TaskDigest
     checkpoint_digest: TaskDigest
     closure: GeneralTaskToolClosureV1 | None = None
+    repository_closure: RepositoryNativeStopClosureV1 | None = None
     effect_debt: bool
     no_learning: Literal[True] = True
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_repository_absence(self, handler):
+        result = handler(self)
+        # The new optional field is the only absent field omitted.  Existing
+        # legacy explicit nulls (notably ``closure``) remain byte-for-byte
+        # present for old cancellation witnesses and their digests.
+        if self.repository_closure is None:
+            result.pop("repository_closure", None)
+        return result
+
+    @model_validator(mode="after")
+    def exact_repository_closure_binding(self):
+        if self.closure is not None and self.repository_closure is not None:
+            raise ValueError("ordinary and repository stop closures are mutually exclusive")
+        if self.repository_closure is not None:
+            if (self.repository_closure.original_binding != self.original_binding
+                    or self.repository_closure.original_input_digest != self.original_binding.input_digest):
+                raise ValueError("repository stop closure binding changed")
+        return self
 
 
 class GeneralTaskNativeCancelV1(ClosedTaskModel):

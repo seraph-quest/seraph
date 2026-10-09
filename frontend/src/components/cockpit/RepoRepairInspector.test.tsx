@@ -722,3 +722,41 @@ describe("RepoRepairInspector", () => {
     });
   });
 });
+
+// Closed Source-specific metadata; these negative fixtures grant no runtime authority.
+function repositorySourceStatus() {
+  return {
+    job_id: 'repository:source-test', status: 'running', revision: 6,
+    repository_review: {native_child_id:'general-tool:source-test',repository_job_id:'repository:source-test',iteration_index:1,
+      iteration_id:'a'.repeat(64),preparation_digest:'b'.repeat(64),contact_state:'not_started',source_preview_path:'/api/workflows/repo-repair/repository:source-test/source-preview'},
+    patch_proposal:null,approval:null,iterations:[],iteration_states:[],recovery_action:'review_code_egress',provider_contacted:false,no_learning:true,operator_visible:true,
+  };
+}
+
+describe('RepoRepairInspector current Source metadata boundary',()=>{
+  beforeEach(()=>{vi.stubGlobal('fetch',vi.fn());window.sessionStorage.clear();});
+  afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();window.sessionStorage.clear();});
+  it.each([
+    ['foreign job',{job_id:'repository:foreign'}],
+    ['private body',{private_source:'source must not reach metadata'}],
+    ['provider contact string',{provider_contacted:'false'}],
+    ['invisible source',{operator_visible:false}],
+    ['missing no learning',{no_learning:false}],
+    ['unpaired iteration metadata',{iterations:[{index:1,input_tree_digest:'a'.repeat(64),patch_digest:'b'.repeat(64),command_refs:['repository:execution:a'],result_artifacts:['repository:readback:a']}]}],
+    ['foreign preview route',{repository_review:{...repositorySourceStatus().repository_review,source_preview_path:'https://foreign.invalid/private'}}],
+    ['renewed iteration',{repository_review:{...repositorySourceStatus().repository_review,iteration_index:4}}],
+  ])('rejects %s before any private read',async(_label,change)=>{
+    const fetch=vi.fn().mockResolvedValue(response({...repositorySourceStatus(),...change}));vi.stubGlobal('fetch',fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test'/>);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Inspect exact source and diagnostics')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it('clears current Source metadata during operator rotation before late replies',async()=>{
+    const fetch=vi.fn().mockResolvedValueOnce(response(repositorySourceStatus())).mockImplementationOnce(()=>new Promise(()=>undefined));vi.stubGlobal('fetch',fetch);
+    const view=render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test'/>);
+    expect(await screen.findByText('Inspect exact source and diagnostics')).toBeInTheDocument();
+    view.rerender(<RepoRepairInspector {...inspectorProps} ownerSessionId='new-session' taskOwnerSessionId='new-session' jobId='repository:source-test'/>);
+    expect(screen.queryByText('Inspect exact source and diagnostics')).not.toBeInTheDocument();
+  });
+});

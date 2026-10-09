@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import or_
 from sqlmodel import col, select
 
@@ -1064,16 +1064,81 @@ class RepoChangeRetryRequest(BaseModel):
 
 
 class RepoRepairEgressConsentRequest(BaseModel):
-    """Explicit acknowledgement for one private source packet."""
+    """Explicit acknowledgement for one private source packet or iteration.
+
+    The legacy six-field packet acknowledgement remains accepted for older
+    roots.  A protected original repository root must use the closed
+    iteration variant, which binds the prepared request, route, envelope and
+    diagnostics evidence returned by the source owner.
+    """
 
     model_config = {"extra": "forbid", "strict": True}
 
-    expected_job_revision: int = Field(ge=1)
-    source_packet_digest: str = Field(min_length=64, max_length=64)
-    expected_source_manifest_digest: str = Field(min_length=64, max_length=64)
-    expected_profile_id: str = Field(min_length=1, max_length=128)
-    acknowledged_selected_source: bool
-    idempotency_key: str = Field(min_length=1, max_length=160)
+    expected_job_revision: int | None = Field(default=None, ge=1, strict=True)
+    source_packet_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_source_manifest_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
+    acknowledged_selected_source: bool | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
+
+    expected_iteration_index: int | None = Field(default=None, ge=1, le=3, strict=True)
+    expected_iteration_id: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_preparation_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_request_body_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_request_route_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_egress_envelope_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_diagnostics_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_redaction_version: str | None = Field(default=None, min_length=1, max_length=128)
+    acknowledged_diagnostics: bool | None = None
+
+    @model_validator(mode="after")
+    def closed_variant(self):
+        iteration_field_names = {
+            "expected_iteration_index",
+            "expected_iteration_id",
+            "expected_preparation_digest",
+            "expected_request_body_digest",
+            "expected_request_route_digest",
+            "expected_egress_envelope_digest",
+            "expected_diagnostics_digest",
+            "expected_redaction_version",
+            "acknowledged_diagnostics",
+        }
+        legacy_fields = (
+            self.expected_job_revision,
+            self.source_packet_digest,
+            self.expected_source_manifest_digest,
+            self.expected_profile_id,
+            self.acknowledged_selected_source,
+            self.idempotency_key,
+        )
+        iteration_fields = (
+            self.expected_iteration_index,
+            self.expected_iteration_id,
+            self.expected_preparation_digest,
+            self.expected_request_body_digest,
+            self.expected_request_route_digest,
+            self.expected_egress_envelope_digest,
+            self.expected_diagnostics_digest,
+            self.expected_redaction_version,
+            self.acknowledged_diagnostics,
+        )
+        supplied_iteration_fields = self.model_fields_set.intersection(iteration_field_names)
+        has_legacy = all(value is not None for value in legacy_fields)
+        has_iteration = all(value is not None for value in iteration_fields)
+        if supplied_iteration_fields and supplied_iteration_fields != iteration_field_names:
+            raise ValueError("repository iteration consent fields must be supplied as one closed variant")
+        if supplied_iteration_fields and not has_iteration:
+            raise ValueError("repository iteration consent fields cannot be null")
+        if not has_legacy:
+            raise ValueError("repository consent requires the complete legacy binding")
+        if has_iteration and self.acknowledged_diagnostics is not True:
+            raise ValueError("repository diagnostics acknowledgement is required")
+        return self
+
+    @property
+    def is_repository_iteration_variant(self) -> bool:
+        return self.expected_iteration_index is not None
 
 
 class RepoRepairResumeRequest(BaseModel):
@@ -7909,6 +7974,44 @@ async def _owned_repo_repair_job(
     return safe_job_id, job
 
 
+async def _repo_repair_source_root(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> bool:
+    """Classify only the genuine protected original repository root.
+
+    The source owner distinguishes an absent original checkpoint from a
+    corrupted one.  Keep that distinction intact: callers may fall back to
+    the legacy path only for a clean ``False`` result, never for an exception.
+    """
+
+    from src.workflows.repo_repair_source import repository_source_root
+
+    owner = WorkBoardOwner(
+        principal_id=str(operator.principal.principal_id),
+        session_id=str(operator.session_id),
+    )
+    async with get_session() as db:
+        return bool(await repository_source_root(db, job_id=job_id, owner=owner))
+
+
+def _repo_repair_source_owner():
+    """Use the live Source owner, including its original durable jobs and lane."""
+    from src.api.work_board import dispatcher as work_board_dispatcher
+    from src.work_board.general_task import GeneralTaskService
+    from src.workflows.repo_repair import RepoRepairService
+
+    tasks = work_board_dispatcher.general_tasks
+    source = getattr(tasks, "repository_source_service", None)
+    if (type(tasks) is not GeneralTaskService or not tasks.started
+            or type(source) is not RepoRepairService or source.jobs is None):
+        raise HTTPException(status_code=503, detail={
+            "code": "general_task_inactive", "recovery_action": "restore_general_task_service",
+            "operator_visible": True,
+        })
+    return tasks, source, source.jobs
+
+
 async def _repo_repair_rows(
     job_id: str,
     operator: AuthenticatedOperator,
@@ -8269,6 +8372,30 @@ async def _safe_repo_repair_projection(
 async def get_repo_repair_source_preview(job_id: str, request: Request):
     operator = _require_authenticated_capability_operator(request)
     safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    try:
+        source_root = await _repo_repair_source_root(safe_job_id, operator)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+    if source_root:
+        from src.workflows.repo_repair_source import repository_source_preview
+
+        _tasks, source, jobs = _repo_repair_source_owner()
+        try:
+            return await repository_source_preview(
+                source,
+                jobs,
+                job_id=safe_job_id,
+                owner=WorkBoardOwner(
+                    principal_id=str(operator.principal.principal_id),
+                    session_id=str(operator.session_id),
+                ),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _repo_repair_error(exc) from exc
     packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
     if packet is None:
         raise HTTPException(
@@ -8339,6 +8466,62 @@ async def grant_repo_repair_code_egress_consent(
 ):
     operator = _require_authenticated_capability_operator(request)
     safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    try:
+        source_root = await _repo_repair_source_root(safe_job_id, operator)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+    if source_root:
+        if not req.is_repository_iteration_variant:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "repair_iteration_consent_required",
+                    "recovery_action": "refresh_source_preview",
+                    "operator_visible": True,
+                },
+            )
+        if req.acknowledged_selected_source is not True:
+            raise HTTPException(status_code=422, detail={"code": "repair_source_acknowledgement_required"})
+        for field_name in (
+            "expected_iteration_id",
+            "expected_preparation_digest",
+            "expected_request_body_digest",
+            "expected_request_route_digest",
+            "expected_egress_envelope_digest",
+            "expected_diagnostics_digest",
+        ):
+            value = getattr(req, field_name)
+            if (
+                not isinstance(value, str)
+                or value.lower() != value
+                or not re.fullmatch(r"[0-9a-f]{64}", value)
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": f"{field_name}_invalid", "operator_visible": True},
+                )
+        general_task_service, source, jobs = _repo_repair_source_owner()
+        from src.workflows.repo_repair_source import grant_repository_iteration_consent
+
+        try:
+            return await grant_repository_iteration_consent(
+                source,
+                jobs,
+                job_id=safe_job_id,
+                owner=WorkBoardOwner(
+                    principal_id=str(operator.principal.principal_id),
+                    session_id=str(operator.session_id),
+                ),
+                request=req,
+                general_task_service=general_task_service,
+                principal=operator.principal,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _repo_repair_error(exc) from exc
     if req.acknowledged_selected_source is not True:
         raise HTTPException(status_code=422, detail={"code": "repair_source_acknowledgement_required"})
     for field_name, value in (
@@ -8463,6 +8646,27 @@ async def resume_repo_repair(
 
     operator = _require_authenticated_capability_operator(request)
     safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    try:
+        source_root = await _repo_repair_source_root(safe_job_id, operator)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+    if source_root:
+        from src.workflows.repo_repair_source import execute_repository_iteration
+
+        _tasks, source, jobs = _repo_repair_source_owner()
+        try:
+            return await execute_repository_iteration(
+                source, jobs, job_id=safe_job_id,
+                owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id),
+                    session_id=str(operator.session_id)),
+                request=req, principal=operator.principal,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _repo_repair_error(exc) from exc
     packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
     if proposal is None:
         raise HTTPException(
@@ -8637,6 +8841,26 @@ async def resume_repo_repair(
 async def get_repo_repair(job_id: str, request: Request):
     operator = _require_authenticated_capability_operator(request)
     safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    try:
+        source_root = await _repo_repair_source_root(safe_job_id, operator)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+    if source_root:
+        from src.workflows.repo_repair_source import repository_operator_projection
+
+        _tasks, source, jobs = _repo_repair_source_owner()
+        try:
+            return await repository_operator_projection(
+                source, jobs, job_id=safe_job_id,
+                owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id),
+                    session_id=str(operator.session_id)),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _repo_repair_error(exc) from exc
     packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
     return await _safe_repo_repair_projection(
         safe_job_id,

@@ -15,6 +15,7 @@ from src.work_board.contracts import (
     GeneralTaskCurrentManifestV1, GeneralTaskNativeChildBindingV1,
     GeneralTaskApprovalTransitionV1, GeneralTaskToolClosureV1,
     GeneralTaskCheckpointReservationV1, GeneralTaskNativeCancelChildV1, GeneralTaskNativeCancelV1,
+    RepositoryNativeStopClosureV1,
 )
 
 _NATIVE_CHECKPOINT_BYTES = 4 * 1024 * 1024
@@ -1820,7 +1821,8 @@ def _assert_joint_manifest(parent, task, attempt, manifest):
 
 
 def _cancel_state(children):
-    if any(item.original_attempt_count and item.closure is None for item in children):
+    if any(item.original_attempt_count and item.closure is None
+           and item.repository_closure is None for item in children):
         return "pending"
     if any(item.effect_debt for item in children):
         return "callback_closed_outcome_debt"
@@ -1874,13 +1876,20 @@ def _cancel_witness(parent, task, attempt):
             or binding.original_deadline_at != original.original_deadline_at
             or binding.native_deadline_at != original.native_deadline_at
             or binding.goal_id != witness.goal_id or binding.goal_revision != witness.goal_revision
-            or (item.original_attempt_count == 0 and (item.original_claim_fence != 0 or item.closure is not None))
+            or (item.original_attempt_count == 0 and (item.original_claim_fence != 0
+                or item.closure is not None or item.repository_closure is not None))
             or (item.original_attempt_count == 1 and item.original_claim_fence <= 0)):
             raise DurableJobLeaseError("original cancellation child binding changed")
         if item.closure is not None:
             closure = _protected_payload(parent, cleanup_checkpoint_id(binding, item.original_claim_fence), GeneralTaskToolClosureV1)
             if closure != item.closure or closure.original_binding_digest != item.original_binding_digest:
                 raise DurableJobLeaseError("original cancellation callback closure changed")
+        if item.repository_closure is not None:
+            if (type(item.repository_closure) is not RepositoryNativeStopClosureV1
+                    or item.closure is not None
+                    or item.repository_closure.original_binding != binding
+                    or item.repository_closure.original_input_digest != binding.input_digest):
+                raise DurableJobLeaseError("original repository stop closure changed")
     return witness
 
 
@@ -1896,7 +1905,6 @@ async def _cancel_original(jobs, db, parent_id, *, observation=False):
     """Cancellation-only metadata compiler; expired execution clocks grant nothing."""
     from src.db.models import Goal
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _as_utc
-    from src.work_board.pipelines import root_binding
     parent = await jobs._fetch(db, parent_id)
     assert_original_parent_authority(parent)
     manifest = read_manifest(parent)
@@ -1932,6 +1940,7 @@ async def _cancel_original(jobs, db, parent_id, *, observation=False):
             raise DurableJobLeaseError("original cancelled workspace Root seals disagree")
         root_digest = next(iter(original_roots))
     else:
+        from src.work_board.pipelines import root_binding
         root_digest = _digest(root_binding())
     creation = _digest(["general-task.creation.v1", parent.run_identity, parent.input_digest,
         parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
@@ -2044,13 +2053,31 @@ async def _cancel_result(jobs, db, parent_id, task_id, attempt_id, event=None):
         "cancellation": read_general_task_native_cancel(parent, task, attempt), "job": _serialize(parent)}
 
 
-async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task_revision):
+async def cancel_native_parent(
+    jobs,
+    parent_id,
+    *,
+    operator_owner,
+    expected_task_revision,
+    repository_stop_witness=None,
+):
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.repository import _begin_sqlite_immediate, WorkBoardRepository
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _utc_now, _as_utc
+    if repository_stop_witness is not None:
+        from src.workflows.repo_repair_source import assert_repository_stop_witness
+        assert_repository_stop_witness(repository_stop_witness)
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
-        parent, task, attempt, previous, artifact, goal, children = await _cancel_original(jobs, db, parent_id)
+        # A repository stop witness carries the source-owned original Root
+        # binding that was staged before entering this writer.  Keep the
+        # generic cancellation path unchanged, but use its observational
+        # root-digest branch for the private source path so cancellation does
+        # not call root_binding() (and therefore does no filesystem/provider
+        # work) while the SQLite transaction is open.  The source validator
+        # rechecks the current Goal and staged Root binding below.
+        parent, task, attempt, previous, artifact, goal, children = await _cancel_original(
+            jobs, db, parent_id, observation=repository_stop_witness is not None)
         if (type(operator_owner) is not WorkBoardOwner or operator_owner.principal_id != task.owner_principal_id
             or operator_owner.session_id != task.owner_session_id or task.task_revision != expected_task_revision):
             raise DurableJobLeaseError("original native cancellation owner/revision changed")
@@ -2067,14 +2094,61 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
         if (reservation.parent_job_id != parent_id or reservation.attempt_id != attempt.attempt_id
             or reservation.creation_digest != previous.creation_digest or reservation.invocation_id is not None):
             raise DurableJobLeaseError("original cancellation capacity reservation changed")
+        repository_closures = {}
+        if repository_stop_witness is not None:
+            # The source-private witness is validated inside this existing
+            # writer.  A public projection, copied dataclass, or absent source
+            # owner can never enter the generic cancellation path.
+            try:
+                from src.workflows.repo_repair_source import validate_repository_stop_witness
+            except (ImportError, AttributeError) as exc:
+                raise DurableJobLeaseError("repository stop witness validator unavailable") from exc
+            repository_closures = await validate_repository_stop_witness(
+                db,
+                repository_stop_witness,
+                parent=parent,
+                task=task,
+                attempt=attempt,
+                children=children,
+            )
+            if type(repository_closures) is not dict or not repository_closures:
+                raise DurableJobLeaseError("repository stop witness did not produce closed child evidence")
+            child_ids = {child.run_identity for child in children}
+            if not set(repository_closures).issubset(child_ids) or any(type(child_id) is not str or child_id not in child_ids
+                   or type(closure) is not RepositoryNativeStopClosureV1
+                   or closure.original_binding.invocation_id != child_id
+                   or closure.original_binding != child_binding(next(child for child in children if child.run_identity == child_id))
+                   or json.loads(next(child for child in children if child.run_identity == child_id).arguments_json).get("tool_id") != "repository_work"
+                   for child_id, closure in repository_closures.items()):
+                raise DurableJobLeaseError("repository stop witness child binding changed")
         entries = []
         for child in children:
             binding = child_binding(child)
-            claimed_fence = child.fencing_token if child.attempt_count else 0
+            repository_closure = repository_closures.get(child.run_identity)
+            if (repository_closure is not None
+                    and (repository_closure.original_binding != binding
+                         or repository_closure.original_input_digest != binding.input_digest)):
+                raise DurableJobLeaseError("repository stop closure current binding changed")
+            if repository_closure is not None:
+                ordinary_cleanup = [item for item in _history(parent)
+                    if item.get("checkpoint_id") == cleanup_checkpoint_id(
+                        binding, repository_closure.original_claim_fence)]
+                if any(item.get("payload", {}).get("schema_version") == "general_task.tool_closure.v1"
+                       for item in ordinary_cleanup):
+                    raise DurableJobLeaseError("repository stop closure conflicts with ordinary callback closure")
+            claimed_fence = (
+                repository_closure.original_claim_fence
+                if repository_closure is not None
+                else (child.fencing_token if child.attempt_count else 0)
+            )
+            if (repository_closure is not None
+                    and ((child.attempt_count and claimed_fence != child.fencing_token)
+                         or (not child.attempt_count and claimed_fence != 0))):
+                raise DurableJobLeaseError("repository stop closure claim fence changed")
             closure = None
             if child.attempt_count:
                 # approval_wait fenced a positively closed precontact callback.
-                if previous.phase == "approval_wait":
+                if repository_closure is None and previous.phase == "approval_wait":
                     wait = _protected_payload(parent, approval_checkpoint_id(binding), GeneralTaskApprovalTransitionV1)
                     if (wait.original_binding != binding or wait.phase != "approval_wait"
                         or wait.current_child_fence != child.fencing_token
@@ -2083,18 +2157,20 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
                         raise DurableJobLeaseError("original cancelled approval wait changed")
                     claimed_fence = wait.original_claim_fence
                 _require_callback_reservation(parent, binding, claimed_fence)
-                record = next(item for item in _history(parent) if item["checkpoint_id"] == cleanup_checkpoint_id(binding, claimed_fence))
-                if record["payload"].get("schema_version") == "general_task.tool_closure.v1":
-                    closure = _protected_payload(parent, record["checkpoint_id"], GeneralTaskToolClosureV1)
-                if previous.phase == "approval_wait" and (closure is None
-                    or closure.outcome != "approval_precontact" or closure.approval_id != wait.approval_id
-                    or closure.approval_fingerprint != wait.approval_fingerprint
-                    or _digest(closure.model_dump(mode="json")) != wait.cleanup_receipt_digest):
-                    raise DurableJobLeaseError("original cancelled precontact closure changed")
+                if repository_closure is None:
+                    record = next(item for item in _history(parent)
+                        if item["checkpoint_id"] == cleanup_checkpoint_id(binding, claimed_fence))
+                    if record["payload"].get("schema_version") == "general_task.tool_closure.v1":
+                        closure = _protected_payload(parent, record["checkpoint_id"], GeneralTaskToolClosureV1)
+                    if previous.phase == "approval_wait" and (closure is None
+                        or closure.outcome != "approval_precontact" or closure.approval_id != wait.approval_id
+                        or closure.approval_fingerprint != wait.approval_fingerprint
+                        or _digest(closure.model_dump(mode="json")) != wait.cleanup_receipt_digest):
+                        raise DurableJobLeaseError("original cancelled precontact closure changed")
             effects = json.loads(child.effect_receipts_json or "[]")
-            safe_effects = bool(closure and (closure.outcome == "approval_precontact" or
+            safe_effects = bool(repository_closure or (closure and (closure.outcome == "approval_precontact" or
                 (closure.outcome == "returned" and child.status in {"succeeded", "degraded"}
-                 and effects and all(item.get("status") in {"succeeded", "cancelled", "failed"} for item in effects))))
+                 and effects and all(item.get("status") in {"succeeded", "cancelled", "failed"} for item in effects)))))
             immutable_completed = child.status in {"succeeded", "degraded"} and safe_effects
             entries.append(GeneralTaskNativeCancelChildV1(original_binding=binding,
                 original_binding_digest=_digest(binding.model_dump(mode="json")), original_attempt_count=child.attempt_count,
@@ -2103,7 +2179,8 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
                 current_child_revision=child.revision + int(not immutable_completed),
                 effect_digest=_digest(effects), artifact_digest=_digest(json.loads(child.artifact_receipts_json or "[]")),
                 checkpoint_digest=_digest(json.loads(child.checkpoint_receipts_json or "[]")),
-                closure=closure, effect_debt=bool(child.attempt_count and not safe_effects)))
+                closure=closure, repository_closure=repository_closure,
+                effect_debt=bool(child.attempt_count and not safe_effects)))
         state = _cancel_state(entries)
         proposed = _phase_successor(previous, phase="cancelled" if state == "fully_cancelled" else "unknown_recovery",
             task_revision=task.task_revision + 1, job_fence=parent.fencing_token + 1,
@@ -2126,6 +2203,14 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
         await _cancel_cas_job(db, parent, {**values, "status": "cancelled" if state == "fully_cancelled" else "blocked",
             "failure_reason": "general_task_native_cancel_" + state, "fencing_token": proposed.job_fence,
             "lease_owner": None, "lease_expires_at": None}, child_entries=entries, child_rows=children)
+        if repository_stop_witness is not None:
+            try:
+                from src.workflows.repo_repair_source import complete_repository_stop_in_writer
+            except (ImportError, AttributeError) as exc:
+                raise DurableJobLeaseError("repository stop completion unavailable") from exc
+            # The source terminal Root/RepoTask mutation is part of this same
+            # SQL transaction, after the existing C1 CAS and before commit.
+            await complete_repository_stop_in_writer(db, repository_stop_witness, jobs=jobs)
         await db.refresh(task)
         event = await WorkBoardRepository._event(db, task, operator_owner, kind="attempt.cancel_requested",
             metadata={"attempt_id": attempt.attempt_id, "workflow_run_id": parent_id,

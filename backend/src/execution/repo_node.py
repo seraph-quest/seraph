@@ -632,8 +632,20 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 shutil.rmtree(stage)
                 if stage.exists():
                     raise RepoSandboxError("Original Node stage cleanup unproven", terminal_status="unknown_external_effect")
+                marker_result = result
+                if job.iteration_binding is not None:
+                    # The complete physically read-back result remains in the
+                    # manifest/readback and actual sealed cleanup witness.
+                    # Keep the fixed 16 KiB process marker bounded without
+                    # duplicating the potentially large dependency file list.
+                    marker_result = {key: value for key, value in result.items()
+                                     if key != "tested_file_hash_metadata"}
+                    marker_result["metadata_digest"] = hashlib.sha256(json.dumps(
+                        result["tested_file_hash_metadata"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    marker_result["supervisor_result_digest"] = hashlib.sha256(json.dumps(
+                        result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 marker.update(phase="iteration_cleanup_verified" if job.iteration_binding is not None else "cleanup_verified",
-                              status="iteration_failed_quiescent" if job.iteration_binding is not None and status == "failed" else status,cleanup_proven=True,process_cleanup=result,
+                              status="iteration_failed_quiescent" if job.iteration_binding is not None and status == "failed" else status,cleanup_proven=True,process_cleanup=marker_result,
                               terminal_receipt={"status":status,"manifest_sha256":hashlib.sha256(encoded).hexdigest(),"readback_sha256":hashlib.sha256(encoded).hexdigest(),"stage_binding":marker["stage_binding"]})
                 self._write_job_marker(job.job_id,marker)
                 terminal = {"status":status,"failure_reason":result.get("reason"),"manifest":manifest,"readback":manifest,

@@ -2539,6 +2539,15 @@ def _recovered_descriptor(kind, value):
     return value
 
 
+async def _recovered_repository_terminal_events(db, *, task_id):
+    from sqlalchemy import select
+    from src.db.models import WorkBoardEvent
+    return list((await db.scalars(select(WorkBoardEvent).where(
+        WorkBoardEvent.task_id == task_id,
+        WorkBoardEvent.kind == "attempt.repository_verified",
+    ).order_by(WorkBoardEvent.event_id).limit(2).execution_options(populate_existing=True))).all())
+
+
 async def _expect_recovered_repository_final_writer(jobs, *, completion_witness, kind, job_id, descriptor):
     from src.workflows.repo_repair_source_recovery import repository_completion_scoped_binding
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical
@@ -2576,6 +2585,25 @@ async def _expect_recovered_repository_final_writer(jobs, *, completion_witness,
         from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
         pending["publication_artifact"] = verify_staged_task_artifact(descriptor["staged_artifact"],
             parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest)
+    if kind == "terminal":
+        from src.db.models import WorkBoardTask
+        from src.work_board.repository import _safe_metadata
+        original = bound["context"]["original"]
+        tasks = [json.loads(raw) for (model, _key), raw in state["rows"].items()
+            if model is WorkBoardTask and json.loads(raw)["task_id"] == original["repository_task_id"]]
+        if len(tasks) != 1:
+            raise DurableJobLeaseError("recovered original terminal event task changed")
+        task = tasks[0]
+        pending["terminal_event"] = {"task_id": task["task_id"],
+            "owner_principal_id": task["owner_principal_id"], "owner_session_id": task["owner_session_id"],
+            "actor_principal_id": bound["owner"].principal_id, "actor_session_id": bound["owner"].session_id,
+            "kind": "attempt.repository_verified", "metadata_json": _safe_metadata({
+                "attempt_id": original["repository_attempt_id"], "workflow_run_id": bound["job_id"],
+                "readback_id": "repository-final:" + bound["iteration_id"], "no_learning": True}),
+            "mutation_idempotency_key": None, "mutation_request_digest": None}
+        async with jobs._session() as db:
+            if await _recovered_repository_terminal_events(db, task_id=task["task_id"]):
+                raise DurableJobLeaseError("recovered original terminal event already exists")
     state["pending"] = pending
 
 
@@ -2648,6 +2676,9 @@ async def verify_recovered_repository_final_writer(jobs, db, run, *, completion_
     elif _canonical(actual) != _canonical(expected):
         raise DurableJobLeaseError("recovered finalizer original descriptor changed")
     await _recheck_recovered_finalizer_rows(db, jobs, state, completion_witness)
+    if kind == "terminal" and await _recovered_repository_terminal_events(
+            db, task_id=pending["terminal_event"]["task_id"]):
+        raise DurableJobLeaseError("recovered original terminal event absence changed")
     if kind == "publish":
         state["final_witness"] = descriptor["repository_final_witness"]
     if state.get("final_witness") is not None:
@@ -2746,7 +2777,8 @@ def _recovered_terminal_delta(old, current, pending, timestamp, bound):
     return old
 
 
-async def capture_recovered_repository_final_writer(jobs, db, run, *, completion_witness, kind):
+async def capture_recovered_repository_final_writer(jobs, db, run, *, completion_witness, kind,
+        _terminal_event=None):
     """Freeze a verified finite SQL delta; publication is not yet observed."""
     from types import SimpleNamespace
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest, _as_utc, _utc_now
@@ -2815,6 +2847,20 @@ async def capture_recovered_repository_final_writer(jobs, db, run, *, completion
         if _canonical(current) != _canonical(expected):
             raise DurableJobLeaseError("recovered finalizer exact original write delta changed")
         after[identity] = _canonical(current)
+    if kind == "terminal":
+        from src.db.models import WorkBoardEvent
+        events = await _recovered_repository_terminal_events(db, task_id=pending["terminal_event"]["task_id"])
+        if (type(_terminal_event) is not WorkBoardEvent or type(_terminal_event.event_id) is not int
+                or _terminal_event.event_id <= 0 or len(events) != 1 or events[0] is not _terminal_event):
+            raise DurableJobLeaseError("recovered original terminal event insertion changed")
+        event = _terminal_event.model_dump(mode="json")
+        expected = {**pending["terminal_event"], "event_id": _terminal_event.event_id,
+            "created_at": timestamp(event["created_at"])}
+        if _canonical(event) != _canonical(expected):
+            raise DurableJobLeaseError("recovered original terminal event fields changed")
+        after[(WorkBoardEvent, _terminal_event.event_id)] = _canonical(event)
+    elif _terminal_event is not None:
+        raise DurableJobLeaseError("recovered terminal event cannot enter another write")
     from src.db.models import OperatorSession, WorkBoardInputArtifact
     bound = state["bound"]
     if (_utc_now() >= bound["context"]["binding"].native_deadline_at
@@ -2843,6 +2889,12 @@ async def observe_recovered_repository_final_writer(jobs, *, completion_witness,
             row = await db.get(model, key, populate_existing=True)
             if row is None or _canonical(row.model_dump(mode="json")) != expected:
                 raise DurableJobLeaseError("recovered finalizer committed readback changed")
+        if kind == "terminal":
+            from src.db.models import WorkBoardEvent
+            events = await _recovered_repository_terminal_events(db, task_id=pending["terminal_event"]["task_id"])
+            expected_events = [raw for (model, _key), raw in pending["after"].items() if model is WorkBoardEvent]
+            if len(events) != 1 or [_canonical(event.model_dump(mode="json")) for event in events] != expected_events:
+                raise DurableJobLeaseError("recovered original terminal event committed membership changed")
     state["rows"], state["phase"], state["pending"] = pending["after"], state["phase"] + 1, None
 
 
@@ -3275,12 +3327,12 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
         await _cas_repository_stop_board_row(db, repo_attempt, {
             "outcome": "repository_cumulative_repair_verified", "ended_at": now,
             "lease_owner": None, "lease_expires_at": None, "updated_at": now})
-        await WorkBoardRepository._event(db, repo_task, owner, kind="attempt.repository_verified",
+        terminal_event = await WorkBoardRepository._event(db, repo_task, owner, kind="attempt.repository_verified",
             metadata={"attempt_id": repo_attempt.attempt_id, "workflow_run_id": job_id,
                 "readback_id": "repository-final:" + identity, "no_learning": True})
         if _recovered_completion is not None:
             await capture_recovered_repository_final_writer(jobs, db, await jobs._fetch(db, job_id),
-                completion_witness=_recovered_completion, kind="terminal")
+                completion_witness=_recovered_completion, kind="terminal", _terminal_event=terminal_event)
         await db.commit()
     if _recovered_completion is not None:
         await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="terminal")
@@ -3292,7 +3344,7 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
         lane.clear_quarantine()
     else:
         assert_repository_scoped_completion(_recovered_completion, service=service, jobs=jobs, job_id=job_id, owner=owner)
-        if terminal["status"] != "succeeded" or terminal["fencing_token"] != root_fence:
+        if terminal["status"] != "succeeded" or terminal["lease"]["fencing_token"] != root_fence:
             raise DurableJobLeaseError("recovered original terminal readback changed")
     published["repository_root"] = terminal
     published["repository_task_status"] = "done"

@@ -449,7 +449,7 @@ function validateRepositoryStatus(value: unknown, jobId: string): RepositorySour
   if (Object.prototype.hasOwnProperty.call(value, "repository_stop")) {
     if (!isRecord(stop) || !exactKeys(stop, ["reason", "pending", "limit_evidence", "limit_evidence_digest"])
       || !["operator_cancelled", "iterations_exhausted", ...automaticReasons].includes(String(stop.reason)) || typeof stop.pending !== "boolean"
-      || (stop.pending ? value.status !== "running" || value.recovery_action !== "repository_stop_pending"
+      || (stop.pending ? !["running", "unknown_external_effect"].includes(String(value.status)) || value.recovery_action !== "repository_stop_pending"
         : value.status !== (stop.reason === "operator_cancelled" ? "cancelled" : "failed")
           || value.recovery_action !== (stop.reason === "operator_cancelled" ? "repository_stopped" : `original_${stop.reason}`))) return reject();
     const evidence = stop.limit_evidence;
@@ -1273,7 +1273,7 @@ export function RepoRepairInspector({
       <div>Provider contact: {current.provider_contacted ? "recorded" : "not recorded"} · no learning</div>
       {current.repository_stop && <div>
         <div>Stop reason: {current.repository_stop.reason}</div>
-        <div role="status">{current.repository_stop.pending ? "Stop pending. Original durable and physical capacities remain retained." : "Original repository stop recorded."}</div>
+        <div role="status">{current.repository_stop.pending ? "Original reservation remains held. Physical cleanup is pending verification." : "Original repository stop recorded."}</div>
         {current.repository_stop.limit_evidence && <div>
           <div>Recorded Root cost: {current.repository_stop.limit_evidence.root_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_root_max_cost_microusd} microusd</div>
           <div>Recorded group cost: {current.repository_stop.limit_evidence.group_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_group_max_cost_microusd} microusd</div>

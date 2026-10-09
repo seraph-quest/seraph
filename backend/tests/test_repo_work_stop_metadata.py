@@ -102,7 +102,7 @@ async def test_actual_prepared_without_stop_retains_normal_twelve_keys(accountin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["pending", "terminal", "prepared"])
+@pytest.mark.parametrize("state", ["pending", "terminal", "prepared", "unknown_pending"])
 async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_db, monkeypatch, repository_admission_signer, state):
     import httpx
     from config.settings import settings
@@ -117,7 +117,47 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
         return token, operator
     monkeypatch.setattr(auth_service, "create_session", capture_session)
     factory, owner, source, jobs, binding, root_id, service = await stopped_original(accounting_db, monkeypatch,
-        pending=state == "pending", prepared=state == "prepared")
+        pending=state == "pending", prepared=state in {"prepared", "unknown_pending"})
+    unknown_context = None
+    if state == "unknown_pending":
+        from src.db.models import Goal
+        async with factory() as db:
+            root = await jobs._fetch(db, root_id)
+            original = read_repository_original(root)[0]
+            hold = jobs._repo_repair_reservation_state(root)
+            goal = await db.get(Goal, binding.goal_id)
+            goal_before = goal.model_dump(mode="json")
+            unknown_context = {"original": original, "reservation": hold,
+                "owner": {"principal_id": owner.principal_id, "session_id": owner.session_id},
+                "root_id": root_id, "goal": goal_before, "authority_digest": root.authority_digest,
+                "fencing_token": root.fencing_token, "revision_before": root.revision,
+                "lease_owner": root.lease_owner}
+        transitioned = await jobs.transition_job(root_id, "unknown_external_effect",
+            owner=unknown_context["lease_owner"], fencing_token=unknown_context["fencing_token"],
+            expected_revision=unknown_context["revision_before"], expected_status="running",
+            reason="repository_callback_closure_unproven")
+        assert transitioned["status"] == "unknown_external_effect"
+        async with factory() as db:
+            root = await jobs._fetch(db, root_id)
+            assert read_repository_original(root)[0] == original
+            assert jobs._repo_repair_reservation_state(root) == hold and hold["status"] == "held"
+            assert root.authority_digest == unknown_context["authority_digest"]
+            assert root.fencing_token == unknown_context["fencing_token"]
+            assert (await db.get(Goal, binding.goal_id)).model_dump(mode="json") == goal_before
+            assert list((await db.scalars(select(InferenceCostReservation))).all()) == []
+        assert source._iterative_lanes[root_id].acquired
+        unknown_context["revision_after"] = transitioned["revision"]
+        from src.workflows import repo_repair_source as source_module
+        from src.workflows.repo_repair_stop import stop_repository_root
+        original_validator = source_module.validate_repository_stop_witness
+        async def rollback_terminal(*args, **kwargs):
+            await original_validator(*args, **kwargs)
+            raise DurableJobLeaseError("disposable actual terminal rollback")
+        with monkeypatch.context() as pending_patch:
+            pending_patch.setattr(source_module, "validate_repository_stop_witness", rollback_terminal)
+            stopped = await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
+                general_task_service=service, reason="operator_cancelled")
+        assert stopped["pending"] is True
     # Existing singleton owns the exact fixture Source and durable repository.
     monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
@@ -145,12 +185,20 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
         assert task["task"]["repository_review"] == status["repository_review"]
         assert set(status) == NORMAL_KEYS | ({"repository_stop"} if state != "prepared" else set())
         if state != "prepared":
-            assert status["repository_stop"]["pending"] is (state == "pending")
+            if state == "unknown_pending":
+                assert status["repository_stop"]["pending"] is True
+            else:
+                assert status["repository_stop"]["pending"] is (state == "pending")
+        if state == "unknown_pending":
+            assert status["status"] == "unknown_external_effect"
+            assert status["recovery_action"] == "repository_stop_pending"
         foreign_token, _ = await create_session()
         client.cookies.set(settings.operator_auth_cookie_name, foreign_token)
         await get(prefix, 403)
     (source._workspace() / ("actual-auth-stop-" + state + ".json")).write_text(json.dumps({
         "owner": {"principal_id": owner.principal_id, "session_id": owner.session_id}, "captures": captures}, sort_keys=True))
+    if unknown_context is not None:
+        (source._workspace() / "actual-auth-stop-unknown-context.json").write_text(json.dumps(unknown_context, sort_keys=True))
 
 
 @pytest.mark.asyncio

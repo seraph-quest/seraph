@@ -50,7 +50,7 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None):
     git(repository, 'commit', '-m', 'actual source')
     work = RepoWorkInput.model_validate(selection(repository_ref='example',
         base_commit=git(repository, 'rev-parse', 'HEAD').decode().strip()))
-    source = RepoRepairService()
+    source = RepoRepairService(session_factory=factory)
     assert source.sandbox.config.model_dump(mode='json') == settings.repo_sandbox.model_dump(mode='json')
     class FixedDescriptorView:
         def descriptors(self):
@@ -244,8 +244,10 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
     from datetime import datetime, timedelta, timezone
     from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardTaskCreate
     from src.work_board.input_artifacts import prepare_input_artifact
-    from src.workflows.job_runtime import DurableJobSpec, DurableJobIdentity, _digest, DurableJobAdmissionDenied
-    from src.workflows.repo_repair_source import prepare_repository_original_admission, read_repository_original
+    from src.workflows.job_runtime import (DurableJobSpec, DurableJobIdentity, _digest,
+        DurableJobAdmissionDenied, DurableJobLeaseError)
+    from src.workflows.repo_repair_source import (prepare_repository_original_admission,
+        read_repository_original, stage_repository_canonical_source)
     async with factory.accounting_sessions() as db:
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id='engineering.repo-repair.v1', goal_id='goal:fixture', goal_revision=1,
@@ -266,6 +268,9 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
         check, scope = await prepare_repository_original_admission(service.repository_source_service, db,
             native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
             repository_attempt_id=claimed.attempt.attempt_id)
+        stale_check, stale_scope = await prepare_repository_original_admission(service.repository_source_service, db,
+            native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
+            repository_attempt_id=claimed.attempt.attempt_id)
     run_id = 'repo-repair-actual-original-source'
     inputs = {'schema_version': 1, 'capability_id': 'engineering.repo-repair.v1',
         'input': request.plan.steps[0].input}
@@ -278,15 +283,17 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
         inputs=inputs, session_id=owner.session_id, operator_session_id=owner.session_id,
         goal_id='goal:fixture', goal_revision=1, deadline_at=cutoff,
         resource_claims=('repo-repair-execution',), declared_authority=authority,
-        max_attempts=1, max_outstanding_jobs=goal_capacity or 1)
+        max_attempts=1, max_outstanding_jobs=goal_capacity or 1, run_fingerprint=_digest(inputs))
     if goal_capacity != 2:
-        async with scope():
-            with pytest.raises(DurableJobAdmissionDenied, match='goal_budget_outstanding_limit'):
+        with pytest.raises(DurableJobAdmissionDenied, match='goal_budget_outstanding_limit'):
+            async with scope():
                 await jobs.admit_job(spec, admission_authority_check=check)
         async with factory() as db:
             assert await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id)) is None
             assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
         return
+    with pytest.raises(DurableJobLeaseError, match='source admission scope required'):
+        await jobs.admit_job(spec, admission_authority_check=check)
     async with scope():
         admitted = await jobs.admit_job(spec, admission_authority_check=check)
     async with factory() as db:
@@ -303,6 +310,78 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
         assert payload['original_input'] == request.plan.steps[0].input
         assert payload['original_deadline_at'] == cutoff.isoformat()
         assert payload['group']['group_id']
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+    # A permanent mapping denies another new-only producer before physical
+    # private reads, even if a stored terminal/corrupt mapping is presented.
+    async def forbidden_physical(*args, **kwargs):
+        raise AssertionError('mapping replay must not read private source')
+    def forbidden_private(*args, **kwargs):
+        raise AssertionError('stale source scope must not read private source')
+    with monkeypatch.context() as blocked_reads:
+        blocked_reads.setattr('src.workflows.general_task_guard.assert_general_task_child_current', forbidden_physical)
+        blocked_reads.setattr(service.repository_source_service, '_read_private_artifact', forbidden_private)
+        with pytest.raises(DurableJobLeaseError, match='permanent repository mapping'):
+            async with stale_scope():
+                await jobs.admit_job(spec, admission_authority_check=stale_check)
+        for mapping_state in ('accepted', 'cancelled', 'unknown_external_effect'):
+            async with factory.accounting_sessions() as db:
+                run = await jobs._fetch(db, run_id)
+                run.status = mapping_state
+            async with factory() as db:
+                with pytest.raises(DurableJobLeaseError, match='permanent repository mapping'):
+                    await prepare_repository_original_admission(service.repository_source_service, db,
+                        native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
+                        repository_attempt_id=claimed.attempt.attempt_id)
+
+    async with factory.accounting_sessions() as db:
+        run = await jobs._fetch(db, run_id)
+        run.status = 'accepted'
+
+    # Actual original link/claim permits control-plane inspection, but a
+    # missing owned egress consent cannot mint any accounting/source witness.
+    async with factory.accounting_sessions() as db:
+        await service.repository.link_attempt_workflow_run(db, created.task.task_id, claimed.attempt.attempt_id,
+            workflow_run_id=run_id, expected_revision=claimed.task.task_revision,
+            board_fence=claimed.attempt.fencing_token, lease_owner=claimed.attempt.lease_owner,
+            workflow_projection=admitted,
+            expected_identity={'job_id': run_id, 'owner_kind': spec.identity.owner_kind,
+                'owner_principal_id': spec.identity.owner_principal_id, 'service_id': spec.service_id,
+                'operator_session_id': spec.operator_session_id, 'session_id': spec.session_id,
+                'goal_id': spec.goal_id, 'goal_revision': spec.goal_revision,
+                'job_kind': spec.identity.job_kind, 'capability_version': spec.identity.capability_version,
+                'input_digest': _digest(spec.inputs), 'authority_digest': _digest(spec.declared_authority),
+                'run_fingerprint': spec.run_fingerprint, 'idempotency_scope': spec.identity.idempotency_scope,
+                'idempotency_key': spec.identity.idempotency_key})
+    await jobs.queue_job(run_id)
+    await jobs.claim_job(run_id, owner=claimed.attempt.lease_owner, lease_seconds=900)
+    from src.workflows.repo_repair import RepoRepairError
+    source_service = service.repository_source_service
+    source_service.session_factory = factory
+    monkeypatch.setattr('src.workflows.repo_repair.durable_job_repository', jobs)
+    async with factory() as db:
+        current_run = await jobs._fetch(db, run_id)
+        _original, _work, compiled, *_rest = read_repository_original(current_run)
+        original_repo_lease = (current_run.lease_owner, current_run.fencing_token, current_run.lease_expires_at)
+        current_child = await jobs._fetch(db, binding.invocation_id)
+        original_child_lease = (current_child.lease_owner, current_child.fencing_token, current_child.lease_expires_at)
+    packet = await source_service.inspect_and_prepare(compiled, owner=owner,
+        work_board_task_id=created.task.task_id, work_board_attempt_id=claimed.attempt.attempt_id,
+        workflow_run_id=run_id, goal_id=spec.goal_id, goal_revision=spec.goal_revision,
+        input_digest=_digest(inputs))
+    assert packet.state == 'verified'
+    packet_bytes = source_service._read_private_artifact(packet.artifact_ref, expected_digest=packet.artifact_sha256)
+    assert json.loads(packet_bytes)['workflow_run_id'] == run_id
+    async with factory() as db:
+        current_run = await jobs._fetch(db, run_id)
+        current_child = await jobs._fetch(db, binding.invocation_id)
+        assert (current_run.lease_owner, current_run.fencing_token, current_run.lease_expires_at) == original_repo_lease
+        assert (current_child.lease_owner, current_child.fencing_token, current_child.lease_expires_at) == original_child_lease
+        assert read_repository_original(current_run)[0]['native_binding'] == binding.model_dump(mode='json')
+        with pytest.raises(RepoRepairError) as denied:
+            await stage_repository_canonical_source(service.repository_source_service, db,
+                repository_job_id=run_id, native_invocation_id=binding.invocation_id,
+                consent_id='actual-missing-consent')
+        assert denied.value.code == 'egress_consent_authority_invalid'
         assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
 
 

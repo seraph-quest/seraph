@@ -222,8 +222,19 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
             or attempt.ended_at is not None or attempt.cancel_requested_at is not None):
         raise DurableJobLeaseError("new original repository Task attempt required")
     # Reject existing-root attempts before any private physical source read.
-    await assert_general_task_child_current(db, child)
     binding = child_binding(child)
+    from src.workflows.job_runtime import _binding
+    permanent_binding = _binding(owner_principal_id=binding.owner_principal_id,
+        goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+        idempotency_scope="original-repository-child", dedupe_key=binding.invocation_id)
+    existing_mapping = await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.idempotency_binding == permanent_binding))
+    if existing_mapping is not None:
+        # This new-only producer cannot turn immutable generic admission replay
+        # into current Source authority. A separate exact scoped recovery owns
+        # the existing root; no private source artifact has been read here.
+        raise DurableJobLeaseError("original native invocation already has its permanent repository mapping")
+    await assert_general_task_child_current(db, child)
     parent = await db.scalar(select(WorkflowRunState).where(
         WorkflowRunState.run_identity == binding.parent_job_id))
     parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
@@ -266,13 +277,24 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
     rows = tuple((model, key, _canonical(row.model_dump(mode="json"))) for model, key, row in originals)
     witness, entered = object(), ContextVar("repository_original_admission", default=None)
     compiled = None
+    issued = False
 
     @asynccontextmanager
     async def scope():
-        nonlocal compiled
+        nonlocal compiled, issued
         from src.model_fabric.effective_policy import configuration_mutation_lock
         from config.settings import settings
         async with configuration_mutation_lock:
+            issued = False
+            # A preparation may have preceded another source admission. Recheck
+            # its permanent mapping before reopening any private source bytes.
+            # This read is outside the financial/admission writer; the exact
+            # same predicate is checked again inside the new-row transaction.
+            async with service.session_factory() as mapping_db:
+                existing_mapping = await mapping_db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.idempotency_binding == permanent_binding))
+                if existing_mapping is not None:
+                    raise DurableJobLeaseError("original native invocation already has its permanent repository mapping")
             staged_config = _assert_task_publication_configuration(service)
             facts = json.loads(service._read_private_artifact(source.source_artifact_ref,
                 expected_digest=source.source_artifact_digest))
@@ -285,10 +307,13 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
                 canonical_digest(settings.repo_sandbox.model_dump(mode="json"))))
             try:
                 yield
+                if not issued:
+                    raise DurableJobLeaseError("repository admission replay requires its original scoped recovery")
             finally:
                 entered.reset(token)
 
     async def check(current_db, run):
+        nonlocal issued
         from src.workflows.general_task_accounting import validate_group_owner
         from config.settings import settings
         held = entered.get()
@@ -313,19 +338,12 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
             WorkflowRunState.record_schema_version >= DURABLE_JOB_RECORD_SCHEMA_VERSION))
         if int(outstanding or 0) >= goal_capacity:
             raise DurableJobLeaseError("original Goal outstanding capacity cannot admit repository root")
-        # The original native invocation can mint only one repository root,
-        # including after its terminal/Unknown lifetime. The existing journal
-        # is the canonical mapping; a fresh Task/idempotency key cannot reset it.
-        candidates = (await current_db.execute(select(WorkflowRunState).where(
-            WorkflowRunState.job_kind == "engineering.repo-repair.v1",
-            WorkflowRunState.owner_principal_id == binding.owner_principal_id,
-            WorkflowRunState.operator_session_id == binding.original_root_id))).scalars().all()
-        for candidate in candidates:
-            original_records = [item for item in json.loads(candidate.checkpoint_receipts_json or "[]")
-                if isinstance(item, dict) and item.get("checkpoint_id") == "repository:original:v1"]
-            if any(item.get("payload", {}).get("native_binding", {}).get("invocation_id") == binding.invocation_id
-                    for item in original_records):
-                raise DurableJobLeaseError("original C1 invocation already owns its repository root")
+        # Permanent single use is the existing indexed canonical idempotency
+        # binding, including terminal/Unknown rows, not an all-history scan.
+        existing_mapping = await current_db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.idempotency_binding == permanent_binding))
+        if existing_mapping is not None:
+            raise DurableJobLeaseError("original C1 invocation already owns its repository root")
         now = _utc_now()
         cutoff = _as_utc(run.deadline_at)
         if (child.status != "running" or child.attempt_count != 1 or child.fencing_token < 1
@@ -333,6 +351,9 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
                 or _as_utc(attempt.lease_expires_at) <= now
                 or run.job_kind != "engineering.repo-repair.v1" or run.capability_version != "1"
                 or run.root_run_identity != run.run_identity or run.parent_job_id
+                or run.idempotency_scope != "original-repository-child"
+                or run.idempotency_key != binding.invocation_id
+                or run.idempotency_binding != permanent_binding
                 or run.input_digest != input_artifact.payload_sha256
                 or (run.owner_principal_id, run.operator_session_id, run.goal_id, run.goal_revision) !=
                     (binding.owner_principal_id, binding.original_root_id, binding.goal_id, binding.goal_revision)
@@ -352,6 +373,7 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "repository:original:v1",
             "state_digest": _digest(payload), "safe": True, "payload": payload,
             "created_at": now.isoformat()}])
+        issued = True
 
     return check, scope
 

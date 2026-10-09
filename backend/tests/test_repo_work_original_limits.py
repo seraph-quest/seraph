@@ -30,7 +30,8 @@ async def actual_original_limits(accounting_db, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["goal_budget", "goal_revision", "goal_owner", "goal_revoked",
-    "policy_bound_lowered", "inventory_missing_limits", "inventory_digest", "inventory_unknown_field"])
+    "policy_bound_lowered", "inventory_missing_limits", "inventory_digest", "inventory_unknown_field",
+    "inventory_wrong_version", "inventory_mixed_version", "inventory_extra_identity", "inventory_missing_identity"])
 async def test_actual_original_limits_drift_blocks_before_private_read(accounting_db, monkeypatch, repository_admission_signer, drift):
     factory, owner, source, jobs, root_id = await actual_original_limits(accounting_db, monkeypatch)
     async with factory() as db:
@@ -41,7 +42,8 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
             "original_deadline_at", "original_max_cost_microusd", "group", "native_binding", "source_binding"}
         assert len(original["original_input"]) == 7
         inventory = read_repository_inventory(root)
-        assert len(inventory["identities"]) == 44
+        assert inventory["schema"] == "repository.checkpoint_inventory.v2"
+        assert len(inventory["identities"]) == 45
         assert inventory["original_limits"]["original_server_bound_microusd"] > 0
         goal = await db.get(Goal, "goal:fixture")
         if drift == "goal_budget":
@@ -61,6 +63,14 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
                 del record["payload"]["original_limits"]
             elif drift == "inventory_digest":
                 record["payload"]["original_limits_digest"] = "0" * 64
+            elif drift == "inventory_wrong_version":
+                record["payload"]["schema"] = "repository.checkpoint_inventory.v3"
+            elif drift == "inventory_mixed_version":
+                record["payload"]["schema"] = "repository.checkpoint_inventory.v1"
+            elif drift == "inventory_extra_identity":
+                record["payload"]["identities"].append("repository:foreign:v1")
+            elif drift == "inventory_missing_identity":
+                record["payload"]["identities"].remove("repository:stop-uncertainty-successor:v1")
             else:
                 record["payload"]["caller_authority"] = True
             record["state_digest"] = _digest(record["payload"])

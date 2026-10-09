@@ -102,7 +102,8 @@ async def test_actual_prepared_without_stop_retains_normal_twelve_keys(accountin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["pending", "terminal", "prepared", "unknown_pending"])
+@pytest.mark.parametrize("state", ["pending", "terminal", "prepared", "unknown_pending",
+    "pending_unknown_callback", "pending_unknown_process"])
 async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_db, monkeypatch, repository_admission_signer, state):
     import httpx
     from config.settings import settings
@@ -117,9 +118,29 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
         return token, operator
     monkeypatch.setattr(auth_service, "create_session", capture_session)
     factory, owner, source, jobs, binding, root_id, service = await stopped_original(accounting_db, monkeypatch,
-        pending=state == "pending", prepared=state in {"prepared", "unknown_pending"})
+        pending=state == "pending", prepared=state in {"prepared", "unknown_pending",
+            "pending_unknown_callback", "pending_unknown_process"})
     unknown_context = None
-    if state == "unknown_pending":
+    is_unknown = state in {"unknown_pending", "pending_unknown_callback", "pending_unknown_process"}
+    if is_unknown:
+        from src.workflows import repo_repair_source as source_module
+        from src.workflows.repo_repair_stop import stop_repository_root
+        original_validator = source_module.validate_repository_stop_witness
+        async def rollback_terminal(*args, **kwargs):
+            await original_validator(*args, **kwargs)
+            raise DurableJobLeaseError("disposable actual terminal rollback")
+        stop_before = None
+        if state != "unknown_pending":
+            with monkeypatch.context() as pending_patch:
+                pending_patch.setattr(source_module, "validate_repository_stop_witness", rollback_terminal)
+                stopped = await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
+                    general_task_service=service, reason="operator_cancelled")
+            assert stopped["pending"] is True
+            async with factory() as db:
+                root = await jobs._fetch(db, root_id)
+                stop_before = source_module._repository_record(root, "repository:stop-intent:v1")
+            snapshot_before = source._read_private_artifact(stop_before["snapshot_artifact_ref"],
+                expected_digest=stop_before["snapshot_artifact_digest"])
         from src.db.models import Goal
         async with factory() as db:
             root = await jobs._fetch(db, root_id)
@@ -132,10 +153,27 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
                 "root_id": root_id, "goal": goal_before, "authority_digest": root.authority_digest,
                 "fencing_token": root.fencing_token, "revision_before": root.revision,
                 "lease_owner": root.lease_owner}
-        transitioned = await jobs.transition_job(root_id, "unknown_external_effect",
-            owner=unknown_context["lease_owner"], fencing_token=unknown_context["fencing_token"],
-            expected_revision=unknown_context["revision_before"], expected_status="running",
-            reason="repository_callback_closure_unproven")
+        if state == "unknown_pending":
+            transitioned = await jobs.transition_job(root_id, "unknown_external_effect",
+                owner=unknown_context["lease_owner"], fencing_token=unknown_context["fencing_token"],
+                expected_revision=unknown_context["revision_before"], expected_status="running",
+                reason="repository_callback_closure_unproven")
+        else:
+            role = "process" if state == "pending_unknown_process" else "callback"
+            iteration_id = source_module.iteration_identity(root_id, original["repository_attempt_id"],
+                source_module._source_digest(original["original_input"]), 1)
+            await source_module._quarantine_original_uncertainty(source, jobs, job_id=root_id, owner=owner,
+                lease_owner=unknown_context["lease_owner"], fencing_token=unknown_context["fencing_token"],
+                reason="repository_" + role + "_closure_unproven",
+                result={"no_learning": True, "operator_action": "reconcile_original_" + role,
+                    "iteration_id": iteration_id})
+            transitioned = await jobs.get_job(root_id)
+            async with factory() as db:
+                root = await jobs._fetch(db, root_id)
+                assert source_module._repository_record(root, "repository:stop-intent:v1") == stop_before
+                assert source_module._repository_record(root, "repository:stop-uncertainty-successor:v1") is not None
+            assert source._read_private_artifact(stop_before["snapshot_artifact_ref"],
+                expected_digest=stop_before["snapshot_artifact_digest"]) == snapshot_before
         assert transitioned["status"] == "unknown_external_effect"
         async with factory() as db:
             root = await jobs._fetch(db, root_id)
@@ -153,11 +191,12 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
         async def rollback_terminal(*args, **kwargs):
             await original_validator(*args, **kwargs)
             raise DurableJobLeaseError("disposable actual terminal rollback")
-        with monkeypatch.context() as pending_patch:
-            pending_patch.setattr(source_module, "validate_repository_stop_witness", rollback_terminal)
-            stopped = await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
-                general_task_service=service, reason="operator_cancelled")
-        assert stopped["pending"] is True
+        if state == "unknown_pending":
+            with monkeypatch.context() as pending_patch:
+                pending_patch.setattr(source_module, "validate_repository_stop_witness", rollback_terminal)
+                stopped = await stop_repository_root(source, jobs, job_id=root_id, owner=owner,
+                    general_task_service=service, reason="operator_cancelled")
+            assert stopped["pending"] is True
     # Existing singleton owns the exact fixture Source and durable repository.
     monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
@@ -185,11 +224,11 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
         assert task["task"]["repository_review"] == status["repository_review"]
         assert set(status) == NORMAL_KEYS | ({"repository_stop"} if state != "prepared" else set())
         if state != "prepared":
-            if state == "unknown_pending":
+            if is_unknown:
                 assert status["repository_stop"]["pending"] is True
             else:
                 assert status["repository_stop"]["pending"] is (state == "pending")
-        if state == "unknown_pending":
+        if is_unknown:
             assert status["status"] == "unknown_external_effect"
             assert status["recovery_action"] == "repository_stop_pending"
         foreign_token, _ = await create_session()

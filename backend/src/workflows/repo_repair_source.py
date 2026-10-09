@@ -22,6 +22,48 @@ _SHA = re.compile(r"^[0-9a-f]{64}$")
 _task_publication = ContextVar("repository_task_publication", default=None)
 
 
+def _stop_static_rows_match(run, stop, current):
+    """Read-only exact successor; never closure or release authority."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    successor = _repository_record(run, "repository:stop-uncertainty-successor:v1")
+    if successor is None:
+        return stop.get("static_rows") == current
+    inventory = read_repository_inventory(run)
+    keys = {"schema", "job_id", "stop_digest", "root_key", "predecessor_digest",
+        "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision"}
+    root_key = type(run).__tablename__ + ":" + str(run.id)
+    if (set(successor) != keys or successor["schema"] != "repository.stop_uncertainty_successor.v1"
+            or inventory["schema"] != "repository.checkpoint_inventory.v2"
+            or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
+            or successor["stop_digest"] != _source_digest(stop)
+            or successor["authority_digest"] != run.authority_digest
+            or type(successor["fencing_token"]) is not int
+            or successor["fencing_token"] != run.fencing_token
+            or type(successor["from_revision"]) is not int or type(successor["to_revision"]) is not int
+            or successor["to_revision"] != successor["from_revision"] + 1
+            or run.revision < successor["to_revision"] or run.status != "unknown_external_effect"
+            or successor["predecessor_digest"] != stop["static_rows"].get(root_key)
+            or successor["successor_digest"] != current.get(root_key)):
+        raise DurableJobLeaseError("original repository uncertainty successor changed")
+    expected = dict(stop["static_rows"])
+    expected[root_key] = successor["successor_digest"]
+    return current == expected
+
+
+async def _quarantine_original_uncertainty(service, jobs, *, job_id, owner, lease_owner, fencing_token, reason, result):
+    """Only the existing original closure-uncertainty owners call this seam."""
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    from src.workflows.repo_repair_stop import stage_repository_uncertainty
+    async with configuration_mutation_lock:
+        current = await jobs.get_job(job_id)
+        if current and current["status"] == "running":
+            witness = await stage_repository_uncertainty(service, jobs, job_id=job_id, owner=owner)
+            await jobs.transition_job(job_id, "unknown_external_effect",
+                owner=lease_owner, fencing_token=fencing_token,
+                expected_revision=current["revision"], expected_status="running", reason=reason,
+                result=result, _repository_uncertainty_witness=witness)
+
+
 def assert_repository_stop_witness(witness):
     from src.workflows.repo_repair_stop import assert_repository_stop_witness as verify
     return verify(witness)
@@ -99,7 +141,7 @@ def read_repository_inventory(run):
     if not isinstance(record, dict) or set(record) != expected_keys:
         raise DurableJobLeaseError("original repository limits inventory required")
     limits = record["original_limits"]
-    if (record["schema"] != "repository.checkpoint_inventory.v1"
+    if (record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2"}
             or record["identities"] != repository_checkpoint_inventory(run, work)
             or type(record["max_records"]) is not int or record["max_records"] != 50
             or type(record["max_metadata_bytes_per_record"]) is not int or record["max_metadata_bytes_per_record"] != 16384
@@ -158,7 +200,7 @@ def _iterative_executor_preflight(service, compiled=None):
     raise DurableJobLeaseError("fixed local iterative executor required")
 
 
-def repository_checkpoint_inventory(run, work):
+def repository_checkpoint_inventory(run, work, *, _admission_schema=None):
     """Reserve the full fixed identity set before any repository effect.
 
     Private bodies/logs are artifacts; the canonical journal holds bounded
@@ -177,6 +219,14 @@ def repository_checkpoint_inventory(run, work):
     ids.extend(("repo-repair-source-intent:" + run.run_identity,
                 "repo-repair-source:" + run.run_identity,
                 "repo-repair-execution-reservation", "repo-repair-execution-release"))
+    reserved = _repository_record(run, "repository:inventory:v1")
+    schema = _admission_schema if _admission_schema is not None else (
+        reserved.get("schema") if reserved is not None else "repository.checkpoint_inventory.v1")
+    if schema == "repository.checkpoint_inventory.v2":
+        ids.append("repository:stop-uncertainty-successor:v1")
+    elif schema != "repository.checkpoint_inventory.v1":
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError("original repository inventory version changed")
     if len(ids) != len(set(ids)) or len(ids) > 50:
         from src.workflows.job_runtime import DurableJobTransitionError
         raise DurableJobTransitionError("repository fixed checkpoint capacity exceeded")
@@ -820,7 +870,8 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None):
         if (artifact is None or repo_artifact is None or attempt.ended_at is not None
                 or attempt.cancel_requested_at is not None or repo_attempt.ended_at is not None
                 or repo_attempt.cancel_requested_at is not None
-                or stop["static_rows"] != {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows}):
+                or not _stop_static_rows_match(run, stop,
+                    {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows})):
             raise DurableJobLeaseError("original repository Pending static snapshot changed")
     else:
         try:
@@ -1232,14 +1283,11 @@ async def grant_repository_iteration_consent(service, jobs, *, job_id, owner, re
         # closure; a disconnected HTTP caller is not such proof.
         import asyncio
         async def quarantine_original():
-            current = await jobs.get_job(job_id)
-            if current and current["status"] == "running":
-                await jobs.transition_job(job_id, "unknown_external_effect",
-                    owner=context["run"].lease_owner,
-                    fencing_token=context["run"].fencing_token, expected_revision=current["revision"],
-                    reason="repository_callback_closure_unproven",
-                    result={"no_learning": True, "operator_action": "reconcile_original_callback",
-                        "iteration_id": ticket.iteration_id})
+            await _quarantine_original_uncertainty(source, jobs, job_id=job_id, owner=owner,
+                lease_owner=context["run"].lease_owner, fencing_token=context["run"].fencing_token,
+                reason="repository_callback_closure_unproven",
+                result={"no_learning": True, "operator_action": "reconcile_original_callback",
+                    "iteration_id": ticket.iteration_id})
         quarantine = asyncio.create_task(quarantine_original())
         source._iterative_model_callbacks["quarantine:" + ticket.iteration_id] = quarantine
         await asyncio.shield(quarantine)
@@ -1816,13 +1864,11 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         # An absent cleanup witness never releases the original root lane.
         service._iterative_lanes[job_id].quarantine(job_id)
         async def quarantine_original():
-            current = await jobs.get_job(job_id)
-            if current and current["status"] == "running":
-                await jobs.transition_job(job_id, "unknown_external_effect",
-                    owner=context["run"].lease_owner, fencing_token=context["run"].fencing_token,
-                    expected_revision=current["revision"], reason="repository_process_closure_unproven",
-                    result={"no_learning": True, "operator_action": "reconcile_original_process",
-                        "iteration_id": identity})
+            await _quarantine_original_uncertainty(service, jobs, job_id=job_id, owner=owner,
+                lease_owner=context["run"].lease_owner, fencing_token=context["run"].fencing_token,
+                reason="repository_process_closure_unproven",
+                result={"no_learning": True, "operator_action": "reconcile_original_process",
+                    "iteration_id": identity})
         quarantine = asyncio.create_task(quarantine_original())
         service._iterative_process_callbacks["quarantine:" + identity] = quarantine
         await asyncio.shield(quarantine)
@@ -2548,9 +2594,9 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "repository:original:v1",
             "state_digest": _digest(payload), "safe": True, "payload": payload,
             "created_at": now.isoformat()}])
-        inventory = repository_checkpoint_inventory(run, work)
+        inventory = repository_checkpoint_inventory(run, work, _admission_schema="repository.checkpoint_inventory.v2")
         _append_repository_record(run, "repository:inventory:v1",
-            {"schema": "repository.checkpoint_inventory.v1", "identities": inventory,
+            {"schema": "repository.checkpoint_inventory.v2", "identities": inventory,
              "max_records": 50, "max_metadata_bytes_per_record": 16384,
              "original_limits": held[4], "original_limits_digest": _source_digest(held[4])}, inventory=inventory)
         read_repository_inventory(run)

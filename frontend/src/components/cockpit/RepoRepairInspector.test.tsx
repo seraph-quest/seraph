@@ -870,7 +870,7 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
       if (source.status === 'unknown_external_effect') {
         expect(stop.pending).toBe(true);
         expect(screen.getByText(/unknown external effect/)).toBeInTheDocument();
-        expect(screen.getByText('Unknown outcome. Reconcile the original repository execution; its lane remains held.')).toBeInTheDocument();
+        expect(screen.getByText('Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification.')).toBeInTheDocument();
       }
       expectNoRepositoryEffects();
       expect(screen.getByText(stop.pending ? 'Original reservation remains held. Physical cleanup is pending verification.' : 'Original repository stop recorded.')).toBeInTheDocument();

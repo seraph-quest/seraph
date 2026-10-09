@@ -1314,7 +1314,7 @@ export function RepoRepairInspector({
           {outcome.command_results_status === "unknown" ? <div>Command outcomes: Unknown</div> : outcome.command_results?.map((command) => <div key={command.check}>{command.check}: {statusLabel(command.status)} · exit {command.exit_code ?? "unknown"}</div>)}
         </details>;
       })}
-      <div role="status">{current.status === "unknown_external_effect" ? "Unknown outcome. Reconcile the original repository execution; its lane remains held." : statusLabel(current.recovery_action)}</div>
+      <div role="status">{current.status === "unknown_external_effect" ? "Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification." : statusLabel(current.recovery_action)}</div>
       {current.status === "succeeded" && <div>The recorded named checks passed. Review the local patch; passing checks do not establish patch quality or authorize publication.</div>}
     </section>;
   }

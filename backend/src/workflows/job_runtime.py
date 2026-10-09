@@ -3548,6 +3548,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         near_text_policy_scope=None,
         _general_task_resume_witness=None,
         _repository_publication_witness=None,
+        _repository_uncertainty_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3605,7 +3606,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer or repository_publication_guard:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer or repository_publication_guard or _repository_uncertainty_witness is not None:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
@@ -3937,6 +3938,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 values["effect_receipts_json"] = _canonical(
                     _job_effect_ledger(run, [*(effect_ledger or []), approval_resume_record])
                 )
+            if _repository_uncertainty_witness is not None or (to_status == "unknown_external_effect"
+                    and reason in {"repository_callback_closure_unproven", "repository_process_closure_unproven"}):
+                from src.workflows.repo_repair_stop import append_repository_uncertainty_in_writer
+                await append_repository_uncertainty_in_writer(db, self, run,
+                    witness=_repository_uncertainty_witness, to_status=to_status, reason=reason,
+                    result=result, values=values)
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
             if owner is not None:

@@ -18,6 +18,7 @@ STOP_ID = "repository:stop-intent:v1"
 AUTOMATIC_REASONS = frozenset({"deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"})
 _ISSUED = weakref.WeakKeyDictionary()
 _STAGED = weakref.WeakKeyDictionary()
+_UNCERTAINTY = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
@@ -26,6 +27,69 @@ class _RepositoryStopContext:
 
     def __getitem__(self, key):
         return self.data[key]
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _RepositoryUncertainty:
+    pass
+
+
+async def stage_repository_uncertainty(service, jobs, *, job_id, owner):
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        stop = _source()._repository_record(run, STOP_ID)
+        if stop is None or _source().read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v1":
+            return None
+    context = await _context(service, jobs, job_id=job_id, owner=owner)
+    witness = _RepositoryUncertainty()
+    _UNCERTAINTY[witness] = (jobs, context, _source()._source_digest(stop))
+    return witness
+
+
+async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_status, reason, result, values):
+    """Exact original predecessor CAS; all physical staging already closed."""
+    source = _source()
+    stop = source._repository_record(run, STOP_ID)
+    if witness is None:
+        if stop is not None and source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v2":
+            raise DurableJobLeaseError("original pending uncertainty owner witness required")
+        return
+    if type(witness) is not _RepositoryUncertainty or witness not in _UNCERTAINTY:
+        raise DurableJobLeaseError("actual original uncertainty owner required")
+    actual_jobs, context, stop_digest = _UNCERTAINTY.pop(witness)
+    reasons = {"repository_callback_closure_unproven": "reconcile_original_callback",
+        "repository_process_closure_unproven": "reconcile_original_process"}
+    if (actual_jobs is not jobs or context["run"].run_identity != run.run_identity
+            or run.status != "running" or to_status != "unknown_external_effect" or reason not in reasons
+            or stop is None or source._source_digest(stop) != stop_digest
+            or source.read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v2"
+            or not isinstance(result, dict) or set(result) != {"no_learning", "operator_action", "iteration_id"}
+            or result["no_learning"] is not True or result["operator_action"] != reasons[reason]):
+        raise DurableJobLeaseError("original uncertainty projection changed")
+    original, work, *_ = source.read_repository_original(run)
+    identities = {source.iteration_identity(run.run_identity, original["repository_attempt_id"],
+        source._source_digest(original["original_input"]), index) for index in range(1, work.limits.max_iterations + 1)}
+    if result["iteration_id"] not in identities:
+        raise DurableJobLeaseError("original uncertainty iteration changed")
+    for kind, key, expected in context["rows"]:
+        row = await db.get(kind, key)
+        if row is None or _canonical(row.model_dump(mode="json")) != expected:
+            raise DurableJobLeaseError("original uncertainty predecessor changed")
+    hold = jobs._repo_repair_reservation_state(run)
+    if (hold is None or hold["status"] != "held" or not jobs._repo_repair_reservation_matches(hold,
+            job_id=run.run_identity, attempt_id=original["repository_attempt_id"],
+            fence=run.fencing_token, authority_digest=run.authority_digest)
+            or hold["execution_deadline_at"] != original["original_deadline_at"]):
+        raise DurableJobLeaseError("original uncertainty held reservation changed")
+    successor = run.model_copy(update={**values, "revision": run.revision + 1})
+    payload = {"schema": "repository.stop_uncertainty_successor.v1", "job_id": run.run_identity,
+        "stop_digest": stop_digest, "root_key": type(run).__tablename__ + ":" + str(_key(run)),
+        "predecessor_digest": _static(run, context), "successor_digest": _static(successor, context),
+        "authority_digest": run.authority_digest, "fencing_token": run.fencing_token,
+        "from_revision": run.revision, "to_revision": run.revision + 1}
+    source._append_repository_record(run, "repository:stop-uncertainty-successor:v1", payload,
+        inventory=source.repository_checkpoint_inventory(run, work))
+    values["checkpoint_receipts_json"] = run.checkpoint_receipts_json
 
 
 def _source():
@@ -134,12 +198,12 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None):
         if limit_reason is not None:
             context["limit_evidence"] = await _limit_evidence(db, context, reason=limit_reason)
         stop = source._repository_record(run, STOP_ID)
-        if stop is not None and stop.get("static_rows") != context["static_rows"]:
+        if stop is not None and not source._stop_static_rows_match(run, stop, context["static_rows"]):
             raise DurableJobLeaseError("original stop snapshot changed before private read")
         if stop is not None:
             snapshot = json.loads(service._read_private_artifact(stop["snapshot_artifact_ref"],
                 expected_digest=stop["snapshot_artifact_digest"]))
-            if snapshot != {"schema": "repository.stop_snapshot.v1", "static_rows": context["static_rows"],
+            if snapshot != {"schema": "repository.stop_snapshot.v1", "static_rows": stop["static_rows"],
                     "repository_job_id": job_id, "source_checkpoint_digest": source._source_digest(original)}:
                 raise DurableJobLeaseError("literal original stop snapshot changed")
         # A contacted callback's already-published static witnesses are checked

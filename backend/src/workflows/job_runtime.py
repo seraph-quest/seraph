@@ -7889,9 +7889,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     reconcile_job = reconcile_external_effect
 
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_stale_jobs_locked(now=now)
+
+    async def _recover_stale_jobs_locked(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()
         recovered: list[dict[str, Any]] = await self.recover_inference_accounting(now=observed_at)
         async with self._session() as db:
+            from src.work_board.repository import _begin_sqlite_immediate
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            await _begin_sqlite_immediate(db)
+            protected = await _repository_startup_protected_lineage(db)
             result = await db.execute(
                 select(WorkflowRunState).where(
                     WorkflowRunState.status == "running",
@@ -7900,6 +7909,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             )
             runs = result.scalars().all()
             for run in runs:
+                if run.run_identity in protected:
+                    continue
                 old_owner = run.lease_owner
                 expected_token = run.fencing_token
                 expected_revision = _revision(run)
@@ -8082,6 +8093,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_stale_job_locked(job_id, now=now)
+
+    async def _recover_stale_job_locked(
+        self, job_id: str, *, now: datetime | None = None,
+    ) -> dict[str, Any]:
         """Recover one expired lease without touching unrelated jobs.
 
         Capability-specific recovery routes must not run the global stale-job
@@ -8095,7 +8113,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         observed_at = now or _utc_now()
         await self.recover_inference_accounting(now=observed_at, job_id=job_id)
         async with self._session() as db:
+            from src.work_board.repository import _begin_sqlite_immediate
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            await _begin_sqlite_immediate(db)
+            protected = await _repository_startup_protected_lineage(db)
             run = await self._fetch(db, job_id)
+            if job_id in protected:
+                db.expunge(run)
+                return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop",
+                    "reason": "original_repository_source_recovery_required", "operator_visible": True})
             if run.status != "running":
                 db.expunge(run)
                 return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop", "operator_visible": True})

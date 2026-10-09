@@ -2620,11 +2620,22 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         manifest = result["manifest"]
         proof = manifest.get("process_cleanup") or {}
         transport = manifest.get("supervisor_transport") or {}
+        durable_transport = transport.get("transport_kind") == "original_producer_durable_v1"
+        if durable_transport:
+            from src.execution.repo_original_producer import verify_completion
+            body, outputs = verify_completion(result["original_producer_directory"],
+                result["original_producer_ready"], result["original_producer_registration"].registration_digest,
+                maximum_output=self.limits.max_output_bytes)
+            if (body != result["original_producer_completion"] or outputs != result["outputs"]
+                    or body["manifest"] != manifest
+                    or any(transport.get(name) is not True for name in (
+                        "command_output_drained", "command_descriptors_closed", "original_children_waited", "no_spawn"))):
+                raise RepoSandboxError("original durable producer readback changed")
         marker = self._read_job_marker(job.job_id)
         if (manifest.get("cleanup_proven") is not True or manifest.get("stage_removed") is not True
             or manifest.get("iteration_binding") != iteration_process_projection(binding)
             or proof.get("oracle") != "linux_subreaper_waitpid_echild" or proof.get("cleanup_proven") is not True
-            or any(transport.get(name) is not True for name in ("stdin_closed", "stdout_eof", "stderr_eof", "stdout_closed", "stderr_closed", "waited"))
+            or (not durable_transport and any(transport.get(name) is not True for name in ("stdin_closed", "stdout_eof", "stderr_eof", "stdout_closed", "stderr_closed", "waited")))
             or marker is None or marker.get("phase") != "iteration_cleanup_verified"
             or marker.get("iteration_binding") != manifest["iteration_binding"]
             or marker.get("cleanup_proven") is not True
@@ -2643,6 +2654,25 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             binding.iteration_id, binding.iteration_index, job.authority_digest,
             projection["artifact_digests"]["manifest.json"], projection["artifact_digests"]["readback.json"],
             json.dumps(projection, sort_keys=True, separators=(",", ":")), _ITERATION_CLEANUP_SEAL)
+
+    def _finish_original_producer(self, job, result):
+        """Publish only a physically verified original producer's marker."""
+        manifest = result["manifest"]
+        marker = self._read_job_marker(job.job_id)
+        if marker is None or marker.get("iteration_binding") != iteration_process_projection(job.iteration_binding):
+            raise RepoSandboxError("original producer marker binding changed")
+        marker.update(phase="iteration_cleanup_verified", cleanup_proven=True,
+            status="iteration_failed_quiescent" if result["status"] == "failed" else result["status"],
+            process_cleanup={"transport_kind": "original_producer_durable_v1",
+                "completion_digest": hashlib.sha256(json.dumps(result["original_producer_completion"],
+                    sort_keys=True, separators=(",", ":")).encode()).hexdigest()},
+            terminal_receipt={"status": result["status"],
+                "manifest_sha256": hashlib.sha256(result["outputs"]["manifest.json"]).hexdigest(),
+                "readback_sha256": hashlib.sha256(result["outputs"]["readback.json"]).hexdigest()})
+        self._write_job_marker(job.job_id, marker)
+        self._owned_iteration_terminal[(job.job_id, job.iteration_binding.iteration_id)] = result
+        result["iteration_cleanup_witness"] = self._iteration_cleanup_witness(job, result)
+        return result
 
     def _trusted_workspace(self) -> Path:
         descriptor = _open_trusted_directory(self.workspace_dir)
@@ -3332,8 +3362,13 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         job: RepoSandboxJob,
         *,
         before_dispatch: Callable[[], None] | None = None,
+        producer_owner=None,
     ) -> dict[str, Any]:
         """Run the shared fixed worker against trusted local staged roots."""
+
+        if producer_owner is not None:
+            from src.execution.repo_original_producer import assert_original_producer_owner
+            assert_original_producer_owner(producer_owner, job)
 
         if int(job.deadline_seconds) < 1 or int(job.deadline_seconds) > self.limits.max_wall_seconds:
             raise RepoSandboxError("job deadline is outside the local fixed profile")
@@ -3713,6 +3748,19 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 if before_dispatch is not None:
                     before_dispatch()
                 mark_phase("dispatch_authorized")
+
+                if producer_owner is not None:
+                    from src.execution.repo_original_producer import run_original_producer
+                    from src.execution.repo_supervisor import PYTHON_PROFILE
+                    before_spawn()
+                    payload = {"profile": PYTHON_PROFILE, "stage": str(root), "runtime": current_identity,
+                        "job_id": job.job_id, "iteration_binding": iteration_process_projection(job.iteration_binding),
+                        "deadline_at": deadline_at, "token": marker_token, "environment": environment,
+                        "supervisor_source_sha256": posture["supervisor_source_sha256"],
+                        "git_sha256": posture["git_sha256"]}
+                    result = run_original_producer(self, job, stage=root, payload=payload, posture=posture,
+                        owner=producer_owner, observe_process=observe_process)
+                    return self._finish_original_producer(job, result)
 
                 try:
                     worker_runner = run_local_job

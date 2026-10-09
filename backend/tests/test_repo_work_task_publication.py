@@ -428,7 +428,7 @@ async def test_actual_source_terminal_release_admits_distinct_successor(accounti
     async with factory() as db:
         original = await jobs._fetch(db, root_id)
         inventory = _repository_record(original, 'repository:inventory:v1')['identities']
-        assert len(inventory) == 44 and 'repo-repair-execution-release' in inventory
+        assert len(inventory) == 49 and 'repo-repair-execution-release' in inventory
         first_scope = read_repository_original(original)[0]
     stopped = await stop_repository_root(service.repository_source_service, jobs,
         job_id=root_id, owner=owner, general_task_service=service)
@@ -636,14 +636,15 @@ async def test_actual_source_unknown_model_cost_retains_original_capacity(accoun
 
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
-        unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0):
+        unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0,
+        goal_capacity=2):
     import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
         repository_source_preview, grant_repository_iteration_consent)
     factory, owner, service, jobs, binding, creation_request = await actual_native_source(
-        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language, node_build=node_build,
+        accounting_db, monkeypatch, goal_capacity=goal_capacity, claim_child=False, language=language, node_build=node_build,
         publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits)
     operator = await authenticate_session(owner.session_id, touch=False)
     prepared = await prepare_repository_native_source(service, jobs, binding,

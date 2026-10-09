@@ -42,8 +42,8 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
             "original_deadline_at", "original_max_cost_microusd", "group", "native_binding", "source_binding"}
         assert len(original["original_input"]) == 7
         inventory = read_repository_inventory(root)
-        assert inventory["schema"] == "repository.checkpoint_inventory.v2"
-        assert len(inventory["identities"]) == 45
+        assert inventory["schema"] == "repository.checkpoint_inventory.v3"
+        assert len(inventory["identities"]) == 49
         assert inventory["original_limits"]["original_server_bound_microusd"] > 0
         goal = await db.get(Goal, "goal:fixture")
         if drift == "goal_budget":
@@ -64,7 +64,7 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
             elif drift == "inventory_digest":
                 record["payload"]["original_limits_digest"] = "0" * 64
             elif drift == "inventory_wrong_version":
-                record["payload"]["schema"] = "repository.checkpoint_inventory.v3"
+                record["payload"]["schema"] = "repository.checkpoint_inventory.v2"
             elif drift == "inventory_mixed_version":
                 record["payload"]["schema"] = "repository.checkpoint_inventory.v1"
             elif drift == "inventory_extra_identity":

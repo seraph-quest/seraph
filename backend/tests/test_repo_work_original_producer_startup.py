@@ -1,0 +1,179 @@
+"""Startup preserves actual registered original repository lineage."""
+from datetime import datetime, timedelta, timezone
+import json
+import asyncio
+
+import pytest
+import httpx
+from sqlalchemy import select
+
+from src.db.models import WorkflowRunState, InferenceCostReservation, InferenceAccountingOwner
+from src.workflows import repo_repair_source as source
+from tests.test_general_task_planner import accounting_db, forbid_external_inference
+from tests.repository_admission_lifecycle import repository_admission_signer
+from tests.test_repo_work_task_publication import _actual_source_callback_journey
+
+
+class _KeepOriginalSourceRunning(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_inherited_context_does_not_grant_startup_fence_to_child_task():
+    from src.workflows.job_runtime import DurableJobLeaseError
+    async with source._repository_startup_mutation_fence():
+        async def inherited_child():
+            with pytest.raises(DurableJobLeaseError, match="private repository startup mutation fence"):
+                await source._repository_startup_protected_lineage(object())
+        await asyncio.create_task(inherited_child())
+
+
+async def registered_running_source(accounting_db, monkeypatch, *, goal_capacity=2):
+    captured = {}
+
+    async def hold_final(service, jobs, **kwargs):
+        captured.update(service=service, jobs=jobs, **kwargs)
+        raise _KeepOriginalSourceRunning()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "finalize_repository_iteration", hold_final)
+        with pytest.raises(_KeepOriginalSourceRunning):
+            await _actual_source_callback_journey(accounting_db, monkeypatch, False, "test_python",
+                goal_capacity=goal_capacity)
+    return captured
+
+
+async def exact_canonical_bytes(factory):
+    async with factory() as db:
+        values = {}
+        for model in (WorkflowRunState, InferenceCostReservation, InferenceAccountingOwner):
+            values[model.__tablename__] = sorted(row.model_dump_json() for row in
+                (await db.scalars(select(model))).all())
+        return values
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_startup_preserves_registered_original_lineage_and_accounting(
+        accounting_db, monkeypatch, unknown, corrupt, repository_admission_signer):
+    captured = await registered_running_source(accounting_db, monkeypatch)
+    jobs, service, job_id, owner = (captured[key] for key in ("jobs", "service", "job_id", "owner"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        original, _, _, _, binding, _ = source.read_repository_original(root)
+        assert root.status == "running"
+        if unknown:
+            original_owner, original_fence = root.lease_owner, root.fencing_token
+    if unknown:
+        await source._quarantine_original_uncertainty(service, jobs, job_id=job_id, owner=owner,
+            lease_owner=original_owner, fencing_token=original_fence,
+            reason="repository_process_closure_unproven",
+            result={"no_learning": True, "operator_action": "reconcile_original_process",
+                "iteration_id": captured["actual_job"].iteration_binding.iteration_id})
+    if corrupt:
+        # Corruption of a genuinely registered producer is not absence. This
+        # negative fixture changes no owner identity or caller authority.
+        from src.workflows.job_runtime import _digest, _canonical
+        async with factory() as db:
+            root = await jobs._fetch(db, job_id)
+            history = json.loads(root.checkpoint_receipts_json)
+            producer = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
+            producer["payload"]["ready_digest"] = "0" * 64
+            producer["state_digest"] = _digest(producer["payload"])
+            root.checkpoint_receipts_json = _canonical(history)
+            await db.commit()
+    before = await exact_canonical_bytes(factory)
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    assert await jobs.recover_inference_accounting(now=observed) == []
+    assert await jobs.recover_stale_jobs(now=observed) == []
+    for protected_id in (job_id, binding.invocation_id, binding.parent_job_id):
+        receipt = await jobs.recover_stale_job(protected_id, now=observed)
+        assert receipt["receipt"]["reason"] == "original_repository_source_recovery_required"
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+async def test_registered_lineage_does_not_protect_unrelated_same_goal_job(
+        accounting_db, monkeypatch, repository_admission_signer):
+    from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
+    captured = await registered_running_source(accounting_db, monkeypatch, goal_capacity=3)
+    jobs, owner, job_id = (captured[key] for key in ("jobs", "owner", "job_id"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        original = await jobs._fetch(db, job_id)
+        _, _, _, _, binding, _ = source.read_repository_original(original)
+        protected_ids = {job_id, binding.invocation_id, binding.parent_job_id}
+        before = {row.run_identity: row.model_dump_json() for row in
+            (await db.scalars(select(WorkflowRunState))).all() if row.run_identity in protected_ids}
+    unrelated = await jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(
+        job_id="startup-unrelated-same-goal", owner_kind="user", owner_principal_id=owner.principal_id,
+        job_kind="startup_unrelated", capability_version="1",
+        idempotency_scope="startup-unrelated", idempotency_key="same-goal"), inputs={"work": "unrelated"},
+        session_id=owner.session_id, operator_session_id=owner.session_id,
+        goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+        declared_authority={"principal": owner.principal_id, "owner_kind": "user", "session_id": owner.session_id,
+            "goal_id": binding.goal_id, "goal_revision": binding.goal_revision}))
+    await jobs.queue_job(unrelated["job_id"])
+    await jobs.claim_job(unrelated["job_id"], owner="unrelated-worker", lease_seconds=1)
+    recovered = await jobs.recover_stale_jobs(now=datetime.now(timezone.utc) + timedelta(seconds=5))
+    assert [row["job_id"] for row in recovered] == [unrelated["job_id"]]
+    assert recovered[0]["status"] == "blocked"
+    async with factory() as db:
+        after = {row.run_identity: row.model_dump_json() for row in
+            (await db.scalars(select(WorkflowRunState))).all() if row.run_identity in protected_ids}
+        assert after == before
+    async with source._repository_startup_mutation_fence():
+        async with factory() as db:
+            from src.work_board.repository import _begin_sqlite_immediate
+            await _begin_sqlite_immediate(db)
+            protected = await source._repository_startup_protected_lineage(db)
+            assert protected == {job_id, binding.invocation_id, binding.parent_job_id}
+
+
+@pytest.mark.asyncio
+async def test_startup_retains_real_unknown_provider_debt_after_registered_iteration(
+        accounting_db, monkeypatch, repository_admission_signer):
+    # Fail only the second actual intercepted provider billing response, after
+    # the first real failed Python iteration registered and closed its producer.
+    # No reservation or accounting evidence is inserted by this fixture.
+    captured, responses = {}, []
+    original_grant = source.grant_repository_iteration_consent
+    original_response = httpx.Response
+
+    async def capture_grant(service, jobs, **kwargs):
+        captured.update(service=service, jobs=jobs, job_id=kwargs["job_id"], owner=kwargs["owner"])
+        return await original_grant(service, jobs, **kwargs)
+
+    def missing_second_bill(*args, **kwargs):
+        payload = kwargs.get("json")
+        if isinstance(payload, dict) and payload.get("id") == "scripted-source-final-transport":
+            responses.append(payload)
+            if len(responses) == 2:
+                payload["usage"].pop("cost")
+        return original_response(*args, **kwargs)
+
+    monkeypatch.setattr(source, "grant_repository_iteration_consent", capture_grant)
+    monkeypatch.setattr(httpx, "Response", missing_second_bill)
+    with pytest.raises(Exception):
+        await _actual_source_callback_journey(accounting_db, monkeypatch, True, "test_python")
+    assert len(responses) == 2
+    factory, jobs, job_id = accounting_db[2], captured["jobs"], captured["job_id"]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        assert root.status == "unknown_external_effect"
+        original, work, _, _, _, _ = source.read_repository_original(root)
+        identity = source.iteration_identity(job_id, original["repository_attempt_id"],
+            source._source_digest(original["original_input"]), 1)
+        assert source._repository_record(root, "repository:producer:" + identity) is not None
+        reservations = list((await db.scalars(select(InferenceCostReservation))).all())
+        debt = next(row for row in reservations if row.state == "unknown")
+        from src.workflows.general_task_accounting import reservation_liability
+        assert debt.contact_started_at is not None and debt.actual_cost_microusd is None
+        assert reservation_liability(debt) == debt.bound_microusd > 0
+    before = await exact_canonical_bytes(factory)
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    assert await jobs.recover_inference_accounting(now=observed) == []
+    assert await jobs.recover_stale_jobs(now=observed) == []
+    assert await exact_canonical_bytes(factory) == before

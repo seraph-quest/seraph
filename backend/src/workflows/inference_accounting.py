@@ -255,11 +255,18 @@ class InferenceAccountingRepositoryMixin:
                 return _operation_payload(row)
 
     async def recover_inference_accounting(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_inference_accounting_locked(now=now, job_id=job_id)
+
+    async def _recover_inference_accounting_locked(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
         """Classify stale provider work without replaying ephemeral callbacks."""
         observed = _utc(now or datetime.now(timezone.utc))
         recovered = []
         async with self._session() as db:
             await self._accounting_begin(db)
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            protected = await _repository_startup_protected_lineage(db)
             account, rows = await self._accounting_rows(db)
             if account is None:
                 return []
@@ -267,6 +274,8 @@ class InferenceAccountingRepositoryMixin:
                 self._assert_accounting_continuity(workspace, account, rows)
                 changed = False
                 for row in rows:
+                    if row.job_id in protected:
+                        continue
                     if job_id is not None and row.job_id != job_id:
                         continue
                     if row.state not in {"reserved", "contact_started", "unknown"}:

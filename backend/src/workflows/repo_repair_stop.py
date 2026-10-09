@@ -51,7 +51,8 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
     source = _source()
     stop = source._repository_record(run, STOP_ID)
     if witness is None:
-        if stop is not None and source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v2":
+        if stop is not None and source.read_repository_inventory(run)["schema"] in {
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}:
             raise DurableJobLeaseError("original pending uncertainty owner witness required")
         return
     if type(witness) is not _RepositoryUncertainty or witness not in _UNCERTAINTY:
@@ -62,7 +63,8 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
     if (actual_jobs is not jobs or context["run"].run_identity != run.run_identity
             or run.status != "running" or to_status != "unknown_external_effect" or reason not in reasons
             or stop is None or source._source_digest(stop) != stop_digest
-            or source.read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v2"
+            or source.read_repository_inventory(run)["schema"] not in {
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
             or not isinstance(result, dict) or set(result) != {"no_learning", "operator_action", "iteration_id"}
             or result["no_learning"] is not True or result["operator_action"] != reasons[reason]):
         raise DurableJobLeaseError("original uncertainty projection changed")
@@ -123,7 +125,7 @@ def _static(row, context):
     return source._source_digest({key: value for key, value in values.items() if key not in mutable})
 
 
-async def _context(service, jobs, *, job_id, owner, limit_reason=None):
+async def _context(service, jobs, *, job_id, owner, limit_reason=None, completion_witness=None):
     """Cleanup-only metadata first, then current original physical source."""
     from src.workflows.repo_repair import RepoRepairService
     from src.workflows.general_task_guard import _cancel_original, child_binding
@@ -202,8 +204,14 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None):
         if limit_reason is not None:
             context["limit_evidence"] = await _limit_evidence(db, context, reason=limit_reason)
         stop = source._repository_record(run, STOP_ID)
-        if stop is not None and not source._stop_static_rows_match(run, stop, context["static_rows"]):
-            raise DurableJobLeaseError("original stop snapshot changed before private read")
+        if stop is not None:
+            if completion_witness is None:
+                matches = source._stop_static_rows_match(run, stop, context["static_rows"])
+            else:
+                matches = await source._validate_repository_completion_post_context_sql(db,
+                    service, jobs, witness=completion_witness, context=context)
+            if not matches:
+                raise DurableJobLeaseError("original stop snapshot changed before private read")
         if stop is not None:
             snapshot = json.loads(service._read_private_artifact(stop["snapshot_artifact_ref"],
                 expected_digest=stop["snapshot_artifact_digest"]))
@@ -258,7 +266,8 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None):
         return staged
 
 
-async def _accounting(db, context):
+async def _original_accounting_members(db, context):
+    """Validate original liability without granting terminal settlement."""
     from src.workflows.general_task_accounting import entry_for, reservation_liability
     source = _source()
     group = context["group"]
@@ -279,13 +288,19 @@ async def _accounting(db, context):
                     or member["source_checkpoint_digest"] != source._source_digest(context["original"])):
                 raise DurableJobLeaseError("original stop Root accounting changed")
             root_members.append(row)
-        if (same_group or same_root) and row.state not in {"settled", "released"}:
-            raise DurableJobLeaseError("original stop retains unsettled or Unknown liability")
     if (len(members) > group.max_inference_calls
             or sum(reservation_liability(row) for row in members) > group.max_cost_microusd
             or sum(reservation_liability(row) for row in root_members) > context["work"].limits.max_cost_microusd):
         raise DurableJobLeaseError("original stop accounting exceeded original bounds")
-    return source._source_digest([row.model_dump(mode="json") for row in sorted(members, key=lambda row: row.operation_id)])
+    return members
+
+
+async def _accounting(db, context):
+    members = await _original_accounting_members(db, context)
+    if any(row.state not in {"settled", "released"} for row in members):
+        raise DurableJobLeaseError("original stop retains unsettled or Unknown liability")
+    return _source()._source_digest([row.model_dump(mode="json")
+        for row in sorted(members, key=lambda row: row.operation_id)])
 
 
 async def _limit_evidence(db, context, *, reason):
@@ -299,9 +314,9 @@ async def _limit_evidence(db, context, *, reason):
     goal = await db.get(Goal, context["goal"].id, populate_existing=True)
     if goal is None or source._source_digest(goal.model_dump(mode="json")) != limits["original_goal_row_digest"]:
         raise DurableJobLeaseError("original stop Goal limit facts changed")
-    await _accounting(db, context)
-    rows = list((await db.scalars(select(InferenceCostReservation))).all())
-    members = [row for row in rows if (entry_for(row) or {}).get("group", {}).get("group_id") == context["group"].group_id]
+    # Negative expiry/limit intent retains contacted and Unknown debt. The
+    # terminal owner still requires _accounting's settled-only proof.
+    members = await _original_accounting_members(db, context)
     root_members = [row for row in members if row.job_id == context["run"].run_identity]
     root_cost, group_cost = sum(map(reservation_liability, root_members)), sum(map(reservation_liability, members))
     group, work = context["group"], context["work"]
@@ -549,55 +564,80 @@ async def _cas_repository_stop_board_row(db, row, values):
     await db.refresh(row)
 
 
+async def _persist_repository_stop_intent_locked(service, jobs, *, context, owner, reason, fence):
+    """Commit and re-read original intent under the actual owner's live fence."""
+    from src.workflows.repo_repair_source_recovery import assert_repository_recovery_fence
+    from src.work_board.repository import _begin_sqlite_immediate, WorkBoardRepository
+    source = _source()
+    if type(context) is not _RepositoryStopContext or _STAGED.get(context) is not service:
+        raise DurableJobLeaseError("actual source-staged stop context required")
+    job_id = context["run"].run_identity
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
+    if context["owner"] != owner or reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
+        raise DurableJobLeaseError("closed original repository stop reason required")
+    existing_stop = source._repository_record(context["run"], STOP_ID)
+    if existing_stop is None:
+        snapshot = {"schema": "repository.stop_snapshot.v1", "static_rows": context["static_rows"],
+            "repository_job_id": job_id, "source_checkpoint_digest": source._source_digest(context["original"])}
+        encoded = _canonical(snapshot).encode()
+        if len(encoded) > 1024 * 1024:
+            raise DurableJobLeaseError("original stop snapshot exceeds protected artifact bound")
+        snapshot_ref, snapshot_digest = service._write_private_artifact(
+            "artifacts/repo-repair/stop-" + source._source_digest(job_id) + ".json", encoded)
+        if service._read_private_artifact(snapshot_ref, expected_digest=snapshot_digest) != encoded:
+            raise DurableJobLeaseError("literal original stop snapshot readback changed")
+    async with jobs._session() as db:
+        await _begin_sqlite_immediate(db)
+        for model, key, expected in context["rows"]:
+            row = await db.get(model, key, populate_existing=True)
+            if row is None or _canonical(row.model_dump(mode="json")) != expected:
+                raise DurableJobLeaseError("original stop intent SQL epoch changed")
+        run = await jobs._fetch(db, job_id)
+        stop = source._repository_record(run, STOP_ID)
+        if stop is None:
+            stop = {"schema": "repository.stop_intent.v1", "stop_reason": reason,
+                "native_binding_digest": source._source_digest(context["binding"].model_dump(mode="json")),
+                "static_rows": context["static_rows"], "snapshot_artifact_ref": snapshot_ref,
+                "snapshot_artifact_digest": snapshot_digest, "no_learning": True}
+            if reason in AUTOMATIC_REASONS:
+                stop.update(limit_evidence=context["limit_evidence"],
+                    limit_evidence_digest=source._source_digest(context["limit_evidence"]))
+            source._append_repository_record(run, STOP_ID, stop,
+                inventory=source.repository_checkpoint_inventory(run, context["work"]))
+            run.revision += 1
+        elif stop.get("stop_reason") != reason:
+            raise DurableJobLeaseError("original stop reason cannot be replaced")
+        event = await WorkBoardRepository._event(db, context["task"], owner,
+            kind="attempt.repository_stop_requested", metadata={"attempt_id": context["attempt"].attempt_id,
+                "repository_job_id": job_id, "stop_reason": reason, "no_learning": True})
+        repository_event = await WorkBoardRepository._event(db, context["repo_task"], owner,
+            kind="attempt.repository_stop_requested", metadata={"attempt_id": context["repo_attempt"].attempt_id,
+                "repository_job_id": job_id, "stop_reason": reason, "no_learning": True})
+        await db.commit()
+    # The committed intent must be observed before any completion adoption.
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
+    fresh = await _context(service, jobs, job_id=job_id, owner=owner,
+        limit_reason=reason if reason in AUTOMATIC_REASONS else None)
+    staged = _RepositoryStopContext(MappingProxyType({**fresh.data, "stop_events": (event, repository_event)}))
+    _STAGED[staged] = service
+    return staged
+
+
 async def stop_repository_root(service, jobs, *, job_id, owner, general_task_service, reason="operator_cancelled"):
     from src.model_fabric.effective_policy import configuration_mutation_lock
-    from src.work_board.repository import _begin_sqlite_immediate, WorkBoardRepository, BoardAttemptProjection
+    from src.work_board.repository import BoardAttemptProjection
     source = _source()
     if reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
         raise DurableJobLeaseError("closed original repository stop reason required")
-    async with configuration_mutation_lock:
+    from src.workflows.repo_repair_source_recovery import _repository_recovery_fence
+    async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
         source._assert_task_publication_configuration(service)
         context = await _context(service, jobs, job_id=job_id, owner=owner,
             limit_reason=reason if reason in AUTOMATIC_REASONS else None)
-        existing_stop = source._repository_record(context["run"], STOP_ID)
-        if existing_stop is None:
-            snapshot = {"schema": "repository.stop_snapshot.v1", "static_rows": context["static_rows"],
-                "repository_job_id": job_id, "source_checkpoint_digest": source._source_digest(context["original"])}
-            encoded = _canonical(snapshot).encode()
-            if len(encoded) > 1024 * 1024:
-                raise DurableJobLeaseError("original stop snapshot exceeds protected artifact bound")
-            snapshot_ref, snapshot_digest = service._write_private_artifact(
-                "artifacts/repo-repair/stop-" + source._source_digest(job_id) + ".json", encoded)
-            if service._read_private_artifact(snapshot_ref, expected_digest=snapshot_digest) != encoded:
-                raise DurableJobLeaseError("literal original stop snapshot readback changed")
-        async with jobs._session() as db:
-            await _begin_sqlite_immediate(db)
-            for model, key, expected in context["rows"]:
-                row = await db.get(model, key, populate_existing=True)
-                if row is None or _canonical(row.model_dump(mode="json")) != expected:
-                    raise DurableJobLeaseError("original stop intent SQL epoch changed")
-            run = await jobs._fetch(db, job_id)
-            stop = source._repository_record(run, STOP_ID)
-            if stop is None:
-                stop = {"schema": "repository.stop_intent.v1", "stop_reason": reason,
-                    "native_binding_digest": source._source_digest(context["binding"].model_dump(mode="json")),
-                    "static_rows": context["static_rows"], "snapshot_artifact_ref": snapshot_ref,
-                    "snapshot_artifact_digest": snapshot_digest, "no_learning": True}
-                if reason in AUTOMATIC_REASONS:
-                    stop.update(limit_evidence=context["limit_evidence"],
-                        limit_evidence_digest=source._source_digest(context["limit_evidence"]))
-                source._append_repository_record(run, STOP_ID, stop,
-                    inventory=source.repository_checkpoint_inventory(run, context["work"]))
-                run.revision += 1
-            elif stop.get("stop_reason") != reason:
-                raise DurableJobLeaseError("original stop reason cannot be replaced")
-            event = await WorkBoardRepository._event(db, context["task"], owner,
-                kind="attempt.repository_stop_requested", metadata={"attempt_id": context["attempt"].attempt_id,
-                    "repository_job_id": job_id, "stop_reason": reason, "no_learning": True})
-            repository_event = await WorkBoardRepository._event(db, context["repo_task"], owner,
-                kind="attempt.repository_stop_requested", metadata={"attempt_id": context["repo_attempt"].attempt_id,
-                    "repository_job_id": job_id, "stop_reason": reason, "no_learning": True})
-            await db.commit()
+        context = await _persist_repository_stop_intent_locked(service, jobs,
+            context=context, owner=owner, reason=reason, fence=fence)
+        stop = source._repository_record(context["run"], STOP_ID)
+        event, repository_event = context["stop_events"]
     # Signalling and waiting happen after the short configuration/SQL fence.
     # Only actual Source-owned jobs may supply the exact supervisor authority.
     import asyncio

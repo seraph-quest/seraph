@@ -20,9 +20,154 @@ from src.work_board.contracts import (TaskProposalGroupV1,
 _SEAL = object()
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _task_publication = ContextVar("repository_task_publication", default=None)
+_startup_fence = ContextVar("repository_startup_fence", default=None)
 _UNCERTAINTY_COLUMNS = frozenset({"status", "failure_reason", "finished_at", "lease_owner",
     "lease_expires_at", "result_digest", "result_summary"})
 _ROOT_BOOKKEEPING = frozenset({"updated_at", "revision", "checkpoint_receipts_json", "heartbeat_at"})
+
+
+@asynccontextmanager
+async def _repository_startup_mutation_fence():
+    """One task-owned startup fence, shared by its accounting subpass."""
+    import asyncio
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    task = asyncio.current_task()
+    held = _startup_fence.get()
+    if held is not None and held[0] is task:
+        if not configuration_mutation_lock.locked():
+            raise RuntimeError("repository startup fence lost")
+        yield
+        return
+    async with configuration_mutation_lock:
+        token = _startup_fence.set((task, object()))
+        try:
+            yield
+        finally:
+            _startup_fence.reset(token)
+
+
+async def _repository_startup_protected_lineage(db):
+    """Classify exact original IDs in the caller's IMMEDIATE SQL epoch.
+
+    This is mutation deferral only. It cannot grant cleanup, execution, or
+    financial settlement and never opens a physical artifact.
+    """
+    import asyncio
+    import logging
+    from sqlalchemy import select
+    from src.db.models import WorkflowRunState
+    from src.workflows.general_task_guard import child_binding, _history
+    from src.workflows.job_runtime import DurableJobLeaseError, _binding
+    from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
+    held = _startup_fence.get()
+    if held is None or held[0] is not asyncio.current_task():
+        raise DurableJobLeaseError("private repository startup mutation fence required")
+    protected = set()
+    after = 0
+    while True:
+        roots = list((await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "engineering.repo-repair.v1",
+            WorkflowRunState.id > after).order_by(WorkflowRunState.id).limit(64))).scalars())
+        if not roots:
+            break
+        for root in roots:
+            after = root.id
+            established = {root.run_identity}
+            present = False
+            try:
+                history = _history(root)
+                present = any(item["checkpoint_id"].startswith("repository:producer:") for item in history)
+                if not present:
+                    continue
+                original, work, _, _, binding, _ = read_repository_original(root)
+                expected_mapping = _binding(owner_principal_id=binding.owner_principal_id,
+                    goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+                    idempotency_scope="original-repository-child", dedupe_key=binding.invocation_id)
+                mapped = (await db.execute(select(WorkflowRunState).where(
+                    WorkflowRunState.idempotency_binding == expected_mapping))).scalar_one_or_none()
+                if mapped is None or mapped.id != root.id:
+                    raise DurableJobLeaseError("original startup repository mapping changed")
+                child = (await db.execute(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == binding.invocation_id))).scalar_one_or_none()
+                if child is None or child_binding(child) != binding:
+                    raise DurableJobLeaseError("original startup native mapping changed")
+                established.add(child.run_identity)
+                parent = (await db.execute(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == binding.parent_job_id))).scalar_one_or_none()
+                if (parent is None or child.parent_job_id != parent.run_identity
+                        or (parent.owner_principal_id, parent.operator_session_id,
+                            parent.goal_id, parent.goal_revision) !=
+                           (binding.owner_principal_id, binding.original_root_id,
+                            binding.goal_id, binding.goal_revision)):
+                    raise DurableJobLeaseError("original startup explicit parent changed")
+                established.add(parent.run_identity)
+                inventory = _repository_record(root, "repository:inventory:v1")
+                if inventory is None or inventory.get("schema") != "repository.checkpoint_inventory.v3":
+                    raise DurableJobLeaseError("original startup registered inventory changed")
+                for index in range(1, work.limits.max_iterations + 1):
+                    identity = iteration_identity(root.run_identity, original["repository_attempt_id"],
+                        _source_digest(original["original_input"]), index)
+                    if _repository_record(root, "repository:producer:" + identity) is not None:
+                        read_registered_repository_producer(root, iteration_index=index)
+                read_repository_inventory(root)
+            except Exception:
+                # Corrupt present metadata cannot be interpreted as absence.
+                # Only IDs already established by exact canonical mappings
+                # are retained; no foreign IDs are guessed from corruption.
+                if not present:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Repository original startup provenance blocked for %s; exact lineage retained",
+                    root.run_identity, exc_info=True)
+            if present:
+                protected.update(established)
+    return frozenset(protected)
+
+
+async def _validate_repository_completion_post_context_sql(db, service, jobs, *, witness, context):
+    """Consume only an authentic writer's exact already-committed successor."""
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_completion_witness, repository_completion_context,
+        repository_completion_post_cas, repository_completion_committed_rows)
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    assert_repository_completion_witness(witness, service=service, jobs=jobs)
+    before = repository_completion_context(witness)
+    cas = repository_completion_post_cas(witness)
+    run = context["run"]
+    stop = _repository_record(run, "repository:stop-intent:v1")
+    if (read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3"
+            or run.run_identity != before["run"].run_identity
+            or context["owner"] != before["owner"]
+            or type(cas["before_revision"]) is not int or type(cas["post_revision"]) is not int
+            or cas["post_revision"] != cas["before_revision"] + 1
+            or before["run"].revision != cas["before_revision"]
+            or run.revision != cas["post_revision"] or stop is None
+            or _source_digest(stop) != cas["stop_digest"]
+            or not _stop_static_rows_match(before["run"], stop, before["static_rows"])):
+        raise DurableJobLeaseError("authenticated repository completion successor changed")
+    committed = repository_completion_committed_rows(witness)
+    if not committed:
+        raise DurableJobLeaseError("authenticated repository completion rows missing")
+    for model, key, expected in committed:
+        current = await db.get(model, key, populate_existing=True)
+        if current is None or _canonical(current.model_dump(mode="json")) != expected:
+            raise DurableJobLeaseError("authenticated repository completion row changed")
+    # Cleanup changes only Root bookkeeping. The original snapshot continues
+    # to bind every non-Root byte and the Root's actual static values.
+    return context["static_rows"] == before["static_rows"]
+
+
+async def stage_repository_completion_post_context(service, jobs, *, witness, owner, fence):
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_completion_witness, repository_completion_context,
+        assert_repository_recovery_fence)
+    from src.workflows.repo_repair_stop import _context
+    assert_repository_completion_witness(witness, service=service, jobs=jobs)
+    original = repository_completion_context(witness)
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=original["run"].run_identity, owner=owner)
+    return await _context(service, jobs, job_id=original["run"].run_identity,
+        owner=owner, completion_witness=witness)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +220,7 @@ def _validate_repository_unknown_root_projection(run, stop, successor):
     if (type(stop) is not dict or type(stop.get("static_rows")) is not dict
             or type(successor) is not dict or set(successor) != keys
             or successor["schema"] != "repository.stop_uncertainty_successor.v1"
-            or inventory["schema"] != "repository.checkpoint_inventory.v2"
+            or inventory["schema"] not in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
             or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
             or successor["stop_digest"] != _source_digest(stop)
             or successor["authority_digest"] != run.authority_digest
@@ -234,7 +379,7 @@ def read_repository_inventory(run):
     if not isinstance(record, dict) or set(record) != expected_keys:
         raise DurableJobLeaseError("original repository limits inventory required")
     limits = record["original_limits"]
-    if (record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2"}
+    if (record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
             or record["identities"] != repository_checkpoint_inventory(run, work)
             or type(record["max_records"]) is not int or record["max_records"] != 50
             or type(record["max_metadata_bytes_per_record"]) is not int or record["max_metadata_bytes_per_record"] != 16384
@@ -315,11 +460,16 @@ def repository_checkpoint_inventory(run, work, *, _admission_schema=None):
     reserved = _repository_record(run, "repository:inventory:v1")
     schema = _admission_schema if _admission_schema is not None else (
         reserved.get("schema") if reserved is not None else "repository.checkpoint_inventory.v1")
-    if schema == "repository.checkpoint_inventory.v2":
+    if schema in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}:
         ids.append("repository:stop-uncertainty-successor:v1")
     elif schema != "repository.checkpoint_inventory.v1":
         from src.workflows.job_runtime import DurableJobLeaseError
         raise DurableJobLeaseError("original repository inventory version changed")
+    if schema == "repository.checkpoint_inventory.v3":
+        ids.extend("repository:producer:" + iteration_identity(run.run_identity,
+            original["repository_attempt_id"], _source_digest(original["original_input"]), index)
+            for index in range(1, work.limits.max_iterations + 1))
+        ids.append("repository:physical-cleanup:v1")
     if len(ids) != len(set(ids)) or len(ids) > 50:
         from src.workflows.job_runtime import DurableJobTransitionError
         raise DurableJobTransitionError("repository fixed checkpoint capacity exceeded")
@@ -1946,7 +2096,18 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         def before_dispatch():
             future = asyncio.run_coroutine_threadsafe(dispatch_sql_guard(), loop)
             future.result(timeout=min(10, max(1, remaining)))
-        task = asyncio.create_task(asyncio.to_thread(service.sandbox.execute_job, job, before_dispatch=before_dispatch))
+        if read_repository_inventory(context["run"])["schema"] == "repository.checkpoint_inventory.v3":
+            from src.workflows.repo_repair_source_recovery import issue_repository_source_producer
+            producer_owner = await issue_repository_source_producer(service, jobs, job, owner=owner)
+            # Registration advances the canonical epoch before ACK. Each real
+            # command is authorized through its private channel after that
+            # commit, rather than replaying this pre-registration snapshot.
+            task = asyncio.create_task(asyncio.to_thread(service.sandbox.execute_job,
+                job, producer_owner=producer_owner))
+        else:
+            producer_owner = None
+            task = asyncio.create_task(asyncio.to_thread(service.sandbox.execute_job,
+                job, before_dispatch=before_dispatch))
         service._iterative_process_callbacks[identity] = task
         service._iterative_process_jobs[identity] = job
     try:
@@ -1970,6 +2131,35 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
     assert_repo_iteration_cleanup_witness(cleanup, job)
     if not task.done() or task.cancelled() or task.exception() is not None:
         raise DurableJobLeaseError("actual original process owner closure is unproven")
+    if producer_owner is not None:
+        from src.workflows.repo_repair_source_recovery import (
+            publish_original_repository_completion, repository_completion_outcome)
+        completion = await publish_original_repository_completion(service, jobs,
+            job_id=job_id, owner=owner, iteration_index=prepared["iteration_index"],
+            producer_owner=producer_owner, actual_result=result)
+        outcome = repository_completion_outcome(completion)
+        async with jobs._session() as db:
+            stopping = _repository_record(await jobs._fetch(db, job_id), "repository:stop-intent:v1")
+        if stopping is not None:
+            from src.workflows.repo_repair_stop import stop_repository_root
+            stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+                general_task_service=None, reason=stopping["stop_reason"])
+            outcome["stop_pending"] = stopped["pending"]
+            outcome["recovery_action"] = "repository_stop_pending" if stopped["pending"] else "repository_stopped"
+        elif outcome["status"] == "succeeded":
+            outcome["original_child_final"] = await finalize_repository_iteration(service, jobs,
+                job_id=job_id, owner=owner, iteration_index=prepared["iteration_index"],
+                actual_cleanup=cleanup, actual_job=job, completion_witness=completion)
+        elif outcome["status"] == "failed" and prepared["iteration_index"] < work.limits.max_iterations:
+            outcome["repository_review"] = await prepare_repository_iteration(service, jobs,
+                job_id=job_id, owner=owner, iteration_index=prepared["iteration_index"] + 1)
+        elif outcome["status"] == "failed":
+            from src.workflows.repo_repair_stop import stop_repository_root
+            stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+                general_task_service=None, reason="iterations_exhausted")
+            outcome["stop_pending"] = stopped["pending"]
+            outcome["recovery_action"] = "repository_stop_pending" if stopped["pending"] else "original_iterations_exhausted"
+        return outcome
     projection = cleanup.projection()
     prefix = "artifacts/repo-repair/model/iteration-" + identity
     cleanup_ref, cleanup_digest = service._write_private_artifact(prefix + "-cleanup.json", _canonical(projection).encode())
@@ -2050,7 +2240,7 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
 
 
 async def finalize_repository_iteration(service, jobs, *, job_id, owner, iteration_index,
-        actual_cleanup, actual_job):
+        actual_cleanup, actual_job, completion_witness=None):
     """Adopt only the actual supervised final readback into the original child."""
     from dataclasses import replace
     from sqlalchemy import select
@@ -2111,7 +2301,23 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
             checks_passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
                 and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
                 and manifest.get("test_args") == check_args)
-        if (json.loads(cleanup_bytes) != actual_cleanup.projection() or not checks_passed
+        if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+            from src.workflows.repo_repair_source_recovery import (
+                assert_repository_completion_witness, repository_completion_result,
+                repository_completion_post_cas)
+            assert_repository_completion_witness(completion_witness, service=service, jobs=jobs)
+            actual_result = repository_completion_result(completion_witness)
+            cas = repository_completion_post_cas(completion_witness)
+            actual_projection = actual_cleanup.projection()
+            recorded_projection = json.loads(cleanup_bytes)
+            cleanup_matches = (cas["iteration_id"] == identity and cas["post_revision"] == run.revision
+                and cleanup_record.get("source_completion_cas") == cas
+                and readback.get("source_completion_cas") == cas
+                and actual_result["manifest"] == manifest
+                and recorded_projection == actual_projection)
+        else:
+            cleanup_matches = json.loads(cleanup_bytes) == actual_cleanup.projection()
+        if (not cleanup_matches or not checks_passed
                 or _source_digest(manifest) != readback["manifest_digest"]):
             raise DurableJobLeaseError("all requested original checks and actual cleanup must pass")
         output = RepoWorkVerifiedResult(iterations=iterations, patch_artifact_ref=patch["patch_artifact_ref"],
@@ -2609,6 +2815,16 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
             staged_config = _assert_task_publication_configuration(service)
             staged_policy = _repository_policy_limits()
             staged_limits = _repository_original_limits(goal, staged_policy)
+            from src.execution.repo_original_producer import _enable_original_producer_service
+            # Actual Source admission owns this native-host selection. It is
+            # staged before SQL and cannot upgrade any pre-existing Root.
+            try:
+                _enable_original_producer_service(service, service.jobs)
+            except (ValueError, OSError) as exc:
+                from src.workflows.repo_repair import RepoRepairError
+                raise RepoRepairError("repository_original_producer_prerequisites_blocked",
+                    "The selected original producer mode requires native Linux supervision and signing support",
+                    status_code=503) from exc
             facts = json.loads(service._read_private_artifact(source.source_artifact_ref,
                 expected_digest=source.source_artifact_digest))
             compiled = service.recheck_task_source_snapshot(work, facts)
@@ -2687,9 +2903,13 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         run.checkpoint_receipts_json = _canonical([{"checkpoint_id": "repository:original:v1",
             "state_digest": _digest(payload), "safe": True, "payload": payload,
             "created_at": now.isoformat()}])
-        inventory = repository_checkpoint_inventory(run, work, _admission_schema="repository.checkpoint_inventory.v2")
+        from src.execution.repo_original_producer import original_producer_service_enabled
+        if not original_producer_service_enabled(service, service.jobs):
+            raise DurableJobLeaseError("original producer admission owner changed")
+        inventory_schema = "repository.checkpoint_inventory.v3"
+        inventory = repository_checkpoint_inventory(run, work, _admission_schema=inventory_schema)
         _append_repository_record(run, "repository:inventory:v1",
-            {"schema": "repository.checkpoint_inventory.v2", "identities": inventory,
+            {"schema": inventory_schema, "identities": inventory,
              "max_records": 50, "max_metadata_bytes_per_record": 16384,
              "original_limits": held[4], "original_limits_digest": _source_digest(held[4])}, inventory=inventory)
         read_repository_inventory(run)

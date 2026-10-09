@@ -483,9 +483,13 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
         except (OSError, TypeError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
             return RepoSandboxPreflight(False,"blocked",str(exc)[:512],executor_kind=str(self.config.executor_kind),posture=posture)
 
-    def execute_job(self, job: RepoSandboxJob, *, before_dispatch: Callable[[],None] | None=None) -> dict[str,Any]:
+    def execute_job(self, job: RepoSandboxJob, *, before_dispatch: Callable[[],None] | None=None,
+            producer_owner=None) -> dict[str,Any]:
         from src.execution.repo_supervisor import exact_signal, start_identity, finish_supervisor
         from src.execution.repo_sandbox import iteration_process_projection
+        if producer_owner is not None:
+            from src.execution.repo_original_producer import assert_original_producer_owner
+            assert_original_producer_owner(producer_owner, job)
         if job.iteration_binding is not None:
             from src.workflows.repo_repair_source import assert_repo_iteration_process_binding
             assert_repo_iteration_process_binding(job.iteration_binding, job)
@@ -553,6 +557,19 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 if before_dispatch:before_dispatch()
                 if time.monotonic()>=deadline:
                     raise RepoSandboxError("Node deadline exhausted before supervisor launch")
+                if producer_owner is not None:
+                    from src.execution.repo_original_producer import run_original_producer
+                    def observe_original(process):
+                        with self._active_lock:
+                            self._active[job.job_id].update(process=process,
+                                pid_start_identity=start_identity(process.pid) if process is not None else None)
+                        if process is not None:
+                            marker.update(phase="worker_started", pid=process.pid,
+                                pid_start_identity=start_identity(process.pid))
+                            self._write_job_marker(job.job_id, marker)
+                    result = run_original_producer(self, job, stage=stage, payload=payload, posture=preflight.posture,
+                        owner=producer_owner, observe_process=observe_original)
+                    return self._finish_original_producer(job, result)
                 supervisor=Path(__file__).with_name("repo_supervisor.py")
                 process=subprocess.Popen([sys.executable,"-I",str(supervisor),str(request)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
                 pid_start=start_identity(process.pid)

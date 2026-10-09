@@ -13,11 +13,11 @@ from pathlib import Path, PurePosixPath
 import stat
 import tempfile
 import uuid
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
 from sqlalchemy import or_
 from sqlmodel import col, select
 
@@ -1151,6 +1151,15 @@ class RepoRepairResumeRequest(BaseModel):
     expected_proposal_revision: int = Field(ge=1)
     expected_job_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class RepoSourceRecoveryRequest(BaseModel):
+    """Current original Root revision and one negative cleanup action only."""
+
+    model_config = {"extra": "forbid", "strict": True}
+
+    expected_job_revision: StrictInt = Field(ge=0)
+    action: Literal["reconcile_original_cleanup", "settle_original_host_boot_cleanup"]
 
 
 _WORKFLOW_CONTROL_ACTIONS = frozenset(
@@ -8366,6 +8375,35 @@ async def _safe_repo_repair_projection(
         "recovery_action": recovery_action,
         "operator_visible": True,
     }
+
+
+@router.post("/workflows/repo-repair/{job_id}/source-recovery")
+async def recover_repo_repair_source(job_id: str, req: RepoSourceRecoveryRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, _job = await _owned_repo_repair_job(job_id, operator)
+    from src.workflows.repo_repair_source_recovery import (
+        RepositorySourceRecoveryError, recover_original_repository_cleanup,
+    )
+    try:
+        if not await _repo_repair_source_root(safe_job_id, operator):
+            raise RepositorySourceRecoveryError("repository_source_recovery_unavailable")
+        _tasks, source, jobs = _repo_repair_source_owner()
+        return await recover_original_repository_cleanup(source, jobs,
+            job_id=safe_job_id, owner=WorkBoardOwner(
+                principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
+            expected_job_revision=req.expected_job_revision, action=req.action)
+    except RepositorySourceRecoveryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={
+            "code": exc.code, "operator_visible": True, "no_learning": True,
+        }) from exc
+    except HTTPException:
+        raise
+    except (DurableJobError, ValueError, BoardError) as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "repository_source_recovery_blocked", "operator_visible": True, "no_learning": True,
+        }) from exc
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
 
 
 @router.get("/workflows/repo-repair/{job_id}/source-preview")

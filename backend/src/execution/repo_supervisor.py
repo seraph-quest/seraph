@@ -22,6 +22,7 @@ WAIT_ALL = 0x40000000
 MAX_CHILDREN = 1024
 MAX_CHILD_READ = 16 * 1024
 CANCELLED = False
+ORIGINAL_PRODUCER = None
 PYTHON_PROFILE = "repo-python-pytest-iterative-supervisor-v1"
 
 
@@ -189,6 +190,10 @@ def cancel(signum: int, frame: Any) -> None:
 
 def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float, *, stream_limit: int) -> dict[str,Any]:
     if CANCELLED:raise ValueError("node_cancelled_before_command")
+    if ORIGINAL_PRODUCER is not None:
+        ORIGINAL_PRODUCER.authorize(argv)
+        if ORIGINAL_PRODUCER.parent_gone():
+            raise ValueError("original_producer_no_spawn_after_parent_eof")
     process=subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
     selector=selectors.DefaultSelector();buffers={"stdout":bytearray(),"stderr":bytearray()};truncated=False
     for name,stream in (("stdout",process.stdout),("stderr",process.stderr)):
@@ -197,6 +202,8 @@ def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float,
     timed_out=False;code=None;leftover=False;proof=None
     try:
         while selector.get_map() or code is None:
+            if ORIGINAL_PRODUCER is not None and ORIGINAL_PRODUCER.parent_gone():
+                cancel(signal.SIGTERM, None)
             code=process.poll()
             if proof is None and (code is not None or CANCELLED or time.monotonic()>=command_deadline):
                 timed_out=code is None and not CANCELLED
@@ -323,6 +330,8 @@ def main(request_file: Path) -> int:
             raise ValueError("node_supervisor_request_untrusted")
         job=json.loads(os.read(descriptor,32769))
     finally:os.close(descriptor)
+    if ORIGINAL_PRODUCER is not None:
+        job["deadline_at"] = min(float(job["deadline_at"]), ORIGINAL_PRODUCER.deadline)
     if job.get("profile") == PYTHON_PROFILE:
         return run_python(job)
     if job.get("profile")!=PROFILE:raise ValueError("node_supervisor_profile_invalid")

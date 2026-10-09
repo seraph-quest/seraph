@@ -171,7 +171,7 @@ async def test_inbox_metadata_negatives(accounting_db,monkeypatch,forbid_externa
         async with client:
             r=await client.get('/api/operator/continuation');assert r.status_code==200,r.text
             assert not r.json()['task_next_actions']['items']
-            assert r.json()['task_next_actions']['state']==('blocked' if mutation=='malformed_id' else 'empty')
+            assert r.json()['task_next_actions']['state']==('degraded' if mutation=='malformed_id' else 'empty')
     finally:hm.home_projection.stop()
 
 

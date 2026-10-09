@@ -291,7 +291,7 @@ async def test_corrupt_programme_metadata_blocks_section_without_private_reads(a
         async with client:
             result = await client.get("/api/operator/continuation")
             assert result.status_code == 200,result.text
-            assert result.json()["programme_status"]["state"] == "blocked"
+            assert result.json()["programme_status"]["state"] == "degraded"
             assert result.json()["programme_status"]["items"] == []
             assert result.json()['active_goals']['items'][0]['title']=='Private corrupt programme goal'
             assert 'unexpected' not in result.text and 'generations' not in result.text
@@ -352,3 +352,84 @@ async def test_genuine_selected_task_only_recovery_never_selects_goal_and_rollba
             assert removed.status_code == 200 and removed.json()["task_next_actions"]["items"] == []
     finally:
         home_projection.stop()
+
+
+async def test_genuine_admitted_method_task_only_recovery_has_no_navigation(accounting_db,monkeypatch,tmp_path,forbid_external_inference):
+    from tests import test_home_method_vertical as method_fixture
+    from src.auth import service as auth
+    from src.auth.ownership import RecoveryRequest,RecoveryConfirmRequest,preview,confirm,rollback
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.auth import ownership
+    original_enroll=ownership.enroll
+    original_setup=method_fixture.home_setup
+    original_create=auth.create_session
+    original_pass=WorkBoardDispatcher.run_pass
+    observed={"checked":False}
+    async def capture_enrollment(operator):
+        value=await original_enroll(operator);observed[operator.session_id]=value[1];return value
+    async def capture_setup(*args,**kwargs):
+        value=await original_setup(*args,**kwargs);observed['client']=value[0];return value
+    async def verify_before_pass(self,*args,**kwargs):
+        client=observed['client']
+        current=await client.get('/api/operator/continuation')
+        assert current.status_code==200,current.text
+        if not observed.get('diagnostic_checked'):
+            from src.db.models import WorkBoardTask
+            initial=current.json()['task_next_actions']['items']
+            if initial:
+                observed['diagnostic_checked']=True
+                task_id=initial[0]['task_id']
+                async with accounting_db[2].accounting_sessions() as db:
+                    task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                    original_goal,original_method,original_priority=task.goal_id,task.admitted_method_json,task.priority
+                    task.admitted_method_json='{malformed-negative-source'
+                try:
+                    unknown=await client.get('/api/operator/continuation');assert unknown.status_code==200,unknown.text
+                    rows=unknown.json()['task_next_actions']['items']
+                    assert len(rows)==1 and rows[0]['method']['status']=='unknown'
+                    (accounting_db[0]/'home-prior-unknown-wire.json').write_text(unknown.text)
+                    async with accounting_db[2].accounting_sessions() as db:
+                        task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id));task.priority=-1
+                    degraded=await client.get('/api/operator/continuation');assert degraded.status_code==200,degraded.text
+                    section=degraded.json()['task_next_actions']
+                    assert section['state']=='degraded' and section['items']==[]
+                    (accounting_db[0]/'home-degraded-empty-wire.json').write_text(degraded.text)
+                finally:
+                    async with accounting_db[2].accounting_sessions() as db:
+                        task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                        task.goal_id,task.admitted_method_json,task.priority=original_goal,original_method,original_priority
+        admitted=[r for section in ('task_next_actions','prepared_outputs') for r in current.json()[section]['items']
+            if r.get('method') and r['method']['status']=='admitted' and r['method']['lifecycle']=='active_metadata']
+        if admitted and not observed['checked']:
+            observed['checked']=True
+            source=admitted[0];assert source['method']['target'] is not None
+            original_token=client.cookies.get(settings.operator_auth_cookie_name)
+            owner=await auth.authenticate_home_token_readonly(original_token)
+            continuity=observed[owner.session_id]
+            token,receiving=await original_create(continuity_token=continuity)
+            selection=RecoveryRequest(selections=[{'kind':'task','record_id':source['task_id']}])
+            reviewed=await preview(receiving,selection)
+            journal=await confirm(receiving,RecoveryConfirmRequest(**selection.model_dump(),
+                preview_digest=reviewed['preview_digest'],idempotency_key='home-method-task-only',acknowledge_read_only=True))
+            try:
+                client.cookies.set(settings.operator_auth_cookie_name,token)
+                response=await client.get('/api/operator/continuation');assert response.status_code==200,response.text
+                assert response.json()['active_goals']['items']==[]
+                rows=[r for section in ('task_next_actions','prepared_outputs') for r in response.json()[section]['items']]
+                assert len(rows)==1 and rows[0]['task_id']==source['task_id']
+                row=rows[0];assert row['ownership_access']=='recovered_read_only'
+                assert row['method']['status']=='admitted' and row['method']['lifecycle']=='active_metadata'
+                assert row['method']['target'] is None
+                for field in ('method_id','version','digest','admitted_at'):
+                    assert row['method'][field]==source['method'][field]
+                (accounting_db[0]/'home-recovered-method-wire.json').write_text(response.text)
+            finally:
+                await rollback(receiving,journal['journal_id'])
+                client.cookies.set(settings.operator_auth_cookie_name,original_token)
+        return await original_pass(self,*args,**kwargs)
+    monkeypatch.setattr(ownership,'enroll',capture_enrollment)
+    monkeypatch.setattr(method_fixture,'home_setup',capture_setup)
+    monkeypatch.setattr(WorkBoardDispatcher,'run_pass',verify_before_pass)
+    await method_fixture.test_genuine_native_method_history_read_without_body_or_file_access(
+        accounting_db,monkeypatch,tmp_path,forbid_external_inference)
+    assert observed['checked'] and observed['diagnostic_checked']

@@ -486,11 +486,15 @@ class HomeProjection:
         if operator.operator_identity_id is not None and not parameters["recovery_ok"]:
             invalid.update(SECTIONS)
         if not parameters["programme_ok"]:
-            invalid.add("programme_status")
+            body["programme_status"]["state"] = "degraded" if body["programme_status"]["items"] else "blocked"
             if operator.operator_identity_id is not None:
-                invalid.add("blocked_items")
+                body["blocked_items"]["state"] = "degraded" if body["blocked_items"]["items"] else "blocked"
+        if diagnostic["malformed"]:
+            invalid.update(("programme_status", "blocked_items"))
         for name in invalid:
-            body[name]["state"] = "degraded" if body[name]["items"] else "blocked"
+            # Projection diagnostics mean unknown source truth even with no
+            # safe rows; independently confirmed prerequisites stay blocked.
+            body[name]["state"] = "degraded"
         body["as_of"] = timestamp(as_of).isoformat()
         output = HomeContinuation.model_validate_json(json.dumps(body))
         next_cursor = None
@@ -682,6 +686,10 @@ class HomeProjection:
             elif row["lifecycle"]=='active' and row["proposal_state"]=='accepted' and row["memory_state"]=='active' and row["pointer_matches"]:
                 method.update(lifecycle="active_metadata",reason_code=None)
             else:
+                continue
+            if item["ownership_access"] == "recovered_read_only":
+                # Task-only recovery grants historical metadata, not the
+                # original Goal scope required by the method inspector.
                 continue
             method["target"] = {"kind":"method","proposal_id":method["method_id"],
                 "version":method["version"],"digest":method["digest"]}

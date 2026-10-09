@@ -41,4 +41,15 @@ describe("single-source Home continuation", () => {
     await waitFor(()=>expect(buttons[1]).toHaveFocus());expect(buttons[0]).not.toHaveFocus();expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("retains recovered Task method history with no original method inspector affordance", async () => {
+    const body=homeFixture();body.prepared_outputs.items=[];body.prepared_outputs.state="empty";
+    const row=body.task_next_actions.items[0];if(row.kind!=="task_next_action"||!row.method)throw Error();
+    row.ownership_access="recovered_read_only";row.method.target=null;
+    fetch.mockResolvedValue(response(body));render(<CockpitHome onOpenSection={vi.fn()}/>);
+    await screen.findByText(/Originally admitted method/);
+    expect(screen.queryByRole("button",{name:"Inspect original method and rollback controls"})).not.toBeInTheDocument();
+    expect(screen.getByText(/rolled back metadata/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
 });

@@ -958,16 +958,31 @@ async def _record_automatic_outcome(operator, original_task, outcome, attempt_id
             metadata_json=canonical({**payload, "outcome_binding": binding})))
 
 
-async def inspect_task_lesson(operator, proposal_id):
+async def _visible_lesson_for_inspection(operator, proposal_id):
+    """Read current canonical privacy authority before private disclosure."""
+    from src.db.models import MemoryProposalPrivacyState, MemoryTombstone
     async with db_engine.get_session() as db:
         await assert_current_root(db, operator)
         row = await db.get(MemoryProposal, proposal_id, populate_existing=True)
         if (row is None or row.schema_version != PROPOSAL_SCHEMA or
             (row.owner_principal_id, row.owner_session_id) != (operator.principal.principal_id, operator.session_id)):
             raise BoardError("lesson_owner_mismatch", "The lesson belongs to another operator", status_code=403)
-        payload = proposal_projection(row)
-        ref, sha = row.artifact_ref, row.artifact_digest
+        if (row.privacy_state == MemoryProposalPrivacyState.redacted
+            or (row.accepted_memory_id and await db.scalar(select(MemoryTombstone.id).where(
+                MemoryTombstone.memory_id == row.accepted_memory_id)))):
+            raise BoardError("lesson_private_content_unavailable",
+                "The lesson's canonical private content was deleted", status_code=410)
+        return row
+
+
+async def inspect_task_lesson(operator, proposal_id):
+    row = await _visible_lesson_for_inspection(operator, proposal_id)
+    payload = proposal_projection(row)
+    ref, sha = row.artifact_ref, row.artifact_digest
     raw = await asyncio.to_thread(read_private_proof, ref, sha)
+    # Staging reads do not hold a SQL writer. Re-read canonical state before
+    # mirror repair, then again before returning the staged private envelope.
+    row = await _visible_lesson_for_inspection(operator, proposal_id)
     mirror = await _repair_lesson_mirror(row)
     envelope = json.loads(raw)
     request = LessonRequest(task_id=payload["task_id"], attempt_id=payload["attempt_id"],
@@ -990,6 +1005,7 @@ async def inspect_task_lesson(operator, proposal_id):
             current = token == envelope["source_token"]
         except BoardError:
             current = False
+    await _visible_lesson_for_inspection(operator, proposal_id)
     return {**envelope, **payload, "mirror": mirror, "source_current": current, "status": payload["status"] if current else "blocked",
         "reason_code": payload["reason_code"] if current else "lesson_source_changed"}
 

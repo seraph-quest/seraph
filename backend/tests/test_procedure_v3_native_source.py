@@ -185,6 +185,8 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             return await call_next(request)
         app.include_router(api.router, prefix="/api")
         app.include_router(approvals_router, prefix="/api")
+        from src.api.memory import router as memory_router
+        app.include_router(memory_router, prefix="/api")
         plan = {"revision": 1, "steps": [
             {"step_id": "research", "tool_id": "web_search", "input": {"query": "ordinary research", "max_results": 1},
                 "output_contract": selected["web_search"].output_schema},
@@ -329,6 +331,9 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             persist_wire("pre_adopt", preview)
             persist_wire("adopt", await methods.review_method(operator, action(preview, "accept", "adopt-source-dag")))
             persist_wire("post_adopt", await methods.inspect_method(operator, proposed["proposal_id"]))
+            live_lesson = await client.get(f"/api/memory/task-lessons/{proposed['proposal_id']}")
+            assert live_lesson.status_code == 200, live_lesson.text
+            assert live_lesson.json()["new_method"]["schema_version"] == "ProcedurePlan.v3"
             binding = await method_owner.resolve(owner, goal.id, "work.general-task.v1")
             assert binding.status == "active", binding.reason
             from src.db.task_method_models import TaskMethodActive
@@ -610,6 +615,47 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
             preview = await methods.inspect_method(operator, proposed["proposal_id"])
             persist_wire("delete", await methods.review_method(operator, action(preview, "delete", "delete-canonical-method")))
             persist_wire("post_delete", await methods.inspect_method(operator, proposed["proposal_id"]))
+            # Canonical deletion must also close the older sibling lesson GET
+            # before either private artifact reading or mirror reconstruction.
+            from src.memory import task_lessons
+            def private_deleted_access(*args, **kwargs):
+                raise AssertionError("deleted lesson reopened private content")
+            async def mirror_deleted_access(*args, **kwargs):
+                raise AssertionError("deleted lesson reconstructed its private mirror")
+            with monkeypatch.context() as deleted_patch:
+                deleted_patch.setattr(task_lessons, "read_private_proof", private_deleted_access)
+                deleted_patch.setattr(task_lessons, "_repair_lesson_mirror", mirror_deleted_access)
+                deleted_patch.setattr(methods, "read_private_proof", private_deleted_access)
+                with pytest.raises(BoardError) as deleted_direct:
+                    await task_lessons.inspect_task_lesson(operator, proposed["proposal_id"])
+                assert deleted_direct.value.code == "lesson_private_content_unavailable"
+                deleted_lesson = await client.get(f"/api/memory/task-lessons/{proposed['proposal_id']}")
+                assert deleted_lesson.status_code == 410, deleted_lesson.text
+                assert deleted_lesson.json()["detail"]["code"] == "lesson_private_content_unavailable"
+                # A stale restored proposal's visible flag cannot override the
+                # independently retained canonical memory tombstone.
+                from src.db.models import MemoryProposalPrivacyState
+                async with sessions() as db:
+                    stale_visible = await db.get(MemoryProposal, proposed["proposal_id"])
+                    stale_visible.privacy_state = MemoryProposalPrivacyState.visible
+                    await db.commit()
+                try:
+                    stale_deleted_lesson = await client.get(f"/api/memory/task-lessons/{proposed['proposal_id']}")
+                    assert stale_deleted_lesson.status_code == 410, stale_deleted_lesson.text
+                    with pytest.raises(BoardError) as tombstone_direct:
+                        await task_lessons.inspect_task_lesson(operator, proposed["proposal_id"])
+                    assert tombstone_direct.value.code == "lesson_private_content_unavailable"
+                finally:
+                    async with sessions() as db:
+                        stale_visible = await db.get(MemoryProposal, proposed["proposal_id"])
+                        stale_visible.privacy_state = MemoryProposalPrivacyState.redacted
+                        await db.commit()
+                deleted_method = await client.get(f"/api/memory/task-methods/{proposed['proposal_id']}")
+                assert deleted_method.status_code == 200, deleted_method.text
+                safe_deleted = deleted_method.json()
+                assert safe_deleted["status"] == "deleted" and safe_deleted["new_method"] is None
+                assert source not in deleted_lesson.text + deleted_method.text
+                persist_wire("deleted_lesson_denial", deleted_lesson.json())
             with pytest.raises(BoardError):
                 await method_owner.validate_pinned(owner, goal.id, binding)
             print(json.dumps({"flow": "auth_manual_plan_accept_read_write_stock_mcp_approval_resume",

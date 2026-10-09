@@ -307,9 +307,8 @@ M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
 
-**Reusable general procedures (#1002): Planned until the complete independently
-reviewed milestone merge reaches `develop`.** Intended post-merge availability
-adds source inspection, server-offered ordinary scalar parameter naming,
+**Reusable general procedures (#1002): Shipped in `develop` through #1053.**
+The independently reviewed milestone adds source inspection, server-offered ordinary scalar parameter naming,
 immutable inert saving and separate signed M5 review in the existing Task
 Inspector. The exact seven-field `ProcedurePlan.v3` preserves every original
 registered typed step, fixed input, symbolic dependency, output contract and
@@ -341,8 +340,8 @@ focused source/producer/native run passed 36 checks, the consumer regression run
 66 and the UI run 64; these separate proof runs retain their own source epochs.
 Scripted final service transports and actual local SQLite/private-file effects
 prove mechanics, not provider quality, learned improvement, general usefulness
-or native macOS execution. Whole cumulative independent review and merge remain
-required. See the
+or native macOS execution. Whole cumulative independent review passed before
+the milestone merged through #1053. See the
 [operator flow](./12-current-app-guide.md#reusable-general-procedures-1002)
 and [accepted contract](./decisions/028-reviewed-task-methods.md).
 

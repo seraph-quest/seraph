@@ -28,8 +28,8 @@ async def seal_proposal_publication(db, owner, envelope, *, goal_revision):
 
 
 async def recheck_proposal_publication(db, owner, witness):
-    from sqlalchemy import select
-    from src.db.models import InferenceCostReservation
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.inference_accounting import InferenceAccountingError
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task import digest
     from src.workflows.general_task_accounting import validate_group_owner
@@ -44,8 +44,15 @@ async def recheck_proposal_publication(db, owner, witness):
         or group.limits_digest != digest(envelope.task_input.limits.model_dump(mode="json"))):
         raise BoardError("general_task_publication_binding_changed", "Original proposal binding changed", status_code=409)
     await validate_group_owner(db, group)
-    operations = (await db.execute(select(InferenceCostReservation).where(
-        InferenceCostReservation.owner_id == owner.principal_id))).scalars().all()
+    from src.workflows.specialist_evidence import validate_handoff_publication
+    await validate_handoff_publication(db, owner, envelope)
+    try:
+        operations = await group_reservation_rows(db, owner_id=owner.principal_id,
+            group_id=group.group_id, group_digest=digest(group.model_dump(mode="json")),
+            original_root_id=owner.session_id,
+            original_deadline_at=group.original_deadline_at, group=group)
+    except InferenceAccountingError as exc:
+        raise BoardError("general_task_provenance_changed", "Original proposal accounting binding changed", status_code=409) from exc
     if envelope.proposal_provenance is not None:
         original = next((row for row in operations if row.operation_id == envelope.proposal_provenance.initial_operation_id), None)
         if original is None or proposal_provenance(original.model_dump(mode="json"), group) != envelope.proposal_provenance:
@@ -65,7 +72,7 @@ def publication_scan_input(witness, raw):
     if (not isinstance(witness, ProposalPublicationWitness) or witness.seal is not _PUBLICATION_SEAL
         or canonical(GeneralTaskEnvelope.model_validate(raw).model_dump(mode="json")) != witness.envelope_bytes):
         raise BoardError("general_task_publication_witness_invalid", "Exact server proposal publication required", status_code=409)
-    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance"}}
+    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance", "specialist_handoff"}}
 
 
 def stored_scan_input(record, raw):
@@ -77,7 +84,7 @@ def stored_scan_input(record, raw):
         or group.owner_session_id != record.owner_session_id or group.goal_id != record.goal_id
         or group.goal_revision != record.goal_revision):
         raise BoardError("general_task_publication_binding_changed", "Canonical proposal owner binding changed", status_code=409)
-    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance"}}
+    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance", "specialist_handoff"}}
 
 
 def group_identity(owner, goal_id, goal_revision, request_key):

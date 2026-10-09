@@ -222,3 +222,251 @@ async def acquire_source(jobs, *, child_id, owner, fence, source_slot, transport
     binding = await write_verified(jobs,job_id=child_id,owner=owner,fence=fence,
         creation_digest=creation["creation_digest"],slot=source_slot,kind="source",content=raw,max_bytes=SOURCE_BYTES)
     return normalized,binding
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class DiscoveryInputWitness:
+    job_id: str
+    input_digest: str
+    authority_digest: str
+    checkpoint_digest: str
+    artifact_digest: str
+    plan: object
+    public_brief: str
+    artifacts: dict
+
+
+def discovery_stage_inputs(plan, artifacts, stage_id):
+    """Resolve only declared whole-output refs to their exact physical owners."""
+    from src.guardian.research_plan_contracts import ArtifactRef
+    step = next(item for item in plan.steps if item.step_id == stage_id)
+    resolved = []
+    for ref in step.input_refs:
+        if isinstance(ref, ArtifactRef):
+            candidates = [item for item in artifacts.values()
+                if item["reference"] == ref and item["kind"] == "public_brief"]
+        else:
+            producer = next(item for item in plan.steps if item.step_id == ref.producer_step_id)
+            declared = next(item for item in producer.output_slots if item.slot == ref.output_slot)
+            candidates = [item for item in artifacts.values()
+                if item["kind"] == declared.slot and item.get("slot") == 0]
+        if len(candidates) != 1:
+            raise ValueError("programme declared stage input has no unique original physical output")
+        resolved.append(candidates[0])
+    return resolved
+
+
+def is_local_unsupported_discovery_brief(value, artifacts, effects):
+    """A no-contact negative receipt does not claim executed upstream stages."""
+    return (type(value) is dict and value.get("findings") == [] and value.get("citations") == []
+        and value.get("prepared_artifact_refs") == [] and value.get("proposed_next_steps") == []
+        and value.get("coverage", {}).get("status") == "unsupported"
+        and value["coverage"].get("outcome_state") == "empty"
+        and value["coverage"].get("sources") == [] and value["coverage"].get("source_spans") == []
+        and value["coverage"].get("no_learning") is True
+        and not any(item["kind"] in {"queries", "manifest", "selection", "snapshot", "snapshots", "child"} for item in artifacts.values())
+        and not any(item.get("effect_type") in {"public_https_read", "remote_inference_admission"} for item in effects))
+
+
+def compile_discovery_search_derivation(plan, artifacts, effects, manifest, reference, *, job_id):
+    """Compile protected derivation from original physical query/effect owners."""
+    import re
+    from src.guardian.discovery_search import SEARCH_URL
+    queries = discovery_stage_inputs(plan, artifacts, "search_public")[0]["parsed"]["queries"]
+    query_digest = hashlib.sha256("\n".join(queries).encode()).hexdigest()
+    if manifest.query_digest != query_digest or manifest.run_id != plan.plan_id or len(manifest.results) > plan.limits.max_results:
+        raise ValueError("programme manifest derivation differs from original query outputs")
+    responses = []
+    for index, query in enumerate(queries):
+        original = [item for item in effects if item.get("receipt_kind") == "readback"
+            and item.get("effect_type") == "public_https_read" and item.get("status") == "succeeded"
+            and item.get("details", {}).get("search_response_receipt", {}).get("query_index") == index]
+        if len(original) != 1:
+            raise ValueError("programme manifest lacks its exact original HTTP response receipts")
+        record = original[0]
+        receipt = record.get("details", {}).get("search_response_receipt")
+        if (type(receipt) is not dict or set(receipt) != {"query_index", "query_digest", "response_digest", "byte_count"}
+                or type(receipt["query_index"]) is not int or receipt["query_index"] != index
+                or receipt["query_digest"] != hashlib.sha256(query.encode()).hexdigest()
+                or type(receipt["byte_count"]) is not int or not 0 <= receipt["byte_count"] <= plan.limits.max_search_bytes
+                or not isinstance(receipt["response_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", receipt["response_digest"])
+                or record.get("content_sha256") != receipt["response_digest"]
+                or record.get("target_path") != SEARCH_URL
+                or record.get("target_digest") != hashlib.sha256(SEARCH_URL.encode()).hexdigest()
+                or record.get("effect_id") != f"discovery-search:{job_id}:{index}"):
+            raise ValueError("programme manifest lacks its exact original HTTP response receipts")
+        responses.append(dict(receipt))
+    return {"manifest_ref": reference.model_dump(mode="json"), "query_digest": query_digest, "responses": responses}
+
+
+async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None):
+    """Reopen immutable programme inputs BEFORE a short native writer."""
+    from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND
+    from src.work_board.research_artifacts import read_discovery, DISCOVERY_ARTIFACT_LIMITS
+    from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, DiscoveryBriefV1
+    from src.artifacts.registry import artifact_id_for
+    from src.workflows.job_runtime import _digest, _utc_now
+    from src.guardian.goal_programmes import goal_programme_service
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        if run.job_kind != DISCOVERY_KIND:
+            raise ValueError("programme physical inputs require native lineage")
+        authority = discovery_authority(run.declared_authority_json)
+        if completed_read and run.status not in {"succeeded", "degraded"}:
+            raise ValueError("programme completed readback requires its original positive terminal job")
+        inputs = json.loads(run.arguments_json)
+        history = json.loads(run.checkpoint_receipts_json)
+        canonical_artifacts = json.loads(run.artifact_receipts_json)
+        effects = json.loads(run.effect_receipts_json)
+        input_digest, authority_digest = run.input_digest, run.authority_digest
+        deadline = run.deadline_at.replace(tzinfo=timezone.utc)
+    binding = authority.programme_binding
+    if _digest(inputs) != input_digest or _digest(json.loads(run.declared_authority_json)) != authority_digest:
+        raise ValueError("programme original input or authority digest changed")
+    if set(inputs) != {"plan_ref", "plan_file_path", "public_brief_ref", "public_brief_file_path", "no_learning"} or inputs["no_learning"] is not True:
+        raise ValueError("programme input shape is not native and closed")
+    plan_ref = ArtifactRef.model_validate(inputs["plan_ref"])
+    brief_ref = ArtifactRef.model_validate(inputs["public_brief_ref"])
+    if plan_ref != authority.plan_ref or brief_ref.digest != binding.brief_digest:
+        raise ValueError("programme physical input ref changed")
+    raw_plan = read_discovery(inputs["plan_file_path"], plan_ref.digest, programme_id=binding.programme_id, max_bytes=65536)
+    plan_payload = json.loads(raw_plan)
+    observed = datetime.fromisoformat(plan_payload["issued_at"].replace("Z", "+00:00")) if completed_read else _utc_now()
+    plan = validate_goal_research_plan(plan_payload, now=observed)
+    from src.work_board.dispatcher import _dispatcher
+    current_service = _dispatcher.goal_discovery
+    if current_service is not None:
+        async with jobs._session() as db:
+            await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db)
+    elif plan.strategy_binding.status != "none":
+        raise ValueError("programme active strategy requires its current native lifecycle owner")
+    if (plan.programme_id.hex != binding.programme_id or plan.goal_id != binding.goal_id
+            or plan.programme_revision != binding.grant_revision or plan.goal_revision != binding.goal_revision
+            or plan.public_brief_digest != binding.brief_digest or plan.route_epoch != binding.route_epoch
+            or plan.deadline_at != deadline or plan.limits.cost_limit_microusd > binding.cost_ceiling_microusd
+            or plan.steps[0].input_refs != [brief_ref]):
+        raise ValueError("programme plan aliases, original deadline or first input changed")
+    raw_brief = read_discovery(inputs["public_brief_file_path"], brief_ref.digest, programme_id=binding.programme_id, max_bytes=8000)
+    public_brief = raw_brief.decode("utf-8", errors="strict")
+    artifacts = {brief_ref.artifact_id: {"reference": brief_ref, "content": raw_brief, "kind": "public_brief"},
+        plan_ref.artifact_id: {"reference": plan_ref, "content": raw_plan, "kind": "plan"}}
+    for kind, reference, path in [("plan", plan_ref, inputs["plan_file_path"]), ("public_brief", brief_ref, inputs["public_brief_file_path"])]:
+        expected = artifact_id_for(file_path=path, artifact_type="goal_discovery_" + kind,
+            producer=DISCOVERY_KIND, run_id=job_id, content_sha256=reference.digest)
+        if reference.artifact_id != expected:
+            raise ValueError("programme first physical input is not owned by the original job")
+    adopted_slots = set()
+    for entry in history:
+        if not str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"):
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("job_id") != job_id or payload.get("programme_id") != binding.programme_id or payload.get("no_learning") is not True:
+            raise ValueError("programme artifact checkpoint lineage changed")
+        kind, slot = payload["kind"], payload["slot"]
+        if kind not in DISCOVERY_ARTIFACT_LIMITS or type(slot) is not int or not 0 <= slot < 4:
+            raise ValueError("programme artifact shape changed")
+        if (kind, slot) in adopted_slots or (kind in {"queries", "manifest", "selection", "snapshots", "brief"} and slot != 0):
+            raise ValueError("programme physical output slot is ambiguous")
+        adopted_slots.add((kind, slot))
+        reference = ArtifactRef.model_validate(payload["artifact_ref"])
+        expected = artifact_id_for(file_path=payload["file_path"], artifact_type="goal_discovery_" + kind,
+            producer=DISCOVERY_KIND, run_id=job_id, content_sha256=reference.digest)
+        if reference.artifact_id != expected:
+            raise ValueError("programme physical stage output belongs to another original job")
+        records = [a for a in canonical_artifacts if a.get("artifact_id") == reference.artifact_id]
+        if (len(records) != 1 or records[0].get("file_path") != payload["file_path"] or records[0].get("content_sha256") != reference.digest
+                or records[0].get("producer") != DISCOVERY_KIND or records[0].get("artifact_type") != "goal_discovery_" + kind):
+            raise ValueError("programme physical input lacks canonical artifact adoption")
+        content = read_discovery(payload["file_path"], reference.digest, programme_id=binding.programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind])
+        if len(content) != payload["byte_count"]:
+            raise ValueError("programme adopted input byte count changed")
+        output_slot = next((output for step in plan.steps for output in step.output_slots if output.slot == kind), None)
+        if (output_slot is not None and len(content) > min(output_slot.max_bytes, plan.limits.max_output_bytes)
+                or kind in {"snapshot", "draft"} and len(content) > plan.limits.max_output_bytes):
+            raise ValueError("programme physical output exceeds its declared byte allowance")
+        parsed = json.loads(content) if kind != "public_brief" else None
+        if kind == "queries":
+            if (type(parsed) is not dict or set(parsed) != {"queries"} or type(parsed["queries"]) is not list
+                    or not 1 <= len(parsed["queries"]) <= plan.limits.max_queries
+                    or len(set(parsed["queries"])) != len(parsed["queries"])
+                    or any(type(q) is not str or not q.strip() or len(q.encode()) > 2048 or any(ord(c) < 32 for c in q) for q in parsed["queries"])):
+                raise ValueError("programme physical query plan exceeds its original allowance")
+        elif kind == "manifest":
+            parsed = SearchManifestV1.model_validate(parsed)
+            if parsed.run_id != plan.plan_id or len(parsed.results) > plan.limits.max_results:
+                raise ValueError("programme search manifest run or cap changed")
+        elif kind == "selection":
+            parsed = SourceSelectionV1.model_validate(parsed)
+            if len(parsed.selected_result_ids) > plan.limits.max_sources:
+                raise ValueError("programme selected source count exceeds its original allowance")
+        elif kind == "snapshot":
+            parsed = PublicSnapshotV1.model_validate(parsed)
+        artifacts[reference.artifact_id] = {"reference": reference, "content": content, "parsed": parsed, "kind": kind, "slot": slot,
+            "search_derivation": payload.get("search_derivation")}
+    for kind, producer in {"queries": "plan_queries", "manifest": "search_public", "selection": "search_public",
+            "snapshot": "extract_sources", "snapshots": "extract_sources", "brief": "prepare_brief"}.items():
+        if any(item["kind"] == kind for item in artifacts.values()):
+            if kind == "brief" and any(is_local_unsupported_discovery_brief(item["parsed"], artifacts, effects)
+                    for item in artifacts.values() if item["kind"] == "brief"):
+                discovery_stage_inputs(plan, artifacts, "plan_queries")
+                continue
+            discovery_stage_inputs(plan, artifacts, producer)
+    if stage_id is not None:
+        discovery_stage_inputs(plan, artifacts, stage_id)
+    manifests = [a for a in artifacts.values() if a["kind"] == "manifest"]
+    selections = [a for a in artifacts.values() if a["kind"] == "selection"]
+    for manifest_artifact in manifests:
+        manifest = manifest_artifact["parsed"]
+        expected = compile_discovery_search_derivation(plan, artifacts, effects, manifest,
+            manifest_artifact["reference"], job_id=job_id)
+        if manifest_artifact["search_derivation"] != expected:
+            raise ValueError("programme protected manifest derivation changed")
+    if selections:
+        if len(manifests) != 1 or len(selections) != 1:
+            raise ValueError("programme selection provenance is ambiguous")
+        selections[0]["parsed"].validate_manifest(manifests[0]["parsed"], manifests[0]["reference"])
+        known = {r.result_id: r.exact_url for r in manifests[0]["parsed"].results}
+        for artifact in artifacts.values():
+            if artifact["kind"] == "snapshot":
+                snapshot = artifact["parsed"]
+                if snapshot.result_id not in selections[0]["parsed"].selected_result_ids or known.get(snapshot.result_id) != snapshot.url:
+                    raise ValueError("programme snapshot URL was not an exact selected manifest member")
+    snapshots = sorted((item for item in artifacts.values() if item["kind"] == "snapshot"), key=lambda item: item["slot"])
+    if len(snapshots) > plan.limits.max_sources or any(item["slot"] >= plan.limits.max_sources for item in snapshots):
+        raise ValueError("programme physical snapshot count exceeds its original allowance")
+    for container in (item for item in artifacts.values() if item["kind"] == "snapshots"):
+        summary = container["parsed"]
+        expected = [{"url": item["parsed"].url, "digest": item["parsed"].digest,
+            "result_id": item["parsed"].result_id, "fetched_at": item["parsed"].fetched_at.isoformat()} for item in snapshots]
+        if type(summary) is not dict or set(summary) != {"snapshots", "denied"} or summary["snapshots"] != expected:
+            raise ValueError("programme declared snapshots output differs from its physical source artifacts")
+    for artifact in artifacts.values():
+        if artifact["kind"] != "brief":
+            continue
+        output = DiscoveryBriefV1.model_validate(artifact["parsed"])
+        coverage = output.coverage
+        if (coverage.original_public_brief_digest != brief_ref.digest
+                or coverage.original_public_brief_byte_count != len(raw_brief)):
+            raise ValueError("programme output does not bind its entire original public brief")
+        for span in coverage.source_spans:
+            adopted = artifacts.get(span.snapshot_ref.artifact_id)
+            if adopted is None or adopted["kind"] != "snapshot" or adopted["reference"] != span.snapshot_ref:
+                raise ValueError("programme output span has no original adopted snapshot")
+            snapshot = adopted["parsed"]
+            normalized = "\n".join(snapshot.lines).encode()
+            if (span.result_id != snapshot.result_id or span.normalized_digest != snapshot.digest
+                    or span.normalized_byte_count != len(normalized)):
+                raise ValueError("programme output normalized coverage changed")
+            first, last = span.included_first_line, span.included_last_line
+            count = last - first + 1 if first else 0
+            if ((first == 0) != (last == 0) or (first and not 1 <= first <= last <= len(snapshot.lines))
+                    or span.omitted_lines != len(snapshot.lines) - count
+                    or (first and hashlib.sha256("\n".join(snapshot.lines[first-1:last]).encode()).hexdigest() != span.included_span_digest)
+                    or (not first and span.included_span_digest is not None)):
+                raise ValueError("programme represented source span is not mechanically verified")
+    return DiscoveryInputWitness(job_id=job_id, input_digest=input_digest, authority_digest=authority_digest,
+        checkpoint_digest=_digest(history), artifact_digest=_digest(canonical_artifacts),
+        plan=plan, public_brief=public_brief, artifacts=artifacts)

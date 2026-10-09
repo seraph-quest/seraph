@@ -220,10 +220,17 @@ def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object
                 raise ProductionWorkspaceReconciliationError("accounting checkpoint digest mismatch")
             for table, values in (("inference_accounting_owners", [account]), ("inference_cost_reservations", [rows_by_id[item["operation_id"]] for item in changes])):
                 for value in values:
-                    fields = value
+                    fields = dict(value)
                     allowed = {entry[1] for entry in connection.execute(f'PRAGMA table_info("{table}")')}
-                    if set(fields) != allowed:
+                    private = {"group_lookup_key"} if table == "inference_cost_reservations" else set()
+                    if set(fields) != allowed - private:
                         raise ProductionWorkspaceReconciliationError("accounting checkpoint columns invalid")
+                    if private & allowed:
+                        # Maintenance remains dependency-free. Startup's
+                        # serialized migration classifies this private NULL;
+                        # indexed readers block until then. Financial bytes,
+                        # revisions, witness and evidence are unchanged.
+                        fields["group_lookup_key"] = None
                     names = ",".join('"' + name + '"' for name in fields)
                     connection.execute(f'INSERT OR REPLACE INTO "{table}" ({names}) VALUES ({",".join("?" for _ in fields)})', tuple(fields.values()))
             connection.commit()
@@ -312,10 +319,22 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
             for table, values in (("inference_accounting_owners", owner_rows), ("inference_cost_reservations", operations)):
                 destination.execute(f'DELETE FROM "{table}"')
                 if values:
-                    columns = list(values[0].keys())
+                    allowed = {entry[1] for entry in destination.execute(f'PRAGMA table_info("{table}")')}
+                    private = {"group_lookup_key"} if table == "inference_cost_reservations" else set()
+                    records = []
+                    for value in values:
+                        fields = dict(value)
+                        if set(fields) - private != allowed - private:
+                            raise ProductionWorkspaceReconciliationError("accounting continuity columns invalid")
+                        fields.pop("group_lookup_key", None)
+                        if private & allowed:
+                            fields["group_lookup_key"] = None
+                        records.append(fields)
+                    columns = list(records[0])
                     names = ",".join('"' + column + '"' for column in columns)
                     placeholders = ",".join("?" for _ in columns)
-                    destination.executemany(f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})', [tuple(row) for row in values])
+                    destination.executemany(f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
+                        [tuple(record[column] for column in columns) for record in records])
             for present, values in jobs:
                 if present:
                     assignments = ",".join('"' + column + '"=?' for column in values if column != "id")

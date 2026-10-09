@@ -297,7 +297,7 @@ def _metadata_digest(row: WorkBoardInputArtifact) -> str:
                 "revision": row.revision,
                 **({"document_metadata_json": row.document_metadata_json,
                     "document_reserved_bytes": row.document_reserved_bytes}
-                    if row.capability_id in {"work.document-compare.v1", "document.read.v1", "inference.near-text.v1"} else {}),
+                    if row.capability_id in {"work.document-compare.v1", "document.read.v1", "document.build.v1", "inference.near-text.v1"} else {}),
             }
         )
     ).hexdigest()

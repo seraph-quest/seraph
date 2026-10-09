@@ -1139,9 +1139,10 @@ class WorkBoardRepository:
         *,
         origin_session_id: str | None = None,
         publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
+        _specialist_publication=None,
     ) -> BoardMutation:
         return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
-            publication_authority_check=publication_authority_check)
+            publication_authority_check=publication_authority_check, _specialist_publication=_specialist_publication)
 
     async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
                                   staged_input=None, publication_witness=None) -> BoardMutation:
@@ -1154,8 +1155,11 @@ class WorkBoardRepository:
 
     async def _create_task(self, db, owner, request, *, origin_session_id=None,
                            publication_authority_check=None, staged_text=None,
-                           staged_input=None, publication_witness=None) -> BoardMutation:
+                           staged_input=None, publication_witness=None, _specialist_publication=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if (request.idempotency_scope == "general-task" and request.idempotency_key.startswith("specialist:")
+            and _specialist_publication is None):
+            raise BoardError("specialist_delegation_publication_denied","Specialist publication namespace is private",status_code=422)
         if request.capability_id == "inference.near-text.v1":
             from uuid import UUID
             try:
@@ -1256,6 +1260,13 @@ class WorkBoardRepository:
                     raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             if existing.idempotency_payload_digest != digest:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
+            if _specialist_publication is not None:
+                from src.workflows.specialist_delegation import verify_specialist_publication
+                from src.workflows.specialist_lifecycle import seal_child_creation
+                from src.workflows.specialist_lineage import publish_lineage_events
+                await verify_specialist_publication(db,owner,request,_specialist_publication)
+                await seal_child_creation(db,owner,existing,_specialist_publication)
+                await publish_lineage_events(db,owner,existing,_specialist_publication,repository=self)
             latest_event = await db.execute(
                 select(WorkBoardEvent)
                 .where(
@@ -1327,7 +1338,11 @@ class WorkBoardRepository:
         safe_title = staged_text.title if staged_text else await self._safe_text(request.title, db=db)
         safe_body = staged_text.body if staged_text else await self._safe_text(request.body, db=db)
 
-        task = WorkBoardTask(
+        reserved_identity = {}
+        if _specialist_publication is not None:
+            from src.workflows.specialist_delegation import verify_specialist_publication
+            reserved_identity["task_id"] = await verify_specialist_publication(db, owner, request, _specialist_publication)
+        task = WorkBoardTask(**reserved_identity,
             owner_principal_id=owner.principal_id,
             owner_session_id=owner.session_id,
             origin_session_id=origin_session_id or owner.session_id,
@@ -1422,6 +1437,11 @@ class WorkBoardRepository:
                 task_id=task.task_id,
                 task_revision=task.task_revision,
             )
+        if _specialist_publication is not None:
+            from src.workflows.specialist_lifecycle import seal_child_creation
+            await seal_child_creation(db,owner,task,_specialist_publication)
+            from src.workflows.specialist_lineage import publish_lineage_events
+            await publish_lineage_events(db,owner,task,_specialist_publication,repository=self)
         return BoardMutation(task, event)
 
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
@@ -2143,6 +2163,9 @@ class WorkBoardRepository:
         await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
         await self.require_generic_recovery_allowed(db, task)
+        if task.idempotency_scope == "communication-source":
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source replay is unavailable", status_code=409)
         expected = int(expected_revision)
         if task.task_revision != expected:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
@@ -2627,6 +2650,9 @@ class WorkBoardRepository:
             await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
+        if task.idempotency_scope == "communication-source":
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source promotion is unavailable", status_code=409)
         if task.status is not WorkBoardStatus.todo:
             return None
         if task.task_revision != int(expected_revision):
@@ -2867,6 +2893,7 @@ class WorkBoardRepository:
         now: datetime | None = None,
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
+        _communication_publication=None,
     ) -> BoardDispatchClaim | None:
         """Atomically claim a Ready task and persist its pending attempt."""
 
@@ -2876,7 +2903,14 @@ class WorkBoardRepository:
         staged_dependencies = None
         dependency_error = None
         preflight_task = await self._find_task(db, task_id)
-        if preflight_task is not None:
+        if (preflight_task is not None and preflight_task.idempotency_scope == "communication-source"
+            and _communication_publication is None):
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source replay is unavailable", status_code=409)
+        if _communication_publication is not None:
+            from src.work_board.communication_preparation import verify_source_publication
+            await verify_source_publication(db, _communication_publication, preflight_task)
+        if preflight_task is not None and _communication_publication is None:
             try:
                 staged_dependencies = await stage_dependencies(db, preflight_task)
             except (BoardError, OSError, KeyError, TypeError) as exc:
@@ -2886,7 +2920,8 @@ class WorkBoardRepository:
         if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import stage_task_authority
             preference_stage = await stage_task_authority(db,preference_task)
-        await _begin_sqlite_immediate(db)
+        if _communication_publication is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority
@@ -2894,6 +2929,12 @@ class WorkBoardRepository:
         if task is None:
             raise BoardNotFound(task_id)
         await db.refresh(task)
+        if task.idempotency_scope == "communication-source":
+            if _communication_publication is None:
+                raise BoardError("communication_original_source_publication_required",
+                    "Inspect the original preparation; generic source replay is unavailable", status_code=409)
+            from src.work_board.communication_preparation import verify_source_publication
+            await verify_source_publication(db, _communication_publication, task)
         if task.status is not WorkBoardStatus.ready:
             return None
         if task.task_revision != int(expected_revision):
@@ -3125,7 +3166,14 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt = WorkBoardAttempt(
+        reserved_identity = {}
+        if task.capability_id == "agent.task.v1" and task.idempotency_key.startswith("specialist:"):
+            from src.workflows.specialist_delegation import specialist_for_task
+            context = await specialist_for_task(db, task)
+            if context is None or previous_fence or attempt_count:
+                raise BoardError("specialist_delegation_attempt_changed", "Original reserved specialist attempt required", status_code=409)
+            reserved_identity["attempt_id"] = context.reservation.child_attempt_id
+        attempt = WorkBoardAttempt(**reserved_identity,
             task_id=task.task_id,
             task_revision_at_claim=int(expected_revision),
             lease_owner=str(lease_owner)[:256],
@@ -3630,6 +3678,7 @@ class WorkBoardRepository:
         attempt_id: str,
         *,
         expected_revision: int,
+        communication_binding=None,
         board_fence: int,
         lease_owner: str,
         status: WorkBoardStatus,
@@ -3724,6 +3773,12 @@ class WorkBoardRepository:
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            source_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+            source_run = await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == source_attempt.workflow_run_id)) if source_attempt and source_attempt.workflow_run_id else None
+            if source_run is not None and "communication_preparation" in json.loads(source_run.declared_authority_json or "{}"):
+                from src.work_board.communication_preparation import verify_preparation_binding
+                await verify_preparation_binding(db, communication_binding, source_run=source_run, allow_succeeded=True)
             try:
                 if dependency_error is not None:
                     raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')

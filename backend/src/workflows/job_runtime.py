@@ -581,6 +581,12 @@ def _bounded_checkpoint_receipts(
     items = list(history) if isinstance(history, Iterable) else []
     from src.workflows.general_task_guard import protected_checkpoint_ids
     protected_ids = protected_checkpoint_ids(items)
+    protected_ids |= {item.get("checkpoint_id") for item in items if isinstance(item, Mapping)
+        and item.get("checkpoint_id") in {"document-capacity", "document-child", "document-reaped"}}
+    document_children = [item for item in items if isinstance(item, Mapping)
+        and item.get("checkpoint_id") == "document-child"]
+    if len(document_children) > 1 or any(type(item.get("payload")) is not dict for item in document_children):
+        raise DurableJobTransitionError("malformed document process child checkpoint")
     latest_special: dict[str, tuple[int, Any]] = {}
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
@@ -1103,6 +1109,9 @@ def _safe_durable_authority(
     value: Any, *, repo_node_posture_expectation: Mapping[str, Any] | None = None,
     native_research_projection=None, native_job_kind=None,
 ) -> dict[str, Any]:
+    if isinstance(value, Mapping) and value.get("authority_type") == "goal_programme_discovery_v1":
+        from src.work_board.research_parent import discovery_authority
+        return discovery_authority(value).model_dump(mode="json")
     safe = _safe_structure(value)
     if not isinstance(safe, dict) or not isinstance(value, Mapping):
         return safe if isinstance(safe, dict) else {}
@@ -1126,7 +1135,11 @@ def _safe_durable_authority(
     return safe
 
 
-def _safe_durable_inputs(inputs: Any) -> tuple[str, dict[str, Any]]:
+def _safe_durable_inputs(inputs: Any, *, discovery=False) -> tuple[str, dict[str, Any]]:
+    if discovery:
+        from src.work_board.research_parent import GoalDiscoveryInputs
+        typed = GoalDiscoveryInputs.model_validate(inputs).model_dump(mode="json")
+        return _digest(typed), typed
     digest, projection = _safe_inputs_digest(inputs)
     binding = (
         _safe_routine_publication_binding(inputs.get("routine_binding"))
@@ -1186,6 +1199,18 @@ def _validate_admission_authority(spec: "DurableJobSpec") -> None:
         service_id=spec.service_id,
     )
     authority = spec.declared_authority
+    if identity.job_kind == "goal_public_discovery_v1":
+        from src.work_board.research_parent import discovery_authority, DISCOVERY_SERVICE
+        programme_authority = discovery_authority(authority)
+        if (identity.owner_kind != "service" or identity.owner_principal_id != DISCOVERY_SERVICE
+                or spec.service_id != DISCOVERY_SERVICE or spec.session_id is not None
+                or spec.operator_session_id is not None or spec.parent_job_id
+                or programme_authority.original_job_id != identity.job_id
+                or programme_authority.programme_binding.goal_id != spec.goal_id
+                or programme_authority.programme_binding.goal_revision != spec.goal_revision):
+            raise ValueError("discovery requires its original native service lineage")
+    elif authority.get("authority_type") == "goal_programme_discovery_v1":
+        raise ValueError("programme authority cannot authorize another job kind")
     authority_principal = authority.get("principal")
     if _text(authority_principal) != identity.owner_principal_id:
         raise ValueError("declared authority principal must match owner_principal_id")
@@ -1345,6 +1370,16 @@ async def _assert_canonical_goal_fence(
             raise DurableJobTransitionError("service goal authority owner/session is stale")
     else:
         raise DurableJobTransitionError("durable job owner kind is invalid")
+    authority_value = authority if isinstance(authority, Mapping) else _json_load(authority, {})
+    if isinstance(authority_value, Mapping) and authority_value.get("authority_type") == "goal_programme_discovery_v1":
+        from src.workflows.research_guard import assert_discovery_authority
+        from src.work_board.research_parent import discovery_authority, DISCOVERY_SERVICE
+        native = discovery_authority(authority_value)
+        if (owner_kind != "service" or owner_principal_id != DISCOVERY_SERVICE or session_id is not None
+                or native.programme_binding.goal_id != goal_id
+                or native.programme_binding.goal_revision != goal_revision):
+            raise DurableJobTransitionError("programme canonical Goal binding changed")
+        await assert_discovery_authority(db, authority_value)
     return goal
 
 
@@ -1515,9 +1550,15 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
 
 async def _verify_native_child_sql_scope(db, run):
     """Compile a private canonical journal witness before every child CAS."""
+    from src.work_board.communication_preparation import assert_preparation_run_current
+    await assert_preparation_run_current(db, run)
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
         await assert_general_task_child_phase_current(db, run)
+    elif getattr(run, "job_kind", None) == "agent.task.v1":
+        from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
+        if is_specialist_root(run):
+            await assert_specialist_root_current(db, run)
 
 
 def _append_parent_fence_condition(
@@ -1528,6 +1569,9 @@ def _append_parent_fence_condition(
     if getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.general_task_guard import append_general_task_root_gate
         append_general_task_root_gate(conditions, run, now=now)
+        from src.workflows.specialist_delegation import append_specialist_parent_gate
+        if append_specialist_parent_gate(conditions, run, now=now):
+            return
     if getattr(run, "job_kind", None) == "readonly_research_child":
         from src.workflows.research_guard import append_research_parent_gate
         if append_research_parent_gate(conditions, run, now=now):
@@ -2956,7 +3000,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("a durable job cannot depend on itself")
         deadline = _as_utc(spec.deadline_at)
         now = _utc_now()
-        input_digest, safe_inputs = _safe_durable_inputs(spec.inputs)
+        input_digest, safe_inputs = _safe_durable_inputs(spec.inputs, discovery=identity.job_kind == "goal_public_discovery_v1")
         if native_read_admission is not None:
             input_digest = native_read_admission.candidate_digest
         if native_memory_admission is not None:
@@ -3301,10 +3345,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 db.expunge(existing)
                 return _deduped_admission(existing, binding=binding)
 
+            native_communication_leaf = False
+            if "communication_preparation" in spec.declared_authority:
+                from src.work_board.communication_preparation import verify_admission_spec
+                native_communication_leaf = await verify_admission_spec(db, admission_authority_check, spec)
             if (
                 spec.goal_id is not None
                 and spec.max_outstanding_jobs is not None
                 and not native_procedure_leaf
+                and not native_communication_leaf
             ):
                 # This count and the child insert share the same durable
                 # transaction.  Unlike the scheduler's advisory listing,
@@ -3414,7 +3463,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "payload": admission, "state_digest": _digest(admission), "state_keys": sorted(admission),
                     "safe": True, "fencing_token": 0, "recorded_at": now.isoformat()}])
             await recheck_run_dependencies(db, run, admission_dependencies)
-            if identity.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and admission_authority_check is None:
+            if identity.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "goal_public_discovery_v1"} and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")
             if identity.job_kind == "guardian_opportunity_assess" and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("guardian_opportunity_fixed_native_admission_required")
@@ -4300,7 +4349,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
             if to_status in {"succeeded", "degraded"}:
-                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and terminal_authority_check is None:
+                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and terminal_authority_check is None:
                     raise DurableJobTransitionError("Forgejo terminalization requires its fixed native authority callback")
                 if run.job_kind == "guardian_opportunity_assess" and terminal_authority_check is None:
                     raise DurableJobTransitionError("Opportunity terminalization requires its fixed native authority callback")
@@ -4449,6 +4498,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         reason: str = "operator_cancelled",
         cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         result: Any = None,
+        result_summary: str | None = None,
     ) -> dict[str, Any]:
         return await self.transition_job(
             job_id,
@@ -4459,6 +4509,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             reason=reason,
             cancellation_authority_check=cancellation_authority_check,
             result=result,
+            result_summary=result_summary,
         )
 
     async def cancel_job_tree(
@@ -5267,7 +5318,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._writer_session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
-            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2"} and claim_authority_check is None:
+            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
                 raise DurableJobLeaseError("Opportunity claims require the fixed native authority callback")
@@ -5305,13 +5356,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if continue_existing_attempt or run.attempt_count != 0 or run.fencing_token != 0:
                     raise DurableJobLeaseError("the original general task native claim is exhausted")
                 await assert_general_task_child_phase_current(db, run)
+                if json.loads(run.arguments_json).get("tool_id") == "document_build":
+                    from src.work_board.document_build_native import validate_claim
+                    validate_claim(self, run, claim_authority_check)
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
-                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2"} and not (_runtime_service_claim is not None and run.job_kind in {"workflow", "conversation_turn_v1", "research_dossier", "runtime_service_read_v1", "runtime_service_memory_v1", "work.local-evidence-report.v1"}):
+                elif run.job_kind == "general_task_native_tool_v1":
+                    from src.work_board.document_build_native import validate_claim
+                    validate_claim(self, run, claim_authority_check)
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and not (_runtime_service_claim is not None and run.job_kind in {"workflow", "conversation_turn_v1", "research_dossier", "runtime_service_read_v1", "runtime_service_memory_v1", "work.local-evidence-report.v1"}):
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(
@@ -5929,10 +5986,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     ) -> dict[str, Any]:
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("general:delegation:"):
+            raise DurableJobTransitionError("specialist delegation requires its fixed reservation writer")
         if isinstance(checkpoint_id, str) and checkpoint_id.startswith(("general:approval:", "general:cleanup:", "general:cancel:")):
             raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
+        if checkpoint_id in {"document-capacity", "document-child", "document-reaped"}:
+            raise DurableJobTransitionError("document process reservation/reap requires its fixed native owner")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         if _protected_composition_checkpoint(checkpoint_id):
@@ -6023,6 +6084,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         raise DurableJobTransitionError("native original physical reservation cannot be replaced")
                     _native_physical_witness(run.job_kind, witness, binding)
                     receipt["payload"] = checkpoint_payload
+                elif run.job_kind == "goal_public_discovery_v1" and checkpoint_id == "discovery:outcome":
+                    from src.guardian.research_plan_contracts import DiscoveryOutcomeCheckpoint
+                    typed = DiscoveryOutcomeCheckpoint.model_validate(checkpoint_payload)
+                    from src.workflows.research_guard import current_discovery_witness
+                    witness = current_discovery_witness()
+                    artifact = witness.artifacts.get(typed.artifact_ref.artifact_id)
+                    if (artifact is None or artifact["kind"] != "brief" or artifact["reference"] != typed.artifact_ref
+                            or artifact["parsed"]["coverage"]["outcome_state"] != typed.state
+                            or artifact["parsed"]["coverage"]["status"] != typed.coverage
+                            or artifact["parsed"]["coverage"]["sources"] != checkpoint_payload["sources"]):
+                        raise DurableJobTransitionError("programme final checkpoint differs from original physical brief")
+                    receipt["payload"] = typed.model_dump(mode="json")
                 else:
                     receipt["payload"] = _safe_structure(checkpoint_payload)
             elif checkpoint_id == "native-physical-resource-reservation":

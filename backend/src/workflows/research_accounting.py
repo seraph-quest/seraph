@@ -165,3 +165,92 @@ async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_dig
                 db.add(row)
                 await jobs._persist_accounting_witness(db, workspace, account, rows)
             return _operation_payload(row)
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def discovery_accounting_scope(jobs, *, job_id=None, operation_id=None):
+    """Stage current policy before only a programme's existing ledger writer."""
+    from src.db.models import WorkflowRunState
+    from sqlalchemy import select
+    from src.work_board.research_parent import DISCOVERY_KIND
+    if ((job_id is not None and not str(job_id).startswith("goal-discovery:"))
+            or (job_id is None and not str(operation_id).startswith("remote:goal-discovery:"))):
+        yield None
+        return
+    async with jobs._session() as db:
+        if job_id is None:
+            operation = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.operation_id == operation_id))
+            job_id = operation.job_id if operation is not None else None
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id)) if job_id else None
+        programme = run is not None and run.job_kind == DISCOVERY_KIND
+    if not programme:
+        yield None
+        return
+    from src.workflows.research_guard import discovery_writer_scope
+    from src.workflows.research_sources import physical_discovery_inputs
+    witness = await physical_discovery_inputs(jobs, job_id)
+    async with discovery_writer_scope(witness=witness) as policy:
+        yield policy
+
+
+async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, operation_id=None, payload_digest=None):
+    """All-period generation spend and liabilities in the sole cost writer."""
+    from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, discovery_authority
+    from src.workflows.research_guard import assert_discovery_authority
+    from src.db.models import WorkflowRunState
+    from sqlalchemy import select
+    if run.job_kind != DISCOVERY_KIND:
+        return None
+    await assert_discovery_authority(db, run.declared_authority_json, run=run)
+    native = discovery_authority(run.declared_authority_json)
+    binding = native.programme_binding
+    if operation_id is not None:
+        prefix = "remote:" + run.run_identity + ":"
+        if not operation_id.startswith(prefix) or operation_id[len(prefix):] not in {"0", "1", "2", "3"}:
+            raise InferenceAccountingError("programme_operation_lineage_invalid")
+        from src.workflows.research_guard import current_discovery_witness
+        from src.security.trust_contract import canonical_digest
+        witness = current_discovery_witness()
+        prompts = [a for a in witness.artifacts.values() if a["kind"] == "prompt" and a["slot"] == int(operation_id[len(prefix):])]
+        if len(prompts) != 1 or (payload_digest is not None and canonical_digest(prompts[0]["parsed"]) != payload_digest):
+            raise InferenceAccountingError("programme_original_prompt_readback_changed")
+    own_operations = [row for row in rows if row.job_id == run.run_identity]
+    if operation_id is not None and operation_id not in {row.operation_id for row in own_operations} and len(own_operations) >= 4:
+        raise InferenceAccountingError("programme_request_limit_exhausted")
+    ids = {row.job_id for row in rows}
+    runs = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity.in_(ids)))).scalars()) if ids else []
+    parents = {parent.run_identity: parent for parent in runs}
+    used = 0
+    for row in rows:
+        parent = parents.get(row.job_id)
+        if parent is None:
+            if row.owner_id == DISCOVERY_SERVICE:
+                raise InferenceAccountingError("programme_cost_original_job_missing")
+            continue
+        if parent.job_kind != DISCOVERY_KIND:
+            continue
+        original = discovery_authority(parent.declared_authority_json).programme_binding
+        if original.programme_id != binding.programme_id or original.owner_identity_id != binding.owner_identity_id:
+            continue
+        if original != binding:
+            raise InferenceAccountingError("programme_original_generation_binding_changed")
+        if (row.owner_id != DISCOVERY_SERVICE or row.goal_id != original.goal_id
+                or row.goal_revision != original.goal_revision
+                or row.operation_id not in {"remote:" + parent.run_identity + ":" + str(i) for i in range(4)}):
+            raise InferenceAccountingError("programme_cost_original_lineage_changed")
+        if row.state in {"reserved", "contact_started", "unknown"}:
+            used += integer_amount(row.bound_microusd, positive=True)
+        elif row.state == "settled":
+            if row.actual_cost_microusd is None:
+                raise InferenceAccountingError("programme_settlement_cost_missing")
+            used += integer_amount(row.actual_cost_microusd)
+        elif row.state != "released":
+            raise InferenceAccountingError("programme_cost_state_unknown")
+    if used + new_bound > binding.cost_ceiling_microusd:
+        raise InferenceAccountingError("programme_generation_cost_budget_exhausted")
+    return {"binding": binding.model_dump(mode="json"), "native_job_id": run.run_identity,
+        "generation_used_microusd": used, "generation_ceiling_microusd": binding.cost_ceiling_microusd,
+        "memory_status": "no_learning"}

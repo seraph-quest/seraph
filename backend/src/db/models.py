@@ -1928,6 +1928,7 @@ class InferenceCostReservation(SQLModel, table=True):
     """Accounting evidence for a canonical job, never a second job lifecycle."""
 
     __tablename__ = "inference_cost_reservations"
+    __table_args__ = (Index("ix_inference_cost_reservations_owner_group_lookup", "owner_id", "group_lookup_key"),)
     operation_id: str = Field(primary_key=True)
     deployment_id: str = Field(index=True)
     job_id: str = Field(index=True)
@@ -1952,6 +1953,7 @@ class InferenceCostReservation(SQLModel, table=True):
     actual_cost_microusd: Optional[int] = None
     provider_operation_id: Optional[str] = None
     evidence_json: str = Field(default="[]")
+    group_lookup_key: Optional[str] = Field(default=None, exclude=True)
     recovery_reason: Optional[str] = None
     revision: int = Field(default=1)
     created_at: datetime = Field(default_factory=_now)
@@ -3119,6 +3121,61 @@ class OperatorIdentity(SQLModel, table=True):
     id: str = Field(default_factory=_uuid, primary_key=True)
     created_at: datetime = Field(default_factory=_now)
     revoked_at: Optional[datetime] = Field(default=None)
+
+
+class ProgrammeDigestReceipt(SQLModel, table=True):
+    """Immutable owner/day Inbox projection; never an execution queue."""
+    __tablename__ = "programme_digest_receipts"
+    __table_args__ = (Index("ux_programme_digest_owner_day", "owner_identity_id", "local_date", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str = Field(index=True)
+    local_date: str = Field(index=True)
+    timezone: str
+    digest_json: str
+    finding_bindings_json: str = Field(default="[]")
+    phase: str = Field(default="pending")
+    finalize_deadline: datetime
+    digest_notice: str = Field(default="unreserved")
+    deadline_notice: str = Field(default="unreserved")
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ProgrammeFollowThrough(SQLModel, table=True):
+    """Finding disposition and exact C1 task link, without execution authority."""
+    __tablename__ = "programme_follow_through"
+    __table_args__ = (Index("ux_programme_followthrough_owner_finding", "owner_identity_id", "finding_id", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str = Field(index=True)
+    finding_id: str = Field(index=True)
+    desired_outcome: str = Field(default="")
+    task_proposal_id: Optional[str] = Field(default=None)
+    due_at: Optional[datetime] = Field(default=None)
+    status: str = Field(default="pending")
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class ProgrammeFindingAction(SQLModel, table=True):
+    """Durable idempotent operator disposition receipts, without work admission."""
+    __tablename__ = "programme_finding_actions"
+    __table_args__ = (Index("ux_programme_finding_action_owner_key", "owner_identity_id", "idempotency_key", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str = Field(index=True)
+    finding_id: str = Field(index=True)
+    idempotency_key: str
+    request_digest: str
+    local_date: str = Field(index=True)
+    result_json: str
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ProgrammeNotificationPreference(SQLModel, table=True):
+    __tablename__ = "programme_notification_preferences"
+    owner_identity_id: str = Field(primary_key=True)
+    recipient_principal_id: str
+    recipient_root_id: str
+    enabled: bool = Field(default=False)
+    deadline_categories_json: str = Field(default="[]")
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class OperatorContinuityCredential(SQLModel, table=True):

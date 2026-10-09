@@ -438,6 +438,12 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     malformed canonical projection fails closed.
     """
 
+    if isinstance(value, dict) and value.get("schema_version") == "task_method_scope.v1":
+        from src.memory.task_methods import TaskMethodScope
+        try:
+            return TaskMethodScope.model_validate(value).model_dump(mode="json")
+        except (TypeError, ValueError):
+            return None
     if isinstance(value, dict) and value.get("schema_version") == "guardian_opportunity_preference.v1":
         from src.guardian.opportunity_preferences import OpportunityPreferenceScope
         try:
@@ -2116,13 +2122,13 @@ def _ordinary_model_memory_clause(memory_model=Memory):
     """
     metadata = case((func.json_valid(memory_model.metadata_json) == 1,
         memory_model.metadata_json), else_="{}")
-    namespace = "guardian_opportunity_preference.v1"
+    namespaces = ("guardian_opportunity_preference.v1", "task_method_scope.v1")
     return and_(
-        *(func.coalesce(func.json_extract(metadata, path), "") != namespace for path in (
+        *(func.coalesce(func.json_extract(metadata, path), "").not_in(namespaces) for path in (
             "$.work_board_provenance.memory_scope.schema_version",
             "$.provenance.memory_scope.schema_version", "$.memory_scope.schema_version")),
         ~exists().where(MemoryProposal.accepted_memory_id == memory_model.id,
-            MemoryProposal.schema_version == "opportunity_recommendation.v1"),
+            MemoryProposal.schema_version.in_(("opportunity_recommendation.v1", "task_method_proposal.v1"))),
     )
 
 
@@ -3395,6 +3401,7 @@ class MemoryRepository:
         confidence: float,
         corrects_memory_id: str | None = None,
         proposal_id: str = "",
+        _memory_id: str | None = None,
     ) -> Memory:
         """Write one M5 memory through the canonical repository transaction.
 
@@ -3405,6 +3412,16 @@ class MemoryRepository:
         """
 
         normalized_content = content.strip()
+        if _memory_id is not None:
+            from uuid import UUID
+            from src.memory.task_methods import TaskMethodScope, CANDIDATE, digest as method_digest
+            scope = TaskMethodScope.model_validate(json.loads(metadata_json)["work_board_provenance"]["memory_scope"])
+            candidate = CANDIDATE.validate_json(normalized_content).model_dump(mode="json")
+            if (str(UUID(_memory_id)) != _memory_id or scope.candidate_version != _memory_id
+                or scope.proposal_id != proposal_id or str(getattr(kind, "value", kind)) != "pattern"
+                or scope.candidate_schema != candidate["schema_version"]
+                or scope.candidate_digest != method_digest(candidate)):
+                raise ValueError("canonical_method_version_conflict")
         if not normalized_content:
             raise ValueError("content must be non-empty")
         normalized_kind = _coerce_enum(kind, MemoryKind)
@@ -3426,8 +3443,12 @@ class MemoryRepository:
                 )
             except (TypeError, ValueError, AttributeError):
                 existing_provenance = {}
+            if _memory_id is not None and TaskMethodScope.model_validate(
+                existing_provenance.get("memory_scope")) != scope:
+                raise ValueError("canonical_method_version_conflict")
             if (
                 existing.source_session_id != source_session_id
+                or (_memory_id is not None and existing.id != _memory_id)
                 or existing_provenance.get("proposal_id") != proposal_id
                 or existing.content != normalized_content
                 or _canonical_memory_deletion_marker(existing) is not None
@@ -3436,6 +3457,7 @@ class MemoryRepository:
             return existing
 
         memory = Memory(
+            **({"id": _memory_id} if _memory_id is not None else {}),
             content=normalized_content,
             category=MemoryCategory.fact if normalized_kind is MemoryKind.fact else MemoryCategory.pattern,
             kind=normalized_kind,
@@ -3723,6 +3745,7 @@ class MemoryRepository:
                         MemoryProposal.status == MemoryProposalStatus.accepted,
                         MemoryProposal.schema_version != "procedure_recommendation.v1",
                         MemoryProposal.schema_version != "opportunity_recommendation.v1",
+                        MemoryProposal.schema_version != "task_method_proposal.v1",
                         or_(case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
                                 func.json_extract(MemoryProposal.memory_scope_json, "$.schema_version")), else_=None).is_(None),
                             case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
@@ -7173,6 +7196,7 @@ class MemoryRepository:
                     select(Memory)
                     .outerjoin(MemoryTombstone, MemoryTombstone.memory_id == Memory.id)
                     .where(Memory.status == MemoryStatus.active)
+                    .where(_ordinary_model_memory_clause())
                     .where(MemoryTombstone.id.is_(None))
                     .order_by(col(Memory.updated_at).asc(), col(Memory.id).asc())
                     .limit(bounded_limit)
@@ -7515,7 +7539,7 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
-            exact_stmt = exact_stmt.where(_canonical_memory_without_tombstone_clause())
+            exact_stmt = exact_stmt.where(_canonical_memory_without_tombstone_clause(), _ordinary_model_memory_clause())
             exact_result = await db.execute(exact_stmt)
             for memory in exact_result.scalars().all():
                 if _canonical_memory_deletion_marker(memory) is not None:
@@ -7546,7 +7570,7 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
-            legacy_stmt = legacy_stmt.where(_canonical_memory_without_tombstone_clause())
+            legacy_stmt = legacy_stmt.where(_canonical_memory_without_tombstone_clause(), _ordinary_model_memory_clause())
             for key, value in normalized_scope.items():
                 legacy_stmt = legacy_stmt.where(
                     func.json_extract(Memory.metadata_json, _sqlite_json_object_path(key)) == value

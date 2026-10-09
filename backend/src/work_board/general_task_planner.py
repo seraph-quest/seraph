@@ -27,7 +27,7 @@ def public_schema(value, *, property_map=False):
     return value
 
 
-def planner_messages(task_input, descriptors):
+def planner_messages(task_input, descriptors, *, method_constraints=None):
     from src.work_board.general_task import canonical, validate_schema
     validate_schema(task_input.requested_output, check_value=False)
     tools = []
@@ -42,6 +42,10 @@ def planner_messages(task_input, descriptors):
     # turns private artifacts into instruction-authoritative operator input.
     data = {"intent": task_input.intent, "requested_output": public_schema(task_input.requested_output),
         "max_steps": task_input.limits.max_steps, "registered_tools": tools}
+    if method_constraints is not None:
+        # Only server-validated finite tool/guard identities; never canonical
+        # memory JSON, method prose, permissions or invented tool arguments.
+        data["reviewed_plan_constraints"] = method_constraints
     return [{"role": "system", "content":
         "Propose an inert registered-tool plan. Return only one JSON object matching "
         "PlanSpec: {schema_version:1,revision:1,steps:[{step_id,tool_id,input,depends_on,"
@@ -62,6 +66,25 @@ class TaskProposalResult:
 
 
 class GeneralTaskPlanner:
+    async def propose_specialist(self, db, owner, *, group, binding, task_input, descriptors,
+                                 original_provenance, request_key):
+        """Plan only the original protected delegate request under its group."""
+        from src.workflows.specialist_delegation import validate_specialist_planning
+        context = await validate_specialist_planning(db, group, binding, task_input, descriptors)
+        if (owner.principal_id != group.owner_principal_id or owner.session_id != group.owner_session_id
+            or original_provenance != context.envelope.proposal_provenance):
+            raise BoardError("general_task_specialist_not_bound", "Original specialist provenance required", status_code=409)
+        from src.workflows.inference_accounting import _utc
+        specialist = {"group": group, "binding": dict(binding),
+            "original_provenance": original_provenance,
+            "max_steps": context.request.limits.max_steps,
+            "wall_seconds": context.request.limits.wall_seconds,
+            "max_cost_microusd": context.request.limits.max_cost_microusd,
+            "deadline_at": _utc(context.callback.deadline_at).timestamp(),
+            "specialist_role": context.request.role}
+        return await self.propose(db, owner, task_input, descriptors, group.goal_revision,
+            request_key, with_provenance=True, _specialist=specialist)
+
     async def continue_plan(self, db, owner, *, parent, task, attempt, manifest, envelope, request_key):
         """Build continuation context only from verified native projections."""
         from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest, read_native_artifact_reference
@@ -69,7 +92,8 @@ class GeneralTaskPlanner:
         from src.work_board.general_task import digest
         await verify_general_task_manifest(db, parent, task, attempt, manifest)
         if (manifest.plan_revision >= 16 or manifest.phase not in {"native_ready", "assembly"}
-            or parent.status != "running" or task.owner_principal_id != owner.principal_id
+            or parent.status != "running" or parent.parent_job_id is not None
+            or task.owner_principal_id != owner.principal_id
             or task.owner_session_id != owner.session_id):
             raise BoardError("general_task_continuation_not_bound", "Current bounded native assembly required", status_code=409)
         summaries = []
@@ -93,10 +117,11 @@ class GeneralTaskPlanner:
         continuation["frozen_steps"] = [step for step in current_plan(manifest, envelope).steps
             if step.step_id in manifest.step_ids]
         return await self.propose(db, owner, envelope.task_input, envelope.descriptors,
-            task.goal_revision, request_key, with_provenance=True, _continuation=continuation)
+            task.goal_revision, request_key, with_provenance=True, _continuation=continuation,
+            strategy=envelope.strategy)
 
     async def propose(self, db, owner, task_input, descriptors, goal_revision, idempotency_key,
-                      *, with_provenance=False, _continuation=None):
+                      *, with_provenance=False, _continuation=None, _specialist=None, strategy=None):
         from src.auth.service import authenticate_session
         from src.approval.runtime import set_runtime_context, reset_runtime_context
         from src.model_fabric.caller_context import build_canonical_inference_context
@@ -114,6 +139,22 @@ class GeneralTaskPlanner:
         from src.work_board.general_task import digest
         from src.vault.redaction import redact_secrets_in_text_readonly
 
+        if _continuation is not None and _specialist is not None:
+            raise BoardError("general_task_specialist_not_bound", "Planning roles cannot be combined", status_code=409)
+        if _specialist is not None:
+            from src.workflows.specialist_delegation import validate_specialist_planning
+            specialist_context = await validate_specialist_planning(db, _specialist["group"], _specialist["binding"], task_input, descriptors)
+            if (_specialist["original_provenance"] != specialist_context.envelope.proposal_provenance
+                or owner.principal_id != _specialist["group"].owner_principal_id
+                or owner.session_id != _specialist["group"].owner_session_id
+                or goal_revision != _specialist["group"].goal_revision):
+                raise BoardError("general_task_specialist_not_bound", "Original specialist provenance required", status_code=409)
+            from src.workflows.inference_accounting import _utc
+            _specialist = {**_specialist, "max_steps": specialist_context.request.limits.max_steps,
+                "wall_seconds": specialist_context.request.limits.wall_seconds,
+                "max_cost_microusd": specialist_context.request.limits.max_cost_microusd,
+                "deadline_at": _utc(specialist_context.callback.deadline_at).timestamp(),
+                "specialist_role": specialist_context.request.role}
         if not task_input.inference_egress_acknowledged:
             raise BoardError("general_task_planning_consent_required", "Acknowledge intent egress for planning", status_code=422)
         if task_input.limits.max_inference_calls < 1 or task_input.limits.max_cost_microusd <= 0:
@@ -130,17 +171,19 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
         bound = route.request_cost_bound_microusd
         budget = min(task_input.limits.max_cost_microusd, setup.spend_ceiling_microusd or 0)
+        if _specialist is not None:
+            budget = min(budget, _specialist["max_cost_microusd"], _specialist["group"].max_cost_microusd)
         if type(bound) is not int or bound <= 0 or bound > budget:
             raise BoardError("general_task_planning_budget_insufficient", "Existing request reserve exceeds the planning ceiling", status_code=422)
         operator = await authenticate_session(owner.session_id, touch=False)
         if operator.session_id != owner.session_id or operator.principal.principal_id != owner.principal_id:
             raise BoardError("general_task_planning_owner_changed", "Original operator session changed", status_code=403)
         from src.work_board.general_task_proposal import new_group, group_identity, proposal_provenance
-        if _continuation is None:
+        if _continuation is None and _specialist is None:
             group = new_group(owner, task_input, descriptors, goal_revision=goal_revision,
                 request_key=idempotency_key, expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
         else:
-            group = _continuation["group"]
+            group = (_specialist if _specialist is not None else _continuation)["group"]
             from src.workflows.general_task_accounting import validate_group_owner
             await validate_group_owner(db, group)
         principal = replace(operator.principal, session_id=owner.session_id, job_id="", operator_session_id=owner.session_id)
@@ -151,7 +194,24 @@ class GeneralTaskPlanner:
         options = _profile_options(profile_id)
         if set(options) - {"provider", "_seraph_openrouter"}:
             raise BoardError("general_task_planning_options_invalid", "Unsupported provider request options", status_code=409)
-        messages = planner_messages(task_input, descriptors)
+        constraints = None
+        if strategy is not None:
+            from src.work_board.general_task import method_constraints
+            constraints = method_constraints(strategy, descriptors)
+        prompt_input = task_input
+        if _specialist is not None:
+            prompt_input = task_input.model_copy(update={"limits": task_input.limits.model_copy(
+                update={"max_steps": min(task_input.limits.max_steps, _specialist["max_steps"])})})
+        messages = planner_messages(prompt_input, descriptors, method_constraints=constraints)
+        if _specialist is not None:
+            messages.append({"role": "user", "content": json.dumps({"specialist_role": _specialist["specialist_role"]})})
+            if task_input.evidence_refs:
+                messages.append({"role": "system", "content":
+                    "For this specialist only, a tool input value may be "
+                    "{from_evidence:reference,pointer:JSON_pointer} into a selected private copied JSON artifact. "
+                    "Use only the listed references. Contents stay local and are resolved at tool execution; "
+                    "do not infer contents or add fields to the pointer. Selected reference IDs: "
+                    + json.dumps(task_input.evidence_refs)})
         if _continuation is not None:
             from src.work_board.general_task import canonical
             import re
@@ -183,6 +243,10 @@ class GeneralTaskPlanner:
         if _continuation is not None:
             operation_id = "planning-continuation:" + digest([group.group_id, _continuation["task_id"],
                 _continuation["task_attempt_id"], _continuation["plan_revision"], idempotency_key])[:40]
+        if _specialist is not None:
+            operation_id = "planning-specialist:" + digest([group.group_id,
+                _specialist["binding"]["delegation_invocation_id"],
+                _specialist["binding"]["delegation_request_digest"]])[:40]
         from src.workflows.job_runtime import durable_job_repository
         inference_job_id = "inference:" + hashlib.sha256(operation_id.encode()).hexdigest()[:40]
         prior = await durable_job_repository.get_job(inference_job_id)
@@ -193,6 +257,9 @@ class GeneralTaskPlanner:
             output_tokens=body["max_tokens"], timeout_seconds=min(45, route.timeout_seconds, task_input.limits.wall_seconds),
             principal=principal, session_id=owner.session_id, request_id=operation_id)
         context = replace(context, deadline_at=min(context.deadline_at, group.original_deadline_at.timestamp()))
+        if _specialist is not None:
+            context = replace(context, deadline_at=min(context.deadline_at, _specialist["deadline_at"],
+                time.time() + _specialist["wall_seconds"]))
         # Route metadata uses the persisted deployment cost envelope. The
         # broker applies the narrower operator ceiling to its actual reserve;
         # substituting it into route metadata would reject every legacy
@@ -212,9 +279,15 @@ class GeneralTaskPlanner:
         tokens = set_runtime_context(owner.session_id, "high_risk", trust_principal=principal)
         started = False
         from src.model_fabric.accounting import bind_general_task_accounting
-        group_binding = bind_general_task_accounting(group, **({key: _continuation[key] for key in
+        accounting_binding = ({key: _continuation[key] for key in
             ("role", "task_id", "task_attempt_id", "plan_revision", "selected_grant_digest", "parent_owner", "parent_fence")}
-            if _continuation is not None else {}))
+            if _continuation is not None else {})
+        if _specialist is not None:
+            accounting_binding = {key: _specialist["binding"][key] for key in
+                ("task_id", "task_attempt_id", "plan_revision", "selected_grant_digest", "parent_owner", "parent_fence",
+                 "delegation_invocation_id", "delegation_request_digest")}
+            accounting_binding["role"] = "specialist"
+        group_binding = bind_general_task_accounting(group, **accounting_binding)
         group_binding.__enter__()
         try:
             await prepare_bound_remote_inference(request, profile_id=profile_id)
@@ -257,8 +330,8 @@ class GeneralTaskPlanner:
             operation = row.model_dump(mode="json") if row else None
         if operation is None:
             raise BoardError("general_task_provenance_missing", "Original proposal reservation is unavailable", status_code=409)
-        if _continuation is not None:
-            original = _continuation["original_provenance"]
+        if _continuation is not None or _specialist is not None:
+            original = (_specialist if _specialist is not None else _continuation)["original_provenance"]
             if original is not None:
                 async with durable_job_repository._session() as ledger_db:
                     row = await ledger_db.scalar(select(InferenceCostReservation).where(
@@ -287,6 +360,12 @@ class GeneralTaskPlanner:
             expected_revision = _continuation["plan_revision"] + 1 if _continuation else 1
             if plan.revision != expected_revision or len(plan.steps) > task_input.limits.max_steps:
                 raise ValueError("initial plan exceeds revision or step authority")
+            if _specialist is not None:
+                from src.workflows.specialist_delegation import validate_specialist_planning
+                await validate_specialist_planning(db, group, _specialist["binding"], task_input, descriptors)
+                if len(plan.steps) > _specialist["max_steps"] or any(
+                    step.tool_id not in {descriptor.tool_id for descriptor in descriptors} for step in plan.steps):
+                    raise ValueError("specialist plan exceeds its original registered tool subset")
             return TaskProposalResult(plan, group, provenance) if with_provenance else plan
         except Exception as exc:
             if with_provenance:

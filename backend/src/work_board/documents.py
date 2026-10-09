@@ -364,18 +364,14 @@ class DocumentService:
         if sources.sha256(raw) != value["input"]["source"]["sha256"]:
             raise BoardError("document_source_changed", "Restore the exact immutable source", status_code=409)
         token = uuid.uuid4().hex
+        from src.work_board.document_capacity import stage_capacity, assert_capacity
+        capacity_snapshot = await stage_capacity(db)
         await _begin_immediate(db)
         fresh, current = await sources.owned(db, owner, identifier, revision=row.revision, capability=CAPABILITY)
         await sources.authority(db, owner, fresh, current, root)
         if current.get("live_writer"):
             raise BoardError("document_parser_cleanup_unknown", "Reconcile the original reader before reuse", status_code=409)
-        from sqlalchemy import select
-        from src.db.models import WorkBoardInputArtifact
-        retained = list((await db.scalars(select(WorkBoardInputArtifact).where(
-            WorkBoardInputArtifact.capability_id == CAPABILITY,
-            WorkBoardInputArtifact.document_reserved_bytes > 0))).all())
-        if any((sources.metadata(item).get("live_writer") or {}).get("slot") == "parser" for item in retained):
-            raise BoardError("document_parser_capacity_held", "The original local parser still holds host capacity; reconcile its positive witness", status_code=409)
+        await assert_capacity(db, snapshot=capacity_snapshot)
         current["live_writer"] = {"token": token, "slot": "parser"}
         attempts = current.get("parser_attempts", 0)
         if attempts >= 2:

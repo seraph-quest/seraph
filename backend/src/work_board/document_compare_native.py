@@ -299,17 +299,12 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
     binding={"job_id":spec.identity.job_id,"input_digest":spec.inputs["typed_input_digest"],
         "input_artifact_id":task.input_artifact_id,
         "generation":prior.get("document-parser-retry",{}).get("generation",1),"nonce":uuid.uuid4().hex}
+    from src.work_board.document_capacity import stage_capacity, assert_capacity
+    async with jobs._session() as db:
+        capacity_snapshot = await stage_capacity(db)
     async def claim(db,run):
         await current(db,task,attempt,run,staged)
-        rows=list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind==JOB_KIND).limit(4097))).all())
-        if len(rows)>4096:raise BoardError("document_capacity_history_full","Parser capacity needs reconciliation")
-        for other in rows:
-            if other.run_identity==run.run_identity:continue
-            history=checkpoints(other)
-            if "document-capacity" in history and "document-reaped" not in history:
-                raise BoardError("document_parser_capacity_held","A prior parser requires actual quiescence proof")
-            if other.status=="queued" and (other.priority,other.started_at,other.run_identity)<(run.priority,run.started_at,run.run_identity):
-                raise BoardError("document_higher_priority_ready","A higher priority ready comparison owns the next turn")
+        await assert_capacity(db, snapshot=capacity_snapshot, run=run)
         history=json.loads(run.checkpoint_receipts_json)
         history.append({"checkpoint_id":"document-capacity","payload":binding,"safe":True})
         run.checkpoint_receipts_json=canonical(history).decode();await db.flush()
@@ -361,8 +356,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         actual,witness_sha=witness(binding)
         if process.returncode!=0 or actual["parser_exit"]!=0 or len(raw)>512*1024:
             raise BoardError("document_parser_resource_exit","The bounded parser did not complete")
-        await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-reaped",state={"witness_sha256":witness_sha},
-            checkpoint_payload={"binding":binding,"witness_sha256":witness_sha,"wait_reaped":True},owner=runner,fencing_token=fence)
+        await reconcile_reap(jobs, task, attempt)
         result=json.loads(raw)
         if result.get("status")!="succeeded":
             raise BoardError(str(result.get("reason") or "document_parser_blocked"),"The selected document grammar is unsupported")

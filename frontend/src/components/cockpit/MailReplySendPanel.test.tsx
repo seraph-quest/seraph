@@ -13,9 +13,9 @@ describe("exact Gmail send controls",()=>{
   const fetchMock=vi.fn();
   beforeEach(()=>{sessionStorage.clear();fetchMock.mockReset();vi.stubGlobal("fetch",fetchMock);});
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
-  async function preview(){
+  async function preview(callbacks: Partial<Parameters<typeof MailReplySendPanel>[0]> = {}){
     fetchMock.mockResolvedValueOnce(response({profiles:[profile("gmail_reply_read","read-1"),profile("gmail_reply_send","send-1")],provider_contact:false}));
-    const view=render(<MailReplySendPanel {...props}/>);
+    const view=render(<MailReplySendPanel {...props} {...callbacks}/>);
     fireEvent.click(screen.getByRole("button",{name:"Load local reply profiles"}));
     await screen.findByRole("option",{name:/read-1/});
     fireEvent.click(screen.getByRole("checkbox",{name:/Read this selected source/}));
@@ -54,6 +54,17 @@ describe("exact Gmail send controls",()=>{
     expect(screen.getByRole("button",{name:"Load local reply profiles"})).toBeDisabled();view.rerender(<MailReplySendPanel {...props} ownerSessionId="root-2"/>);
     expect(screen.getByRole("button",{name:"Load local reply profiles"})).toBeEnabled();finish(response({profiles:[profile("gmail_reply_read","foreign-read")],provider_contact:false}));
     await waitFor(()=>expect(screen.queryByRole("option",{name:/foreign-read/})).not.toBeInTheDocument());
+  });
+  it("publishes only the actual current original exact approval and factual readback",async()=>{
+    const approved=vi.fn(),readback=vi.fn();await preview({onExactApproved:approved,onReadback:readback});
+    expect(approved).toHaveBeenLastCalledWith(null);const original=job();
+    fetchMock.mockResolvedValueOnce(response({...original,preview:{...original.preview,approval_status:"approved"}}));
+    fireEvent.click(screen.getByRole("button",{name:"Approve these exact bytes and recipient"}));
+    await waitFor(()=>expect(approved).toHaveBeenLastCalledWith({operation_id:"send-job",exact_preview_digest:"b".repeat(64),approval_id:"approval-1",expires_at:original.preview.expires_at}));
+    expect(readback).toHaveBeenCalled();expect(fetchMock.mock.calls.filter(([url])=>String(url).endsWith("/execute"))).toHaveLength(0);
+    fetchMock.mockResolvedValueOnce(response(job({status:"unknown_external_effect",preview:undefined,outcome:"unknown",contact_may_have_occurred:true})));
+    fireEvent.click(screen.getByRole("button",{name:/Send approved reply once/}));await screen.findByText(/Unknown; no resend/);
+    expect(approved).toHaveBeenLastCalledWith(null);expect(readback.mock.calls[readback.mock.calls.length-1]?.[0].status).toBe("unknown_external_effect");
   });
   it("fails closed on corrupt recovery storage",()=>{sessionStorage.setItem("seraph:mail-exact-reply:owner-1:root-1:task-1",'{"version":1,"jobId":"send-job","pending":{"action":"execute","body":{"raw":"untrusted MIME"}}}');render(<MailReplySendPanel {...props}/>);expect(screen.getByRole("alert")).toHaveTextContent(/storage is corrupt/);expect(screen.getByRole("button",{name:"Load local reply profiles"})).toBeDisabled();expect(fetchMock).not.toHaveBeenCalled();});
 });

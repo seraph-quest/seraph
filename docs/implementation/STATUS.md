@@ -90,6 +90,37 @@ OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
 
+**Document generation #1011: Planned target, feature-branch implementation.**
+[ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+also accepts explicit report/brief/workbook authoring, signed private review and
+the same original C1 native ToolStep producing editable DOCX/XLSX and direct PDF.
+The generation family reserves its own 24 MiB, preserves source32/pair16 MiB
+charges, shares durable process exclusion/queued priority with comparison, and
+retains output quota until explicit positively verified retirement. The target
+separates successful/degraded output retirement from protected fully-cancelled
+outputless retirement: blocked Task, ended cancelled Attempt, cancelled parent
+and complete settled original child/effect/cost set. Zero launch still requires
+the same full stop before Goal deletion/cutoff; later current authenticated
+cleanup only reduces capacity. Actual original stdin/EOF/supervisor wait issues
+the private persisted supervision proof; a parser witness alone or missing outer
+receipt after restart holds Unknown and charge. Capacity release never settles
+Task, effect or cost state.
+
+Source-private pending reservation and physical output readback precede final
+native writer adoption; its exact identity-sealed proof and current CAS are
+required without full output-file reads in that writer. Later output/download
+and retirement still perform physical validation because same-user post-read
+replacement remains a local race. Fixed cleanup tombstones before exact
+unlink/fsync/final CAS; partial or foreign inventory holds charge. Metadata
+headroom preserves the 24 MiB reservation within 8,192 bytes (1,781-byte fixed
+private supervision codec). A fresh bounded 4 KiB cleanup-witness read inside
+its writer still has filesystem-stall risk. The shared 4,096-row historical
+inventory ceiling fails closed; the sequential journey reaching a 4,097th
+historical row remains unexecuted and no eviction/recovery bypass is claimed. Actual CPU/Linux receipts
+do not claim shipped generation, native macOS proof, model composition or
+automatic iterative repair. Availability still requires independent full-journey
+review and the reviewed implementation merge; the owning issue/PR carries proof.
+
 ## Task conversation continuity
 
 **Shipped** within the bounded
@@ -166,8 +197,83 @@ restart boundaries, full-capacity cancellation and `no_learning`; macOS executio
 and live external/provider usefulness remain unverified. The current Python
 managed lifecycle remains the execution owner before the separately owned
 [#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
-Specialist delegation in
-[#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
+**Bounded specialist delegation (#999): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#999](https://github.com/seraph-quest/seraph/issues/999)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-specialist-delegation-999)
+extends an accepted native task with actual specialist Work cards, private
+copied handoffs, durable wait and physically verified child outputs. The original
+group admits at most two active and four retained specialist children, depth
+one, and shares its twelve-call ceiling, explicit cost allowance and original
+deadline. Parent/child navigation is informational; reserved identities do not
+mean that a child has been claimed or executed. Completion remains no-learning.
+
+An authenticated private child reservation preserves and revalidates the
+parent's original immutable reviewed-method authority while executing only its
+narrower reserved plan. Ordinary public admission still selects the current
+method and enforces its complete sequence. Lesson projection matches each
+callback to its verified admitted continuation revision and unchanged frozen
+step; method acceptance rechecks compatibility against the actual started
+registry when available. Descriptor projection grants no authority. The genuine
+reviewed-method journey completes the original source and operator review, then
+brings both next-task children to Done and their parent to Review, awaiting its
+separate operator completion.
+
+The four proposal and specialist accounting readers use private indexed
+owner/classification checks and at most thirteen group rows, preserving all original liabilities and
+detecting overflow beyond twelve. Startup strictly classifies legacy rows in
+batches of at most 128. Historical financial seals retain their original typed
+defaults and field presence without resealing. The private hint grants no
+authority and is not a direct-database-tamper integrity seal. Stopped stdlib
+workspace backup/restore accepts the sole added hint column; restored NULL hints
+require canonical startup migration before accounting readiness. This does not
+bound the existing global `_accounting_rows` deployment-ledger baseline.
+
+Private handoff publication derives at most twelve specialist callback identities
+from validated original-group reservations and uses exact unique run-identity
+lookups with the original owner, Root, reservation and current-delegation gates.
+The existing full Vault fingerprint still scales with secret rows and bytes;
+the entire publication path is not claimed independent of global workspace size.
+
+Original-root cancel and held pause fence further work while retaining Unknown
+callbacks, effects and contacted cost liabilities. A failed sibling does not
+discard an already verified output. The current authenticated owner can inspect
+eligible physical child outputs and explicitly accept an immutable partial
+review, including after the execution cutoff. This preserves the original
+Task, Attempt and stop state; it cannot complete the task, settle liabilities
+or resume work. Current unresolved job/effect/cost counts remain separate from
+the accepted decision's historical debt. Exact action replay requires current
+paired-owner authorization; recovered read-only access cannot issue or replay
+the decision. Isolated Linux native/API/stock-MCP, accounting and UI receipts
+cover copied-evidence boundaries, durable waits, failed-sibling retention,
+stop races, physical selection and authenticated restart replay. They establish
+neither model quality nor general callback recovery; native macOS execution and
+live external/provider usefulness remain unverified.
+
+**Communication preparation (#1016): intended Partial scope after independently
+reviewed merge.** This is source-branch behavior until the installed `develop`
+revision contains that merge. One accepted original task composes actual native
+Mail reply drafts and Calendar meeting preparations from explicitly selected,
+currently granted sources under the same original inference group and cutoff.
+The private encrypted five-field plan retains exact source provenance and
+affected-only blockers. Each selected send or owned-event reschedule uses its
+own fresh exact preview, immutable approval, existing native action and
+independent provider readback; validating a subset performs no effects.
+Unknown contacts/costs retain their original liabilities and never trigger
+automatic replay. Read-only RecoveryGoal observation cannot renew an old write.
+Recovered selection grants no private-body access; generic Calendar readers
+remain root-only. Stored configuration alone establishes no readiness.
+
+Deliberate exact-task cleanup reports verified aggregate absence or unresolved
+cleanup. Access expiry does not delete bytes, and aggregate cleanup leaves
+original Mail drafts, plaintext Calendar briefs and approval/effect history with
+their existing owners. Isolated authenticated native/API and UI receipts prove
+these bounded mechanics and explicit `no_learning`, not live-provider usefulness,
+model quality or native macOS execution. Unresolved native process exits 139/245
+remain a validation limitation; a single debugger run passing 24 tests does not
+erase those failures or establish runtime readiness. Only positive cleanup has
+captured authenticated API wire evidence; unresolved cleanup has service/UI
+coverage. See the [operator contract](./12-current-app-guide.md#communication-preparation-1016).
 
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,
@@ -188,13 +294,46 @@ macOS ABI; unknown restart proof visibly retains capacity while same-process
 workers and manual review remain usable. macOS native execution is unverified
 on the Linux validation host. It makes no
 inference call, grants no trace-egress permission and
-does not infer a positive preference from success. Strategy adoption and
-next-task reuse (#1001) remain **Planned**. The named proof is an actual
+does not infer a positive preference from success. The named #1000 proof is an actual
 authenticated failed formatter journey with terminal failure, proven process
 cleanup, private inspectable candidate and no output adoption, plus isolated
 M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
+**Reviewed task methods (#1001): Shipped on `develop` revisions containing the
+independently reviewed milestone merge.** Earlier revisions require that merge;
+branch-local receipts do not establish availability. Explicit review accepts
+immutable closed `TaskMethod.v1` or `ResearchStrategy.v1` data into signed
+canonical M5 patterns and an atomic signed Goal-revision/family selection, with
+at most 16 accepted versions per scope. Generic recall and M5 selection exclude
+these methods. New general tasks apply supported registered tool sequences and
+finite guards through existing PlanSpec/native execution; public discovery
+applies approved research fields within its original finite programme grant.
+Structured research proposals require exact completed research-dossier sources
+and verified native output. The existing Inspector exposes bounded structured
+research fields only for that verified source, shows original Task/Attempt/Goal
+revision/references/observed receipts in private and canonical inspection, and
+requires explicit acknowledgment before adoption. Candidate preparation remains
+inert; known-candidate recovery reads the same draft and uncertain preparation
+requires explicit same-request reconciliation. Dossier execution itself remains
+explicit baseline.
+Unsupported formatter capability steps cannot activate a general-task method.
+Rollback selects baseline for future work while an admitted original immutable
+pin may continue under current source and authority; tombstones and revocation
+still deny it. Missing, invalid, changed or revoked state blocks rather than
+silently downgrading; only demonstrably never-selected scopes preserve ordinary
+baseline. Selected recovered logins are read-only.
+
+Named provider-free Linux proofs exercise an authenticated completed native
+general task, operator completion, exact source discovery, review and subsequent
+native physical output with the selected method; a completed research dossier,
+structured proposal, signed adoption and subsequent real public discovery; and
+rollback, original-pin continuation, explicit future baseline, recovery,
+signature/source/selection tamper and pre-contact revocation. Independent review
+is required for the milestone merge. These receipts establish bounded mechanics,
+not learned quality, live-provider usefulness or native macOS execution. See the
+[operator contract](./12-current-app-guide.md#reviewed-task-methods).
 
 **Finite public goal programme authority: Shipped** on `develop` revisions
 containing the independently reviewed
@@ -212,6 +351,61 @@ external sockets and inference are denied, with zero reservation/spend.
 Executor contact/adoption CAS integration is still required before executor
 activation. macOS execution, provider availability and model usefulness are not
 established by these mechanical checks.
+
+**Finite public Goal discovery: Partial.** The current Python executor for
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) extends the existing
+programme, native job/artifact/accounting and scheduler owners. Its bounded
+operator journey includes fixed search, exact manifest selection, cited local
+brief/readback, first findings and later quiet outcomes, inert checklist proposals
+and explicit `no_learning`. Original deadlines and cumulative programme ceilings
+remain binding across daily/accounting periods.
+Accepted narrower limits and exact whole-output stage references are enforced;
+manifest derivation binds original physical HTTP response readbacks separately
+from artifact digests. Finite search-block causes survive authenticated history
+recovery without query/HTML exposure or provider replay. Untouched invalid queued work can
+close only through the existing canonical deny-only cancellation writer; claimed
+or uncertain effects and any cost-bearing work remain held. Explicit operator
+inspection/readback is available in the Goal panel. See the
+[operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
+Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
+mechanical contracts and failure boundaries. Whole cumulative independent review
+and merge are still required; real provider/model quality, native macOS execution
+and digest delivery were not established by the #1004 receipts; #1005's bounded
+delivery mechanics have their separate receipts below.
+
+**Daily programme digest and follow-through: on `develop` revisions containing
+the #1005 milestone merge, Shipped.** The validated feature-branch implementation
+awaits independent review and merge on earlier revisions.
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) slice implements
+the current Python scheduler's local 08:00 stable-owner/day Inbox receipt,
+bounded same-receipt pending/finalization, passive blocked recovery, persistent
+finding defer/dismiss and a same-card inert C1 task proposal. Existing native
+task acceptance/execution and verified physical checklist readback link completed
+output to the original finding. Original Goal/generation/Root/source freshness
+and canonical publication fences remain binding; recovered Goal reads grant no
+task creation authority. This adds no model calls or alternative execution/cost
+owners and leaves discovery's UTC occurrence and original clocks unchanged.
+Optional native delivery uses the existing outbox, recipient-bound opt-in,
+owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
+ambiguous display consumes the slot without automatic retry. Home distinguishes
+actual run/source/output evidence from the next digest timer and source
+eligibility under the existing UTC cadence, scheduler, finite allowance and
+native holds. Unavailable or blocked eligibility has an explicit reason; it
+does not promise execution. Source freshness is rechecked in the final C1
+publication writer, so expiry after staging cannot publish a Task or bind its
+proposal artifact. Existing private unbound staging retains its size bound/expiry
+cleanup. Missing, unreadable or altered physical sources finalize the original
+pending receipt with passive blocked recovery and bounded digest/status reads;
+cited source reads require review. An opted-in deadline failure retains a bounded
+negative memo without repeated unchanged-tick file reads, a notice slot or task
+creation. Actual source-file unlink, tamper and truncation journeys verify these
+failure paths. See the
+[operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
+Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
+file journey and two-programme cited-deadline/native-slot readbacks prove these
+mechanics with inference intercepted at its owned transport. Provider/model
+quality, actual external spending and macOS native display are not
+established by these receipts.
 
 ## Bounded operator workflows (program #899)
 

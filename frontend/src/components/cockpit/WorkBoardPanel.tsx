@@ -1,3 +1,5 @@
+import { CommunicationPlanPanel } from "./CommunicationPlanPanel";
+import type { CommunicationSelection, CommunicationReplyInput, CommunicationRescheduleInput } from "../../lib/communications";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
 import { createPortal } from "react-dom";
@@ -26,6 +28,7 @@ import { NearTextWorkPanel } from "./NearTextWorkPanel";
 import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import type { InspectPartialArtifact } from "./partialArtifactInspection";
 import { GeneralTaskPanel } from "./GeneralTaskPanel";
 import { GENERAL_TASK_CAPABILITY } from "../../lib/generalTask";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
@@ -142,6 +145,7 @@ export interface WorkBoardPanelProps {
   onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  onInspectPartialArtifact?: InspectPartialArtifact;
   focusTaskId?: string | null;
   onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
@@ -537,6 +541,9 @@ function normalizedIsoOrNull(value: string | null | undefined): string | null {
 }
 
 function eventSummary(event: WorkBoardEvent): string {
+  if (event.kind === "task.specialist_published" || event.kind === "task.specialist_origin") {
+    return event.kind.replace(/[_.]/g, " ");
+  }
   const metadata = event.metadata;
   const parts = [
     metadata.status,
@@ -545,6 +552,81 @@ function eventSummary(event: WorkBoardEvent): string {
     metadata.recovery_action,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   return parts.length ? parts.join(" · ") : event.kind.replace(/[_.]/g, " ");
+}
+
+const SPECIALIST_LINEAGE_FIELDS = ["parent_task_id", "parent_attempt_id", "step_id", "child_task_id",
+  "child_attempt_id", "child_job_id", "delegation_invocation_id", "reservation_digest"] as const;
+type SpecialistLineage = Record<typeof SPECIALIST_LINEAGE_FIELDS[number], string>;
+
+function specialistLineage(event: WorkBoardEvent): SpecialistLineage | null {
+  if (event.kind !== "task.specialist_published" && event.kind !== "task.specialist_origin") return null;
+  const metadata = event.metadata;
+  if (!metadata || Object.keys(metadata).length !== SPECIALIST_LINEAGE_FIELDS.length
+    || !SPECIALIST_LINEAGE_FIELDS.every((field) => typeof metadata[field] === "string")) return null;
+  const tuple = metadata as SpecialistLineage;
+  if (!SPECIALIST_LINEAGE_FIELDS.filter((field) => field !== "reservation_digest")
+    .every((field) => /^[A-Za-z0-9_.:-]{1,128}$/.test(tuple[field]))
+    || !/^[a-f0-9]{64}$/.test(tuple.reservation_digest)
+    || !/^[A-Za-z0-9_-]{1,64}$/.test(tuple.step_id)
+    || !/^general-tool:[a-f0-9]{48}$/.test(tuple.delegation_invocation_id)
+    || tuple.parent_task_id === tuple.child_task_id
+    || tuple.child_job_id !== `work-board:${tuple.child_task_id}:${tuple.child_attempt_id}`
+    || event.task_id !== (event.kind === "task.specialist_published" ? tuple.parent_task_id : tuple.child_task_id)) return null;
+  return tuple;
+}
+
+function SpecialistLineageEvent({ event, detail, readDetail, onOpenTask, ownerPrincipalId, ownerSessionId }: {
+  event: WorkBoardEvent;
+  detail: WorkBoardTaskDetail;
+  readDetail: (taskId: string, signal?: AbortSignal) => Promise<WorkBoardTaskDetail>;
+  onOpenTask: (taskId: string) => void;
+  ownerPrincipalId?: string | null;
+  ownerSessionId?: string | null;
+}) {
+  const [verified, setVerified] = useState<{ event: WorkBoardEvent; detail: WorkBoardTaskDetail;
+    targetId: string; attemptClaimed: boolean; jobAdmitted: boolean } | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  useEffect(() => {
+    setVerified(null);
+    setLookupError(null);
+    const tuple = specialistLineage(event);
+    if (!tuple || event.task_id !== detail.task.task_id || !ownerPrincipalId || !ownerSessionId
+      || detail.task.owner_principal_id !== ownerPrincipalId || detail.task.owner_session_id !== ownerSessionId) return;
+    const controller = new AbortController();
+    const targetId = event.kind === "task.specialist_published" ? tuple.child_task_id : tuple.parent_task_id;
+    void readDetail(targetId, controller.signal).then((target) => {
+      if (controller.signal.aborted || target.task.task_id !== targetId
+        || target.task.owner_principal_id !== detail.task.owner_principal_id
+        || target.task.owner_session_id !== detail.task.owner_session_id) return;
+      const oppositeKind = event.kind === "task.specialist_published" ? "task.specialist_origin" : "task.specialist_published";
+      const paired = target.events.some((other) => {
+        const opposite = specialistLineage(other);
+        return other.kind === oppositeKind && opposite !== null
+          && SPECIALIST_LINEAGE_FIELDS.every((field) => opposite[field] === tuple[field]);
+      });
+      const parent = event.kind === "task.specialist_published" ? detail : target;
+      const child = event.kind === "task.specialist_origin" ? detail : target;
+      if (!paired || !parent.attempts.some((attempt) => attempt.attempt_id === tuple.parent_attempt_id
+        && attempt.task_id === tuple.parent_task_id)) return;
+      const attempt = child.attempts.find((item) => item.attempt_id === tuple.child_attempt_id);
+      if (attempt && (attempt.task_id !== tuple.child_task_id
+        || (attempt.workflow_run_id !== null && attempt.workflow_run_id !== tuple.child_job_id))) return;
+      setVerified({ event, detail, targetId, attemptClaimed: Boolean(attempt?.started_at),
+        jobAdmitted: Boolean(attempt?.started_at && attempt.workflow_run_id === tuple.child_job_id) });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setLookupError(errorText(error));
+    });
+    return () => controller.abort();
+  }, [event, detail, readDetail, ownerPrincipalId, ownerSessionId]);
+  const current = verified?.event === event && verified.detail === detail
+    && detail.task.owner_principal_id === ownerPrincipalId && detail.task.owner_session_id === ownerSessionId ? verified : null;
+  if (!current) return lookupError ? <div className="text-[10px] opacity-70">Linked task unavailable: {lookupError}</div> : null;
+  return <div className="mt-1 text-[10px]">
+    <div>Specialist task published · Attempt {current.attemptClaimed ? "claimed" : "reserved"} · Job {current.jobAdmitted ? "admitted" : "reserved"}</div>
+    <button type="button" className="underline" onClick={() => onOpenTask(current.targetId)}>
+      {event.kind === "task.specialist_published" ? "Open specialist" : "Open delegating task"}
+    </button>
+  </div>;
 }
 
 function attemptLabel(task: WorkBoardTask): string {
@@ -801,6 +883,7 @@ function WorkBoardPanel({
   onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
+  onInspectPartialArtifact,
   focusTaskId,
   onFocusTaskHandled,
   ownerPrincipalId,
@@ -1016,6 +1099,23 @@ function WorkBoardPanel({
   }, [routineInvocationStorageKeyValue]);
 
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
+  const [communicationOpen, setCommunicationOpen] = useState(false);
+  const [communicationSelection, setCommunicationSelection] = useState<Omit<CommunicationSelection, "acknowledge_private_review">>({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] });
+  const communicationGoalRevisions = allGoals.map(g => `${g.id}:${g.revision}:${g.status}`).join("|");
+  useEffect(() => { setCommunicationSelection({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] }); setCommunicationOpen(false); }, [ownerPrincipalId, ownerSessionId, communicationGoalRevisions]);
+  function collectCommunication(kind: "reply" | "meeting" | "reschedule", input: CommunicationReplyInput | CommunicationSelection["meeting_inputs"][number] | CommunicationRescheduleInput) {
+    const revision = "expected_goal_revision" in input ? input.expected_goal_revision : input.goal_revision;
+    if (!ownerPrincipalId || !ownerSessionId || !allGoals.some(g => g.id === input.goal_id && g.revision === revision && g.status === "active" && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only")) return;
+    if ((kind === "reply" && communicationSelection.reply_inputs.length >= 5 && !communicationSelection.reply_inputs.some(v => v.message_binding_id === (input as CommunicationReplyInput).message_binding_id))
+      || (kind === "meeting" && communicationSelection.meeting_inputs.length >= 5 && !communicationSelection.meeting_inputs.some(v => v.event_binding_id === (input as CommunicationSelection["meeting_inputs"][number]).event_binding_id))
+      || (kind === "reschedule" && communicationSelection.reschedule_inputs.length >= 3 && !communicationSelection.reschedule_inputs.some(v => v.event_binding_id === (input as CommunicationRescheduleInput).event_binding_id))) throw Error("Communication source limit reached. Review the selected subset before adding another source.");
+    setCommunicationSelection(current => {
+      if (kind === "reply") { const value = input as CommunicationReplyInput; return { ...current, reply_inputs: [...current.reply_inputs.filter(v => v.message_binding_id !== value.message_binding_id), value] }; }
+      if (kind === "meeting") { const value = input as CommunicationSelection["meeting_inputs"][number]; return { ...current, meeting_inputs: [...current.meeting_inputs.filter(v => v.event_binding_id !== value.event_binding_id), value] }; }
+      const value = input as CommunicationRescheduleInput; return { ...current, reschedule_inputs: [...current.reschedule_inputs.filter(v => v.event_binding_id !== value.event_binding_id), value] };
+    });
+    setAnnouncement("Reviewed source selected in memory for communication preparation. Open Prepare communications to review the bounded task.");
+  }
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
@@ -3210,6 +3310,7 @@ function WorkBoardPanel({
         </div>
         <div className="cockpit-operator-actions flex-wrap">
           <button type="button" className="cockpit-feedback-button" onClick={() => setGeneralTaskOpen(true)}>Describe a task</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setCommunicationOpen(true)}>Prepare communications</button>
           <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
           </button>
@@ -3526,6 +3627,7 @@ function WorkBoardPanel({
                   taskId={selectedTask.task_id}
                   ownerPrincipalId={ownerPrincipalId}
                   ownerSessionId={ownerSessionId}
+                  onPrepareCommunication={input => collectCommunication("reply", input)}
                   mailOrigin={selectedInboxOrigin.mail}
                   goalId={selectedInboxOrigin.goal_id}
                   goalRevision={selectedInboxOrigin.goal_revision}
@@ -4203,7 +4305,8 @@ function WorkBoardPanel({
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
               {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && <GeneralTaskPanel
                 key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
-                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                task={selectedTask} goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onInspectArtifact={onInspectArtifact} onInspectPartialArtifact={onInspectPartialArtifact}
                 onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
               <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
@@ -4265,7 +4368,7 @@ function WorkBoardPanel({
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Safe task event timeline</div>
                 <div className="mt-2 grid gap-2">
-                  {selectedDetail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div></div>)}
+                  {selectedDetail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div><SpecialistLineageEvent event={event} detail={selectedDetail} readDetail={fetchTaskDetail} onOpenTask={openTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} /></div>)}
                   {(!selectedDetail?.events.length) && <div className="cockpit-empty">No task events yet.</div>}
                 </div>
               </section>
@@ -4276,6 +4379,10 @@ function WorkBoardPanel({
       )}
 
       {createPortal(<div className="relative z-[200]">
+      {communicationOpen && <div className="fixed inset-0 z-[200] overflow-auto bg-black/65 p-4" role="dialog" aria-modal="true" aria-label="Prepare communications"><div className="mx-auto max-w-2xl">
+        <CommunicationPlanPanel ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals} selection={communicationSelection}
+          onClose={() => setCommunicationOpen(false)} onCreated={async task => { setCommunicationOpen(false); setCommunicationSelection({ reply_inputs: [], meeting_inputs: [], reschedule_inputs: [] }); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id); }} />
+      </div></div>}
       {generalTaskOpen && <div className="fixed inset-0 z-[200] overflow-auto bg-black/65 p-4" role="dialog" aria-modal="true" aria-label="Describe a task"><div className="mx-auto max-w-2xl">
         <GeneralTaskPanel key={`general-create:${ownerPrincipalId}:${ownerSessionId}`} goals={allGoals}
           ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
@@ -4369,6 +4476,8 @@ function WorkBoardPanel({
           ownerSessionId={ownerSessionId}
           goals={allGoals}
           initialPending={pendingCalendarAtMount}
+          onPrepareCommunication={input => collectCommunication("meeting", input)}
+          onPrepareReschedule={input => collectCommunication("reschedule", input)}
           onPendingChange={setCalendarPending}
           onClose={closeCalendarPrep}
           onOpenSettings={() => setAnnouncement("Open Settings → Calendar to configure an active read-only connection.")}

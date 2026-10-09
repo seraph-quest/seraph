@@ -95,7 +95,8 @@ describe("CalendarPrepForm", () => {
       .mockResolvedValueOnce(response({ events: [{ event_binding_id: "binding-1", event_binding_revision: 3, event_key: digest, event_revision: digest, calendar_list_revision: selectedEventListRevision, summary: "Planning", start: "2026-09-30T12:00:00Z", end: "2026-09-30T13:00:00Z", location: "Room 1", description: null, attendees: null }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }))
       .mockResolvedValueOnce(response({ connection_id: "connection-1", state: "ready", active_job_id: null, cursor_revision: 1, reservation_state: "available", external_effect_state: "none", unresolved_jobs: [], items: [ref], coverage: { partial: true, pages_read: 1 }, freshness: { expires_at: ref.expires_at }, selection: { goal_ref: { id: "goal-1", revision: 4 }, connection_ref: { id: "connection-1", revision: 2 }, source_scope: { provider: "calendar", consents: [{ id: "consent-1", revision: 1 }], label_ids: [], thread_keys: [] }, window: { start: new Date().toISOString(), end: ref.expires_at }, max_items: 50 } }))
       .mockResolvedValueOnce(response({ input_artifact: { artifact_id: "artifact-1", typed_input_ref: "workspace-json:artifacts/work-board/inputs/artifact-1.json", typed_input_digest: digest, capability_id: "calendar.meeting-prep.v1", goal_id: "goal-1", goal_revision: 4, expires_at: "2026-10-01T09:00:00Z" }, task: { task_id: "task-1", title: "Prepare meeting", goal_id: "goal-1", goal_revision: 4, input_artifact_id: "artifact-1", capability_id: "calendar.meeting-prep.v1" }, idempotent_replay: false }));
-    render(<CalendarPrepForm ownerPrincipalId="owner" ownerSessionId="session" goals={[goal]} onCreated={onCreated} onClose={vi.fn()} />);
+    const prepared = vi.fn();
+    render(<CalendarPrepForm onPrepareCommunication={prepared} ownerPrincipalId="owner" ownerSessionId="session" goals={[goal]} onCreated={onCreated} onClose={vi.fn()} />);
     await screen.findByText("Work calendar · active · revision 2");
     fireEvent.click(screen.getByRole("button", { name: "Verify calendars" }));
     await screen.findByRole("option", { name: "Work" });
@@ -108,6 +109,11 @@ describe("CalendarPrepForm", () => {
     fireEvent.change(screen.getByLabelText("Event binding"), { target: { value: "binding-1" } });
     fireEvent.click(await screen.findByLabelText(/Use local reference/));
     fireEvent.click(screen.getByLabelText(/I acknowledge these exact references/));
+    const beforeHandoff = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByText("Add this reviewed meeting source to communication preparation"));
+    expect(prepared).toHaveBeenCalledTimes(1);
+    expect(prepared.mock.calls[0][0]).toMatchObject({ consent_id: "consent-1", event_binding_id: "binding-1", goal_id: "goal-1", goal_revision: 4, calendar_list_revision: selectedEventListRevision });
+    expect(fetchMock.mock.calls.length).toBe(beforeHandoff);
     fireEvent.click(screen.getByRole("button", { name: "Prepare meeting" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
     const prepCall = fetchMock.mock.calls[5];

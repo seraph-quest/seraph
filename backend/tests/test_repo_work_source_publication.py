@@ -135,8 +135,9 @@ async def test_actual_source_final_patch_separate_publication_approval_and_readb
             return await original_admit(spec, **kwargs)
         with monkeypatch.context() as boundary:
             boundary.setattr(jobs, "admit_job", drift_before_writer)
-            with pytest.raises(DurableJobError):
+            with pytest.raises(DurableJobError) as rejected:
                 await publisher.prepare(request, owner.principal_id, owner.session_id)
+        assert saved, f"Publication admission writer was not reached: {rejected.value}"
         await mutate(kind, restore=saved[0])
         async with flow["factory"].accounting_sessions() as db:
             assert not list((await db.execute(select(WorkflowRunState).where(

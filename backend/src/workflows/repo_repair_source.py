@@ -2710,9 +2710,11 @@ async def stage_repository_publication_witness(service, jobs, *, repair_job_id, 
     from src.workflows.repo_repair import RepoRepairService
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now, _binding, _assert_canonical_goal_fence
     from src.workflows.general_task_guard import child_binding, read_manifest
-    from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+    from src.work_board.general_task_runtime_artifacts import (_verify_native_manifest_data,
+        read_native_artifact_reference)
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
-    from src.work_board.contracts import GeneralTaskEnvelope
+    from src.work_board.contracts import GeneralTaskEnvelope, GeneralTaskArtifactRef
+    from src.work_board.general_task_native import current_plan
     from src.workflows.repo_repair_stop import _accounting
     from src.work_board.pipelines import root_binding
     if type(service) is not RepoRepairService or service.jobs is not jobs:
@@ -2762,7 +2764,7 @@ async def stage_repository_publication_witness(service, jobs, *, repair_job_id, 
                 or parent.status != "succeeded" or parent.lease_owner or parent.lease_expires_at
                 or c1task.status.value != "done" or c1attempt.ended_at is None
                 or c1attempt.cancel_requested_at or c1attempt.workflow_run_id != parent.run_identity
-                or read_manifest(parent) is None or read_manifest(parent).phase != "complete"
+                or read_manifest(parent) is None or read_manifest(parent).phase != "assembly"
                 or task.status.value != "done" or attempt.ended_at is None or attempt.cancel_requested_at
                 or goal.revision != binding.goal_revision
                 or (goal.owner_principal_id, goal.owner_session_id) != (owner.principal_id, owner.session_id)
@@ -2781,6 +2783,22 @@ async def stage_repository_publication_witness(service, jobs, *, repair_job_id, 
             expected_task_id=c1task.task_id)
         envelope = await _verify_native_manifest_data(parent, c1task, c1attempt,
             read_manifest(parent), GeneralTaskEnvelope.model_validate(resolved.input))
+        native_manifest = read_manifest(parent)
+        plan = current_plan(native_manifest, envelope)
+        settled_steps = set()
+        for index, step_id in enumerate(native_manifest.step_ids):
+            receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
+                artifact_id=native_manifest.step_receipt_artifact_ids[index],
+                digest=native_manifest.step_receipt_digests[index], schema_version="StepReceipt.v1"),
+                parent_job_id=parent.run_identity, creation_digest=native_manifest.creation_digest)
+            if receipt.status != "verified" or receipt.contact_state != "settled":
+                raise DurableJobLeaseError("actual completed C1 plan receipts required")
+            settled_steps.add(step_id)
+        latest_attempt = await db.scalar(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.task_id == c1task.task_id).order_by(WorkBoardAttempt.started_at.desc()).limit(1))
+        if (settled_steps != {step.step_id for step in plan.steps} or latest_attempt is None
+                or latest_attempt.attempt_id != c1attempt.attempt_id):
+            raise DurableJobLeaseError("exact complete latest original C1 plan required")
         if envelope.repository_source != task_source or envelope.proposal_group != group:
             raise DurableJobLeaseError("original scoped publication Task changed")
         await _accounting(db, {"group": group, "run": run, "work": work, "original": original})
@@ -2793,12 +2811,34 @@ async def stage_repository_publication_witness(service, jobs, *, repair_job_id, 
         raise DurableJobLeaseError("original physical publication Root changed")
     from src.work_board.dispatcher import WorkBoardDispatcher
     parent_projection = await jobs.get_job(parent.run_identity)
+    if not isinstance(parent_projection, dict) or parent_projection.get("status") != "succeeded":
+        raise DurableJobLeaseError("actual final C1 publication parent required")
+    from src.work_board.general_task import GeneralTaskService
+    # This existing read-only verifier uses no receiver state and grants no
+    # execution. The checked Source owner supplies its current canonical data.
+    recovered_outputs, recovered_artifacts = GeneralTaskService.recovered_outputs(service,
+        parent_projection, envelope.model_copy(update={"plan": plan}))
+    final_artifact = recovered_artifacts.get(plan.steps[-1].step_id)
     parent_readback = WorkBoardDispatcher._workflow_readback(parent_projection or {}, parent.run_identity)
     references = json.loads(c1task.result_refs_json or "[]")
     verified_refs = [item for item in references if isinstance(item, dict)
         and isinstance(item.get("file_path"), str) and parent_readback is not None
         and item.get("content_sha256") == parent_readback["content_sha256"]]
-    if parent_readback is None or len(verified_refs) != 1:
+    if (parent_readback is None or len(verified_refs) != 1
+            or set(recovered_outputs) != {step.step_id for step in plan.steps}
+            or final_artifact is None
+            or any(key not in final_artifact or key not in verified_refs[0]
+                or final_artifact[key] != verified_refs[0][key]
+                for key in ("file_path", "content_sha256", "size_bytes"))
+            or ("artifact_id" in final_artifact or "artifact_id" in verified_refs[0])
+                and final_artifact.get("artifact_id") != verified_refs[0].get("artifact_id")
+            or not any(effect.get("effect_type") == "board_child_readback"
+                and effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded"
+                and effect.get("content_sha256") == final_artifact["content_sha256"]
+                and effect.get("target_path") == final_artifact["file_path"]
+                and effect.get("details", {}).get("verified") is True
+                for effect in parent_projection.get("effects", []))
+            or final_artifact["content_sha256"] != parent_readback["content_sha256"]):
         raise DurableJobLeaseError("actual final C1 publication artifact readback required")
     service._read_private_artifact("workspace-json:" + verified_refs[0]["file_path"],
         expected_digest=parent_readback["content_sha256"])

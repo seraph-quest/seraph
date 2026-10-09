@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import update
+from sqlalchemy import update, text, event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlmodel import select
 
@@ -122,6 +122,108 @@ async def test_deleting_positive_absence_resumes(documentary,async_db):
     async with async_db() as db: await db.execute(update(Bundle).where(Bundle.id==row.id).values(state='deleting'))
     (Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'/sources[0].object_id).unlink()
     assert (await repository.cleanup_settled_audio_documentation())['deleted']==1
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('column',['id','attestation_id','ordinal','source_id','source_url','object_id','sha256','size_bytes','acquired_at'])
+@pytest.mark.parametrize('fault',['oversize','blob'])
+async def test_source_corruption_denied_before_orm_materialization(documentary,async_db,monkeypatch,column,fault):
+    repository,_,row,sources=await settled(documentary,async_db)
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before={s.object_id:(objects/s.object_id).read_bytes() for s in sources}
+    async with async_db() as db:
+        if column=='attestation_id':
+            # Simulate already-corrupt disk storage, then restore enforcement
+            # before exercising the real reader. Normal writers cannot do this.
+            await db.execute(text('PRAGMA foreign_keys=OFF'))
+        await db.execute(update(Bundle).where(Bundle.id==row.id).values(expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+        # Raw SQL preserves SQLite's corrupt storage type without ORM coercion.
+        value='x'*1000000 if fault=='oversize' else b'corrupt'
+        await db.execute(text(f'UPDATE model_audio_documentation_sources SET {column}=:value WHERE id=:id'),
+            {'value':value,'id':sources[0].id})
+        engine=db.bind.sync_engine
+    if column=='attestation_id':
+        async with async_db() as db:await db.execute(text('PRAGMA foreign_keys=ON'))
+    bodies=[]
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'model_audio_documentation_sources.source_id' in statement and 'SELECT model_audio_documentation_sources.id,' in statement:
+            bodies.append(statement)
+            raise AssertionError('corrupt Source body materialized')
+    def no_private_access(*args,**kwargs):
+        raise AssertionError('invalid inventory opened private storage')
+    event.listen(engine,'before_cursor_execute',trap)
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    try:
+        assert await repository.cleanup_settled_audio_documentation()=={'inspected':1,'deleted':0,'unknown':1}
+    finally:
+        event.remove(engine,'before_cursor_execute',trap)
+    assert bodies==[]
+    async with async_db() as db:
+        current=await db.get(Bundle,row.id)
+        assert current.reserved_bytes==doc.RESERVED_BYTES and current.binding_json==row.binding_json
+        assert current.bundle_digest==row.bundle_digest and current.revision==1 and current.state=='staged'
+    assert {name:(objects/name).read_bytes() for name in before}==before
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+async def test_extra_source_denied_before_orm_materialization(documentary,async_db,monkeypatch):
+    repository,_,row,sources=await settled(documentary,async_db)
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before={s.object_id:(objects/s.object_id).read_bytes() for s in sources}
+    async with async_db() as db:
+        await db.execute(update(Bundle).where(Bundle.id==row.id).values(expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+        db.add(Source(attestation_id=row.id,ordinal=2,source_id='extra',source_url='https://openrouter.ai',object_id='f'*32+'.source',sha256='a'*64,size_bytes=1))
+        engine=db.bind.sync_engine
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('extra Source body materialized')
+    def no_private_access(*args,**kwargs):raise AssertionError('invalid inventory opened private storage')
+    event.listen(engine,'before_cursor_execute',trap)
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    try:
+        assert await repository.cleanup_settled_audio_documentation()=={'inspected':1,'deleted':0,'unknown':1}
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    async with async_db() as db:
+        current=await db.get(Bundle,row.id)
+        assert current.reserved_bytes==doc.RESERVED_BYTES and current.binding_json==row.binding_json
+    assert {name:(objects/name).read_bytes() for name in before}==before
+
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('column',['id','state','error_code','revision','reserved_bytes'])
+@pytest.mark.parametrize('fault',['oversize','blob'])
+async def test_corrupt_outer_header_is_bounded_before_any_body_or_file(documentary,async_db,monkeypatch,column,fault):
+    repository,_,row,sources=await settled(documentary,async_db)
+    objects=Path(settings.workspace_dir)/'.model-fabric/audio-documentation/objects'
+    before={s.object_id:(objects/s.object_id).read_bytes() for s in sources}
+    async with async_db() as db:
+        if column=='id':await db.execute(text('PRAGMA foreign_keys=OFF'))
+        await db.execute(update(Bundle).where(Bundle.id==row.id).values(expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+        await db.execute(text(f'UPDATE model_audio_documentation_attestations SET {column}=:value WHERE id=:id'),
+            {'value':'x'*1000000 if fault=='oversize' else b'corrupt','id':row.id})
+        engine=db.bind.sync_engine
+    if column=='id':
+        async with async_db() as db:await db.execute(text('PRAGMA foreign_keys=ON'))
+    def trap(connection,cursor,statement,parameters,context,executemany):
+        if 'SELECT model_audio_documentation_attestations.id,' in statement:
+            raise AssertionError('unbounded Bundle header or body loaded')
+        if 'SELECT model_audio_documentation_sources.id,' in statement:
+            raise AssertionError('Source body loaded after invalid Bundle header')
+    def no_private_access(*args,**kwargs):raise AssertionError('invalid header opened private storage')
+    event.listen(engine,'before_cursor_execute',trap)
+    monkeypatch.setattr(doc,'object_directory',no_private_access)
+    try:
+        assert await repository.cleanup_settled_audio_documentation()=={'inspected':1,'deleted':0,'unknown':1}
+    finally:event.remove(engine,'before_cursor_execute',trap)
+    async with async_db() as db:
+        current=(await db.execute(select(Bundle.binding_json,Bundle.bundle_digest))).one()
+        assert current==(row.binding_json,row.bundle_digest)
+        if column=='reserved_bytes':
+            header=(await db.execute(text('SELECT typeof(reserved_bytes), octet_length(reserved_bytes) FROM model_audio_documentation_attestations'))).one()
+            assert header==('text',1000000) if fault=='oversize' else header==('blob',7)
+        else:
+            assert (await db.execute(select(Bundle.reserved_bytes))).scalar_one()==doc.RESERVED_BYTES
+    assert {name:(objects/name).read_bytes() for name in before}==before
 
 
 def process_cleaner(database_url,workspace,values,mode,barrier,results):

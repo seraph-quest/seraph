@@ -388,10 +388,36 @@ def successful_inventory(row, sources):
 
 
 async def cleanup_witness(db, identifier):
-    # Reject large corrupt bindings before Python/ORM body materialization.
+    # SQL headers only: corrupt storage must not materialize unbounded ORM
+    # bodies. These fixed bounds cover the current two-source producer, not
+    # future source catalogs. SQLite datetime columns are stored as text too.
     size=(await db.execute(select(Bundle.id).where(Bundle.id==identifier,
-        text('octet_length(binding_json) <= 16384')))).scalar_one_or_none()
+        text("typeof(id)='text' AND octet_length(id) BETWEEN 1 AND 32 "
+            "AND typeof(revision)='integer' AND revision=1 "
+            "AND typeof(reserved_bytes)='integer' AND reserved_bytes=540672 "
+            "AND typeof(owner_principal_id)='text' AND octet_length(owner_principal_id) BETWEEN 1 AND 128 "
+            "AND typeof(original_root_id)='text' AND octet_length(original_root_id) BETWEEN 1 AND 128 "
+            "AND typeof(profile_hash)='text' AND octet_length(profile_hash)=64 "
+            "AND typeof(state)='text' AND octet_length(state) BETWEEN 1 AND 8 "
+            "AND typeof(binding_json)='text' AND octet_length(binding_json) BETWEEN 1 AND 16384 "
+            "AND typeof(bundle_digest)='text' AND octet_length(bundle_digest)=64 "
+            "AND typeof(error_code)='text' AND octet_length(error_code) BETWEEN 1 AND 38 "
+            "AND typeof(created_at)='text' AND octet_length(created_at) BETWEEN 1 AND 32 "
+            "AND typeof(expires_at)='text' AND octet_length(expires_at) BETWEEN 1 AND 32")))).scalar_one_or_none()
     if size is None: raise DocumentationError('audio_documentation_cleanup_unknown')
+    count,valid=(await db.execute(text("SELECT count(*), sum(CASE WHEN "
+        "typeof(id)='text' AND octet_length(id)=32 "
+        "AND typeof(attestation_id)='text' AND octet_length(attestation_id)=32 "
+        "AND typeof(source_id)='text' AND octet_length(source_id) BETWEEN 1 AND 15 "
+        "AND typeof(source_url)='text' AND octet_length(source_url) BETWEEN 1 AND 320 "
+        "AND typeof(object_id)='text' AND octet_length(object_id)=39 "
+        "AND typeof(sha256)='text' AND octet_length(sha256)=64 "
+        "AND typeof(acquired_at)='text' AND octet_length(acquired_at) BETWEEN 1 AND 32 "
+        "AND typeof(ordinal)='integer' AND ordinal IN (0,1) "
+        "AND typeof(size_bytes)='integer' AND size_bytes BETWEEN 1 AND 262144 "
+        "THEN 1 ELSE 0 END) FROM model_audio_documentation_sources WHERE attestation_id=:id"),
+        {'id':identifier})).one()
+    if count!=2 or valid!=2: raise DocumentationError('audio_documentation_cleanup_unknown')
     row=await db.get(Bundle,identifier)
     sources=(await db.execute(select(Source).where(Source.attestation_id==identifier)
         .order_by(Source.ordinal).limit(4))).scalars().all()
@@ -476,12 +502,18 @@ async def delete_successful(repository, original, *, automatic):
 async def cleanup_settled(repository):
     counts={'inspected':0,'deleted':0,'unknown':0}
     async with repository._session() as db:
-        rows=(await db.execute(select(Bundle.id,Bundle.revision,Bundle.state,Bundle.error_code)
-            .where(Bundle.reserved_bytes>0).limit(17))).all()
+        # Corrupt headers count as unknown without returning their raw bytes.
+        # The fixed CASE projections precede even cleanup_witness's preflight.
+        rows=(await db.execute(text("SELECT "
+            "CASE WHEN typeof(id)='text' AND octet_length(id)=32 THEN id END, "
+            "CASE WHEN typeof(revision)='integer' THEN revision END, "
+            "CASE WHEN typeof(state)='text' AND octet_length(state) BETWEEN 1 AND 8 THEN state END, "
+            "CASE WHEN typeof(error_code)='text' AND octet_length(error_code) BETWEEN 1 AND 38 THEN error_code END "
+            "FROM model_audio_documentation_attestations WHERE reserved_bytes>0 LIMIT 17"))).all()
     if len(rows)>16: return {'inspected':17,'deleted':0,'unknown':17}
     for identifier,revision,state,error in rows:
         counts['inspected']+=1
-        if revision!=1 or state not in {'staged','deleting'} or error!='audio_documentation_source_incomplete':
+        if identifier is None or revision!=1 or state not in {'staged','deleting'} or error!='audio_documentation_source_incomplete':
             counts['unknown']+=1;continue
         try:
             async with repository._session() as db:

@@ -167,7 +167,7 @@ async def test_current_grant_revocation_prevents_native_contact(execution, async
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.asyncio
-async def test_authenticated_api_capture_execution_confirmation_and_source_read(client, execution, monkeypatch):
+async def test_authenticated_api_capture_preserved_and_unbound_model_execution_denied(client, execution, monkeypatch):
     import src.api.audio as api
     import src.guardian.audio_worker as owner_module
     from src.db.models import OperatorSession
@@ -183,24 +183,33 @@ async def test_authenticated_api_capture_execution_confirmation_and_source_read(
     async with jobs._session() as db:
         root = await db.get(OperatorSession, root_id)
     conversation = await session_manager.get_or_create("api-native-conversation", owner_principal_id=root.principal_id)
-    grants = []
-    for boundary in ("capture", "cloud_upload"):
+    response = await client.post("/api/audio/ptt/consent", json={"boundary": "capture"}, headers=origin)
+    assert response.status_code == 200, response.text
+    capture_grant=response.json()["reference"]
+    from src.db.models import AudioConsentGrant
+    async with jobs._session() as db:
+        original_grants=(await db.execute(select(AudioConsentGrant.id))).scalars().all()
+        original_jobs=(await db.execute(select(AudioIngressJob.id))).scalars().all()
+    for boundary in ("model", "cloud_upload"):
         response = await client.post("/api/audio/ptt/consent", json={"boundary": boundary}, headers=origin)
-        assert response.status_code == 200, response.text
-        grants.append(response.json()["reference"])
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"]=="audio_original_selection_required"
+    async with jobs._session() as db:
+        assert (await db.execute(select(AudioConsentGrant.id))).scalars().all()==original_grants
+        assert (await db.execute(select(AudioIngressJob.id))).scalars().all()==original_jobs
     capture = await client.post("/api/audio/ptt", json={"session_id": conversation.id,
         "audio_base64": base64.b64encode(_wav(rate=16000, seconds=.03, channels=1)).decode(),
-        "capture_consent_reference": grants[0], "model_consent_reference": grants[1]}, headers=origin)
+        "capture_consent_reference": capture_grant}, headers=origin)
     assert capture.status_code == 200, capture.text
     request_id = capture.json()["request_id"]
     result = await client.post(f"/api/audio/ptt/{request_id}/process", json={"audio_budget_microusd": 100, "max_calls": 1}, headers=origin)
-    assert result.status_code == 200, result.text
-    assert result.json()["status"] == "transcript_ready" and len(calls) == 1
-    corrected = "Explicit corrected API intent"
-    confirmed = await client.post(f"/api/audio/ptt/{request_id}/confirm", json={"transcript": corrected,
-        "expected_transcript_digest": result.json()["transcript"]["digest"]}, headers=origin)
-    assert confirmed.status_code == 200, confirmed.text
+    assert result.status_code == 422, result.text
+    assert result.json()["detail"]["code"]=="audio_original_grant_invalid"
+    assert len(calls) == 0
+    async with jobs._session() as db:
+        audio=(await db.execute(select(AudioIngressJob).where(AudioIngressJob.request_id==request_id))).scalars().one()
+        assert audio.workflow_job_id is None
     readback = await client.get(f"/api/audio/ptt/{request_id}")
     assert readback.status_code == 200, readback.text
-    assert readback.json()["transcript"]["text"] == corrected
+    assert readback.json()["transcript"]=={"available":False,"digest":None,"confirmed_digest":None}
     assert readback.json()["operator_session_id"] != readback.json()["session_id"]

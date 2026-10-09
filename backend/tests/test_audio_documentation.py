@@ -145,6 +145,35 @@ async def test_original_selection_cannot_issue_grant_from_incomplete_sources(doc
     async with async_db() as db:assert not (await db.execute(select(AudioConsentGrant))).scalars().all()
     assert calls==[]
 
+
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('selection',['omitted','caller_fake','stale'])
+@pytest.mark.parametrize('boundary',['model','cloud_upload'])
+async def test_http_model_consent_never_issues_unbound_permission(client,documentary,async_db,monkeypatch,selection,boundary):
+    from src.db.models import AudioConsentGrant, AudioIngressJob
+    from src.guardian.audio_worker import default_audio_worker
+    repository,operator,request,calls=documentary
+    client.cookies.set(settings.operator_auth_cookie_name,calls.token)
+    body={'boundary':boundary}
+    if selection!='omitted':
+        reference='caller-fake';expected='b'*64
+        if selection=='stale':
+            staged=await repository.stage_audio_documentation(operator,request)
+            reference=staged['staged_ref'];expected='b'*64
+        body['original_audio_selection']={'action':'select_one_original_audio_call','conversation_session_id':'owned',
+            'audio_budget_microusd':100,'max_calls':1,'expected_audio_profile_hash':request.expected_audio_profile_hash,
+            'documentation_attestation_ref':reference,'expected_documentation_digest':expected}
+    before=len(calls)
+    async def no_issue(*args,**kwargs):raise AssertionError('model permission issued before documentary authority')
+    monkeypatch.setattr(default_audio_worker,'issue_consent_grant',no_issue)
+    response=await client.post('/api/audio/ptt/consent',headers={'Origin':'http://localhost:3001'},json=body)
+    assert response.status_code==(422 if selection=='omitted' else 409),response.text
+    assert response.json()['detail']['code']==('audio_original_selection_required' if selection=='omitted' else 'audio_documentation_source_incomplete')
+    async with async_db() as db:
+        assert not (await db.execute(select(AudioConsentGrant))).scalars().all()
+        assert not (await db.execute(select(AudioIngressJob))).scalars().all()
+    assert len(calls)==before
+
 @pytest.mark.parametrize('async_db',['file'],indirect=True)
 async def test_oversized_vault_cipher_never_resolves_credential(documentary,async_db):
     from src.db.models import Secret

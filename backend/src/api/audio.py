@@ -214,6 +214,8 @@ async def issue_audio_consent(body: AudioConsentGrantBody, request: Request) -> 
     owner, operator_session_id, operator = _operator(request)
     if body.boundary in {"cloud_upload", "model"} and not _has_model_inference_grant(operator):
         raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
+    if body.boundary in {"cloud_upload", "model"} and body.original_audio_selection is None:
+        raise HTTPException(status_code=422, detail={"code": "audio_original_selection_required"})
     if body.original_audio_selection is not None:
         from src.model_fabric.repository import model_fabric_repository
         from src.model_fabric.audio_documentation import DocumentationError

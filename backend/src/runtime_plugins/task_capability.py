@@ -386,7 +386,7 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal) ->
     from src.runtime_plugins.ownership import RuntimeCompositionBinding
     from src.work_board.pipeline_cpu import spec_for
     from src.work_board.pipelines import utc
-    from src.workflows.job_runtime import _admission_conflicts, _binding, _composition_fingerprint, _digest
+    from src.workflows.job_runtime import _admission_conflicts, _binding, _composition_fingerprint, _digest, _safe_durable_inputs
     try:
         metadata = read_report_candidate(run)
         model = EvidenceConsumerInput.model_validate(dict(inputs))
@@ -417,10 +417,10 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal) ->
             composition_binding=RuntimeCompositionBinding.from_json(run.composition_binding_json),
             run_fingerprint=digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
                 "inputs": original.inputs, "authority": authority}))
-        input_digest = _digest(original.inputs)
+        input_digest, safe_inputs = _safe_durable_inputs(original.inputs)
         return (not _admission_conflicts(run, spec=original, input_digest=input_digest,
                     authority_digest=_digest(authority), deadline=original.deadline_at)
-            and canonical_bytes(json.loads(run.arguments_json)) == canonical_bytes(original.inputs)
+            and canonical_bytes(json.loads(run.arguments_json)) == canonical_bytes(safe_inputs)
             and canonical_bytes(json.loads(run.declared_authority_json)) == canonical_bytes(authority)
             and run.operator_session_id == task.owner_session_id
             and run.idempotency_scope == original.identity.idempotency_scope

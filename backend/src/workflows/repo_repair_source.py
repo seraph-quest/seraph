@@ -2799,7 +2799,7 @@ async def verify_recovered_repository_final_writer(jobs, db, run, *, completion_
         from src.workflows.repo_repair_source_recovery import assert_repository_completion_final_source
         final = state["final_witness"]
         assert_repository_completion_final_source(final._source_binding._final_source, final_witness=final)
-    pending["entered"], pending["since"], pending["writer_run"] = True, _utc_now(), run
+    pending["entered"], pending["since"], pending["writer_run"], pending["writer_db"] = True, _utc_now(), run, db
 
 
 def _recovered_publish_delta(old, current, pending, timestamp, *, child_id, parent_id):
@@ -4182,6 +4182,70 @@ def verify_repository_iteration_transport_body(body, *, target, runtime_path) ->
         raise InferenceAccountingError("repository_iteration_final_transport_changed")
 
 
+async def _validate_recovered_repository_accounting_source(db, source, witness, run, *, rows,
+        operation_id, payload_digest, bound_microusd, deadline_at, already_reserved):
+    """Only the entered original publication may account its settled contact."""
+    from src.db.models import WorkflowRunState, InferenceCostReservation
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc
+    from src.workflows.inference_accounting import InferenceAccountingError
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_completion_final_source, RepositorySourceRecoveryError)
+
+    def blocked():
+        raise InferenceAccountingError("repository_iteration_recovered_publication_required")
+
+    if already_reserved is not True:
+        blocked()
+    completion = source._recovered_completion
+    try:
+        state = _recovered_finalizer_slot(completion)["state"]
+        pending = state["pending"] if state is not None else None
+        if (pending is None or state["phase"] != 4 or pending["kind"] != "publish"
+                or pending["entered"] is not True or pending["after"] is not None
+                or pending.get("writer_db") is not db):
+            blocked()
+        final = state.get("final_witness")
+        if (final is None or pending["descriptor"]["repository_final_witness"] is not final
+                or final._source_binding._final_source is not source):
+            blocked()
+        assert_repository_completion_final_source(source, final_witness=final)
+        bound = state["bound"]
+        binding = bound["context"]["binding"]
+        child = pending.get("writer_run")
+        if (type(run) is not WorkflowRunState or type(child) is not WorkflowRunState
+                or run.run_identity != bound["job_id"] or run.run_identity != witness.repository_job_id
+                or run.fencing_token != witness.repository_fence
+                or child.run_identity != binding.invocation_id or pending["job_id"] != child.run_identity
+                or child.fencing_token != source.child_fence
+                or witness.native_invocation_id != child.run_identity
+                or witness.iteration_id != bound["iteration_id"]
+                or _canonical(child.model_dump(mode="json")) != source.child_row_json
+                or state["rows"].get((WorkflowRunState, child.id)) != source.child_row_json
+                or state["rows"].get((WorkflowRunState, run.id)) != _canonical(run.model_dump(mode="json"))):
+            blocked()
+        await _recheck_recovered_finalizer_rows(db, bound["fence"].jobs, state, completion)
+        if (await db.get(WorkflowRunState, run.id, populate_existing=True) is not run
+                or await db.get(WorkflowRunState, child.id, populate_existing=True) is not child):
+            blocked()
+        response = _repository_record(run, "repository:response:" + bound["iteration_id"])
+        existing = [row for row in rows if row.job_id == bound["job_id"] and row.operation_id == operation_id]
+        if (response is None or response["operation_id"] != operation_id
+                or witness.operation_id != operation_id or len(existing) != 1):
+            blocked()
+        cost = existing[0]
+        if (type(cost) is not InferenceCostReservation
+                or await db.get(InferenceCostReservation, operation_id, populate_existing=True) is not cost
+                or state["rows"].get((InferenceCostReservation, operation_id)) != _canonical(cost.model_dump(mode="json"))
+                or cost.state != "settled" or cost.contact_started_at is None
+                or cost.job_fencing_token != run.fencing_token
+                or payload_digest != cost.payload_digest or witness._request_body_digest != cost.payload_digest
+                or type(bound_microusd) is not int or bound_microusd != cost.bound_microusd
+                or _as_utc(deadline_at) != _as_utc(cost.deadline_at)):
+            blocked()
+    except (DurableJobLeaseError, RepositorySourceRecoveryError) as exc:
+        raise InferenceAccountingError("repository_iteration_recovered_publication_required") from exc
+
+
 async def validate_repository_iteration_accounting(db, witness, run, *, rows,
         operation_id, payload_digest, bound_microusd, deadline_at,
         already_reserved=False) -> dict[str, Any]:
@@ -4191,14 +4255,24 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
         WorkBoardInputArtifact, RepoRepairEgressConsent, Goal)
     from src.workflows.general_task_guard import _history, child_binding, read_manifest
     from src.workflows.inference_accounting import InferenceAccountingError, _utc
+    from src.workflows.job_runtime import DurableJobLeaseError
+    from src.workflows.repo_repair_source_recovery import RepositorySourceRecoveryError
     assert_repository_iteration_witness(witness)
     source = witness._canonical_source
-    if (type(source) is not _CanonicalRepositorySource or source._seal is not _SEAL
+    if (type(source) is not _CanonicalRepositorySource
             or any(not getattr(source, name) for name in (
                 "parent_row_json", "task_row_json", "parent_attempt_row_json",
                 "repository_attempt_row_json", "child_row_json", "repository_task_row_json",
                 "input_artifact_row_json", "consent_row_json", "consent_id"))):
         raise InferenceAccountingError("repository_iteration_staged_source_required")
+    try:
+        assert_repository_canonical_source(source)
+    except (DurableJobLeaseError, RepositorySourceRecoveryError) as exc:
+        raise InferenceAccountingError("repository_iteration_staged_source_required") from exc
+    if source._recovered_completion is not None:
+        await _validate_recovered_repository_accounting_source(db, source, witness, run,
+            rows=rows, operation_id=operation_id, payload_digest=payload_digest,
+            bound_microusd=bound_microusd, deadline_at=deadline_at, already_reserved=already_reserved)
     now = datetime.now(timezone.utc)
     def blocked(code="repository_iteration_binding_changed"):
         raise InferenceAccountingError(code)

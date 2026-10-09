@@ -30,14 +30,18 @@ DENIED = (recovery.RepositorySourceRecoveryError, DurableJobLeaseError,
 
 async def _rows(jobs):
     """Literal private-DB snapshots, never passed back as authority."""
-    from sqlmodel import SQLModel
     async with jobs._session() as db:
-        connection = await db.connection()
-        snapshots = {}
-        for table in SQLModel.metadata.sorted_tables:
-            rows = await connection.exec_driver_sql('SELECT * FROM "' + table.name + '"')
-            snapshots[table.name] = sorted(repr(tuple(row)) for row in rows)
-        return snapshots
+        return await _session_rows(db)
+
+
+async def _session_rows(db):
+    from sqlmodel import SQLModel
+    connection = await db.connection()
+    snapshots = {}
+    for table in SQLModel.metadata.sorted_tables:
+        rows = await connection.exec_driver_sql('SELECT * FROM "' + table.name + '"')
+        snapshots[table.name] = sorted(repr(tuple(row)) for row in rows)
+    return snapshots
 
 
 async def _signed_ownerless_fixture(accounting_db, monkeypatch, language, *, failed=False,
@@ -209,6 +213,62 @@ async def test_signed_ownerless_completion_uses_original_factories_and_writers(
             patch.setattr(recovery, "repository_completion_recovered_wait", wait)
             patch.setattr(recovery, "repository_completion_recovered_final_source", canonical)
             patch.setattr(recovery, "repository_completion_recovered_child_final", child)
+            real_accounting = source.validate_repository_iteration_accounting
+            accounting_denials = []
+
+            async def accounting(db, witness, run, **kw):
+                if witness._canonical_source is not objects.get("source"):
+                    return await real_accounting(db, witness, run, **kw)
+                from datetime import timedelta
+                from src.db.models import WorkflowRunState
+                from src.workflows.inference_accounting import InferenceAccountingError
+                assert transaction["immediate"]
+                before = await _session_rows(db)
+                probes = [
+                    (db, witness, run, {**kw, "already_reserved": value}) for value in (False, 1)
+                ]
+                probes += [(db, witness, run, {**kw, **change}) for change in (
+                    {"operation_id": "remote:repo-work:" + "0" * 64},
+                    {"payload_digest": "0" * 64},
+                    {"bound_microusd": kw["bound_microusd"] + 1},
+                    {"deadline_at": kw["deadline_at"] - timedelta(seconds=1)},
+                    {"rows": []},
+                )]
+                for bad in (replace(objects["source"]),
+                            replace(objects["source"], _recovered_completion=None)):
+                    probes.append((db, replace(witness, _canonical_source=bad), run, kw))
+                probes.append((db, witness, run.model_copy(), kw))
+                copied_rows = [row.model_copy() if row.operation_id == kw["operation_id"] else row
+                    for row in kw["rows"]]
+                probes.append((db, witness, run, {**kw, "rows": copied_rows}))
+                async with jobs._session() as another_db:
+                    probes.append((another_db, witness, run, kw))
+                    for bad_db, bad_witness, bad_run, bad_kw in probes:
+                        with pytest.raises(InferenceAccountingError):
+                            await real_accounting(bad_db, bad_witness, bad_run, **bad_kw)
+                        assert await _session_rows(db) == before
+                        accounting_denials.append(True)
+                # Drift an actual current SQL row within a rolled-back savepoint.
+                # The genuine active source cannot approve the changed vector.
+                savepoint = await db.begin_nested()
+                try:
+                    await db.execute(update(WorkflowRunState).where(WorkflowRunState.id == run.id)
+                        .values(failure_reason="accounting-negative-current-row")
+                        .execution_options(synchronize_session=False))
+                    drifted = await _session_rows(db)
+                    with pytest.raises(InferenceAccountingError):
+                        await real_accounting(db, witness, run, **kw)
+                    assert await _session_rows(db) == drifted
+                    accounting_denials.append(True)
+                finally:
+                    await savepoint.rollback()
+                    await db.refresh(run)
+                assert await _session_rows(db) == before
+                result = await real_accounting(db, witness, run, **kw)
+                assert result == witness.projection()
+                assert await _session_rows(db) == before
+                return result
+            patch.setattr(source, "validate_repository_iteration_accounting", accounting)
             real_publish = guard.publish_repository_child_final
             publication_denials = []
 
@@ -258,6 +318,7 @@ async def test_signed_ownerless_completion_uses_original_factories_and_writers(
                 assert result["receipt"]["contact_state"] == "settled"
                 assert result["receipt"]["no_learning"] is True
                 assert publication_denials == [True, False]
+                assert len(accounting_denials) == 13
                 assert kinds == ["checkpoint", "artifact", "readback", "readback", "publish",
                     "artifact", "artifact", "artifact", "artifact", "readback", "terminal"]
                 async with jobs._session() as db:

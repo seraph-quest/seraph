@@ -164,6 +164,8 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
         from src.memory import task_methods as methods
         method_owner = methods.current_method
         await method_owner.start()
+        from src.work_board.historical_method import historical_method_service
+        await historical_method_service.start()
         service = GeneralTaskService(registry,
             strategy_resolver=methods.TaskMethodStrategyResolver(method_owner)); service.start()
         descriptors, tool_digest = service.snapshot()
@@ -667,5 +669,6 @@ async def test_actual_native_dag_saved_as_private_immutable_parameterized_method
         if service is not None:
             service.stop()
             await method_owner.stop()
+            await historical_method_service.stop()
         registry.stop()
         await asyncio.to_thread(manager.disconnect_all)

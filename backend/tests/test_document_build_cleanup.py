@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from tests.test_inference_accounting import accounting_db
 from tests.test_general_task_planner import forbid_external_inference
 from tests.test_document_build_storage import setup, SPEC
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from src.work_board import document_build_storage as storage
 from src.work_board.repository import BoardError
 
@@ -81,7 +82,7 @@ async def test_cleanup_authority_denies_without_tombstone_or_charge_release(acco
         assert value["phase"] == "staged" and "retirement_key" not in value
 
 
-async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accounting_db, monkeypatch):
+async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accounting_db, monkeypatch, build_admission_lifecycle):
     import json
     from sqlalchemy import select
     from src.api import documents, work_board
@@ -95,6 +96,7 @@ async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accoun
     from tests.test_document_build_native_capacity import admitted_build
     token, operator, owner, goal = await setup(accounting_db, monkeypatch)
     jobs, _owner = await prepare(accounting_db, monkeypatch, existing_owner=owner)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     async with sessions() as db:
         (await db.get(Goal, goal.id)).due_date = datetime.now(timezone.utc)+timedelta(seconds=5)

@@ -33,7 +33,11 @@ def current_near_text_policy() -> tuple[object, str]:
 
 
 def current_inference_policy() -> tuple[object, str]:
-    configured = read_model_fabric_configuration()
+    return inference_policy_from_configuration(read_model_fabric_configuration())
+
+
+def inference_policy_from_configuration(configured) -> tuple[object, str]:
+    """Exact pure owner projection for an already validated configuration."""
     if configured.status != "ready" or configured.openrouter_setup is None or configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged:
         raise PermissionError("provider_policy_revoked_or_unavailable")
     payload = _configuration_payload(configured)

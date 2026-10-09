@@ -1,10 +1,22 @@
 """Actual authenticated partial review over real stopped specialist debt."""
 import json
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_specialist_parent_synthesis import genuine_mcp_registry,charged_parent
+
+
+@pytest_asyncio.fixture
+async def historical_source_owner(task_runtime):
+    from src.work_board.historical_method import historical_method_service
+    await historical_method_service.start()
+    try:
+        assert historical_method_service.signing_key is not None
+        yield
+    finally:
+        await historical_method_service.stop()
 
 
 async def failed_stopped_parent(task_runtime,monkeypatch,registry,descriptor):
@@ -36,7 +48,7 @@ async def failed_stopped_parent(task_runtime,monkeypatch,registry,descriptor):
 
 
 @pytest.mark.asyncio
-async def test_authenticated_partial_overlay_preserves_stop_and_replays_after_restart(task_runtime,monkeypatch):
+async def test_authenticated_partial_overlay_preserves_stop_and_replays_after_restart(task_runtime,monkeypatch,historical_source_owner):
     import httpx
     from fastapi import FastAPI
     from src.api.work_board import router

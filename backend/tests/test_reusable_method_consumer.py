@@ -108,6 +108,8 @@ async def test_ordinary_original_no_pin_task_executes_without_source_upgrade(asy
     from src.db.models import WorkBoardTask, WorkBoardAttempt
     from sqlalchemy import select
     operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    from src.work_board.historical_method import historical_method_service
+    await historical_method_service.start()
     modern_descriptors = registry.descriptors
     def historical_descriptors():
         return [descriptor.model_copy(update={"procedure_inputs": None}) for descriptor in modern_descriptors()]
@@ -145,6 +147,7 @@ async def test_ordinary_original_no_pin_task_executes_without_source_upgrade(asy
         assert eligibility["reason_code"] == "source_contract_review_required"
     finally:
         service.stop(); registry.stop(); await current.stop()
+        await historical_method_service.stop()
 
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)

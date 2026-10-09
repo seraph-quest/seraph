@@ -27,16 +27,23 @@ async def test_reviewed_parent_method_keeps_two_specialists_narrow(async_db, mon
     workspace=tmp_path/'workspace'; workspace.mkdir(mode=0o700)
     monkeypatch.setattr(settings,'workspace_dir',str(workspace))
     monkeypatch.setattr(settings,'operator_auth_secret','genuine-method-delegation')
+    monkeypatch.setattr(settings,'operator_auth_secret_hash','')
+    monkeypatch.setattr(settings,'operator_auth_allow_unauthenticated_tests',False)
+    monkeypatch.setattr(settings,'operator_auth_allowed_hosts','test,localhost')
+    monkeypatch.setattr(settings,'operator_auth_allowed_origins','http://test')
     monkeypatch.setattr(settings,'use_delegation',True)
     monkeypatch.setattr('src.memory.m5.get_session',async_db)
     monkeypatch.setattr('src.workflows.job_runtime.get_session',async_db)
-    _,operator=await create_session(); await enroll(operator)
+    token,operator=await create_session(); await enroll(operator)
     owner=WorkBoardOwner(principal_id=operator.principal.principal_id,session_id=operator.session_id)
     async with async_db() as db:
         db.add(Session(id=operator.session_id))
         db.add(Goal(id='goal',title='Create two bounded fragments',revision=1,status='active',
             owner_principal_id=owner.principal_id,owner_session_id=owner.session_id)); await db.commit()
     current=methods.CurrentMethod(); await current.start(); monkeypatch.setattr(methods,'current_method',current)
+    from src.work_board.historical_method import historical_method_service, verify_historical_method
+    await historical_method_service.start()
+    assert historical_method_service.signing_key is not None
     registry=ToolRegistry(); registry.start()
     service=GeneralTaskService(registry,strategy_resolver=methods.TaskMethodStrategyResolver(current)); service.start()
     descriptors=registry.descriptors(); by_id={d.tool_id:d for d in descriptors}
@@ -75,6 +82,10 @@ async def test_reviewed_parent_method_keeps_two_specialists_narrow(async_db, mon
     # Bind the actual started owner through the existing Python lifecycle seam;
     # canonical method review reads its detached descriptors, never a fixture grant.
     monkeypatch.setattr('src.work_board.dispatcher._dispatcher',dispatcher)
+    from src.operator import home_projection as home_module
+    from src.operator.home_projection import home_projection
+    monkeypatch.setattr(home_module,'get_session',async_db)
+    home_projection.start()
     async def execute(prefix, *, blocked=False):
         request=GeneralTaskCreate(goal_revision=1,idempotency_key='genuine-'+prefix,accept=True,expected_plan_revision=1,
             input=GeneralTaskInput(goal_ref='goal',intent='Create '+prefix+' fragments',
@@ -165,8 +176,51 @@ async def test_reviewed_parent_method_keeps_two_specialists_narrow(async_db, mon
             assert projection['strategy']['digest']==pin.digest
             children=list((await db.execute(select(WorkBoardTask).where(WorkBoardTask.idempotency_key.like('specialist:%')))).scalars())
             assert len(children)==4 and all(t.status.value=='done' for t in children)
+            assert all(t.admitted_method_json is None for t in children)
+            parent_history=verify_historical_method(selected.admitted_method_json,task=selected)
+            assert parent_history is not None
+            assert (parent_history.method_id,parent_history.version,parent_history.method_digest)==(pin.method_id,pin.version,pin.digest)
+            engine=db.bind
+        # Read the real authenticated Home endpoint without artifact, secret or
+        # canonical Memory body access. Children retain explicit Unknown history.
+        import httpx
+        from pathlib import Path
+        from fastapi import FastAPI
+        from sqlalchemy import event
+        from src.api.operator import router as home_router
+        from src.auth.middleware import OperatorAuthMiddleware
+        app=FastAPI(); app.include_router(home_router,prefix='/api'); app.add_middleware(OperatorAuthMiddleware)
+        statements=[]
+        def observe(connection,cursor,statement,parameters,context,many):
+            statements.append(statement)
+            lowered=statement.lower()
+            assert 'm.content' not in lowered and 'memories.content' not in lowered
+            assert 'm.summary' not in lowered and 'memories.summary' not in lowered
+            assert 'from secrets' not in lowered
+        def deny_file(*args,**kwargs):
+            raise AssertionError('Specialist Home metadata attempted private artifact read')
+        event.listen(engine.sync_engine,'before_cursor_execute',observe)
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://test',headers={'Origin':'http://test'}) as client:
+                client.cookies.set(settings.operator_auth_cookie_name,token)
+                with monkeypatch.context() as scoped:
+                    scoped.setattr(Path,'read_text',deny_file)
+                    scoped.setattr(Path,'read_bytes',deny_file)
+                    response=await client.get('/api/operator/continuation')
+            assert response.status_code==200,response.text
+            assert len([s for s in statements if s.lstrip().upper().startswith(('SELECT','WITH'))])<=18
+            assert not any(s.lstrip().upper().startswith(('INSERT','UPDATE','DELETE')) for s in statements)
+            rows={row['task_id']:row for row in response.json()['prepared_outputs']['items']}
+            assert (rows[selected.task_id]['method']['method_id'],rows[selected.task_id]['method']['version'],rows[selected.task_id]['method']['digest'])==(pin.method_id,pin.version,pin.digest)
+            assert all(rows[child.task_id]['method']['status']=='unknown' and rows[child.task_id]['method']['target'] is None for child in children)
+            assert 'actual distinct' not in response.text and 'next-A.txt' not in response.text
+            (workspace/'home-specialist-wire.json').write_text(response.text)
+            (workspace/'home-specialist-receipt.json').write_text(json.dumps({'route':'/api/operator/continuation','status':response.status_code,'mutation':mutation,'selected_parent':selected.task_id,'child_task_ids':[child.task_id for child in children]},sort_keys=True))
+        finally:
+            event.remove(engine.sync_engine,'before_cursor_execute',observe)
         if mutation=='rollback':
             assert mutations==['rollback']
             assert (await current.resolve(owner,'goal','work.general-task.v1')).status=='none'
     finally:
-        service.stop(); registry.stop(); await current.stop()
+        service.stop(); registry.stop(); home_projection.stop()
+        await historical_method_service.stop(); await current.stop()

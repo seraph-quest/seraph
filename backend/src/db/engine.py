@@ -1658,6 +1658,7 @@ async def _ensure_work_board_columns(conn) -> None:
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
     columns = {row[1] for row in result.fetchall()}
     attempt_additions = {
+        "admitted_method_json": "VARCHAR",
         "cancel_requested_at": "DATETIME",
         "parent_handoff_context_json": "VARCHAR DEFAULT '[]'",
         "parent_handoff_digest": "VARCHAR",
@@ -1670,6 +1671,8 @@ async def _ensure_work_board_columns(conn) -> None:
     task_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_tasks)")
     task_columns = {row[1] for row in task_result.fetchall()}
     task_additions = {
+        "priority_explicit": "BOOLEAN NOT NULL DEFAULT 0",
+        "admitted_method_json": "VARCHAR",
         "input_artifact_id": "VARCHAR",
         "pipeline_operation_id": "VARCHAR",
         "pipeline_slot": "VARCHAR",

@@ -11,7 +11,7 @@ import pytest
 from tests.test_inference_accounting import accounting_db
 from tests.test_general_task_planner import forbid_external_inference
 from tests.test_document_build_storage import setup, SPEC
-from tests.test_document_build_native_capacity import admitted_build
+from tests.test_document_build_native_capacity import admitted_build, build_admission_lifecycle
 from src.work_board import document_build_storage as storage
 from src.work_board import document_pairs as sources
 from src.work_board.repository import BoardError
@@ -56,7 +56,7 @@ else:
 
 @pytest.mark.parametrize("mode", ["valid_and_foreign_proofs", "stale_reservation", "plaintext_mismatch"])
 async def test_original_process_readback_seal_and_sql_writer(accounting_db, monkeypatch,
-        forbid_external_inference, mode):
+        forbid_external_inference, mode, build_admission_lifecycle):
     from src.native_tools.task_adapters import ToolRegistry
     from src.work_board.general_task import GeneralTaskService
     from src.work_board.dispatcher import WorkBoardDispatcher
@@ -64,6 +64,7 @@ async def test_original_process_readback_seal_and_sql_writer(accounting_db, monk
     from src.vault import crypto
     from src.work_board import dispatcher as dispatch_module
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     async with sessions() as db:
         foreign = await storage.create(db, owner, operator, storage.BuildCreate(goal_id=goal.id,

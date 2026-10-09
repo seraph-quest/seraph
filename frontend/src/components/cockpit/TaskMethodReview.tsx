@@ -50,11 +50,11 @@ function preview(value: unknown, task: WorkBoardTask, proposalId: string, attemp
   }
   return value as unknown as Preview;
 }
-interface Props { task: WorkBoardTask; proposalId: string; owned: boolean; attemptId?: string; sourceRefs?: string[]; goals?: GoalInfo[]; onCreated?: (id: string) => Promise<void> }
+interface Props { task: WorkBoardTask; proposalId: string; owned: boolean; attemptId?: string; sourceRefs?: string[]; initialPreview?: unknown; goals?: GoalInfo[]; onCreated?: (id: string) => Promise<void> }
 export function TaskMethodReview(props: Props) {
   return <OwnedMethodReview key={`${props.task.task_id}:${props.task.task_revision}:${props.task.owner_principal_id}:${props.task.owner_session_id}:${props.proposalId}:${props.owned}`} {...props} />;
 }
-function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs, goals = [], onCreated }: Props) {
+function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs, initialPreview, goals = [], onCreated }: Props) {
   const [data, setData] = useState<Preview | null>(null), [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -65,6 +65,11 @@ function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs, goa
   const reusable = data?.new_method?.schema_version === "ProcedurePlan.v3";
   const current = data?.active_binding?.proposal_id === proposalId && data?.active_binding?.version === data?.version;
   useEffect(() => { ++generation.current; setData(null); setReason(""); setBusy(false); setError(null); setNotice(null); return () => { ++generation.current; }; }, [task.task_id, task.task_revision, task.owner_session_id, proposalId, owned]);
+  useEffect(() => {
+    if (initialPreview === undefined) return;
+    try { setData(preview(initialPreview, task, proposalId, attemptId, sourceRefs)); }
+    catch (cause) { setData(null); setError((cause as Error).message); }
+  }, [initialPreview, task, proposalId, attemptId, sourceRefs]);
   async function inspect() {
     if (busy || locked.current || !owned) return;
     locked.current = true; setAck(false); setDeleteAck(false);
@@ -109,27 +114,28 @@ function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs, goa
       <pre aria-label="Canonical proposed method">{JSON.stringify(data.new_method, null, 2)}</pre>
       <p>{data.active_binding ? `Active version ${data.active_binding.version} · ${data.active_binding.digest}` : data.configured_baseline ? "Future tasks use configured baseline." : "No method is selected."}</p>
       <p>{data.new_method.schema_version === "ProcedurePlan.v3" ? "Rollback restores the exact previous signed method or explicit baseline." : "Rollback selects baseline for future tasks."} Already admitted tasks keep their immutable pin while current authority remains valid; revocation or tombstone blocks their next boundary.</p>
-      {data.adoption_requires_current_owner && <p role="status">Inspection only: current original ownership is required for adoption.</p>}
+      {(!owned || data.adoption_requires_current_owner) && <p role="status">Inspection only: current original ownership is required for adoption.</p>}
       <label>Review reason<textarea maxLength={500} value={reason} onChange={e => setReason(e.target.value)} /></label>
-      <label><input type="checkbox" disabled={busy || data.adoption_requires_current_owner} checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed this exact method and verified source evidence.</label>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner || !ack || reusable && data.status !== "proposed"} onClick={() => void act("accept")}>Adopt reviewed method</button>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner || reusable && data.status !== "proposed"} onClick={() => void act("reject")}>Reject method</button>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner || !reason.trim() || reusable && !current} onClick={() => void act("rollback")}>{data.new_method.schema_version === "ProcedurePlan.v3" ? "Restore exact previous method or baseline" : "Rollback to baseline"}</button>
+      <label><input type="checkbox" disabled={!owned || busy || data.adoption_requires_current_owner} checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed this exact method and verified source evidence.</label>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner || !ack || reusable && data.status !== "proposed"} onClick={() => void act("accept")}>Adopt reviewed method</button>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner || reusable && data.status !== "proposed"} onClick={() => void act("reject")}>Reject method</button>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner || !reason.trim() || reusable && !current} onClick={() => void act("rollback")}>{data.new_method.schema_version === "ProcedurePlan.v3" ? "Restore exact previous method or baseline" : "Rollback to baseline"}</button>
       {data.new_method.schema_version === "ProcedurePlan.v3" && <>
         <p>Exact version {data.version ?? "not adopted"} · digest {data.digest} · pointer revision {data.pointer_revision ?? "absent"}</p>
         <pre aria-label="Reusable method source receipt">{JSON.stringify(data.source_receipt, null, 2)}</pre>
         <pre aria-label="General-task method history">{JSON.stringify(data.family_history, null, 2)}</pre>
         {onCreated && data.family_history?.map((entry, index) => object(entry) && typeof entry.task_id === "string" && typeof entry.proposal_id === "string"
-          ? <button key={`${entry.proposal_id}:${index}`} disabled={busy} onClick={() => void onCreated(entry.task_id as string)}>Open source Task for method {entry.proposal_id}</button> : null)}
+          ? <button key={`${entry.proposal_id}:${index}`} disabled={!owned || busy} onClick={() => void onCreated(entry.task_id as string)}>Open source Task for method {entry.proposal_id}</button> : null)}
         <p>Disable scope: {data.disable_scope}. Disabling selects baseline for future general Tasks and retains history.</p>
-        <button disabled={busy || data.adoption_requires_current_owner || !reason.trim() || !current} onClick={() => void act("disable")}>Disable general-task method selection</button>
-        <button disabled={busy || data.adoption_requires_current_owner || !reason.trim() || !data.configured_baseline || data.status !== "accepted"} onClick={() => void act("activate")}>Activate exact reviewed prior method</button>
-        <label><input type="checkbox" checked={deleteAck} disabled={busy} onChange={e => setDeleteAck(e.target.checked)} />Tombstone this exact canonical method version. Its next execution boundary will stop; source Tasks, artifacts and audit remain.</label>
-        <button disabled={busy || data.adoption_requires_current_owner || !reason.trim() || !deleteAck || !data.version || data.status !== "accepted"} onClick={() => void act("delete")}>Delete canonical method version</button>
-        {onCreated && data.active_binding?.proposal_id === proposalId && data.active_binding.version === data.version && data.active_binding.digest === data.digest && data.pointer_revision && !data.adoption_requires_current_owner && <ReusableProcedureInvoke
+        <button disabled={!owned || busy || data.adoption_requires_current_owner || !reason.trim() || !current} onClick={() => void act("disable")}>Disable general-task method selection</button>
+        <button disabled={!owned || busy || data.adoption_requires_current_owner || !reason.trim() || !data.configured_baseline || data.status !== "accepted"} onClick={() => void act("activate")}>Activate exact reviewed prior method</button>
+        <label><input type="checkbox" checked={deleteAck} disabled={!owned || busy} onChange={e => setDeleteAck(e.target.checked)} />Tombstone this exact canonical method version. Its next execution boundary will stop; source Tasks, artifacts and audit remain.</label>
+        <button disabled={!owned || busy || data.adoption_requires_current_owner || !reason.trim() || !deleteAck || !data.version || data.status !== "accepted"} onClick={() => void act("delete")}>Delete canonical method version</button>
+        {owned && onCreated && data.active_binding?.proposal_id === proposalId && data.active_binding.version === data.version && data.active_binding.digest === data.digest && data.pointer_revision && !data.adoption_requires_current_owner && <ReusableProcedureInvoke
           key={`${data.active_binding.version}:${data.pointer_revision}`} proposalId={proposalId} version={data.active_binding.version} digest={data.active_binding.digest} pointerRevision={data.pointer_revision}
           parameters={data.parameters ?? []} goals={goals} scopeGoalId={data.scope.goal_id} scopeGoalRevision={data.scope.goal_revision} ownerSessionId={task.owner_session_id} onCreated={onCreated} onStale={() => setError("Invocation blocked. Inspect fresh canonical state before retrying.")} />}
       </>}
+
     </>}
   </section>;
 }

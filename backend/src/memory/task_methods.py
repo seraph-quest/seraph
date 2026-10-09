@@ -16,7 +16,7 @@ from uuid import uuid4
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
-from sqlalchemy import select, func, case, or_
+from sqlalchemy import select, func, case, or_, text as sql_text
 from sqlalchemy.exc import SQLAlchemyError
 from src.extensions.capability_execution import CapabilityJournalError
 
@@ -249,43 +249,59 @@ class CurrentMethod:
         self._started = False
 
     async def resolve(self, owner, goal_ref, task_family, programme_grant=None):
-        family = _family(task_family)
         try:
             if not self._started:
                 _fail("method_lifecycle_not_started")
             async with database.get_session() as db:
-                identity, scope = await _context(db, owner, goal_ref, family or "general", programme_grant)
-                if family is None:
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                history = await _history(db, scope)
-                if identity is None:
-                    any_pointer = await db.scalar(select(TaskMethodActive.id).where(
-                        TaskMethodActive.goal_id == scope.goal_id, TaskMethodActive.goal_revision == scope.goal_revision,
-                        TaskMethodActive.family == scope.family).limit(1))
-                    if history or any_pointer:
-                        _fail("method_stable_identity_required")
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                pointer = await _pointer(db, identity, scope)
-                if pointer is None:
-                    other_pointer = await db.scalar(select(TaskMethodActive.id).where(
-                        TaskMethodActive.goal_id == scope.goal_id,
-                        TaskMethodActive.goal_revision == scope.goal_revision,
-                        TaskMethodActive.family == scope.family).limit(1))
-                    if other_pointer is not None:
-                        _fail("method_pointer_owner_changed")
-                    if history:
-                        _fail("method_pointer_missing")
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                if self._key is None:
-                    _fail("method_signing_key_unavailable")
-                if not _pointer_valid(pointer, self._key):
-                    _fail("method_pointer_invalid")
-                if pointer.baseline:
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
-                return await self._version(db, selected, identity, scope, allow_rollback=False)
+                return await self.resolve_current_in_session(
+                    db, owner, goal_ref, task_family, programme_grant
+                )
         except (BoardError, AuthFailure, ValueError, KeyError, TypeError, SQLAlchemyError) as error:
             return TaskStrategyBinding(status="blocked", reason=getattr(error, "code", "method_selection_invalid"))
+
+    async def resolve_current_in_session(self, db, owner, goal_ref, task_family, programme_grant=None):
+        """Resolve the current pointer against an already-owned writer session.
+
+        The ordinary resolver keeps its own read-session wrapper.  Admission
+        writers use this source-owned body while holding their existing
+        transaction lock, so a pointer rollback or replacement between
+        preflight and the final Task CAS cannot publish the stale strategy.
+        This method only uses the lifecycle-staged signing key and never
+        initializes or reads key material from inside the writer.
+        """
+        family = _family(task_family)
+        if not self._started:
+            _fail("method_lifecycle_not_started")
+        identity, scope = await _context(db, owner, goal_ref, family or "general", programme_grant)
+        if family is None:
+            return TaskStrategyBinding(status="none", reason="baseline")
+        history = await _history(db, scope)
+        if identity is None:
+            any_pointer = await db.scalar(select(TaskMethodActive.id).where(
+                TaskMethodActive.goal_id == scope.goal_id, TaskMethodActive.goal_revision == scope.goal_revision,
+                TaskMethodActive.family == scope.family).limit(1))
+            if history or any_pointer:
+                _fail("method_stable_identity_required")
+            return TaskStrategyBinding(status="none", reason="baseline")
+        pointer = await _pointer(db, identity, scope)
+        if pointer is None:
+            other_pointer = await db.scalar(select(TaskMethodActive.id).where(
+                TaskMethodActive.goal_id == scope.goal_id,
+                TaskMethodActive.goal_revision == scope.goal_revision,
+                TaskMethodActive.family == scope.family).limit(1))
+            if other_pointer is not None:
+                _fail("method_pointer_owner_changed")
+            if history:
+                _fail("method_pointer_missing")
+            return TaskStrategyBinding(status="none", reason="baseline")
+        if self._key is None:
+            _fail("method_signing_key_unavailable")
+        if not _pointer_valid(pointer, self._key):
+            _fail("method_pointer_invalid")
+        if pointer.baseline:
+            return TaskStrategyBinding(status="none", reason="baseline")
+        selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
+        return await self._version(db, selected, identity, scope, allow_rollback=False)
 
     async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
         try:
@@ -399,6 +415,11 @@ class TaskMethodStrategyResolver:
     async def resolve(self, owner, goal_ref, task_family, programme_grant=None):
         return await self.current.resolve(owner, goal_ref, task_family, programme_grant)
 
+    async def resolve_current_in_session(self, db, owner, goal_ref, task_family, programme_grant=None):
+        return await self.current.resolve_current_in_session(
+            db, owner, goal_ref, task_family, programme_grant
+        )
+
     async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
         return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db)
 
@@ -450,6 +471,23 @@ class MethodWitness:
     source_request: object
     key: bytes
     consumer_supported: bool
+    accepted_version: str | None
+
+
+async def _accepted_preview(db, row, owner, key):
+    """Validate the original accepted version, independently of today's pointer."""
+    if row.accepted_memory_id is None:
+        if row.status in {MemoryProposalStatus.accepted,MemoryProposalStatus.rolled_back}:
+            _fail("method_version_unavailable")
+        return None
+    signed = TaskMethodScope.model_validate_json(row.memory_scope_json)
+    scope = LessonScope(goal_id=signed.goal_id, goal_revision=signed.goal_revision, family=signed.family)
+    selected = ActiveMethodBinding(owner=signed.owner, scope=scope,
+        version=row.accepted_memory_id, digest=row.accepted_memory_content_digest,
+        proposal_id=row.proposal_id)
+    validator = CurrentMethod()
+    validator._key = key
+    return await validator._version(db, selected, owner.identity_id, scope, allow_rollback=True)
 
 
 def _consumer_supported(candidate, scope, proposal_id):
@@ -485,8 +523,16 @@ def _consumer_supported(candidate, scope, proposal_id):
 async def _stage(operator, proposal_id, *, acceptance):
     from src.memory import task_lessons as lessons
     from src.memory.repository import _effect_mac_key
+    key = None
     async with database.get_session() as db:
+        await db.execute(sql_text("BEGIN"))
         row, owner, _ = await _proposal(db, operator, proposal_id, mutate=acceptance)
+        accepted_version = row.accepted_memory_id
+        if accepted_version is not None:
+            key = await asyncio.to_thread(_effect_mac_key)
+            await _accepted_preview(db, row, owner, key)
+        elif row.status in {MemoryProposalStatus.accepted,MemoryProposalStatus.rolled_back}:
+            _fail("method_version_unavailable")
         token, artifact_ref, artifact_sha = _proposal_token(row), row.artifact_ref, row.artifact_digest
         source_token = json.loads(row.provenance_json)["source_token"]
         task_revision, source_task, source_attempt = row.source_task_revision, row.source_task_id, row.source_attempt_id
@@ -510,7 +556,8 @@ async def _stage(operator, proposal_id, *, acceptance):
         sanitized = await sanitize_m5_memory_text_async(text)
     if sanitized != text:
         _fail("method_candidate_requires_redaction")
-    key = await asyncio.to_thread(_effect_mac_key)
+    if key is None:
+        key = await asyncio.to_thread(_effect_mac_key)
     request = lessons.LessonRequest(task_id=source_task, attempt_id=source_attempt,
         correction=envelope["correction"], source_refs=source_refs, scope=scope, expected_revision=task_revision)
     staged = None
@@ -535,7 +582,7 @@ async def _stage(operator, proposal_id, *, acceptance):
             if current != source_token:
                 _fail("method_original_source_changed")
             staged = lessons._SourceStage(lessons._STAGE_SEAL, current, observed, audit, procedure_source)
-    return MethodWitness(owner, scope, token, envelope, candidate, staged, request, key, consumer_supported)
+    return MethodWitness(owner, scope, token, envelope, candidate, staged, request, key, consumer_supported, accepted_version)
 
 
 async def inspect_method(operator, proposal_id):
@@ -586,9 +633,15 @@ async def _inspect_method(operator, proposal_id):
                 "adoption_requires_current_owner": not own, "disable_scope": scope.family}
     witness = await _stage(operator, proposal_id, acceptance=False)
     async with database.get_session() as db:
+        await db.execute(sql_text("BEGIN"))
         row, owner, own = await _proposal(db, operator, proposal_id)
         if _proposal_token(row) != witness.proposal_token:
             _fail("method_preview_changed")
+        if row.accepted_memory_id != witness.accepted_version:
+            _fail("method_preview_changed")
+        verified = await _accepted_preview(db, row, owner, witness.key)
+        if verified is not None and verified.typed_data != witness.candidate.model_dump(mode="json"):
+            _fail("method_original_candidate_invalid")
         pointer = await _pointer(db, owner.identity_id, witness.scope)
         if pointer and not _pointer_valid(pointer, witness.key):
             _fail("method_pointer_invalid")

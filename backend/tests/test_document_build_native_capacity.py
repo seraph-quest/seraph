@@ -3,6 +3,7 @@ import asyncio
 import json
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
@@ -19,6 +20,16 @@ from src.work_board.general_task_native import initialize_interpreter, admit_nat
 from src.workflows.job_runtime import _digest
 
 
+@pytest_asyncio.fixture
+async def build_admission_lifecycle(accounting_db):
+    """Keep the real historical admission owner live for native build callers."""
+    from src.work_board.historical_method import historical_method_service
+    try:
+        yield historical_method_service
+    finally:
+        await historical_method_service.stop()
+
+
 @pytest.mark.parametrize("field,bad",[("generation",True),("stdin_closed",1),
     ("parser_witness_nlink",True),("stdout_size",native._STDOUT_MAX+1),("invented_authority",True)])
 def test_supervision_codec_denies_untyped_or_extended_metadata(field,bad):
@@ -30,12 +41,13 @@ def test_supervision_codec_denies_untyped_or_extended_metadata(field,bad):
 
 
 async def test_original_late_cancel_supervision_preserves_frozen_native_rows(accounting_db,monkeypatch,
-        forbid_external_inference):
+        forbid_external_inference, build_admission_lifecycle):
     from src.db.models import WorkflowRunState
     from src.work_board.general_task_native import run_native_step
     from src.work_board.repository import BoardError
     from src.work_board import dispatcher as dispatch_module
     _token,operator,owner,goal = await setup(accounting_db,monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
@@ -91,13 +103,14 @@ async def test_original_late_cancel_supervision_preserves_frozen_native_rows(acc
 
 @pytest.mark.parametrize("case",["restart_missing_outer","witness_tamper","witness_fifo","physical_release"])
 async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounting_db,monkeypatch,
-        forbid_external_inference,case):
+        forbid_external_inference,case, build_admission_lifecycle):
     from src.db.models import Goal
     from src.work_board.general_task_native import run_native_step, retain_native_failure
     from src.work_board.repository import BoardError
     from src.workflows.job_runtime import DurableJobRepository
     from src.work_board import dispatcher as dispatch_module
     _token,operator,owner,goal = await setup(accounting_db,monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
@@ -168,8 +181,9 @@ async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounti
 
 
 async def test_genuine_preclaim_reserves_complete_cleanup_headroom(accounting_db, monkeypatch,
-        forbid_external_inference):
+        forbid_external_inference, build_admission_lifecycle):
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
@@ -261,9 +275,10 @@ async def admitted_build(accounting_db, service, dispatcher, operator, owner, go
 
 
 @pytest.mark.parametrize("case", ["held", "priority", "forged_callback", "copied_callback"])
-async def test_real_original_build_preclaim_never_mutates_denied_child(accounting_db, monkeypatch, case):
+async def test_real_original_build_preclaim_never_mutates_denied_child(accounting_db, monkeypatch, case, build_admission_lifecycle):
     from src.work_board.repository import BoardError
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
     dispatcher = WorkBoardDispatcher(session_provider=accounting_db[2].accounting_sessions, general_tasks=service)
@@ -305,10 +320,11 @@ async def test_real_original_build_preclaim_never_mutates_denied_child(accountin
 
 @pytest.mark.parametrize("priorities", [(10, 90), (90, 10)])
 async def test_independent_original_build_claim_race_preserves_task_priority(accounting_db, monkeypatch,
-        forbid_external_inference, priorities):
+        forbid_external_inference, priorities, build_admission_lifecycle):
     from src.workflows.job_runtime import DurableJobRepository
     from src.work_board.repository import BoardError
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry=registry); service.start()
     jobs = DurableJobRepository()
@@ -342,12 +358,13 @@ async def test_independent_original_build_claim_race_preserves_task_priority(acc
 
 @pytest.mark.parametrize("first_owner", ["build", "source"])
 async def test_actual_source_process_and_original_build_share_one_slot(accounting_db, monkeypatch,
-        forbid_external_inference, first_owner):
+        forbid_external_inference, first_owner, build_admission_lifecycle):
     from hashlib import sha256
     from src.work_board import document_pairs as sources, dispatcher as dispatch_module
     from src.work_board.documents import DocumentService, DocumentSourceReserve, DocumentReadInput
     from src.work_board.repository import BoardError
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
@@ -466,11 +483,12 @@ async def admitted_comparison(accounting_db, dispatcher, owner, goal, upload_pro
 
 @pytest.mark.parametrize("first_owner", ["build", "comparison"])
 async def test_authentic_comparison_build_priority_is_reciprocal(accounting_db, monkeypatch,
-        forbid_external_inference, first_owner):
+        forbid_external_inference, first_owner, build_admission_lifecycle):
     from datetime import timedelta
     from src.work_board import document_compare_native as comparison, dispatcher as dispatch_module
     from src.work_board.documents import DocumentService
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     from tests.test_document_build_storage import _goal
     comparison_goal = _goal("mixed-comparison-goal", "Original bounded comparison goal")
     comparison_goal.owner_principal_id, comparison_goal.owner_session_id = owner.principal_id, owner.session_id
@@ -510,7 +528,7 @@ async def test_authentic_comparison_build_priority_is_reciprocal(accounting_db, 
 
 
 async def test_authentic_document_child_checkpoint_survives_generic_history(accounting_db,
-        monkeypatch, forbid_external_inference):
+        monkeypatch, forbid_external_inference, build_admission_lifecycle):
     """Generic calls cannot mint or erase a real process's recovery witness."""
     from copy import deepcopy
     from src.db.models import AuditEvent
@@ -518,6 +536,7 @@ async def test_authentic_document_child_checkpoint_survives_generic_history(acco
     from src.workflows.job_runtime import DurableJobTransitionError, _bounded_checkpoint_receipts
     from src.work_board import dispatcher as dispatch_module
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()

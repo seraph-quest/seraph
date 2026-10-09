@@ -193,6 +193,8 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         authorized = await jobs._fetch(db, binding.invocation_id)
         jobs._assert_lease(authorized, owner=child_owner, fencing_token=fence)
         await assert_general_task_child_current(db, authorized)
+        from src.workflows.general_task_guard import check_native_writer_source
+        await check_native_writer_source(db, authorized)
         from src.workflows.general_task_guard import assert_native_callback_capacity
         parent = await jobs._fetch(db, binding.parent_job_id)
         compiler = getattr(service.registry, "compile_capacity", None)
@@ -228,15 +230,20 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         validate_schema(descriptor.output_schema, output)
         validate_schema(step.output_contract, output)
         async def method_authority(db, run):
+            from src.workflows.general_task_guard import check_native_writer_source
+            await check_native_writer_source(db, run)
             await service.validate_pinned_strategy(db, WorkBoardOwner(principal_id=principal.principal_id,
                 session_id=principal.operator_session_id), envelope)
         document_authority = method_authority
         if descriptor.tool_id == "document_prepare":
             from src.work_board.document_preparation import invocation as document_invocation
+            async with jobs._session() as source_db:
+                await document_invocation(source_db, replace(principal, job_id=binding.invocation_id),
+                    binding.invocation_id, fence)
             async def document_authority(db, run):
                 await method_authority(db, run)
                 await document_invocation(db, replace(principal, job_id=binding.invocation_id),
-                    binding.invocation_id, fence)
+                    binding.invocation_id, fence, metadata_only=True)
         elif descriptor.tool_id == "communication_prepare":
             from src.work_board.communication_preparation import stage_plan_authority
             async with jobs._session() as db:
@@ -393,6 +400,8 @@ async def continue_native_wait(service, jobs, parent_id, *, principal):
         child_binding, assert_general_task_child_phase_current)
     from src.workflows.job_runtime import DurableJobLeaseError
     async with jobs._session() as db:
+        from src.workflows.general_task_guard import stage_positive_parent
+        await stage_positive_parent(jobs, db, parent_id)
         parent, task, attempt, manifest, _ = await _current(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, manifest)
         rows = list((await db.execute(select(WorkflowRunState).where(
@@ -521,10 +530,12 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         document_authority = method_authority
         if step.tool_id == "document_prepare":
             from src.work_board.document_preparation import invocation
+            from dataclasses import replace
+            async with jobs._session() as source_db:
+                await invocation(source_db, replace(principal, job_id=job_id), job_id, fence)
             async def document_authority(db, run):
-                from dataclasses import replace
                 await method_authority(db, run)
-                await invocation(db, replace(principal, job_id=job_id), job_id, fence)
+                await invocation(db, replace(principal, job_id=job_id), job_id, fence, metadata_only=True)
         artifact, _verified = await write_step_artifact(jobs, job_id=job_id, owner=owner, fence=fence,
             plan_digest=digest(active_envelope.model_dump(mode="json")), step_id=step.step_id,
             output=outputs[step.step_id], authority_check=document_authority)

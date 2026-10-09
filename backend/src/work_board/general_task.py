@@ -658,10 +658,8 @@ class GeneralTaskService:
         task = await self.repository.get_task(db, owner, task_id)
         if task.capability_id != CAPABILITY:
             raise BoardError("general_task_unavailable", "General task unavailable", status_code=404)
-        from src.work_board.channel_capture import check_capture_origin, current_workspace_digest
-        if await check_capture_origin(db, owner, task, _classify_only=True):
-            staged_workspace = current_workspace_digest()
-            await check_capture_origin(db, owner, task, _workspace_digest=staged_workspace)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         acceptance_events = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == owner.principal_id,
@@ -814,6 +812,8 @@ class GeneralTaskService:
             reason, status = None, "unavailable"
             try:
                 original = child_binding(child)
+                from src.workflows.general_task_guard import stage_positive_parent
+                await stage_positive_parent(durable_job_repository, db, parent.run_identity)
                 current_parent, current_task, current_attempt, current_manifest, _ = await _current(
                     durable_job_repository, db, parent.run_identity)
                 _assert_joint_manifest(current_parent, current_task, current_attempt, current_manifest)
@@ -976,6 +976,8 @@ class GeneralTaskService:
             raise BoardError("general_task_plan_locked", "Only inert Triage plans are editable", status_code=409)
         if task.task_revision != request.expected_revision:
             raise BoardRevisionConflict(task_id, request.expected_revision, task.task_revision)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         prior = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         if (prior.plan.revision if prior.plan else 0) != request.expected_plan_revision:
             raise BoardError("general_task_plan_revision_stale", "Plan changed before editing", status_code=409)
@@ -1066,6 +1068,8 @@ class GeneralTaskService:
             raise BoardRevisionConflict(task_id, expected_revision, task.task_revision)
         if task.status != WorkBoardStatus.triage:
             raise BoardError("general_task_acceptance_state", "Accept the exact inert Triage proposal", status_code=409)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         await self.recheck_authority(db, owner, envelope, require_current_strategy=True)
         from src.work_board.document_build_native import validate_acceptance
@@ -1087,7 +1091,8 @@ class GeneralTaskService:
             if storage.build_binding(row, value) != selected.model_dump(mode="json"):
                 raise BoardError("document_build_binding_changed", "The immutable original build changed", status_code=409)
         if envelope.task_input.document_source is not None:
-            await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
+            await resolve(db, owner, envelope.task_input.document_source,
+                goal_id=envelope.task_input.goal_ref, metadata_only=True)
         if require_current_strategy:
             binding = await self.strategy(owner, envelope.task_input.goal_ref)
             if binding != envelope.strategy:

@@ -245,6 +245,120 @@ class _VerifiedParentJournal:
     checkpoint_json: str
     authority_json: str
     _seal: object
+    staged_receipts: tuple = ()
+    source_scope: object = None
+    creator: object = None
+    envelope: object = None
+    envelope_pins: tuple = ()
+
+
+_STAGED_NATIVE_JOURNALS = {}
+_LIVE_NATIVE_JOURNALS = {}
+
+
+def _register_native_journal(db, identity, journal):
+    key = (id(db), identity)
+    previous = _STAGED_NATIVE_JOURNALS.get(key)
+    if previous is not None:
+        _LIVE_NATIVE_JOURNALS.pop(id(previous), None)
+    _STAGED_NATIVE_JOURNALS[key] = journal
+    _LIVE_NATIVE_JOURNALS[id(journal)] = journal
+
+
+async def stage_native_journal(db, run, *, additional=()):
+    """Stage retained receipt proofs at the fixed owner's pre-writer boundary."""
+    import asyncio
+    from src.work_board.channel_capture import _checked_source_frame
+    from src.work_board.general_task_runtime_artifacts import stage_retained_native_artifact
+    from src.work_board.contracts import GeneralTaskArtifactRef
+    if run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND:
+        return
+    await assert_general_task_child_phase_current(db, run)
+    binding = child_binding(run)
+    parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
+    assert_original_parent_authority(parent)
+    manifest = read_manifest(parent)
+    refs = [GeneralTaskArtifactRef(artifact_id=identifier, digest=sha, schema_version=schema)
+        for identifier, sha, schema in zip(manifest.step_receipt_artifact_ids,
+            manifest.step_receipt_digests, manifest.step_receipt_schemas)]
+    for item in _history(parent):
+        payload = item.get('payload', {})
+        if payload.get('schema_version') == 'general_task.native_approval_transition.v1':
+            refs.append(GeneralTaskApprovalTransitionV1.model_validate(payload).awaiting_receipt)
+    staged = tuple(stage_retained_native_artifact(ref, parent_job_id=parent.run_identity,
+        creation_digest=manifest.creation_digest) for ref in refs)
+    journal = _VerifiedParentJournal(run.run_identity, run.fencing_token,
+        parent.checkpoint_receipts_json, parent.declared_authority_json, _PHASE_SQL_SEAL,
+        (*staged, *additional), _checked_source_frame(), asyncio.current_task())
+    _register_native_journal(db, run.run_identity, journal)
+
+
+def close_native_journals(db):
+    for key in tuple(_STAGED_NATIVE_JOURNALS):
+        if key[0] == id(db):
+            _LIVE_NATIVE_JOURNALS.pop(id(_STAGED_NATIVE_JOURNALS[key]), None)
+            del _STAGED_NATIVE_JOURNALS[key]
+
+
+def close_source_journals(frame):
+    for identity, journal in tuple(_LIVE_NATIVE_JOURNALS.items()):
+        if journal.source_scope is frame:
+            del _LIVE_NATIVE_JOURNALS[identity]
+    for key, journal in tuple(_STAGED_NATIVE_JOURNALS.items()):
+        if journal.source_scope is frame:
+            _LIVE_NATIVE_JOURNALS.pop(id(journal), None)
+            del _STAGED_NATIVE_JOURNALS[key]
+
+
+async def stage_positive_parent(jobs, db, parent_id, *, manifest=None):
+    """Stage this fixed positive owner's immutable envelope before its writer."""
+    import asyncio
+    from src.work_board.channel_capture import _checked_source_frame, check_current_captured_task_source
+    from src.work_board.contracts import WorkBoardOwner, GeneralTaskArtifactRef
+    from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest, stage_retained_native_artifact
+    from src.db.models import WorkBoardInputArtifact
+    current_parent = await jobs._fetch(db, parent_id)
+    current_manifest = read_manifest(current_parent) or manifest
+    parent, task, attempt, manifest = await _current_original_sql(jobs, db, parent_id, manifest=current_manifest)
+    await check_current_captured_task_source(db, WorkBoardOwner(
+        principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
+    envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
+    source = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+    refs = [GeneralTaskArtifactRef(artifact_id=i, digest=d, schema_version=s)
+        for i, d, s in zip(manifest.revision_artifact_ids[1:], manifest.revision_artifact_digests[1:],
+            manifest.revision_artifact_schemas[1:])]
+    refs.extend(GeneralTaskArtifactRef(artifact_id=i, digest=d, schema_version=s)
+        for i, d, s in zip(manifest.step_receipt_artifact_ids, manifest.step_receipt_digests,
+            manifest.step_receipt_schemas))
+    staged = tuple(stage_retained_native_artifact(ref, parent_job_id=parent_id,
+        creation_digest=manifest.creation_digest) for ref in refs)
+    pins = (task.task_id, task.task_revision, attempt.attempt_id, attempt.fencing_token,
+        parent.revision, parent.fencing_token, source.model_dump_json(), envelope.model_dump_json())
+    journal = _VerifiedParentJournal(
+        parent_id, parent.fencing_token, parent.checkpoint_receipts_json, parent.declared_authority_json,
+        _PHASE_SQL_SEAL, staged, _checked_source_frame(), asyncio.current_task(), envelope, pins)
+    _register_native_journal(db, parent_id, journal)
+
+
+def _retained_receipt(db, parent_id, creation_digest, reference):
+    import asyncio
+    from src.work_board.channel_capture import _checked_source_frame
+    from src.work_board.general_task_runtime_artifacts import recheck_staged_task_artifact, read_native_artifact_reference
+    journals = [value for key, value in _STAGED_NATIVE_JOURNALS.items() if key[0] == id(db)] if db is not None else []
+    for journal in journals:
+        if (_LIVE_NATIVE_JOURNALS.get(id(journal)) is not journal
+            or journal._seal is not _PHASE_SQL_SEAL or journal.source_scope is not _checked_source_frame()
+            or journal.creator is not asyncio.current_task()):
+            from src.workflows.job_runtime import DurableJobLeaseError
+            raise DurableJobLeaseError('original staged native journal scope changed')
+        for staged in journal.staged_receipts:
+            if (staged.reference == reference and staged.producer_ref == parent_id
+                and staged.creation_digest == creation_digest):
+                return recheck_staged_task_artifact(staged, parent_job_id=parent_id, creation_digest=creation_digest)[0]
+    if journals:
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError('current native receipt was not staged by its original owner')
+    return read_native_artifact_reference(reference, parent_job_id=parent_id, creation_digest=creation_digest)
 
 
 def assert_original_parent_authority(parent):
@@ -320,8 +434,7 @@ async def verify_native_approval_transition(db, child, parent):
             or (witness.phase == "native_wait" and approved_receipt_digest(approval,
                 witness.approval_context_digest) != witness.approved_receipt_digest)):
             raise ValueError()
-        awaiting = read_native_artifact_reference(witness.awaiting_receipt,
-            parent_job_id=parent.run_identity, creation_digest=binding.creation_digest)
+        awaiting = _retained_receipt(db, parent.run_identity, binding.creation_digest, witness.awaiting_receipt)
         closure = _protected_payload(parent, cleanup_checkpoint_id(binding, witness.original_claim_fence), GeneralTaskToolClosureV1)
         if (awaiting.status != "awaiting_approval" or awaiting.approval_id != approval.id
             or awaiting.child_job_id != child.run_identity or awaiting.child_fence != witness.waiting_child_fence
@@ -392,13 +505,28 @@ def requires_native_writer(run):
 async def verify_native_writer(jobs, db, run):
     """Fixed canonical owner check under the existing journal's SQL writer."""
     if run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
-        await assert_general_task_child_current(db, run)
+        await assert_general_task_child_phase_current(db, run)
     elif run.job_kind == "agent.task.v1" and read_manifest(run) is not None:
-        parent, task, attempt, manifest, _envelope = await _current(jobs, db, run.run_identity)
+        parent, task, attempt, manifest = await _current_original_sql(jobs, db, run.run_identity)
         _assert_joint_manifest(parent, task, attempt, manifest)
         if parent.status != "running" or manifest.phase not in {"native_ready", "assembly"}:
             from src.workflows.job_runtime import DurableJobLeaseError
             raise DurableJobLeaseError("general task final publication requires its joint assembly lease")
+
+
+async def check_native_writer_source(db, run):
+    """Positive fixed owners add Source permission to the original SQL journal."""
+    from src.work_board.channel_capture import check_current_captured_task_source
+    from src.work_board.contracts import WorkBoardOwner
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
+        await assert_general_task_child_current(db, run)
+    task_id = child_binding(run).task_id if run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND else read_manifest(run).task_id
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id).execution_options(populate_existing=True))
+    if task is None:
+        raise DurableJobLeaseError('original native Task is missing')
+    await check_current_captured_task_source(db,
+        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
 
 
 def child_binding(run):
@@ -478,9 +606,9 @@ def append_general_task_parent_gate(conditions, run, *, now):
         return False
     try:
         binding = child_binding(run)
-        from src.work_board.pipelines import root_binding
+        from src.work_board.channel_capture import _staged_source_root_for_sql
         from src.work_board.pipeline_contracts import digest
-        if binding.live_root_digest != digest(root_binding()):
+        if binding.live_root_digest != digest(dict(_staged_source_root_for_sql())):
             raise ValueError()
     except (ValueError, RuntimeError):
         conditions.append(false())
@@ -612,7 +740,7 @@ async def assert_general_task_child_phase_current(db, run):
     return effective
 
 
-def _step_receipt(manifest, step_id):
+def _step_receipt(manifest, step_id, *, db=None):
     from src.work_board.contracts import GeneralTaskArtifactRef
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     from src.workflows.job_runtime import DurableJobLeaseError
@@ -620,9 +748,9 @@ def _step_receipt(manifest, step_id):
         index = manifest.step_ids.index(step_id)
     except ValueError as exc:
         raise DurableJobLeaseError("positive original native claim receipt is required before contact") from exc
-    return read_native_artifact_reference(GeneralTaskArtifactRef(
+    return _retained_receipt(db, manifest.run_id, manifest.creation_digest, GeneralTaskArtifactRef(
         artifact_id=manifest.step_receipt_artifact_ids[index], digest=manifest.step_receipt_digests[index],
-        schema_version="StepReceipt.v1"), parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
+        schema_version="StepReceipt.v1"))
 
 
 async def assert_general_task_child_current(db, run):
@@ -632,7 +760,7 @@ async def assert_general_task_child_current(db, run):
     binding = child_binding(run)
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
     _require_callback_reservation(parent, binding, run.fencing_token)
-    receipt = _step_receipt(read_manifest(parent), binding.step_id)
+    receipt = _step_receipt(read_manifest(parent), binding.step_id, db=db)
     if (run.status != "running" or not run.lease_owner or _as_utc(run.lease_expires_at) is None
         or _as_utc(run.lease_expires_at) <= _utc_now() or _as_utc(run.deadline_at) <= _utc_now()
         or run.attempt_count != 1 or run.fencing_token <= 0 or receipt.child_attempt_count != run.attempt_count
@@ -702,11 +830,10 @@ async def assert_general_task_child_terminal_current(jobs, db, run):
         raise DurableJobLeaseError("native terminal output must match original callback return")
 
 
-async def _current(jobs, db, parent_id, *, manifest=None):
+async def _current_original_sql(jobs, db, parent_id, *, manifest=None):
     from src.workflows.job_runtime import (
         DurableJobLeaseError, _as_utc, _assert_canonical_goal_fence, _utc_now,
     )
-    from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
     now = _utc_now()
     parent = await jobs._fetch(db, parent_id)
     assert_original_parent_authority(parent)
@@ -737,7 +864,63 @@ async def _current(jobs, db, parent_id, *, manifest=None):
     await _assert_canonical_goal_fence(db, goal_id=parent.goal_id, goal_revision=parent.goal_revision,
         owner_kind=parent.owner_kind, owner_principal_id=parent.owner_principal_id,
         session_id=parent.session_id, authority=parent.declared_authority_json)
-    envelope = await verify_general_task_manifest(db, parent, task, attempt, selected)
+    from src.db.models import WorkBoardInputArtifact
+    from src.work_board.input_artifacts import _metadata_digest
+    from src.work_board.channel_capture import _staged_source_root_for_sql
+    from src.work_board.general_task import digest
+    from src.work_board.general_task_runtime_artifacts import compile_phase_digest
+    artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+    creation = digest(['general-task.creation.v1', parent.run_identity, parent.input_digest,
+        parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
+        task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,
+        task.typed_input_digest, selected.group_id, selected.group_digest, selected.selected_grant_digest,
+        digest(dict(_staged_source_root_for_sql())), _as_utc(parent.deadline_at).isoformat(),
+        selected.original_deadline_at.isoformat()])
+    if (artifact is None or artifact.owner_principal_id != task.owner_principal_id
+        or artifact.owner_session_id != task.owner_session_id or artifact.goal_id != task.goal_id
+        or artifact.goal_revision != task.goal_revision or artifact.capability_id != 'agent.task.v1'
+        or artifact.capability_version != '1' or artifact.bound_task_id != task.task_id
+        or artifact.payload_sha256 != task.typed_input_digest or artifact.typed_input_ref != task.typed_input_ref
+        or artifact.metadata_digest != _metadata_digest(artifact)
+        or selected.task_id != task.task_id or selected.attempt_id != attempt.attempt_id
+        or selected.run_id != parent.run_identity or selected.original_root_id != task.owner_session_id
+        or selected.owner_principal_id != task.owner_principal_id
+        or selected.original_envelope_artifact_id != task.input_artifact_id
+        or selected.original_envelope_digest != task.typed_input_digest
+        or selected.original_input_digest != parent.input_digest or creation != selected.creation_digest
+        or selected.phase_digest != compile_phase_digest(selected)
+        or selected.revision_artifact_ids[0] != task.input_artifact_id
+        or selected.revision_artifact_digests[0] != task.typed_input_digest
+        or selected.revision_artifact_schemas[0] != 'GeneralTaskEnvelope.v1'):
+        raise DurableJobLeaseError('general task original immutable metadata changed')
+    return parent, task, attempt, selected
+
+
+async def _current(jobs, db, parent_id, *, manifest=None):
+    from src.work_board.channel_capture import check_current_captured_task_source
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+    from src.work_board.channel_capture import _checked_source_frame
+    from src.db.models import WorkBoardInputArtifact
+    from src.workflows.job_runtime import DurableJobLeaseError
+    import asyncio
+    parent, task, attempt, selected = await _current_original_sql(jobs, db, parent_id, manifest=manifest)
+    await check_current_captured_task_source(db,
+        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
+    journal = _STAGED_NATIVE_JOURNALS.get((id(db), parent_id))
+    source = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
+    if (type(journal) is not _VerifiedParentJournal or journal._seal is not _PHASE_SQL_SEAL
+        or _LIVE_NATIVE_JOURNALS.get(id(journal)) is not journal
+        or journal.source_scope is not _checked_source_frame() or journal.creator is not asyncio.current_task()
+        or journal.envelope is None or source is None
+        or journal.checkpoint_json != parent.checkpoint_receipts_json
+        or journal.authority_json != parent.declared_authority_json
+        or journal.envelope_pins != (task.task_id, task.task_revision, attempt.attempt_id,
+            attempt.fencing_token, parent.revision, parent.fencing_token, source.model_dump_json(),
+            journal.envelope.model_dump_json())):
+        raise DurableJobLeaseError('original staged positive envelope changed')
+    envelope = await _verify_native_manifest_data(parent, task, attempt, selected, journal.envelope,
+        _staged_artifacts=journal.staged_receipts)
     if envelope.strategy.status == "active":
         from src.memory.task_methods import current_method
         from src.work_board.contracts import WorkBoardOwner
@@ -794,7 +977,7 @@ def _next_manifest(parent, previous, proposed, *, task, attempt):
 
 def _publish(parent, manifest, *, staged_records=()):
     from src.workflows.job_runtime import _canonical, _digest, _github_recovery_history, _utc_now
-    from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
+    from src.work_board.general_task_runtime_artifacts import recheck_staged_task_artifact
     # The fixed writer derives protection; no proposed list can grant retention
     # or silently drop an already committed original proof.
     history = _history(parent)
@@ -805,7 +988,7 @@ def _publish(parent, manifest, *, staged_records=()):
         manifest.model_dump(mode="json") | {"required_checkpoint_ids": required})
     artifacts = json.loads(parent.artifact_receipts_json or "[]")
     for staged in staged_records:
-        _payload, record = verify_staged_task_artifact(staged,
+        _payload, record = recheck_staged_task_artifact(staged,
             parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)
         artifacts = [item for item in artifacts if item.get("artifact_id") != record["artifact_id"]]
         artifacts.append({**record, "recorded_at": _utc_now().isoformat()})
@@ -820,7 +1003,7 @@ def _publish(parent, manifest, *, staged_records=()):
 
 
 def _validate_staged_refs(previous, manifest, staged):
-    from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
+    from src.work_board.general_task_runtime_artifacts import recheck_staged_task_artifact
     from src.workflows.job_runtime import DurableJobLeaseError
     def refs(value):
         if value is None:
@@ -830,7 +1013,7 @@ def _validate_staged_refs(previous, manifest, staged):
     added = refs(manifest) - refs(previous)
     supplied = set()
     for item in staged:
-        verify_staged_task_artifact(item, parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
+        recheck_staged_task_artifact(item, parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
         supplied.add((item.reference.artifact_id, item.reference.digest, item.reference.schema_version))
     if added != supplied:
         raise DurableJobLeaseError("new native references require exact sealed staged artifacts")
@@ -868,12 +1051,15 @@ async def publish_tool_closure(jobs, child_id, *, owner, fencing_token,
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _serialize
     async with jobs._session() as db:
+        preflight_child = await jobs._fetch(db, child_id)
+        await stage_native_journal(db, preflight_child)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         child = await jobs._fetch(db, child_id)
         jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
         await assert_general_task_child_current(db, child)
         binding = child_binding(child)
-        parent, task, attempt, previous, _ = await _current(jobs, db, binding.parent_job_id)
+        parent, task, attempt, previous = await _current_original_sql(jobs, db, binding.parent_job_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         if parent.revision != expected_parent_revision:
             raise DurableJobLeaseError("native callback closure parent revision changed")
@@ -915,12 +1101,13 @@ async def wait_native_approval(jobs, child_id, *, owner, fencing_token,
     from src.work_board.contracts import GeneralTaskStepReceiptV1
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _canonical, _serialize, _utc_now, _job_has_unsafe_effects
     async with jobs._session() as db:
-        await _begin_sqlite_immediate(db)
+        preflight_child = await jobs._fetch(db, child_id)
+        await stage_native_journal(db, preflight_child)
         child = await jobs._fetch(db, child_id)
         jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
         await assert_general_task_child_current(db, child)
         binding = child_binding(child)
-        parent, task, attempt, previous, _ = await _current(jobs, db, binding.parent_job_id)
+        parent, task, attempt, previous = await _current_original_sql(jobs, db, binding.parent_job_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         closure = verify_task_tool_closure(producer_witness, binding=binding, fencing_token=fencing_token)
         approval_slot = read_native_checkpoint_reservation(parent, approval_checkpoint_id(binding))
@@ -935,7 +1122,7 @@ async def wait_native_approval(jobs, child_id, *, owner, fencing_token,
         approval = await db.get(ApprovalRequest, closure.approval_id)
         if approval is None or approval.fingerprint != closure.approval_fingerprint:
             raise DurableJobLeaseError("original native callback approval fingerprint changed")
-        old_receipt = _step_receipt(previous, binding.step_id)
+        old_receipt = _step_receipt(previous, binding.step_id, db=db)
         effects = json.loads(child.effect_receipts_json or "[]")
         effect_id = "general:" + binding.step_id + ":" + str(fencing_token)
         intents = [item for item in effects if item.get("effect_id") == effect_id]
@@ -956,8 +1143,28 @@ async def wait_native_approval(jobs, child_id, *, owner, fencing_token,
         receipt = GeneralTaskStepReceiptV1.model_validate(old_receipt.model_dump(mode="json") | {
             "status": "awaiting_approval", "contact_state": "not_contacted", "approval_id": closure.approval_id,
             "effect_receipt_digest": _digest(effects), "cleanup_receipt_digest": closure_digest})
+        original_sql = (parent.revision, parent.checkpoint_receipts_json,
+            parent.artifact_receipts_json, task.task_revision, attempt.fencing_token,
+            child.revision, child.effect_receipts_json, child.arguments_json,
+            approval.id, approval.fingerprint, approval.status, approval.details_json)
         staged = stage_task_artifact(parent_job_id=parent.run_identity,
             creation_digest=binding.creation_digest, payload=receipt)
+        await stage_native_journal(db, child, additional=(staged,))
+        approval_id = approval.id
+        await db.rollback()
+        await _begin_sqlite_immediate(db)
+        parent, task, attempt, current_manifest = await _current_original_sql(jobs, db, binding.parent_job_id)
+        _assert_joint_manifest(parent, task, attempt, current_manifest)
+        child = await jobs._fetch(db, child_id)
+        jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
+        await assert_general_task_child_current(db, child)
+        approval = await db.get(ApprovalRequest, approval_id, populate_existing=True)
+        current_sql = (parent.revision, parent.checkpoint_receipts_json,
+            parent.artifact_receipts_json, task.task_revision, attempt.fencing_token,
+            child.revision, child.effect_receipts_json, child.arguments_json,
+            approval.id, approval.fingerprint, approval.status, approval.details_json) if approval else None
+        if current_manifest != previous or current_sql != original_sql:
+            raise DurableJobLeaseError('original no-contact approval changed during artifact staging')
         proposed = _phase_successor(previous, phase="approval_wait", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token, board_fence=attempt.fencing_token)
         refs = dict(zip(previous.step_ids, zip(previous.step_receipt_artifact_ids,
@@ -1008,6 +1215,9 @@ async def resume_native_approval(jobs, child_id, *, operator_owner,
     if type(service) is not GeneralTaskService or type(request) is not GeneralTaskResume or not service.started:
         raise DurableJobLeaseError("native resume requires the fixed active service and original request")
     async with jobs._session() as db:
+        child = await jobs._fetch(db, child_id)
+        await stage_positive_parent(jobs, db, child_binding(child).parent_job_id)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         child = await jobs._fetch(db, child_id)
         binding = child_binding(child)
@@ -1228,7 +1438,8 @@ async def _cancel_original(jobs, db, parent_id, *, observation=False):
             raise DurableJobLeaseError("original cancelled workspace Root seals disagree")
         root_digest = next(iter(original_roots))
     else:
-        root_digest = _digest(root_binding())
+        from src.work_board.channel_capture import _staged_source_root_for_sql
+        root_digest = _digest(dict(_staged_source_root_for_sql()))
     creation = _digest(["general-task.creation.v1", parent.run_identity, parent.input_digest,
         parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
         task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,
@@ -1596,6 +1807,8 @@ async def replace_manifest(jobs, job_id, *, manifest, owner, fencing_token, expe
     from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
     from src.workflows.job_runtime import DurableJobLeaseError, _serialize, _utc_now, _as_utc
     async with jobs._session() as db:
+        await stage_positive_parent(jobs, db, job_id, manifest=manifest)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         parent, task, attempt, _selected, _envelope = await _current(jobs, db, job_id, manifest=manifest)
         previous = read_manifest(parent)
@@ -1609,7 +1822,10 @@ async def replace_manifest(jobs, job_id, *, manifest, owner, fencing_token, expe
         _next_manifest(parent, previous, manifest, task=task, attempt=attempt)
         if manifest.phase not in {"native_ready", "assembly"}:
             raise DurableJobLeaseError("general task manifest transition requires its paired native owner")
-        await verify_general_task_manifest(db, parent, task, attempt, manifest)
+        from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+        journal = _STAGED_NATIVE_JOURNALS[(id(db), job_id)]
+        await _verify_native_manifest_data(parent, task, attempt, manifest, _envelope,
+            _staged_artifacts=(*journal.staged_receipts, *staged_artifacts))
         if previous is not None:
             _assert_joint_manifest(parent, task, attempt, previous)
             if any(getattr(manifest, name) != getattr(previous, name) for name in (
@@ -1641,7 +1857,7 @@ class _ChildAdmission:
 
     async def __call__(self, db, child):
         from src.work_board.general_task_runtime_artifacts import (
-            verify_general_task_manifest, read_native_artifact_reference, verify_staged_task_artifact,
+            verify_general_task_manifest, read_native_artifact_reference, recheck_staged_task_artifact,
             resolve_current_native_step_inputs,
         )
         from src.work_board.contracts import GeneralTaskArtifactRef
@@ -1687,7 +1903,7 @@ class _ChildAdmission:
             if (child.priority != task.priority or authority.get("document_build_priority") != task.priority
                     or authority.get("document_build_input_artifact_id") != task.input_artifact_id):
                 raise DurableJobLeaseError("original document build priority/input binding changed")
-        native_input, input_record = verify_staged_task_artifact(self.staged_input,
+        native_input, input_record = recheck_staged_task_artifact(self.staged_input,
             parent_job_id=parent.run_identity, creation_digest=previous.creation_digest)
         resolved_inputs = await resolve_current_native_step_inputs(
             db, parent, task, attempt, previous, envelope, step)
@@ -1721,7 +1937,10 @@ class _ChildAdmission:
         view_task = type("TaskCounter", (), {"task_revision": task.task_revision + 1})()
         _next_manifest(parent, previous, proposed, task=view_task, attempt=attempt)
         _validate_staged_refs(previous, proposed, ())
-        await verify_general_task_manifest(db, parent, task, attempt, proposed)
+        from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+        journal = _STAGED_NATIVE_JOURNALS[(id(db), parent.run_identity)]
+        await _verify_native_manifest_data(parent, task, attempt, proposed, envelope,
+            _staged_artifacts=journal.staged_receipts)
         capacity_parent = _reserve_native_capacity(parent, proposed, binding, envelope=envelope,
             service=self.service, capacity_witness=self.capacity_witness)
         await _ensure_future_cancel_capacity(db, capacity_parent, task, attempt, proposed, candidate=binding)
@@ -1753,19 +1972,30 @@ async def admit_child(jobs, spec, *, manifest, owner, fencing_token, expected_re
 
 async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, owner, fencing_token, expected_parent_revision):
     from src.work_board.repository import _begin_sqlite_immediate
-    from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact, compile_phase_digest
+    from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact, recheck_staged_task_artifact, compile_phase_digest
     from src.work_board.contracts import GeneralTaskStepReceiptV1
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _serialize, _verified_readback_exists
+    verify_staged_task_artifact(staged_artifact, parent_job_id=parent_id, creation_digest=staged_artifact.creation_digest)
     async with jobs._session() as db:
+        preflight_child = await jobs._fetch(db, child_id)
+        await stage_native_journal(db, preflight_child)
+        if staged_artifact.reference.schema_version == 'StepReceipt.v1':
+            preflight_receipt, _ = recheck_staged_task_artifact(staged_artifact,
+                parent_job_id=parent_id, creation_digest=staged_artifact.creation_digest)
+            if preflight_receipt.status in {'running', 'verified'}:
+                await stage_positive_parent(jobs, db, parent_id)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
-        parent, task, attempt, previous, _envelope = await _current(jobs, db, parent_id)
+        parent, task, attempt, previous = await _current_original_sql(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         child = await jobs._fetch(db, child_id)
         jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
         effective = await assert_general_task_child_phase_current(db, child)
         binding = child_binding(child)
-        receipt, _record = verify_staged_task_artifact(staged_artifact,
+        receipt, _record = recheck_staged_task_artifact(staged_artifact,
             parent_job_id=parent_id, creation_digest=previous.creation_digest)
+        if type(receipt) is GeneralTaskStepReceiptV1 and receipt.status in {'running', 'verified'}:
+            await _current(jobs, db, parent_id)
         if (type(receipt) is not GeneralTaskStepReceiptV1 or parent.revision != expected_parent_revision
             or parent.status != "paused" or previous.phase != "native_wait" or child.status != "running"
             or child.attempt_count != 1 or child.fencing_token <= 0
@@ -1797,7 +2027,7 @@ async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, ow
         refs = dict(zip(previous.step_ids, zip(previous.step_receipt_artifact_ids,
             previous.step_receipt_digests, previous.step_receipt_schemas)))
         if binding.step_id in refs:
-            old = _step_receipt(previous, binding.step_id)
+            old = _step_receipt(previous, binding.step_id, db=db)
             if old.status in {"verified", "unknown"} or old.contact_state == "unknown":
                 raise DurableJobLeaseError("verified or unresolved native step evidence is frozen")
         refs[binding.step_id] = (staged_artifact.reference.artifact_id, staged_artifact.reference.digest, "StepReceipt.v1")
@@ -1827,10 +2057,14 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
     if type(operator_owner) is not WorkBoardOwner:
         raise DurableJobLeaseError("current typed operator owner required")
     async with jobs._session() as db:
+        preflight_children = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent_id))).scalars().all())
+        for preflight_child in preflight_children:
+            await stage_native_journal(db, preflight_child)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         if authority_check is not None:
             await authority_check(db)
-        parent, task, attempt, previous, _envelope = await _current(jobs, db, parent_id)
+        parent, task, attempt, previous = await _current_original_sql(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         if (operator_owner.principal_id != task.owner_principal_id or operator_owner.session_id != task.owner_session_id
             or task.task_revision != expected_task_revision or parent.revision != expected_revision
@@ -1852,7 +2086,7 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
                 or _job_has_unsafe_effects(effects)):
                 raise DurableJobLeaseError("native children must close under native_wait before paired pause; unknown remains in wait")
             if child.status in {"succeeded", "degraded"}:
-                receipt = _step_receipt(previous, binding.step_id)
+                receipt = _step_receipt(previous, binding.step_id, db=db)
                 if (receipt.status != "verified" or receipt.contact_state != "settled"
                     or receipt.child_job_id != child.run_identity
                     or receipt.child_fence != child.fencing_token
@@ -1860,7 +2094,7 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
                     or not _verified_readback_exists(effects)):
                     raise DurableJobLeaseError("native child closure requires original verified readback")
             if child.attempt_count > 0:
-                assert_child_closed(parent, child, _step_receipt(previous, binding.step_id))
+                assert_child_closed(parent, child, _step_receipt(previous, binding.step_id, db=db))
         if authority_check is not None:
             await authority_check(db)
         proposed = _phase_successor(previous, phase="operator_paused", task_revision=task.task_revision + 1,
@@ -1894,6 +2128,8 @@ async def revise_operator_paused_parent(jobs, parent_id, *, operator_owner, requ
         or type(service) is not GeneralTaskService or not service.started):
         raise DurableJobLeaseError("fixed paused revision requires the current typed operator and service")
     async with jobs._session() as db:
+        await stage_positive_parent(jobs, db, parent_id)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         parent, task, attempt, previous, envelope = await _current(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, previous)
@@ -2020,6 +2256,8 @@ async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_m
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _as_utc, _job_has_unsafe_effects, _serialize, _utc_now, _verified_readback_exists
     async with jobs._session() as db:
+        await stage_positive_parent(jobs, db, parent_id)
+        await db.rollback()
         await _begin_sqlite_immediate(db)
         if authority_check is not None:
             await authority_check(db)

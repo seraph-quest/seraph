@@ -388,8 +388,10 @@ async def test_actual_source_process_and_original_build_share_one_slot(accountin
         monkeypatch.setattr(document_service, "parse", paused_parse)
         request = DocumentReadInput(artifact_ref="document-source:"+source["artifact_id"], format="csv")
         async def read_source():
-            async with sessions() as db:
-                return await document_service.read(db, owner, request, operator=operator)
+            from src.work_board.channel_capture import staged_captured_source_identity
+            with staged_captured_source_identity():
+                async with sessions() as db:
+                    return await document_service.read(db, owner, request, operator=operator)
         if first_owner == "build":
             claim = await native.stage_claim(service, dispatcher.jobs, binding)
             await dispatcher.jobs.claim_job(binding.invocation_id, owner="build-slot-owner", claim_authority_check=claim)

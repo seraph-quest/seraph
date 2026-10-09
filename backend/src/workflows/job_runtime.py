@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -2774,6 +2775,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     # The pure canonical guard below commits the stale receipt
                     # for a bound task rather than admitting unreadable input.
                     admission_dependencies = None
+            if identity.job_kind == 'general_task_native_tool_v1' and prior_admission is None:
+                from src.workflows.general_task_guard import stage_positive_parent
+                await stage_positive_parent(self, db, spec.parent_job_id)
             await db.rollback()
             transaction_started = False
             audio_capture = None
@@ -3853,6 +3857,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             native_writer = requires_native_writer(preflight_run)
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            from src.workflows.general_task_guard import stage_native_journal
+            await stage_native_journal(db, preflight_run)
+            if native_writer and preflight_run.job_kind == 'general_task_native_tool_v1' and to_status in {'succeeded', 'degraded'}:
+                from src.workflows.general_task_guard import stage_positive_parent, child_binding
+                await stage_positive_parent(self, db, child_binding(preflight_run).parent_job_id)
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
@@ -3866,6 +3875,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             run = await self._fetch(db, job_id)
             if native_writer and run.job_kind == "agent.task.v1":
                 await verify_native_writer(self, db, run)
+                if to_status in {'queued', 'running', 'succeeded', 'degraded'}:
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
             elif native_writer and to_status in {"succeeded", "degraded"}:
                 from src.workflows.general_task_guard import assert_general_task_child_terminal_current
                 await assert_general_task_child_terminal_current(self, db, run)
@@ -4683,8 +4695,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
             preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1"
             staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None
+            native_claim = preflight_run.job_kind == "general_task_native_tool_v1"
+            from src.workflows.general_task_guard import stage_native_journal
+            if not native_claim or (not continue_existing_attempt
+                and preflight_run.attempt_count == 0 and preflight_run.fencing_token == 0):
+                await stage_native_journal(db, preflight_run)
             await db.rollback()
-            if claim_authority_check is not None or dependency_guard or preference_guard:
+            if (claim_authority_check is not None or dependency_guard or preference_guard
+                or native_claim):
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
             if preference_guard:
@@ -4697,6 +4715,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if continue_existing_attempt or run.attempt_count != 0 or run.fencing_token != 0:
                     raise DurableJobLeaseError("the original general task native claim is exhausted")
                 await assert_general_task_child_phase_current(db, run)
+                from src.workflows.general_task_guard import child_binding, _current_original_sql
+                from src.work_board.channel_capture import check_current_captured_task_source
+                from src.work_board.contracts import WorkBoardOwner
+                _parent, task, _attempt, _manifest = await _current_original_sql(self, db, child_binding(run).parent_job_id)
+                await check_current_captured_task_source(db,
+                    WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
                 if json.loads(run.arguments_json).get("tool_id") == "document_build":
                     from src.work_board.document_build_native import validate_claim
                     validate_claim(self, run, claim_authority_check)
@@ -5304,6 +5328,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
             staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            from src.workflows.general_task_guard import stage_native_journal
+            await stage_native_journal(db, preflight_run)
             await db.rollback()
             # SQLite WAL readers cannot reliably upgrade a snapshot to a
             # writer while another dispatcher is committing.  Acquire the
@@ -5320,6 +5346,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
                 await verify_native_writer(self, db, run)
+                from src.work_board.contracts import GENERAL_TASK_NATIVE_CHILD_KIND
+                if run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
+                    from src.workflows.general_task_guard import assert_general_task_child_current
+                    await assert_general_task_child_current(db, run)
+                if checkpoint_id.startswith(('general:artifact:', 'general:verified:')):
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
@@ -6542,11 +6575,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             run = await self._fetch(db, job_id)
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
+                from src.workflows.general_task_guard import stage_native_journal
+                await stage_native_journal(db, run)
                 await db.rollback()
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
                 run = await self._fetch(db, job_id)
                 await verify_native_writer(self, db, run)
+                from src.workflows.general_task_guard import check_native_writer_source
+                await check_native_writer_source(db, run)
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -7141,26 +7178,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if readback_authority_check is not None:
                 if receipt_kind != "readback":
                     raise ValueError("authority callback requires a readback receipt")
-                from src.work_board.repository import _begin_sqlite_immediate
-                await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
-            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
-            if requires_native_writer(run):
-                if readback_authority_check is None:
-                    await db.rollback()
-                    from src.work_board.repository import _begin_sqlite_immediate
-                    await _begin_sqlite_immediate(db)
-                    run = await self._fetch(db, job_id)
-                await verify_native_writer(self, db, run)
-            await _assert_canonical_goal_fence(
-                db,
-                goal_id=getattr(run, "goal_id", None),
-                goal_revision=getattr(run, "goal_revision", None),
-                owner_kind=_text(getattr(run, "owner_kind", None)),
-                owner_principal_id=getattr(run, "owner_principal_id", None),
-                session_id=getattr(run, "session_id", None),
-                authority=getattr(run, "declared_authority_json", None),
-            )
             recovery_readback = (
                 receipt_kind == "readback"
                 and owner is None
@@ -7171,6 +7189,70 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
                 and not run.lease_owner
                 and not run.lease_expires_at
+            )
+            remote_terminal_settlement = (
+                effect_type == "remote_inference_admission"
+                and status in {"succeeded", "failed"}
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status"))
+                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+            )
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                from src.workflows.general_task_guard import stage_native_journal
+                await stage_native_journal(db, run)
+                await db.rollback()
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                run = await self._fetch(db, job_id)
+                recovery_readback = (
+                    receipt_kind == "readback"
+                    and owner is None
+                    and fencing_token is None
+                    and isinstance(safe_details, Mapping)
+                    and _text(safe_details.get("reconciliation_owner_id"))
+                    == _text(getattr(run, "owner_principal_id", None))
+                    and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
+                    and not run.lease_owner
+                    and not run.lease_expires_at
+                )
+                remote_terminal_settlement = (
+                    effect_type == "remote_inference_admission"
+                    and status in {"succeeded", "failed"}
+                    and isinstance(safe_details, dict)
+                    and isinstance(safe_details.get("receipt"), dict)
+                    and _text(safe_details["receipt"].get("status"))
+                    in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+                )
+                await verify_native_writer(self, db, run)
+                if (not recovery_readback and not remote_terminal_settlement
+                    and status not in {'unknown', 'failed', 'blocked', 'cancelled'}
+                    and not (receipt_kind == 'readback' and status == 'succeeded'
+                        and run.job_kind == 'agent.task.v1' and effect_type == 'general_tool_call'
+                        and isinstance(safe_details, dict) and safe_details.get('verified') is True
+                        and safe_details.get('never_contacted') is True and safe_details.get('approval_precontact') is True
+                        and any(isinstance(item.get('payload'), dict)
+                            and item['payload'].get('phase') == 'approval_precontact'
+                            and item['payload'].get('effect_id') == effect_id
+                            and item['payload'].get('fence') == fencing_token
+                            and _digest(item['payload']) == content_sha256
+                            for item in _json_load(run.checkpoint_receipts_json, [])))):
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
+            elif readback_authority_check is not None:
+                await db.rollback()
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
             )
             if run.job_kind == "forgejo_issue_title_v1" and readback_authority_check is None:
                 raise DurableJobTransitionError("Forgejo effects require its fixed native authority callback")
@@ -7268,14 +7350,6 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         if not receipt.get(field_name):
                             receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
-            remote_terminal_settlement = (
-                effect_type == "remote_inference_admission"
-                and status in {"succeeded", "failed"}
-                and isinstance(safe_details, dict)
-                and isinstance(safe_details.get("receipt"), dict)
-                and _text(safe_details["receipt"].get("status"))
-                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
-            )
             remote_uncertain_projection = (
                 effect_type == "remote_inference_admission"
                 and status == "blocked"
@@ -8417,11 +8491,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         return run
 
     @staticmethod
-    def _session():
+    @asynccontextmanager
+    async def _session():
         # Resolve dynamically so DB fixtures and migration shims can patch the
         # canonical job runtime session factory without changing production
         # persistence behavior.
-        return get_session()
+        from src.work_board.channel_capture import staged_captured_source_identity
+        with staged_captured_source_identity():
+            async with get_session() as db:
+                try:
+                    yield db
+                finally:
+                    from src.workflows.general_task_guard import close_native_journals
+                    close_native_journals(db)
 
 
 durable_job_repository = DurableJobRepository()

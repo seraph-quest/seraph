@@ -4,6 +4,10 @@ Reservations preserve the first selected Task allowance. They authorize no
 inference or effects; only the private source issuer can seal a publication.
 """
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from types import MappingProxyType
+import asyncio
 import json
 from typing import Literal
 
@@ -335,15 +339,125 @@ class _CapturedIdentity:
     callback_root_digest: str
     origin_key: bytes
     _seal: object
+    root: object = None
 
 
 def stage_captured_identity():
     """Stage fixed workspace and existing signing identity outside writers."""
     import hashlib, hmac
-    from src.extensions.telegram_task_controls import root_digest
-    return _CapturedIdentity(current_workspace_digest(), root_digest(),
+    from config.settings import settings
+    from src.workspace import canonical_workspace_root, canonical_workspace_root_identity
+    from src.work_board.general_task import digest
+    root = canonical_workspace_root_identity(settings.workspace_dir)
+    legacy = digest([str(canonical_workspace_root(settings.workspace_dir)), root['device'], root['inode']])
+    if current_workspace_digest() != legacy:
+        raise BoardError('channel_capture_identity_changed', 'Workspace changed during identity staging', status_code=409)
+    return _CapturedIdentity(legacy, digest(root),
         hmac.new(_output_signing_key(), b"seraph.channel-capture-origin.v1", hashlib.sha256).digest(),
-        _IDENTITY_SEAL)
+        _IDENTITY_SEAL, MappingProxyType(root))
+
+
+_SOURCE_FRAME = ContextVar('channel_capture_source_frame', default=None)
+_SOURCE_FRAME_SEAL = object()
+_LIVE_SOURCE_FRAMES = {}
+
+
+class _SourceFrame:
+    def __init__(self, root, identity, seal):
+        if seal is not _SOURCE_FRAME_SEAL:
+            raise BoardError('channel_capture_identity_required', 'Use the Source identity owner', status_code=403)
+        self.root, self.identity = root, identity
+        self.creator = asyncio.current_task()
+        self.task_binding = None
+        self.closed = False
+
+
+def _checked_source_frame():
+    frame = _SOURCE_FRAME.get()
+    if (type(frame) is not _SourceFrame or _LIVE_SOURCE_FRAMES.get(id(frame)) is not frame
+        or frame.closed or frame.creator is not asyncio.current_task()):
+        raise BoardError('channel_capture_identity_required', 'Stage the current Source identity outside SQL', status_code=403)
+    return frame
+
+
+@contextmanager
+def staged_captured_source_identity():
+    """Lexical verification material; current SQL alone grants Source use."""
+    from config.settings import settings
+    from src.workspace import canonical_workspace_root_identity
+    root = identity = None
+    try:
+        root = MappingProxyType(canonical_workspace_root_identity(settings.workspace_dir))
+    except Exception:
+        pass
+    try:
+        identity = stage_captured_identity()
+        if root is None or dict(identity.root) != dict(root):
+            identity = None
+            root = None
+    except Exception:
+        # Missing signer does not prevent ordinary Task journal operations.
+        pass
+    frame = _SourceFrame(root, identity, _SOURCE_FRAME_SEAL)
+    _LIVE_SOURCE_FRAMES[id(frame)] = frame
+    token = _SOURCE_FRAME.set(frame)
+    try:
+        yield
+    finally:
+        frame.closed = True
+        _LIVE_SOURCE_FRAMES.pop(id(frame), None)
+        import sys
+        guard = sys.modules.get('src.workflows.general_task_guard')
+        if guard is not None:
+            guard.close_source_journals(frame)
+        _SOURCE_FRAME.reset(token)
+
+
+def _staged_source_root_for_sql():
+    root = _checked_source_frame().root
+    if root is None:
+        raise BoardError('channel_capture_identity_required', 'Current workspace identity is unavailable', status_code=409)
+    return root
+
+
+async def check_current_captured_task_source(db, owner, task, *, identity=None):
+    """Authenticate exact current capture before any private input or adoption."""
+    frame = None
+    if identity is None:
+        try:
+            frame = _checked_source_frame()
+            identity = frame.identity
+        except BoardError:
+            pass
+    # Ordinary NULL Tasks neither need nor acquire captured signing material.
+    if task.channel_capture_origin_json is None:
+        captured = await check_capture_origin(db, owner, task, _classify_only=True)
+        if captured is None:
+            return None
+        raise BoardError('channel_capture_origin_changed', 'Original capture MAC needs operator recovery', status_code=409)
+    identity = _checked_identity(identity)
+    reservation = await check_capture_origin(db, owner, task,
+        _workspace_digest=identity.workspace_digest, _identity=identity)
+    if reservation.source_kind == 'telegram':
+        from sqlalchemy import select
+        from src.db.models import TelegramInboundUpdate
+        event = await db.scalar(select(TelegramInboundUpdate).where(
+            TelegramInboundUpdate.idempotency_key == reservation.source_id,
+            TelegramInboundUpdate.owner_principal_id == owner.principal_id,
+            TelegramInboundUpdate.operator_session_id == owner.session_id).execution_options(populate_existing=True))
+        stored = json.loads(event.receipt_json).get('channel_task_capture', {}) if event else {}
+        if stored.get('task_id') != task.task_id:
+            raise BoardError('channel_capture_origin_changed', 'Original captured Task association changed', status_code=409)
+        if stored.get('document_acquisition') is not None:
+            from src.work_board.document_channel_ingest import check_original_document_sealed
+            await check_original_document_sealed(db, owner, event, reservation, expected_task_id=task.task_id)
+    if frame is not None:
+        binding = (task.task_id, owner.principal_id, owner.session_id,
+            task.channel_capture_origin_json, reservation.idempotency_key)
+        if frame.task_binding not in (None, binding):
+            raise BoardError('channel_capture_identity_required', 'Source frame belongs to another Task', status_code=403)
+        frame.task_binding = binding
+    return reservation
 
 
 def _checked_identity(identity):
@@ -389,6 +503,44 @@ async def publish_capture_origin(db, owner, request, mutation, capture):
         from src.work_board.document_channel_ingest import bind_original_document_task
         await bind_original_document_task(db, owner, mutation.task, reservation, capture.document_link)
     await db.flush()
+
+
+async def check_document_retirement_origin(db, owner, task, reservation, identity):
+    """Authenticate immutable capture identity without issuing execution authority.
+
+    The document retirement owner separately checks the current authenticated
+    deletion owner and original reciprocal Source/event receipt. Execution group
+    or transit expiry neither grants nor prevents this source-only operation.
+    Identity must have been staged by that owner before its SQL writer.
+    """
+    import hmac
+    from sqlalchemy import select
+    from src.db.models import WorkBoardEvent
+    from src.work_board.general_task import digest
+    identity = _checked_identity(identity)
+    try:
+        raw = task.channel_capture_origin_json
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > 4096:
+            raise ValueError()
+        wrapper = json.loads(raw)
+        if set(wrapper) != {"origin", "mac"} or not isinstance(wrapper["mac"], str):
+            raise ValueError()
+        expected = _origin_record(task, reservation)
+        origin = ChannelCaptureOriginV1.model_validate(wrapper["origin"])
+        if (origin != expected or origin.owner_principal_id != owner.principal_id
+            or origin.original_root_id != owner.session_id
+            or task.owner_principal_id != owner.principal_id
+            or task.owner_session_id != owner.session_id
+            or not hmac.compare_digest(_origin_mac(wrapper["origin"], identity=identity), wrapper["mac"])):
+            raise ValueError()
+        events = (await db.execute(select(WorkBoardEvent.metadata_json).where(
+            WorkBoardEvent.task_id == task.task_id, WorkBoardEvent.kind == "task.created",
+            WorkBoardEvent.owner_principal_id == owner.principal_id,
+            WorkBoardEvent.owner_session_id == owner.session_id))).scalars().all()
+        if len(events) != 1 or json.loads(events[0]).get("channel_capture_origin_digest") != digest(raw):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise BoardError("channel_capture_origin_changed", "Original captured source needs operator recovery", status_code=409) from None
 
 
 async def check_capture_origin(db, owner, task, *, expected_reservation=None,

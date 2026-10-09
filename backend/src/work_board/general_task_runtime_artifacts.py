@@ -153,6 +153,7 @@ class StagedTaskArtifact:
     creation_digest: str
     payload: bytes
     seal: object
+    registry_record: object = None
 
 
 def stage_task_artifact(*, parent_job_id, creation_digest, payload):
@@ -177,8 +178,58 @@ def stage_task_artifact(*, parent_job_id, creation_digest, payload):
     kind = _ARTIFACT_KINDS[payload.schema_version]
     identifier = artifact_id_for(file_path=path, artifact_type=kind, producer="agent.task.v1",
         run_id=parent_job_id, content_sha256=sha)
+    from src.artifacts.registry import build_artifact_record
+    record = build_artifact_record(file_path=path, artifact_type=kind,
+        producer='agent.task.v1', run_id=parent_job_id, content=content)
     return StagedTaskArtifact(GeneralTaskArtifactRef(artifact_id=identifier, digest=sha,
-        schema_version=payload.schema_version), path, len(content), parent_job_id, creation_digest, content, _STAGING_SEAL)
+        schema_version=payload.schema_version), path, len(content), parent_job_id, creation_digest, content, _STAGING_SEAL,
+        record)
+
+
+def recheck_staged_task_artifact(staged, *, parent_job_id, creation_digest):
+    """Check the original off-writer physical proof without filesystem access."""
+    from src.work_board.general_task import digest
+    from src.artifacts.registry import artifact_id_for
+    if (type(staged) is not StagedTaskArtifact or staged.seal is not _STAGING_SEAL
+        or staged.producer_ref != parent_job_id or staged.creation_digest != creation_digest
+        or not 0 < staged.size_bytes <= 65536 or len(staged.payload) != staged.size_bytes
+        or hashlib.sha256(staged.payload).hexdigest() != staged.reference.digest):
+        raise BoardError('general_task_artifact_binding', 'Exact native staged artifact required', status_code=409)
+    kind = _ARTIFACT_KINDS[staged.reference.schema_version]
+    key = digest([parent_job_id, creation_digest, staged.reference.schema_version, staged.reference.digest])
+    expected_path = f'artifacts/work-board/general-tasks/{key}-{staged.reference.digest}.json'
+    record = staged.registry_record
+    if (staged.file_path != expected_path or not isinstance(record, dict)
+        or record.get('artifact_id') != staged.reference.artifact_id
+        or record.get('content_sha256') != staged.reference.digest
+        or record.get('size_bytes') != staged.size_bytes or record.get('file_path') != staged.file_path
+        or record.get('producer') != 'agent.task.v1' or record.get('run_id') != parent_job_id
+        or staged.reference.artifact_id != artifact_id_for(file_path=expected_path,
+            artifact_type=kind, producer='agent.task.v1', run_id=parent_job_id,
+            content_sha256=staged.reference.digest)):
+        raise BoardError('general_task_artifact_binding', 'Native registry reference changed', status_code=409)
+    parsed = _ARTIFACT_MODELS[staged.reference.schema_version].model_validate_json(staged.payload)
+    if (isinstance(parsed, (GeneralTaskPlanRevisionV1, GeneralTaskToolInputV1))
+        and (parsed.parent_job_id != parent_job_id or parsed.creation_digest != creation_digest)
+        or isinstance(parsed, GeneralTaskStepReceiptV1) and parsed.parent_creation_digest != creation_digest):
+        raise BoardError('general_task_artifact_binding', 'Native creation reference changed', status_code=409)
+    return parsed, dict(record)
+
+
+def stage_retained_native_artifact(reference, *, parent_job_id, creation_digest):
+    """Read an existing immutable receipt; never rewrite its retained file."""
+    from src.work_board.general_task import canonical, digest
+    from src.artifacts.registry import build_artifact_record
+    parsed = read_native_artifact_reference(reference, parent_job_id=parent_job_id, creation_digest=creation_digest)
+    content = canonical(parsed.model_dump(mode='json'))
+    key = digest([parent_job_id, creation_digest, reference.schema_version, reference.digest])
+    path = f'artifacts/work-board/general-tasks/{key}-{reference.digest}.json'
+    record = build_artifact_record(file_path=path, artifact_type=_ARTIFACT_KINDS[reference.schema_version],
+        producer='agent.task.v1', run_id=parent_job_id, content=content)
+    staged = StagedTaskArtifact(reference, path, len(content), parent_job_id, creation_digest,
+        content, _STAGING_SEAL, record)
+    recheck_staged_task_artifact(staged, parent_job_id=parent_job_id, creation_digest=creation_digest)
+    return staged
 
 
 def verify_staged_task_artifact(staged, *, parent_job_id, creation_digest):
@@ -251,6 +302,9 @@ async def read_current_native_envelope(db, run, task, attempt):
     if (source is None or source.typed_input_ref != task.typed_input_ref
         or source.payload_sha256 != task.typed_input_digest):
         raise BoardError("general_task_native_binding_changed", "Original native input reference changed", status_code=409)
+    from src.work_board.channel_capture import check_current_captured_task_source
+    await check_current_captured_task_source(db,
+        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
     resolved = await resolve_input_artifact_for_task(db,
         WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
         artifact_id=task.input_artifact_id, goal_id=task.goal_id, goal_revision=task.goal_revision,
@@ -270,12 +324,14 @@ def compile_creation_digest(parent, task, attempt, envelope):
     from src.work_board.general_task import digest
     from src.work_board.pipelines import root_binding
     from src.workflows.inference_accounting import _utc
+    from src.work_board.channel_capture import _staged_source_root_for_sql, _SOURCE_FRAME
+    root = dict(_staged_source_root_for_sql()) if _SOURCE_FRAME.get() is not None else root_binding()
     return digest(["general-task.creation.v1", parent.run_identity, parent.input_digest,
         parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
         task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,
         task.typed_input_digest, envelope.proposal_group.group_id,
         digest(envelope.proposal_group.model_dump(mode="json")), selected_grant_digest(envelope),
-        digest(root_binding()), _utc(parent.deadline_at).isoformat(),
+        digest(root), _utc(parent.deadline_at).isoformat(),
         envelope.proposal_group.original_deadline_at.isoformat()])
 
 
@@ -343,6 +399,8 @@ async def read_current_native_tool_input(db, child):
     from src.work_board.general_task import digest
     await assert_general_task_child_current(db, child)
     binding = child_binding(child)
+    from src.workflows.general_task_guard import check_native_writer_source
+    await check_native_writer_source(db, child)
     return read_bound_native_tool_input(child, binding)
 
 
@@ -484,10 +542,19 @@ async def verify_general_task_manifest(db, parent, task, attempt, manifest):
     return await _verify_native_manifest_data(parent, task, attempt, manifest, envelope)
 
 
-async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope):
+async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope, *, _staged_artifacts=None):
     from src.work_board.contracts import GeneralTaskCurrentManifestV1
     from src.work_board.general_task import digest
     from src.workflows.inference_accounting import _utc
+    def retained(reference):
+        if _staged_artifacts is None:
+            return read_native_artifact_reference(reference, parent_job_id=parent.run_identity,
+                creation_digest=manifest.creation_digest)
+        for staged in _staged_artifacts:
+            if staged.reference == reference:
+                return recheck_staged_task_artifact(staged, parent_job_id=parent.run_identity,
+                    creation_digest=manifest.creation_digest)[0]
+        raise BoardError('general_task_manifest_binding_changed', 'Exact staged native reference required', status_code=409)
     if not isinstance(manifest, GeneralTaskCurrentManifestV1):
         raise BoardError("general_task_manifest_invalid", "Closed native manifest required", status_code=409)
     group = envelope.proposal_group
@@ -516,10 +583,9 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
         raise BoardError("general_task_manifest_plan_changed", "Original immutable plan changed", status_code=409)
     active_plan = envelope.plan
     for index in range(1, len(manifest.revision_numbers)):
-        revision = read_native_artifact_reference(GeneralTaskArtifactRef(
+        revision = retained(GeneralTaskArtifactRef(
             artifact_id=manifest.revision_artifact_ids[index], digest=manifest.revision_artifact_digests[index],
-            schema_version=manifest.revision_artifact_schemas[index]), parent_job_id=parent.run_identity,
-            creation_digest=manifest.creation_digest)
+            schema_version=manifest.revision_artifact_schemas[index]))
         if (revision.plan.revision != manifest.revision_numbers[index]
             or revision.original_envelope_digest != manifest.original_envelope_digest
             or revision.selected_grant_digest != manifest.selected_grant_digest
@@ -530,10 +596,9 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
     if manifest.current_plan_digest != digest(active_plan.model_dump(mode="json")) or manifest.current_plan_artifact_id != manifest.revision_artifact_ids[-1]:
         raise BoardError("general_task_manifest_plan_changed", "Current immutable revision reference changed", status_code=409)
     for index, step_id in enumerate(manifest.step_ids):
-        receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
+        receipt = retained(GeneralTaskArtifactRef(
             artifact_id=manifest.step_receipt_artifact_ids[index], digest=manifest.step_receipt_digests[index],
-            schema_version=manifest.step_receipt_schemas[index]), parent_job_id=parent.run_identity,
-            creation_digest=manifest.creation_digest)
+            schema_version=manifest.step_receipt_schemas[index]))
         if (receipt.step_id != step_id or receipt.task_id != task.task_id or receipt.attempt_id != attempt.attempt_id
             or receipt.invocation_id not in manifest.admitted_invocation_ids
             or receipt.selected_grant_digest != manifest.selected_grant_digest):

@@ -377,14 +377,16 @@ async def delete_source(request: Request, identifier: str, expected_revision: in
 
 @router.post("/read")
 async def read_document(request: Request, body: DocumentReadInput):
+    from src.work_board.channel_capture import staged_captured_source_identity
     operator = _operator(request)
     owner = _owner(operator)
     service = getattr(request.app.state, "document_service", None)
     if service is None:
         raise HTTPException(status_code=503, detail={"code": "document_service_inactive"})
     try:
-        async with get_session() as db:
-            return await service.read(db, owner, body, operator=operator)
+        with staged_captured_source_identity():
+            async with get_session() as db:
+                return await service.read(db, owner, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
     except (ValueError, OSError):

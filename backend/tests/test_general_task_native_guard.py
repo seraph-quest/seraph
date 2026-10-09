@@ -1,5 +1,7 @@
 """Real disposable SQLite native-child phase fences; no tool/provider contact."""
 import json
+import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +18,37 @@ from src.work_board.general_task_runtime_artifacts import (
 )
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.pipelines import root_binding
+
+
+@pytest.mark.asyncio
+async def test_positive_parent_journal_rejects_copy_foreign_scope_and_metadata_drift(task_runtime):
+    from src.workflows import general_task_guard as guard
+    from src.work_board.repository import BoardError
+    from src.db.models import WorkBoardInputArtifact
+    sessions, dispatcher, service, envelope, original = await running_task(task_runtime)
+    parent_id = original['job']['job_id']
+    async with sessions() as db:
+        await guard.stage_positive_parent(dispatcher.jobs, db, parent_id)
+        await guard._current(dispatcher.jobs, db, parent_id)
+        key = (id(db), parent_id)
+        journal = guard._STAGED_NATIVE_JOURNALS[key]
+        guard._STAGED_NATIVE_JOURNALS[key] = replace(journal)
+        with pytest.raises(DurableJobLeaseError, match='staged positive envelope'):
+            await guard._current(dispatcher.jobs, db, parent_id)
+        guard._STAGED_NATIVE_JOURNALS[key] = journal
+        async def foreign():
+            with pytest.raises(BoardError, match='Stage the current Source identity'):
+                await guard._current(dispatcher.jobs, db, parent_id)
+        await asyncio.create_task(foreign())
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == journal.envelope_pins[0]))
+        artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+        artifact.revision += 1
+        await db.flush()
+        with pytest.raises(DurableJobLeaseError, match='immutable metadata changed|staged positive envelope'):
+            await guard._current(dispatcher.jobs, db, parent_id)
+        await db.rollback()
+    assert key not in guard._STAGED_NATIVE_JOURNALS
+    assert id(journal) not in guard._LIVE_NATIVE_JOURNALS
 from src.workflows.general_task_guard import assert_general_task_child_current, read_manifest
 from src.workflows.job_runtime import (
     DurableJobIdentity, DurableJobSpec, DurableJobLeaseError,

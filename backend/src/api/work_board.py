@@ -2359,18 +2359,20 @@ async def create_general_task(request: Request, body: GeneralTaskCreate):
 
 @router.get("/tasks/{task_id}/plan")
 async def get_general_task_plan(request: Request, task_id: str):
-    owner = _owner(_operator(request))
-    try:
-        if dispatcher.general_tasks is None:
-            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
-        async with get_session() as db:
-            payload = await dispatcher.general_tasks.plan(db, owner, task_id)
-            # Plans are data, but can still contain operator-supplied secrets.
-            safe = await vault_redaction.redact_secrets_in_text_readonly(db,
-                json.dumps(payload), fail_closed=True)
-            return json.loads(safe)
-    except BoardError as exc:
-        _raise_board_error(exc)
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        owner = _owner(_operator(request))
+        try:
+            if dispatcher.general_tasks is None:
+                raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+            async with get_session() as db:
+                payload = await dispatcher.general_tasks.plan(db, owner, task_id)
+                # Plans are data, but can still contain operator-supplied secrets.
+                safe = await vault_redaction.redact_secrets_in_text_readonly(db,
+                    json.dumps(payload), fail_closed=True)
+                return json.loads(safe)
+        except BoardError as exc:
+            _raise_board_error(exc)
 
 
 @router.get("/tasks/{task_id}/communications")
@@ -2424,43 +2426,49 @@ async def cleanup_private_communication_plan(request: Request, task_id: str, bod
 
 @router.post("/tasks/{task_id}/plan")
 async def update_general_task_plan(request: Request, task_id: str, body: GeneralTaskPlanUpdate):
-    owner = _owner(_operator(request))
-    try:
-        if dispatcher.general_tasks is None:
-            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
-        async with get_session() as db:
-            task = await dispatcher.general_tasks.update_plan(db, owner, task_id, body)
-            return {"task": await _safe_task_payload(task, db=db)}
-    except BoardError as exc:
-        _raise_board_error(exc)
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        owner = _owner(_operator(request))
+        try:
+            if dispatcher.general_tasks is None:
+                raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+            async with get_session() as db:
+                task = await dispatcher.general_tasks.update_plan(db, owner, task_id, body)
+                return {"task": await _safe_task_payload(task, db=db)}
+        except BoardError as exc:
+            _raise_board_error(exc)
 
 
 @router.post("/tasks/{task_id}/plan/revise")
 async def revise_paused_general_task_plan(request: Request, task_id: str, body: PlanRevisionRequest):
-    owner = _owner(_operator(request))
-    try:
-        task, attempt = await dispatcher.revise_paused_general_task(owner, task_id, body)
-        return {"task": await _safe_task_payload(task, latest_attempt=attempt)}
-    except BoardError as exc:
-        _raise_board_error(exc)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail={"code": "general_task_revision_blocked",
-            "recovery": "Refresh the original safely paused plan; admitted steps and uncertain tool work cannot be revised."}) from exc
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        owner = _owner(_operator(request))
+        try:
+            task, attempt = await dispatcher.revise_paused_general_task(owner, task_id, body)
+            return {"task": await _safe_task_payload(task, latest_attempt=attempt)}
+        except BoardError as exc:
+            _raise_board_error(exc)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail={"code": "general_task_revision_blocked",
+                "recovery": "Refresh the original safely paused plan; admitted steps and uncertain tool work cannot be revised."}) from exc
 
 
 @router.post("/tasks/{task_id}/plan/resume")
 async def resume_general_task_plan(request: Request, task_id: str, body: GeneralTaskResume):
-    owner = _owner(_operator(request))
-    try:
-        task = await dispatcher.resume_general_task(owner, task_id, body)
-        async with get_session() as db:
-            attempt = await db.get(WorkBoardAttempt, body.attempt_id)
-            return {"task": await _safe_task_payload(task, db=db, latest_attempt=attempt)}
-    except BoardError as exc:
-        _raise_board_error(exc)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail={"code": "general_task_resume_binding_changed",
-            "message": "Refresh the exact original task and approval state"}) from exc
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        owner = _owner(_operator(request))
+        try:
+            task = await dispatcher.resume_general_task(owner, task_id, body)
+            async with get_session() as db:
+                attempt = await db.get(WorkBoardAttempt, body.attempt_id)
+                return {"task": await _safe_task_payload(task, db=db, latest_attempt=attempt)}
+        except BoardError as exc:
+            _raise_board_error(exc)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail={"code": "general_task_resume_binding_changed",
+                "message": "Refresh the exact original task and approval state"}) from exc
 
 
 @router.get("/tasks/{task_id}")
@@ -2763,160 +2771,162 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
 
 @router.post("/tasks/{task_id}/actions")
 async def action_work_board_task(request: Request, task_id: str, body: WorkBoardActionRequest):
-    operator = _operator(request)
-    try:
-        owner = _owner(operator)
-        if body.action.value in {"pause", "resume"}:
-            if body.model_fields_set - {"action", "expected_revision"}:
-                raise BoardError("unsupported_action_fields", "Native controls accept the current task revision only", status_code=422)
-            try:
-                task, attempt = await dispatcher.control_general_task(owner, task_id,
-                    expected_revision=body.expected_revision, action=body.action.value)
-            except BoardError:
-                raise
-            except Exception as exc:
-                raise BoardError("general_task_control_blocked", "Refresh the original task; active or unknown tool work must close before safe pause or resume", status_code=409) from exc
-            return {"task": await _safe_task_payload(task, latest_attempt=attempt),
-                "attempt": _attempt_payload(attempt)}
-        if body.action.value == "cancel":
+    from src.work_board.channel_capture import staged_captured_source_identity
+    with staged_captured_source_identity():
+        operator = _operator(request)
+        try:
+            owner = _owner(operator)
+            if body.action.value in {"pause", "resume"}:
+                if body.model_fields_set - {"action", "expected_revision"}:
+                    raise BoardError("unsupported_action_fields", "Native controls accept the current task revision only", status_code=422)
+                try:
+                    task, attempt = await dispatcher.control_general_task(owner, task_id,
+                        expected_revision=body.expected_revision, action=body.action.value)
+                except BoardError:
+                    raise
+                except Exception as exc:
+                    raise BoardError("general_task_control_blocked", "Refresh the original task; active or unknown tool work must close before safe pause or resume", status_code=409) from exc
+                return {"task": await _safe_task_payload(task, latest_attempt=attempt),
+                    "attempt": _attempt_payload(attempt)}
+            if body.action.value == "cancel":
+                async with get_session() as db:
+                    selected_task = await repository.get_task(db, owner, task_id)
+                    if selected_task.capability_id == "agent.task.v1" and body.model_fields_set - {"action", "expected_revision"}:
+                        raise BoardError("unsupported_action_fields", "Native cancellation accepts the current task revision only", status_code=422)
+                projection = await dispatcher.cancel_task(
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                )
+                task_payload = await _safe_task_payload(
+                    projection.task,
+                    latest_attempt=projection.attempt,
+                    attempt_count=1,
+                )
+                payload = {
+                    **_action_receipt_payload(
+                        task_payload,
+                        projection.event,
+                        attempt_id=projection.attempt.attempt_id,
+                    ),
+                    "task": task_payload,
+                    "attempt": _attempt_payload(projection.attempt),
+                }
+                return payload
+            if body.action.value == "retry":
+                await dispatcher.validate_retry(
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                )
             async with get_session() as db:
-                selected_task = await repository.get_task(db, owner, task_id)
-                if selected_task.capability_id == "agent.task.v1" and body.model_fields_set - {"action", "expected_revision"}:
-                    raise BoardError("unsupported_action_fields", "Native cancellation accepts the current task revision only", status_code=422)
-            projection = await dispatcher.cancel_task(
-                owner,
-                task_id,
-                expected_revision=body.expected_revision,
-            )
+                if body.action.value == "request_review":
+                    mutation = await review_service.request_review(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                        attempt_id=body.attempt_id or "",
+                        evidence_refs=body.evidence_refs,
+                        repository=repository,
+                    )
+                elif body.action.value == "request_changes":
+                    mutation = await review_service.request_changes(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                        reason=body.reason or "",
+                        repository=repository,
+                    )
+                elif body.action.value == "complete_review":
+                    mutation = await review_service.complete_review(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                        attempt_id=body.attempt_id or "",
+                        repository=repository,
+                    )
+                elif body.action.value == "renew_review":
+                    mutation = await review_service.renew_review(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                        repository=repository,
+                    )
+                elif body.action.value == "block" and body.block_kind not in WORK_BOARD_AUTHENTICATED_BLOCK_KINDS:
+                    # Workflow/effect categories are written only after the
+                    # authoritative runtime has reconciled them.  The
+                    # authenticated generic action may record only bounded board
+                    # recovery categories; repository.action_task repeats this
+                    # check for direct callers and performs the revision/source
+                    # status CAS.
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"code": "invalid_block_kind"},
+                    )
+                elif body.action.value == "unblock":
+                    mutation = await review_service.unblock_task(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                        resolution=body.resolution or "",
+                        repository=repository,
+                    )
+                elif body.action.value == "retry":
+                    mutation = await repository.retry_task(
+                        db,
+                        owner,
+                        task_id,
+                        expected_revision=body.expected_revision,
+                    )
+                else:
+                    if body.action.value == "promote":
+                        promoted = await repository.get_task(db, owner, task_id)
+                        if promoted.capability_id == "agent.task.v1":
+                            if dispatcher.general_tasks is None:
+                                raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+                            await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
+                                body.expected_revision, document_build_review=body.document_build_review)
+                    mutation = await repository.action_task(db, owner, task_id, body)
+                latest_attempt = (
+                    await db.execute(
+                        select(WorkBoardAttempt)
+                        .where(WorkBoardAttempt.task_id == mutation.task.task_id)
+                        .order_by(
+                            WorkBoardAttempt.created_at.desc(),
+                            WorkBoardAttempt.attempt_id.desc(),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            # Recovery guidance performs fresh provider-free authority checks.
+            # Build this projection only after the mutation session commits so a
+            # manual Block response cannot validate the pre-mutation Todo state
+            # and incorrectly hide its new Unblock action.
             task_payload = await _safe_task_payload(
-                projection.task,
-                latest_attempt=projection.attempt,
-                attempt_count=1,
+                mutation.task,
+                latest_attempt=latest_attempt,
             )
             payload = {
                 **_action_receipt_payload(
                     task_payload,
-                    projection.event,
-                    attempt_id=projection.attempt.attempt_id,
+                    mutation.event,
+                    attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
                 ),
                 "task": task_payload,
-                "attempt": _attempt_payload(projection.attempt),
             }
             return payload
-        if body.action.value == "retry":
-            await dispatcher.validate_retry(
-                owner,
-                task_id,
-                expected_revision=body.expected_revision,
-            )
-        async with get_session() as db:
-            if body.action.value == "request_review":
-                mutation = await review_service.request_review(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                    attempt_id=body.attempt_id or "",
-                    evidence_refs=body.evidence_refs,
-                    repository=repository,
-                )
-            elif body.action.value == "request_changes":
-                mutation = await review_service.request_changes(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                    reason=body.reason or "",
-                    repository=repository,
-                )
-            elif body.action.value == "complete_review":
-                mutation = await review_service.complete_review(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                    attempt_id=body.attempt_id or "",
-                    repository=repository,
-                )
-            elif body.action.value == "renew_review":
-                mutation = await review_service.renew_review(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                    repository=repository,
-                )
-            elif body.action.value == "block" and body.block_kind not in WORK_BOARD_AUTHENTICATED_BLOCK_KINDS:
-                # Workflow/effect categories are written only after the
-                # authoritative runtime has reconciled them.  The
-                # authenticated generic action may record only bounded board
-                # recovery categories; repository.action_task repeats this
-                # check for direct callers and performs the revision/source
-                # status CAS.
-                raise HTTPException(
-                    status_code=422,
-                    detail={"code": "invalid_block_kind"},
-                )
-            elif body.action.value == "unblock":
-                mutation = await review_service.unblock_task(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                    resolution=body.resolution or "",
-                    repository=repository,
-                )
-            elif body.action.value == "retry":
-                mutation = await repository.retry_task(
-                    db,
-                    owner,
-                    task_id,
-                    expected_revision=body.expected_revision,
-                )
-            else:
-                if body.action.value == "promote":
-                    promoted = await repository.get_task(db, owner, task_id)
-                    if promoted.capability_id == "agent.task.v1":
-                        if dispatcher.general_tasks is None:
-                            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
-                        await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
-                            body.expected_revision, document_build_review=body.document_build_review)
-                mutation = await repository.action_task(db, owner, task_id, body)
-            latest_attempt = (
-                await db.execute(
-                    select(WorkBoardAttempt)
-                    .where(WorkBoardAttempt.task_id == mutation.task.task_id)
-                    .order_by(
-                        WorkBoardAttempt.created_at.desc(),
-                        WorkBoardAttempt.attempt_id.desc(),
-                    )
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-        # Recovery guidance performs fresh provider-free authority checks.
-        # Build this projection only after the mutation session commits so a
-        # manual Block response cannot validate the pre-mutation Todo state
-        # and incorrectly hide its new Unblock action.
-        task_payload = await _safe_task_payload(
-            mutation.task,
-            latest_attempt=latest_attempt,
-        )
-        payload = {
-            **_action_receipt_payload(
-                task_payload,
-                mutation.event,
-                attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
-            ),
-            "task": task_payload,
-        }
-        return payload
-    except BoardError as exc:
-        _raise_board_error(exc)
-    except SQLAlchemyError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
-        ) from exc
+        except BoardError as exc:
+            _raise_board_error(exc)
+        except SQLAlchemyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+            ) from exc
 
 
 @router.post("/tasks/{task_id}/specify")

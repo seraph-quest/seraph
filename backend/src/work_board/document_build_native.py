@@ -471,10 +471,13 @@ async def stage_candidate(db, run, *, service=None):
         raise BoardError("document_build_native_owner_required", "Restore the actual native build owner", status_code=503)
     await assert_general_task_child_phase_current(db, run)
     native = child_binding(run)
-    private = read_bound_native_tool_input(run, native)
     parent = await db.scalar(select(type(run)).where(type(run).run_identity == native.parent_job_id))
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == native.task_id))
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == native.attempt_id))
+    from src.work_board.channel_capture import check_current_captured_task_source
+    await check_current_captured_task_source(db,
+        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
+    private = read_bound_native_tool_input(run, native)
     envelope = await read_current_native_envelope(db, parent, task, attempt)
     check_envelope(envelope)
     tool = descriptor()

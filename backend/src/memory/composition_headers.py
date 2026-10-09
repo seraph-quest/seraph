@@ -29,6 +29,16 @@ def _sql(connection, query, parameters=()):
     return connection.exec_driver_sql(query, parameters) if hasattr(connection, "exec_driver_sql") else connection.execute(query, parameters)
 
 
+def _one_scalar(connection, query, parameters=()):
+    result = _sql(connection, query, parameters)
+    if hasattr(result, "scalar_one"):
+        return result.scalar_one()
+    rows = result.fetchmany(2)
+    if len(rows) != 1 or len(rows[0]) != 1:
+        raise HeaderBoundsError("header_scalar_unavailable")
+    return rows[0][0]
+
+
 _SNAPSHOT_SCOPE_SEAL = object()
 _SNAPSHOT_SCOPES = WeakValueDictionary()
 _SNAPSHOT_CERTIFICATES = WeakValueDictionary()
@@ -87,27 +97,28 @@ def _memory_current_snapshot_scope(budget):
 
 
 def _snapshot_schema_cookies(connection, budget):
-    cookies = (_sql(connection, "PRAGMA main.schema_version").scalar_one(),
-               _sql(connection, "PRAGMA temp.schema_version").scalar_one())
+    cookies = (_one_scalar(connection, "PRAGMA main.schema_version"),
+               _one_scalar(connection, "PRAGMA temp.schema_version"))
     if any(type(value) is not int or not 0 <= value < 2**31 for value in cookies):
         raise HeaderBoundsError("header_schema_cookie_unavailable")
     budget.debit(_metadata_cost(cookies), appearance=("schema-cookies",))
     return cookies
 
 
-def _certify_current_memory_snapshot_on_connection(connection, budget):
+def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_owner=None):
     """Reuse only an original issued certificate for this exact live snapshot."""
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
     scope = _checked_current_snapshot_scope(budget)
     if scope is None:
-        return preflight_composition_superset(connection, budget)
+        return preflight_composition_superset(connection, budget, raw_owner=raw_owner)
     current = scope.certificates.get(connection)
     if current is not None:
         certificate, cookies = current
         if (type(certificate) is not CompositionHeaderCertificate
                 or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate
-                or certificate.budget is not budget or certificate.connection is not connection):
+                or certificate.budget is not budget or certificate.connection is not connection
+                or certificate.raw_owner is not raw_owner):
             raise HeaderBoundsError("header_certificate_unavailable")
         try:
             _validate(connection, certificate)
@@ -118,7 +129,7 @@ def _certify_current_memory_snapshot_on_connection(connection, budget):
             if _snapshot_schema_cookies(connection, budget) == cookies:
                 return certificate
     cookies = _snapshot_schema_cookies(connection, budget)
-    certificate = preflight_composition_superset(connection, budget)
+    certificate = preflight_composition_superset(connection, budget, raw_owner=raw_owner)
     if _snapshot_schema_cookies(connection, budget) != cookies:
         raise HeaderBoundsError("header_schema_cookie_changed")
     _validate(connection, certificate)
@@ -136,13 +147,18 @@ def _metadata_cost(rows):
     return len(json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode())
 
 
-def _state(connection):
+def _state(connection, *, raw_owner=None):
+    if raw_owner is not None:
+        from src.workspace.accounting_continuity import _RawRollbackConnection
+        if type(raw_owner) is not _RawRollbackConnection:
+            raise HeaderBoundsError("header_raw_owner_unavailable")
+        return raw_owner._state(connection)
     if not connection.in_transaction():
         raise HeaderBoundsError("header_transaction_required")
     driver = connection.connection.driver_connection
     if not driver.in_transaction:
         raise HeaderBoundsError("header_sqlite_transaction_required")
-    return connection.get_transaction(), driver, _sql(connection, "SELECT total_changes()").scalar_one()
+    return connection.get_transaction(), driver, _one_scalar(connection, "SELECT total_changes()")
 
 
 def validate_descriptor_schema(connection, descriptor):
@@ -224,7 +240,7 @@ def _headers(connection, descriptor, identities):
     return result
 
 
-def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None):
+def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None):
     budget.debit(validate_descriptor_schema(connection,descriptor), appearance=("descriptor-schema", descriptor.table))
     if tombstone:
         name=_validate_locator(connection,descriptor.table,"memory_id")
@@ -252,8 +268,9 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
         ids.append(value)
     if len(ids)!=len(set(ids)):raise HeaderBoundsError("header_row_unavailable")
     for identity,row in zip(ids,rows):
-        budget.resolve_future(descriptor,identity,row[0])
-    budget.enroll((descriptor.table,r[0]) for r in rows)
+        budget.resolve_future(descriptor,identity,row[0],database_identity=database_identity)
+    budget.enroll((descriptor.table,r[0]) if database_identity is None
+        else (database_identity,descriptor.table,r[0]) for r in rows)
     budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("locator-metadata", descriptor.table, key, tombstone, tuple(ids)))
     return tuple(ids)
 
@@ -288,12 +305,18 @@ class CompositionHeaderCertificate:
     budget: HeaderReadBudget
     seal: object
     issued_id: int=0
+    raw_owner: object=None
+    schema_cookies: object=None
 
 
 def _validate(connection,certificate):
     if type(certificate) is not CompositionHeaderCertificate or certificate.seal is not _SEAL or certificate.issued_id!=id(certificate) or certificate.connection is not connection:
         raise HeaderBoundsError("header_certificate_unavailable")
-    if _state(connection)!=(certificate.transaction,certificate.driver,certificate.changes):
+    if certificate.raw_owner is not None:
+        certificate.raw_owner._validate_budget(certificate.budget)
+    if _state(connection,raw_owner=certificate.raw_owner)!=(certificate.transaction,certificate.driver,certificate.changes):
+        raise HeaderBoundsError("header_certificate_stale")
+    if certificate.raw_owner is not None and _snapshot_schema_cookies(connection,certificate.budget)!=certificate.schema_cookies:
         raise HeaderBoundsError("header_certificate_stale")
 
 
@@ -307,7 +330,7 @@ def _validate_fts_metadata(connection,budget,objects):
         if len(header)!=1 or tuple(header[0])!=("text",len(expected_sql.encode("utf-8"))):
             raise HeaderBoundsError("header_fts_metadata_changed")
         budget.debit(6*header[0][1]+2, appearance=("fts-sql", name))
-        actual=_sql(connection,"SELECT sql FROM sqlite_schema WHERE name=? LIMIT 2",(name,)).scalar_one()
+        actual=_one_scalar(connection,"SELECT sql FROM sqlite_schema WHERE name=? LIMIT 2",(name,))
         if actual!=expected_sql:raise HeaderBoundsError("header_fts_metadata_changed")
     for name,expected in _FTS_META.items():
         columns=list(_sql(connection,'SELECT cid,CASE WHEN octet_length(name)<=128 THEN name END,'
@@ -328,10 +351,13 @@ def _validate_fts_metadata(connection,budget,objects):
             if [list(x) for x in actual]!=parts:raise HeaderBoundsError("header_fts_metadata_changed")
 
 
-def preflight_composition_superset(connection,budget):
+def preflight_composition_superset(connection,budget, *, raw_owner=None):
     if type(budget) is not HeaderReadBudget:raise HeaderBoundsError("header_request_bound")
-    state=_state(connection)
-    if tuple(map(int,_sql(connection,"SELECT sqlite_version()").scalar_one().split('.'))) < (3,43,0) or _sql(connection,"PRAGMA encoding").scalar_one()!="UTF-8":
+    state=_state(connection,raw_owner=raw_owner)
+    if raw_owner is not None:
+        raw_owner._validate_budget(budget)
+    cookies=_snapshot_schema_cookies(connection,budget) if raw_owner is not None else None
+    if tuple(map(int,_one_scalar(connection,"SELECT sqlite_version()").split('.'))) < (3,43,0) or _one_scalar(connection,"PRAGMA encoding")!="UTF-8":
         raise HeaderBoundsError("header_sqlite_version_unsupported")
     objects=list(_sql(connection,'SELECT rowid,CASE WHEN octet_length(type)<=7 THEN type END,'
         'CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(tbl_name)<=128 THEN tbl_name END '
@@ -352,12 +378,16 @@ def preflight_composition_superset(connection,budget):
     _validate_fts_metadata(connection,budget,objects)
     allrows={}
     for descriptor in COMPOSITION_DESCRIPTORS.values():
-        ids=_discover(connection,descriptor,budget,remaining=MAX_ROWS-len(allrows))
+        ids=_discover(connection,descriptor,budget,remaining=MAX_ROWS-len(allrows),
+            database_identity=raw_owner._namespace if raw_owner is not None else None)
         rows=_headers(connection,descriptor,ids)
         budget.debit(sum(cost for _,cost in rows.values()), appearance=("complete-headers", descriptor.table, tuple(ids)))
         allrows.update(rows)
-    if _state(connection)!=state:raise HeaderBoundsError("header_snapshot_changed")
-    cert=CompositionHeaderCertificate(connection,*state,MappingProxyType(allrows),budget,_SEAL)
+    if _state(connection,raw_owner=raw_owner)!=state:raise HeaderBoundsError("header_snapshot_changed")
+    if raw_owner is not None and _snapshot_schema_cookies(connection,budget)!=cookies:
+        raise HeaderBoundsError("header_schema_cookie_changed")
+    cert=CompositionHeaderCertificate(connection,*state,MappingProxyType(allrows),budget,_SEAL,
+        raw_owner=raw_owner,schema_cookies=cookies)
     object.__setattr__(cert,"issued_id",id(cert))
     return cert
 

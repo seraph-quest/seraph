@@ -175,11 +175,13 @@ class HeaderReadBudget:
             raise HeaderBoundsError("header_reference_bound")
         self.physical_references |= physical
 
-    def reserve_future_row(self, descriptor, identity, upper_bytes):
+    def reserve_future_row(self, descriptor, identity, upper_bytes, *, database_identity=None):
         """Numeric capacity for an actual not-yet-attached constructor address."""
         if not any(descriptor is item for item in _DESCRIPTORS):
             raise HeaderBoundsError("header_descriptor_unavailable")
         ref=(descriptor.table,descriptor.key,identity)
+        if database_identity is not None:
+            ref=(database_identity,*ref)
         if type(identity) is not str or not identity or len(identity.encode("utf-8"))>512:
             raise HeaderBoundsError("header_request_bound")
         if ref in self.future_references or ref in self.references:
@@ -189,13 +191,16 @@ class HeaderReadBudget:
         self.debit(upper_bytes)
         self.future_references.add(ref)
 
-    def resolve_future(self, descriptor, identity, rowid):
+    def resolve_future(self, descriptor, identity, rowid, *, database_identity=None):
         ref=(descriptor.table,descriptor.key,identity)
+        if database_identity is not None:
+            ref=(database_identity,*ref)
         if ref in self.future_references:
             if type(rowid) is not int or rowid<=0:
                 raise HeaderBoundsError("header_rowid_unavailable")
             self.future_references.remove(ref)
-            self.physical_references.add((descriptor.table,rowid))
+            self.physical_references.add((descriptor.table,rowid) if database_identity is None
+                else (database_identity,descriptor.table,rowid))
 
     async def certify_all(self, db, descriptor):
         from src.memory.composition_headers import discover_rows

@@ -5,6 +5,207 @@ import sqlite3
 import json
 import hashlib
 from datetime import datetime, timezone
+import os
+import stat
+import threading
+
+
+class _RawRollbackConnection:
+    """Private original rollback handle, not a plugin SQL or authority API.
+
+    Path/inode observations check cooperative owner consistency; they do not
+    prove which inode SQLite's VFS opened or isolate a hostile same-UID actor.
+    This bounded first seam admits read certification only. Original retention
+    writes/publication still require the complete programme closure protocol.
+    """
+    def __init__(self, path, budget, *, readonly):
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        from src.workspace.production import _assert_no_symlink_components
+        if type(budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("header_request_bound")
+        self._path = Path(path).absolute()
+        _assert_no_symlink_components(self._path, label="rollback database")
+        self._path = self._path.resolve(strict=True)
+        observed = self._path.stat()
+        if not stat.S_ISREG(observed.st_mode):
+            raise HeaderBoundsError("rollback_database_unavailable")
+        self._observed_inode = (observed.st_dev, observed.st_ino)
+        self._budget = budget
+        self._namespace = object()  # Exact handle namespace, never a VFS claim.
+        self._thread = threading.get_ident()
+        self._pid = os.getpid()
+        self._live = True
+        self._poisoned = False
+        self._token = None
+        self._expected = None
+        self._trace_count = 0
+        self._transition_trace = 0
+        self._probe_denials = 0
+        self._db = sqlite3.connect(self._path.as_uri() + ("?mode=ro" if readonly else "?mode=rw"),
+            uri=True, isolation_level=None, cached_statements=0)
+        self._db.row_factory = sqlite3.Row
+        self._db.set_authorizer(self._authorize)
+        self._db.set_trace_callback(self._trace)
+        try:
+            self._validate_handle()
+        except BaseException:
+            self.close()
+            raise
+
+    def _fail(self, code):
+        from src.memory.header_bounds import HeaderBoundsError
+        self._poisoned = True
+        self._token = None
+        raise HeaderBoundsError(code)
+
+    def _authorize(self, action, first, second, database, trigger):
+        if action == sqlite3.SQLITE_FUNCTION and second == "hex":
+            self._probe_denials += 1
+            return sqlite3.SQLITE_DENY
+        if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_SAVEPOINT):
+            self._poisoned = True
+            self._token = None
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_TRANSACTION:
+            expected = self._expected.split()[0] if self._expected else None
+            if first != expected:
+                self._poisoned = True
+                self._token = None
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_PRAGMA:
+            if (first not in {
+                "database_list", "schema_version", "encoding", "table_xinfo",
+                "table_list", "index_list", "index_xinfo"}
+                or (second is not None and first not in {
+                    "table_xinfo", "table_list", "index_list", "index_xinfo"})):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ):
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_FUNCTION and second in {
+                "typeof", "octet_length", "sqlite_version", "total_changes"}:
+            return sqlite3.SQLITE_OK
+        # Closed read-only policy: temp/virtual schema DDL and every other
+        # unneeded action deny too, rather than relying on a mutation blacklist.
+        return sqlite3.SQLITE_DENY
+
+    def _trace(self, statement):
+        self._trace_count += 1
+        command = statement.strip().upper()
+        if command.split(" ", 1)[0] in ("BEGIN", "COMMIT", "ROLLBACK", "END", "SAVEPOINT", "RELEASE"):
+            if command != self._expected:
+                self._poisoned = True
+                self._token = None
+            else:
+                self._transition_trace += 1
+
+    def _validate_handle(self):
+        if (not self._live or self._poisoned or self._thread != threading.get_ident()
+                or self._pid != os.getpid() or type(self._db) is not sqlite3.Connection
+                or self._db.isolation_level is not None):
+            self._fail("rollback_raw_owner_unavailable")
+        # Harmless denied function probes detect replaced authorizers without
+        # executing an unauthorized transaction. Statement caching is disabled.
+        denied = self._probe_denials
+        try:
+            self._db.execute("SELECT hex(NULL)").fetchall()
+        except sqlite3.DatabaseError:
+            pass
+        if self._probe_denials != denied + 1:
+            self._fail("rollback_authorizer_unavailable")
+        traced = self._trace_count
+        self._db.execute("SELECT 1").fetchone()
+        if self._trace_count != traced + 1:
+            self._fail("rollback_trace_unavailable")
+        from src.workspace.production import _assert_no_symlink_components
+        try:
+            _assert_no_symlink_components(self._path, label="rollback database")
+            observed = self._path.stat()
+        except (OSError, ValueError):
+            self._fail("rollback_database_path_changed")
+        if (not stat.S_ISREG(observed.st_mode)
+                or (observed.st_dev, observed.st_ino) != self._observed_inode):
+            self._fail("rollback_database_path_changed")
+        databases = self._db.execute("PRAGMA database_list").fetchall()
+        main = [row for row in databases if row[1] == "main"]
+        if (len(main) != 1 or Path(main[0][2]) != self._path
+                or any(row[1] not in ("main", "temp") for row in databases)):
+            self._fail("rollback_database_binding_changed")
+        if bool(self._token) != self._db.in_transaction:
+            self._fail("rollback_transaction_state_changed")
+
+    def _validate_budget(self, budget):
+        if budget is not self._budget:
+            self._fail("rollback_budget_changed")
+
+    def _state(self, connection):
+        if connection is not self._db:
+            self._fail("rollback_connection_changed")
+        self._validate_handle()
+        if self._token is None:
+            from src.memory.header_bounds import HeaderBoundsError
+            raise HeaderBoundsError("header_transaction_required")
+        return self._token, self._db, self._db.total_changes
+
+    def _transition(self, statement):
+        self._validate_handle()
+        opening = statement in ("BEGIN", "BEGIN IMMEDIATE")
+        if opening == self._db.in_transaction:
+            self._fail("rollback_transaction_transition_invalid")
+        self._expected = statement
+        traced = self._transition_trace
+        self._token = None
+        try:
+            self._db.execute(statement)
+            if (self._poisoned or self._transition_trace != traced + 1
+                    or self._db.in_transaction != opening):
+                self._fail("rollback_transaction_receipt_unavailable")
+            self._token = object() if opening else None
+        except BaseException:
+            self._poisoned = True
+            self._token = None
+            raise
+        finally:
+            self._expected = None
+
+    def begin(self, *, immediate=False):
+        self._transition("BEGIN IMMEDIATE" if immediate else "BEGIN")
+
+    def rollback(self):
+        self._transition("ROLLBACK")
+
+    def commit(self):
+        self._transition("COMMIT")
+
+    def certify(self):
+        from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection
+        return _certify_current_memory_snapshot_on_connection(self._db, self._budget, raw_owner=self)
+
+    def close(self):
+        if self._live:
+            self._live = False
+            self._token = None
+            self._db.close()
+
+
+class _RawRollbackPair:
+    """Exactly two retained handles and one unchanged numeric frame."""
+    def __init__(self, source_path, destination_path, budget):
+        self.source = _RawRollbackConnection(source_path, budget, readonly=True)
+        try:
+            self.destination = _RawRollbackConnection(destination_path, budget, readonly=False)
+            if self.source._observed_inode == self.destination._observed_inode:
+                self.source._fail("rollback_database_alias")
+        except BaseException:
+            if hasattr(self, "destination"):
+                self.destination.close()
+            self.source.close()
+            raise
+
+    def close(self):
+        self.source.close()
+        self.destination.close()
 
 
 # The same immutable invocation/authority binding checked by durable admission,

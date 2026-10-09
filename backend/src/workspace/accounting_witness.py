@@ -1892,6 +1892,117 @@ class CompositionSessionGuard:
         self.connection_listeners = []
         self.prepared_commit = False
         self._legacy_continuity_metadata = {}
+        self._retention_closed = False
+        self._retention_writer_snapshot = None
+        self._retention_read_budget = None
+
+    def _native_writer_fields(self, connection, budget, owner):
+        import asyncio
+        import threading
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        session_tx = self.db.sync_session.get_transaction()
+        if (self._retention_closed or self.db.info.get("composition_guard") is not self
+                or type(budget) is not HeaderReadBudget or self.header_budget is not budget
+                or owner not in {"native_ingress", "composition_maintenance", "durable_jobs", "finite_service"}
+                or self.db.info.get("composition_writer_owner") != owner
+                or not self.db.info.get("native_writer_started")
+                or session_tx is None or not session_tx.is_active
+                or self.db.in_nested_transaction() or connection.closed or connection.invalidated
+                or self.db.sync_session.connection() is not connection):
+            raise HeaderBoundsError("memory_retention_writer_unavailable")
+        connection_tx = connection.get_transaction()
+        driver = connection.connection.driver_connection
+        if (connection_tx is None or not connection_tx.is_active
+                or connection.in_nested_transaction() or not driver.in_transaction
+                or asyncio.current_task() is None):
+            raise HeaderBoundsError("memory_retention_writer_unavailable")
+        return (self.db, asyncio.current_task(), threading.get_ident(), owner, budget,
+                connection, session_tx, connection_tx, driver)
+
+    def _capture_native_writer_snapshot(self, connection, budget, owner):
+        # Called only by the existing successful BEGIN IMMEDIATE issuer.
+        self._retention_writer_snapshot = self._native_writer_fields(connection, budget, owner)
+
+    @staticmethod
+    def _retention_sql_start(statement):
+        """Skip SQLite's leading trivia and empty statements, never SQL bodies."""
+        offset, size = 0, len(statement)
+        while offset < size:
+            if statement[offset] in " \t\n\r\f\v\ufeff;":
+                offset += 1
+            elif statement.startswith("--", offset):
+                newline = statement.find("\n", offset + 2)
+                if newline < 0:
+                    return size
+                offset = newline + 1
+            elif statement.startswith("/*", offset):
+                closing = statement.find("*/", offset + 2)
+                if closing < 0:
+                    return size
+                offset = closing + 2
+            else:
+                break
+        return offset
+
+    @staticmethod
+    def _retention_sql_keyword(statement):
+        offset = CompositionSessionGuard._retention_sql_start(statement)
+        start, size = offset, len(statement)
+        if offset == size or not (statement[offset].isascii() and statement[offset].isalpha()):
+            return None
+        while offset < size:
+            char = statement[offset]
+            if not (char.isascii() and (char.isalnum() or char in "_$") or ord(char) >= 128):
+                break
+            offset += 1
+        return statement[start:offset].upper()
+
+    def _deny_budgeted_schema_mutation(self, statement):
+        # DDL refers to index/trigger names as well as tables. The old Core
+        # substring set cannot protect the original complete Memory schema.
+        if self.header_budget is None:
+            return
+        command = self._retention_sql_keyword(statement)
+        if command in {"CREATE", "DROP", "ALTER", "REINDEX", "VACUUM", "ATTACH", "DETACH"}:
+            raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
+        if command == "PRAGMA":
+            import re
+            source = statement[self._retention_sql_start(statement):]
+            scalar = re.fullmatch(
+                r'PRAGMA[ \t\n\r\f\v]+(?:encoding|(?:main|temp)\.schema_version)[ \t\n\r\f\v]*;?[ \t\n\r\f\v]*',
+                source, flags=re.IGNORECASE | re.ASCII)
+            metadata = re.fullmatch(
+                r'PRAGMA[ \t\n\r\f\v]+(?:table_info|foreign_key_list|index_list|index_info|index_xinfo)'
+                r'[ \t\n\r\f\v]*\([ \t\n\r\f\v]*"((?:""|[^"\x00])*)"[ \t\n\r\f\v]*\)'
+                r'[ \t\n\r\f\v]*;?[ \t\n\r\f\v]*', source, flags=re.IGNORECASE | re.ASCII)
+            identifier = metadata.group(1).replace('""', '"') if metadata else None
+            if ('=' in source or not (scalar or (identifier is not None
+                    and 0 < len(identifier.encode("utf-8")) <= 128))):
+                raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
+
+    def _validate_native_writer_snapshot(self, budget, connection=None):
+        from src.memory.header_bounds import HeaderBoundsError
+        captured = self._retention_writer_snapshot
+        if captured is None:
+            raise HeaderBoundsError("memory_retention_writer_unavailable")
+        connection = captured[5] if connection is None else connection
+        actual = self._native_writer_fields(connection, budget, captured[3])
+        if any((current != original if index in {2, 3} else current is not original)
+               for index, (current, original) in enumerate(zip(actual, captured))):
+            raise HeaderBoundsError("memory_retention_writer_changed")
+
+    @contextmanager
+    def _retention_reads(self, budget):
+        from src.memory.header_bounds import HeaderBoundsError
+        self._validate_native_writer_snapshot(budget)
+        previous = self._retention_read_budget
+        if previous is not None and previous is not budget:
+            raise HeaderBoundsError("memory_retention_writer_changed")
+        self._retention_read_budget = budget
+        try:
+            yield
+        finally:
+            self._retention_read_budget = previous
 
     def _enroll_legacy_continuity_metadata(self, connection, key):
         """Private canonical legacy transcript caller; no native authorization."""
@@ -2040,6 +2151,7 @@ class CompositionSessionGuard:
             return wrapped
         def before_execute(state):
             if isinstance(state.statement, TextClause):
+                self._deny_budgeted_schema_mutation(state.statement.text)
                 source = state.statement.text.lower().lstrip()
                 if not source.startswith(("select", "begin", "pragma")) and any(table in source for table in RETAINED_FIELDS):
                     raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
@@ -2082,6 +2194,16 @@ class CompositionSessionGuard:
             state.update_execution_options(_composition_tracked_writer=self)
         def connection_started(session, transaction, connection):
             def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+                from src.memory.header_bounds import HeaderBoundsError
+                self._deny_budgeted_schema_mutation(statement)
+                command = self._retention_sql_keyword(statement)
+                control = command in {"BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"}
+                if self._retention_read_budget is not None:
+                    self._validate_native_writer_snapshot(self._retention_read_budget, conn)
+                    if control or command is None:
+                        raise HeaderBoundsError("memory_retention_writer_changed")
+                if control or command is None:
+                    self._retention_writer_snapshot = None
                 compiled = getattr(context, "compiled", None)
                 operation = getattr(compiled, "statement", None)
                 table = getattr(getattr(operation, "table", None), "name", None)
@@ -2270,6 +2392,9 @@ class CompositionSessionGuard:
             event.remove(self.db.sync_session, name, callback)
         for connection, callback in self.connection_listeners:
             event.remove(connection, "before_cursor_execute", callback)
+        self._retention_closed = True
+        self._retention_writer_snapshot = None
+        self._retention_read_budget = None
         _HELD_COMPOSITION_WORKSPACE.reset(self.token)
         self.lock.__exit__(None, None, None)
 

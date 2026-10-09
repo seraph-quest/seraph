@@ -134,7 +134,12 @@ async def test_actual_parent_adopts_two_original_specialist_children(task_runtim
     result = await service.execute(dispatcher.jobs,job_id=original["job"]["job_id"],
         owner=original["job"]["lease"]["owner"],fence=original["job"]["lease"]["fencing_token"],
         envelope=envelope,principal=operator.principal)
-    assert result["verified"] is (second_failure is None)
+    assert result["verified"] is False
+    for _ in range(5):
+        await dispatcher.reconcile_linked_attempts()
+    async with sessions() as db:
+        current_parent=await dispatcher.jobs._fetch(db,original["job"]["job_id"])
+    assert (current_parent.status=="succeeded") is (second_failure is None)
     assert len(transport["contacts"]) == 3  # Two children and actual parent continuation.
     async with sessions() as db:
         children = list((await db.execute(select(WorkBoardTask).where(
@@ -145,7 +150,7 @@ async def test_actual_parent_adopts_two_original_specialist_children(task_runtim
         assert len(roots) == (1 if second_failure == "proposal" else 2)
         assert sum(root.status == "succeeded" for root in roots) == (2 if second_failure is None else 1)
         if second_failure:
-            assert result["unknown_effect"] is True
+            assert current_parent.status in {"paused","blocked","unknown_external_effect"}
             from src.work_board.input_artifacts import _safe_file_bytes
             import json
             succeeded = next(root for root in roots if root.status == "succeeded")

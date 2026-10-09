@@ -196,6 +196,13 @@ class GeneralTaskPlanner:
         messages = planner_messages(prompt_input, descriptors)
         if _specialist is not None:
             messages.append({"role": "user", "content": json.dumps({"specialist_role": _specialist["specialist_role"]})})
+            if task_input.evidence_refs:
+                messages.append({"role": "system", "content":
+                    "For this specialist only, a tool input value may be "
+                    "{from_evidence:reference,pointer:JSON_pointer} into a selected private copied JSON artifact. "
+                    "Use only the listed references. Contents stay local and are resolved at tool execution; "
+                    "do not infer contents or add fields to the pointer. Selected reference IDs: "
+                    + json.dumps(task_input.evidence_refs)})
         if _continuation is not None:
             from src.work_board.general_task import canonical
             import re

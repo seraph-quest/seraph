@@ -1157,6 +1157,9 @@ class WorkBoardRepository:
                            publication_authority_check=None, staged_text=None,
                            staged_input=None, publication_witness=None, _specialist_publication=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if (request.idempotency_scope == "general-task" and request.idempotency_key.startswith("specialist:")
+            and _specialist_publication is None):
+            raise BoardError("specialist_delegation_publication_denied","Specialist publication namespace is private",status_code=422)
         if request.capability_id == "inference.near-text.v1":
             from uuid import UUID
             try:
@@ -1257,6 +1260,13 @@ class WorkBoardRepository:
                     raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             if existing.idempotency_payload_digest != digest:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
+            if _specialist_publication is not None:
+                from src.workflows.specialist_delegation import verify_specialist_publication
+                from src.workflows.specialist_lifecycle import seal_child_creation
+                from src.workflows.specialist_lineage import publish_lineage_events
+                await verify_specialist_publication(db,owner,request,_specialist_publication)
+                await seal_child_creation(db,owner,existing,_specialist_publication)
+                await publish_lineage_events(db,owner,existing,_specialist_publication,repository=self)
             latest_event = await db.execute(
                 select(WorkBoardEvent)
                 .where(
@@ -1427,6 +1437,11 @@ class WorkBoardRepository:
                 task_id=task.task_id,
                 task_revision=task.task_revision,
             )
+        if _specialist_publication is not None:
+            from src.workflows.specialist_lifecycle import seal_child_creation
+            await seal_child_creation(db,owner,task,_specialist_publication)
+            from src.workflows.specialist_lineage import publish_lineage_events
+            await publish_lineage_events(db,owner,task,_specialist_publication,repository=self)
         return BoardMutation(task, event)
 
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:

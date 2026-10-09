@@ -35,6 +35,8 @@ export interface GeneralTaskPlanRead {
   native_execution?: GeneralTaskNativeExecution;
 }
 export interface GeneralTaskNativeExecution {
+  partial_review_options?: SpecialistPartialOptions;
+  partial_review?: SpecialistPartialReview;
   cancellation?: { state: "pending" | "callback_closed_outcome_debt" | "fully_cancelled";
     child_ids: string[]; callback_closed: boolean; effect_debt: boolean; reason: string };
   phase: "native_ready" | "native_wait" | "assembly" | "operator_paused" | "approval_wait" | "cancelled" | "unknown_recovery" | "complete";
@@ -43,6 +45,28 @@ export interface GeneralTaskNativeExecution {
     artifact_refs: { artifact_id: string; digest: string; schema_version: string }[] }[];
   admitted_invocation_ids: string[]; remaining_steps: string[];
   partial_output_refs: { artifact_id: string; digest: string; schema_version: string }[]; no_learning: true;
+}
+export interface SpecialistPartialOutput {
+  child_task_id: string; child_job_id: string; delegation_invocation_id: string;
+  artifact_id: string; content_sha256: string; size_bytes: number;
+}
+export type SpecialistPartialOptions = { eligible: false; reason: string } | {
+  eligible: boolean; attempt_id: string; workflow_run_id: string;
+  expected_manifest_revision: number; expected_plan_revision: number;
+  selected_steps: { step_id: string; outputs: SpecialistPartialOutput[] }[]; no_learning: true;
+};
+export interface SpecialistPartialReview {
+  state: "partial_review_pending_debt"; decision_digest: string; idempotency_key: string;
+  result_ref: { artifact_id: string; digest: string; schema_version: "SpecialistPartialResult.v1" };
+  selected_step_ids: string[]; selected_outputs: (SpecialistPartialOutput & { step_id: string })[];
+  unresolved_job_ids: string[]; unresolved_effect_count: number;
+  current_unresolved_job_ids: string[]; current_unresolved_effect_count: number; current_unresolved_cost_count: number;
+  current_cancellation_state: "pending" | "callback_closed_outcome_debt" | "fully_cancelled"; no_learning: true;
+}
+export interface SpecialistPartialRequest {
+  action: "accept_partial_results"; expected_revision: number;
+  partial_decision: { idempotency_key: string; attempt_id: string; workflow_run_id: string;
+    expected_manifest_revision: number; expected_plan_revision: number; selected_step_ids: string[]; acknowledge_unresolved: true };
 }
 export interface GeneralTaskApprovalPause {
   approval_id: string; approval_status: "pending" | "approved" | "expired" | "denied" | "revoked" | "consumed" | "unavailable";
@@ -85,6 +109,57 @@ export async function generalTaskRequest(path: string, body?: unknown, signal?: 
   return response.json();
 }
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const closed = (v: Record<string, unknown>, keys: string[]) => Object.keys(v).length === keys.length && keys.every(k => Object.prototype.hasOwnProperty.call(v, k));
+const identity = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);
+const sha = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+const uuid = (v: unknown) => typeof v === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
+const uniqueIds = (v: unknown, max: number, min = 0): v is string[] => Array.isArray(v) && v.length >= min && v.length <= max && v.every(identity) && new Set(v).size === v.length;
+const partialBytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length <= 65536;
+const partialOutputKeys = ["child_task_id", "child_job_id", "delegation_invocation_id", "artifact_id", "content_sha256", "size_bytes"];
+function validPartialOutput(v: unknown, selected = false): boolean {
+  return record(v) && closed(v, selected ? [...partialOutputKeys, "step_id"] : partialOutputKeys)
+    && partialOutputKeys.slice(0, 4).every(k => identity(v[k])) && sha(v.content_sha256)
+    && Number.isSafeInteger(v.size_bytes) && Number(v.size_bytes) >= 1 && Number(v.size_bytes) <= 65536
+    && (!selected || identity(v.step_id));
+}
+function samePartialChild(outputs: Record<string, unknown>[]): boolean {
+  return outputs.every(output => output.child_task_id === outputs[0]?.child_task_id
+    && output.child_job_id === outputs[0]?.child_job_id && output.delegation_invocation_id === outputs[0]?.delegation_invocation_id);
+}
+export function validateSpecialistPartialReview(v: unknown): SpecialistPartialReview {
+  if (!record(v) || !closed(v, ["state", "decision_digest", "idempotency_key", "result_ref", "selected_step_ids", "selected_outputs", "unresolved_job_ids", "unresolved_effect_count", "current_unresolved_job_ids", "current_unresolved_effect_count", "current_unresolved_cost_count", "current_cancellation_state", "no_learning"])
+    || v.state !== "partial_review_pending_debt" || !sha(v.decision_digest) || !uuid(v.idempotency_key) || v.no_learning !== true
+    || !record(v.result_ref) || !closed(v.result_ref, ["artifact_id", "digest", "schema_version"])
+    || !identity(v.result_ref.artifact_id) || !sha(v.result_ref.digest) || v.result_ref.schema_version !== "SpecialistPartialResult.v1"
+    || !uniqueIds(v.selected_step_ids, 4, 1) || !Array.isArray(v.selected_outputs) || !v.selected_outputs.length || v.selected_outputs.length > 64
+    || !v.selected_outputs.every(output => validPartialOutput(output, true) && (v.selected_step_ids as string[]).includes(output.step_id))
+    || v.selected_step_ids.some(id => !(v.selected_outputs as Record<string, unknown>[]).some(output => output.step_id === id))
+    || v.selected_step_ids.some(id => !samePartialChild((v.selected_outputs as Record<string, unknown>[]).filter(output => output.step_id === id)))
+    || new Set(v.selected_outputs.map(output => output.artifact_id)).size !== v.selected_outputs.length
+    || !uniqueIds(v.unresolved_job_ids, 84) || !Number.isSafeInteger(v.unresolved_effect_count) || Number(v.unresolved_effect_count) < 0 || Number(v.unresolved_effect_count) > 256
+    || !uniqueIds(v.current_unresolved_job_ids, 84) || !Number.isSafeInteger(v.current_unresolved_effect_count) || Number(v.current_unresolved_effect_count) < 0 || Number(v.current_unresolved_effect_count) > 256
+    || !Number.isSafeInteger(v.current_unresolved_cost_count) || Number(v.current_unresolved_cost_count) < 0 || Number(v.current_unresolved_cost_count) > 12
+    || !["pending", "callback_closed_outcome_debt", "fully_cancelled"].includes(String(v.current_cancellation_state)) || !partialBytes(v)) {
+    throw Error("Partial review receipt is incomplete. Refresh the original task; unresolved debt remains pending.");
+  }
+  return v as unknown as SpecialistPartialReview;
+}
+function validatePartialOptions(v: unknown, task: WorkBoardTask, native: Record<string, unknown>, plan: Record<string, unknown> | null): void {
+  if (record(v) && closed(v, ["eligible", "reason"]) && v.eligible === false && typeof v.reason === "string" && v.reason.length <= 200) return;
+  if (!record(v) || !closed(v, ["eligible", "attempt_id", "workflow_run_id", "expected_manifest_revision", "expected_plan_revision", "selected_steps", "no_learning"])
+    || typeof v.eligible !== "boolean" || v.no_learning !== true || !identity(v.attempt_id) || !identity(v.workflow_run_id)
+    || v.attempt_id !== task.latest_attempt?.attempt_id || v.workflow_run_id !== task.latest_attempt?.workflow_run_id
+    || v.expected_manifest_revision !== native.manifest_revision || v.expected_plan_revision !== native.plan_revision
+    || !Array.isArray(v.selected_steps) || v.selected_steps.length > 4 || (v.eligible && !v.selected_steps.length)
+    || v.selected_steps.some(step => !record(step) || !closed(step, ["step_id", "outputs"]) || !identity(step.step_id)
+      || !Array.isArray(plan?.steps) || !plan.steps.some(original => record(original) && original.step_id === step.step_id)
+      || !Array.isArray(step.outputs) || !step.outputs.length || step.outputs.length > 64 || !step.outputs.every(output => validPartialOutput(output)) || !samePartialChild(step.outputs))
+    || new Set(v.selected_steps.map(step => step.step_id)).size !== v.selected_steps.length
+    || v.selected_steps.flatMap(step => step.outputs).length > 64
+    || new Set(v.selected_steps.flatMap(step => step.outputs.map((output: SpecialistPartialOutput) => output.artifact_id))).size !== v.selected_steps.flatMap(step => step.outputs).length
+    || (v.eligible && (task.status !== "blocked" || task.latest_attempt?.ended_at || native.phase !== "unknown_recovery" || !record(native.cancellation) || !["pending", "callback_closed_outcome_debt"].includes(String(native.cancellation.state))))
+    || !partialBytes(v)) throw Error("Partial selection did not match the original stopped task. Refresh before reviewing.");
+}
 const artifactReference = (v: unknown): boolean => record(v) && typeof v.artifact_id === "string"
   && v.artifact_id.length > 0 && v.artifact_id.length <= 128 && typeof v.digest === "string"
   && /^[a-f0-9]{64}$/.test(v.digest) && typeof v.schema_version === "string";
@@ -139,6 +214,27 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     || !Array.isArray(native.partial_output_refs) || native.partial_output_refs.length > 16 || !native.partial_output_refs.every(artifactReference))) {
     throw new Error("Native task receipts are incomplete. Refresh Work before continuing.");
   }
+  if (record(native)) {
+    const planSteps: unknown[] = record(value.plan) && Array.isArray(value.plan.steps) ? value.plan.steps : [];
+    if (native.partial_review_options !== undefined) validatePartialOptions(native.partial_review_options, task, native, record(value.plan) ? value.plan : null);
+    if (record(native.partial_review_options) && native.partial_review_options.eligible === true && value.accepted !== true) {
+      throw Error("Partial review requires the original admitted task plan.");
+    }
+    if (native.partial_review !== undefined) {
+      const partial = validateSpecialistPartialReview(native.partial_review);
+      if (!record(native.cancellation) || partial.current_cancellation_state !== native.cancellation.state
+        || !planSteps.length || partial.selected_step_ids.some(id => !planSteps.some(step => record(step) && step.step_id === id))) {
+        throw Error("Partial review is not bound to the original stopped task. Refresh Work.");
+      }
+    }
+    const outputs = record(native.partial_review_options) && Array.isArray(native.partial_review_options.selected_steps)
+      ? native.partial_review_options.selected_steps.flatMap(step => step.outputs.map((output: SpecialistPartialOutput) => ({ ...output, step_id: step.step_id }))) : [];
+    if (record(native.partial_review) && Array.isArray(native.partial_review.selected_outputs)) outputs.push(...native.partial_review.selected_outputs);
+    if (outputs.some(output => !Array.isArray(native.steps) || !native.steps.some(step => record(step)
+      && step.step_id === output.step_id && step.invocation_id === output.delegation_invocation_id && step.status === "verified" && step.contact_state === "settled"))) {
+      throw Error("Partial artifacts do not match verified original specialist steps. Refresh Work.");
+    }
+  }
   const pause = value.approval_pause;
   if (pause != null && (!record(pause) || !["pending", "approved", "expired", "denied", "revoked", "consumed", "unavailable"].includes(String(pause.approval_status))
     || ["approval_id", "step_id", "tool_id", "workflow_run_id", "attempt_id"].some(k => typeof pause[k] !== "string" || !pause[k])
@@ -164,6 +260,24 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
     throw new Error("Plan steps do not match the registered tool descriptors.");
   }
   return value as unknown as GeneralTaskPlanRead;
+}
+export function validateSpecialistPartialResponse(value: unknown, task: WorkBoardTask, request: SpecialistPartialRequest): SpecialistPartialReview {
+  const latest = record(value) && record(value.task) && record(value.task.latest_attempt) ? value.task.latest_attempt : null;
+  if (!record(value) || !closed(value, ["task", "attempt", "partial_review", "idempotent_replay"]) || !record(value.task) || !record(value.attempt)
+    || value.task.task_id !== task.task_id || value.task.owner_principal_id !== task.owner_principal_id || value.task.owner_session_id !== task.owner_session_id
+    || value.task.status !== task.status || value.task.task_revision !== request.expected_revision
+    || value.attempt.attempt_id !== request.partial_decision.attempt_id || value.attempt.workflow_run_id !== request.partial_decision.workflow_run_id
+    || value.attempt.ended_at != null || value.attempt.fencing_token !== task.latest_attempt?.fencing_token
+    || latest?.fencing_token !== task.latest_attempt?.fencing_token || latest?.ended_at != null || latest?.attempt_id !== request.partial_decision.attempt_id
+    || latest?.workflow_run_id !== request.partial_decision.workflow_run_id || typeof value.idempotent_replay !== "boolean") {
+    throw Error("Partial acceptance receipt is unconfirmed. Inspect the original task before another decision; debt remains unresolved.");
+  }
+  const partial = validateSpecialistPartialReview(value.partial_review);
+  if (partial.idempotency_key !== request.partial_decision.idempotency_key
+    || JSON.stringify(partial.selected_step_ids) !== JSON.stringify(request.partial_decision.selected_step_ids)) {
+    throw Error("Partial acceptance receipt does not match the exact decision. Reconcile the original request.");
+  }
+  return partial;
 }
 export async function createGeneralTask(request: GeneralTaskCreateRequest, principal: string, session: string): Promise<WorkBoardTask> {
   const value = await generalTaskRequest("/general-tasks", request);

@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { GoalInfo, WorkBoardTask } from "../../types";
-import { canResumeGeneralTask, createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan } from "../../lib/generalTask";
-import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan } from "../../lib/generalTask";
+import { canResumeGeneralTask, createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan, validateSpecialistPartialResponse } from "../../lib/generalTask";
+import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan, SpecialistPartialOutput, SpecialistPartialRequest, SpecialistPartialReview } from "../../lib/generalTask";
 import { parseDocumentPreparationView, type DocumentPreparationView } from "../../lib/documentPreparation";
+import type { WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface Props {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
   task?: WorkBoardTask; goals?: GoalInfo[]; onClose?: () => void;
   onCreated?: (task: WorkBoardTask) => void | Promise<void>; onChanged?: () => void | Promise<void>;
+  onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
 }
 // Pending intent stays in memory under its original owner, never in browser storage.
 const pendingCreates = new Map<string, GeneralTaskCreateRequest>();
@@ -30,7 +32,7 @@ async function readDocumentPreparation(taskId: string, selectedRefs: string[]): 
   }
   return parseDocumentPreparationView(await response.json(), selectedRefs);
 }
-export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated, onChanged }: Props) {
+export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated, onChanged, onInspectArtifact }: Props) {
   const scope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}:${ownerSessionId}` : null;
   const [pending, setPending] = useState<GeneralTaskCreateRequest | null>(() => scope ? pendingCreates.get(scope) ?? null : null);
   const [goalId, setGoalId] = useState(pending?.input.goal_ref ?? "");
@@ -46,6 +48,10 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [revisionReason, setRevisionReason] = useState("");
   const [pendingRevision, setPendingRevision] = useState<{ expected_revision: number; replacements: TaskPlan["steps"]; reason: string; idempotency_key: string } | null>(null);
   const [pendingEdit, setPendingEdit] = useState<{ expected_revision: number; expected_plan_revision: number; idempotency_key: string; plan: TaskPlan } | null>(null);
+  const [partialSteps, setPartialSteps] = useState<string[]>([]), [openedPartial, setOpenedPartial] = useState<string[]>([]);
+  const [partialAck, setPartialAck] = useState(false);
+  const [pendingPartial, setPendingPartial] = useState<SpecialistPartialRequest | null>(null);
+  const [acceptedPartial, setAcceptedPartial] = useState<SpecialistPartialReview | null>(null);
   const generation = useRef(0);
   const ownedGoals = goals.filter(g => g.status === "active" && g.revision && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only");
   const goal = ownedGoals.find(g => g.id === goalId);
@@ -54,6 +60,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     if (!task || !owned) return;
     const version = generation.current;
     setRead(null); setAck(false); setError(null); setPreparationView(null);
+    setPartialSteps([]); setOpenedPartial([]); setPartialAck(false); setAcceptedPartial(null);
     try {
       const value = validateGeneralTaskPlan(await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/plan`), task);
       if (!value.plan) {
@@ -63,6 +70,9 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
         }
       }
       if (version === generation.current) {
+        const overlay = value.native_execution?.partial_review;
+        if (pendingPartial && overlay?.idempotency_key === pendingPartial.partial_decision.idempotency_key
+          && JSON.stringify(overlay.selected_step_ids) === JSON.stringify(pendingPartial.partial_decision.selected_step_ids)) setPendingPartial(null);
         setRead(value); setPlanDraft(JSON.stringify(value.plan?.steps ?? [], null, 2));
         const frozen = new Set(value.native_execution?.steps.map(step => step.step_id) ?? []);
         setReplacementDraft(JSON.stringify(value.plan?.steps.filter(step => !frozen.has(step.step_id)) ?? [], null, 2));
@@ -78,6 +88,50 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     if (task && owned) void refresh();
     return () => { ++generation.current; };
   }, [scope, task?.task_id, task?.task_revision, owned]); // Exact scope fences late readbacks.
+  useEffect(() => {
+    setPendingPartial(null); setAcceptedPartial(null); setPartialSteps([]); setOpenedPartial([]); setPartialAck(false);
+  }, [scope, task?.task_id, owned]);
+  const partialOptions = read?.native_execution?.partial_review_options;
+  const eligiblePartial = partialOptions && "selected_steps" in partialOptions && partialOptions.eligible ? partialOptions : null;
+  const partialOverlay = acceptedPartial ?? read?.native_execution?.partial_review;
+  const selectedPartialOutputs = eligiblePartial?.selected_steps.filter(step => partialSteps.includes(step.step_id)).flatMap(step => step.outputs) ?? [];
+  const partialInspected = Boolean(selectedPartialOutputs.length && selectedPartialOutputs.every(output => openedPartial.includes(output.artifact_id)));
+  function inspectPartial(output: SpecialistPartialOutput) {
+    if (!owned || !ownerSessionId || !onInspectArtifact || busy) return;
+    try {
+      onInspectArtifact({ reference: { artifact_id: output.artifact_id, content_sha256: output.content_sha256 },
+        ownerSessionId, workflowRunId: output.child_job_id, parentWorkflowRunId: output.delegation_invocation_id });
+      setOpenedPartial(previous => [...new Set([...previous, output.artifact_id])]); setPartialAck(false);
+    } catch { setError("Artifact inspector is unavailable. Inspect every selected output before acknowledging this decision."); }
+  }
+  async function acceptPartial() {
+    if (!task || !read || !owned || busy || read.task_revision !== task.task_revision || partialOverlay
+      || (!pendingPartial && (!eligiblePartial || !partialAck || !partialInspected))) return;
+    const request: SpecialistPartialRequest = pendingPartial ?? { action: "accept_partial_results", expected_revision: read.task_revision,
+      partial_decision: { idempotency_key: crypto.randomUUID(), attempt_id: eligiblePartial!.attempt_id,
+        workflow_run_id: eligiblePartial!.workflow_run_id, expected_manifest_revision: eligiblePartial!.expected_manifest_revision,
+        expected_plan_revision: eligiblePartial!.expected_plan_revision,
+        selected_step_ids: eligiblePartial!.selected_steps.filter(step => partialSteps.includes(step.step_id)).map(step => step.step_id), acknowledge_unresolved: true } };
+    const version = generation.current;
+    setPendingPartial(request); setBusy(true); setPartialAck(false); setError(null);
+    try {
+      const value = await generalTaskRequest(`/tasks/${encodeURIComponent(task.task_id)}/actions`, request);
+      if (version !== generation.current) return;
+      const overlay = validateSpecialistPartialResponse(value, task, request);
+      const expected = eligiblePartial?.selected_steps.filter(step => request.partial_decision.selected_step_ids.includes(step.step_id))
+        .flatMap(step => step.outputs.map(output => ({ ...output, step_id: step.step_id })));
+      const proof = (output: SpecialistPartialOutput & { step_id: string }) => [output.step_id, output.child_task_id,
+        output.child_job_id, output.delegation_invocation_id, output.artifact_id, output.content_sha256, output.size_bytes];
+      if (expected && JSON.stringify(expected.map(proof)) !== JSON.stringify(overlay.selected_outputs.map(proof))) throw Error("Partial output receipt changed. Refresh the original task before another decision.");
+      setPendingPartial(null); setAcceptedPartial(overlay);
+      await onChanged?.();
+    } catch (e) { if (version === generation.current) {
+      if (e instanceof GeneralTaskError && [400, 401, 403, 409, 422].includes(e.status)) {
+        setPendingPartial(null); setRead(null); setPartialSteps([]); setOpenedPartial([]);
+      }
+      setError(`${(e as Error).message} Partial review never completes the task or clears unresolved effects or accounting. Refresh to inspect the original decision; no automatic retry occurs.`);
+    } } finally { if (version === generation.current) setBusy(false); }
+  }
   async function create() {
     if (!scope || !ownerPrincipalId || !ownerSessionId || !owned || busy) return;
     const version = generation.current;
@@ -255,7 +309,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     {task && <>
       <p role="status">{task.status} · {read?.accepted ? "plan accepted" : "plan awaiting review"} · {task.block_reason ?? "no active block"}</p>
       <button type="button" disabled={busy || !owned || Boolean(pendingEdit)} onClick={() => void refresh()}>Refresh current task plan</button>
-      {read && <>
+      {read && owned && <>
         <p className="text-xs">Task revision {read.task_revision} · plan revision {read.plan?.revision ?? "not yet valid"} · no_learning. Acceptance grants no new permission; the dispatcher owns admission and each effect still requires its current approval.</p>
         {read.native_execution && <section aria-label="Native task execution" className="mt-3 rounded border border-white/10 p-2">
           <p role="status">Native phase {read.native_execution.phase} · manifest revision {read.native_execution.manifest_revision}</p>
@@ -269,6 +323,34 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
           <p>Verified partial outputs: {read.native_execution.partial_output_refs.length}</p>
           {read.native_execution.partial_output_refs.map(ref => <p key={ref.artifact_id} className="break-all text-xs">{ref.artifact_id}</p>)}
           <p className="text-xs">Partial outputs remain separate from final task success. Unknown contact requires reconciliation before continuing.</p>
+          {partialOverlay && <section aria-label="Accepted partial results pending debt" className="mt-2 rounded border border-amber-400/30 p-2">
+            <p role="status">Partial review accepted · pending debt · no learning. This is not full task success.</p>
+            <p>Current cancellation: {partialOverlay.current_cancellation_state}. Current unresolved jobs: {partialOverlay.current_unresolved_job_ids.length}; current unresolved effects: {partialOverlay.current_unresolved_effect_count}; current unresolved cost operations: {partialOverlay.current_unresolved_cost_count}.</p>
+            <p>Accepted decision history: {partialOverlay.unresolved_job_ids.length} unresolved jobs and {partialOverlay.unresolved_effect_count} unresolved effects at acceptance. Original accounting liabilities remain subject to their own reconciliation. Zero current counts do not prove full success or permission to resume.</p>
+            <p className="break-all text-xs">Decision {partialOverlay.decision_digest} · partial result {partialOverlay.result_ref.artifact_id}</p>
+            {partialOverlay.selected_outputs.map(output => <div key={output.artifact_id} className="mt-1 text-xs">
+              <p>{output.step_id} · specialist {output.child_task_id} · {output.size_bytes} bytes · SHA-256 {output.content_sha256}</p>
+              <button type="button" disabled={busy || !owned || !onInspectArtifact} onClick={() => inspectPartial(output)}>Inspect accepted partial artifact {output.artifact_id}</button>
+            </div>)}
+          </section>}
+          {eligiblePartial && !partialOverlay && <section aria-label="Review specialist partial results" className="mt-2 rounded border border-amber-400/30 p-2">
+            <p>Accept only these producer-issued successful outputs for partial review. Remaining work, Unknown effects and accounting debt stay unresolved; no task or attempt is renewed and no learning occurs.</p>
+            {eligiblePartial.selected_steps.map(step => <div key={step.step_id} className="mt-2">
+              <label><input type="checkbox" aria-label={`Select partial step ${step.step_id}`} checked={partialSteps.includes(step.step_id)} disabled={busy || !owned || Boolean(pendingPartial)}
+                onChange={event => { setPartialSteps(previous => event.target.checked ? [...previous, step.step_id] : previous.filter(id => id !== step.step_id)); setPartialAck(false); }} />Select successful step {step.step_id}</label>
+              {step.outputs.map(output => <div key={output.artifact_id} className="ml-3 text-xs">
+                <p className="break-all">Specialist {output.child_task_id} · {output.size_bytes} bytes · SHA-256 {output.content_sha256}</p>
+                <button type="button" disabled={busy || !owned || !onInspectArtifact || Boolean(pendingPartial)} onClick={() => inspectPartial(output)}>Inspect partial artifact {output.artifact_id}</button>
+              </div>)}
+            </div>)}
+            <p className="text-xs">Opening the inspector is not proof of successful readback. Confirm that you inspected every selected artifact before acknowledging the remaining debt.</p>
+            <label><input type="checkbox" aria-label="Acknowledge unresolved partial debt" checked={partialAck}
+              disabled={busy || !owned || !partialInspected || Boolean(pendingPartial)} onChange={event => setPartialAck(event.target.checked)} />I inspected these selected artifacts and acknowledge unresolved effects and accounting; accept partial review only.</label>
+            <button type="button" disabled={busy || !owned || (!pendingPartial && (!partialAck || !partialInspected))} onClick={() => void acceptPartial()}>{pendingPartial ? "Reconcile exact partial decision" : "Accept selected partial results"}</button>
+          </section>}
+          {pendingPartial && !partialOverlay && <p role="status">The partial decision has an unconfirmed receipt. Refresh this original task to inspect it, or reconcile the exact request with the same idempotency key. No new selection or automatic retry is allowed.</p>}
+          {pendingPartial && !partialOverlay && !eligiblePartial && <button type="button" disabled={busy || !owned} onClick={() => void acceptPartial()}>Reconcile exact partial decision</button>}
+          {partialOptions && !partialOptions.eligible && !partialOverlay && <p role="status">Partial review is unavailable. Original stopped evidence must be available and current; unresolved debt remains visible.</p>}
           <div className="mt-2 flex flex-wrap gap-2">
             <button type="button" disabled={busy || !owned || !["native_ready", "assembly", "native_wait"].includes(read.native_execution.phase)
               || read.native_execution.steps.some(step => !["verified", "cancelled"].includes(step.status))}

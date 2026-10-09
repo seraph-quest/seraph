@@ -9,12 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+from weakref import WeakKeyDictionary
 
 from pydantic import Field
 from sqlalchemy import select, text, update
 
 from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState
-from src.work_board.contracts import ClosedTaskModel, TaskDigest, TaskIdentity
+from src.work_board.contracts import ClosedTaskModel, TaskDigest, TaskIdentity, GeneralTaskArtifactRef
 from src.work_board.repository import BoardError
 from src.workflows.delegation_contracts import DelegateRequest
 
@@ -62,14 +63,18 @@ class DelegationReservationV1(ClosedTaskModel):
     child_task_id: TaskIdentity
     child_attempt_id: TaskIdentity
     child_job_id: TaskIdentity
+    handoff_ref: GeneralTaskArtifactRef
+    handoff_producer_tokens: list[TaskDigest] = Field(max_length=60)
+    handoff_vault_digest: TaskDigest
     original_deadline_at: str = Field(min_length=1, max_length=64)
     child_deadline_at: str = Field(min_length=1, max_length=64)
 
 
 _PUBLICATION_SEAL = object()
+_PUBLICATIONS = WeakKeyDictionary()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _SpecialistPublication:
     invocation_id: str
     reservation_digest: str
@@ -85,19 +90,26 @@ async def specialist_publication(db, context, envelope):
     current = await current_delegation(db, context.callback.run_identity)
     if current.request != context.request or current.reservation != context.reservation:
         _deny()
-    return _SpecialistPublication(current.callback.run_identity,
+    witness = _SpecialistPublication(current.callback.run_identity,
         digest(current.reservation.model_dump(mode="json")),
         hashlib.sha256(_canonical_json({"schema_version":1,"capability_id":"agent.task.v1",
             "input":envelope.model_dump(mode="json", exclude_none=True)})).hexdigest(),
         current.reservation.child_task_id, _PUBLICATION_SEAL)
+    _PUBLICATIONS[witness] = (witness.invocation_id,witness.reservation_digest,witness.envelope_digest,witness.task_id)
+    return witness
+
+
+def verify_publication_source(witness):
+    if (type(witness) is not _SpecialistPublication or witness._seal is not _PUBLICATION_SEAL
+        or _PUBLICATIONS.get(witness) != (witness.invocation_id,witness.reservation_digest,witness.envelope_digest,witness.task_id)):
+        _deny("specialist_delegation_publication_denied")
 
 
 async def verify_specialist_publication(db, owner, request, witness):
     """The existing Board writer consumes an original reserved publication."""
     from src.work_board.general_task import digest
     from src.db.models import WorkBoardInputArtifact
-    if type(witness) is not _SpecialistPublication or witness._seal is not _PUBLICATION_SEAL:
-        _deny("specialist_delegation_publication_denied")
+    verify_publication_source(witness)
     context = await current_delegation(db, witness.invocation_id)
     artifact = await db.get(WorkBoardInputArtifact, request.input_artifact_id, populate_existing=True)
     if (digest(context.reservation.model_dump(mode="json")) != witness.reservation_digest
@@ -160,7 +172,7 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
                              require_reservation=True):
     """Read the real original callback and private request, never caller claims."""
     from src.workflows.general_task_guard import (
-        assert_general_task_child_current, child_binding, read_manifest,
+        assert_general_task_child_current, assert_general_task_child_phase_current, child_binding, read_manifest,
     )
     from src.work_board.general_task_runtime_artifacts import (
         read_bound_native_tool_input, verify_general_task_manifest,
@@ -170,7 +182,11 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
         WorkflowRunState.run_identity == invocation_id))
     if callback is None:
         _deny()
-    await assert_general_task_child_current(db, callback)
+    waiting = callback.status == "paused" and callback.failure_reason == "specialist_wait"
+    if waiting:
+        await assert_general_task_child_phase_current(db, callback)
+    else:
+        await assert_general_task_child_current(db, callback)
     native = child_binding(callback)
     # A specialist may not become another delegation owner. This exact native
     # invocation must belong to the original transport-depth-zero Board root.
@@ -182,7 +198,7 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
         .execution_options(populate_existing=True))
     if (parent is None or task is None or attempt is None
         or parent.parent_job_id is not None or parent.branch_depth != 0
-        or parent.status != "paused" or callback.status != "running"
+        or parent.status != "paused" or (callback.status != "running" and not waiting)
         or (callback_fence is not None and callback.fencing_token != callback_fence)):
         _deny()
     manifest = read_manifest(parent)
@@ -213,20 +229,34 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
             original_group_digest=digest(envelope.proposal_group.model_dump(mode="json")),
             original_root_id=task.owner_session_id, owner_principal_id=task.owner_principal_id,
             goal_id=task.goal_id, goal_revision=task.goal_revision,
-            callback_fence=callback.fencing_token, callback_owner=callback.lease_owner,
+            callback_fence=callback.fencing_token, callback_owner=(reservation.callback_owner if waiting else callback.lease_owner),
             child_publication_key="specialist:" + digest([callback.run_identity, native.input_digest]),
             child_task_id=reservation.child_task_id, child_attempt_id=reservation.child_attempt_id,
             child_job_id=reservation.child_job_id,
+            handoff_ref=reservation.handoff_ref,
+            handoff_producer_tokens=reservation.handoff_producer_tokens,
+            handoff_vault_digest=reservation.handoff_vault_digest,
             original_deadline_at=manifest.original_deadline_at.isoformat(),
             child_deadline_at=reservation.child_deadline_at)
         if reservation != DelegationReservationV1(**expected):
             _deny()
+        from src.workflows.delegation_contracts import _producer_tokens, _vault_state
+        from src.work_board.contracts import WorkBoardOwner
+        selected_owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        if (len(reservation.handoff_producer_tokens) != 5 * len(request.evidence_refs)
+            or tuple(reservation.handoff_producer_tokens) != await _producer_tokens(db, selected_owner, request.evidence_refs)
+            or reservation.handoff_vault_digest != await _vault_state(db)):
+            _deny("specialist_handoff_changed")
         cutoff = datetime.fromisoformat(reservation.child_deadline_at)
         if (cutoff.tzinfo is None or cutoff > manifest.native_deadline_at
             or cutoff <= datetime.now(timezone.utc)):
             _deny("specialist_delegation_deadline")
-    return DelegationContext(parent, task, attempt, manifest, envelope,
+    context = DelegationContext(parent, task, attempt, manifest, envelope,
         callback, native, request, reservation)
+    if waiting:
+        from src.workflows.specialist_lifecycle import verify_current_wait
+        await verify_current_wait(db,context)
+    return context
 
 
 async def validate_specialist_accounting(db, group, binding, initial):
@@ -302,6 +332,7 @@ async def specialist_for_task(db, task):
         or envelope.task_input.intent != context.request.instruction
         or envelope.task_input.limits != context.envelope.task_input.limits
         or envelope.task_input.evidence_refs != context.request.evidence_refs
+        or envelope.specialist_handoff != context.reservation.handoff_ref
         or envelope.plan is None or len(envelope.plan.steps) > context.request.limits.max_steps
         or any(step.tool_id not in context.request.allowed_tool_ids for step in envelope.plan.steps)):
         _deny()
@@ -338,7 +369,61 @@ async def assert_specialist_root_current(db, run):
         or run.authority_digest != digest(authority)
         or run.deadline_at.replace(tzinfo=timezone.utc) > datetime.fromisoformat(context.reservation.child_deadline_at)):
         _deny()
+    object.__setattr__(run, "_specialist_parent_snapshot", _SpecialistParentSnapshot(
+        run.run_identity,run.fencing_token,context.callback.run_identity,context.callback.fencing_token,
+        context.callback.status,context.callback.failure_reason,context.callback.lease_owner,
+        context.callback.lease_expires_at,context.callback.checkpoint_receipts_json,
+        context.callback.effect_receipts_json,context.parent.run_identity,context.parent.checkpoint_receipts_json,
+        _SPECIALIST_SQL_SEAL))
     return context
+
+
+_SPECIALIST_SQL_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _SpecialistParentSnapshot:
+    child_id: str
+    child_fence: int
+    callback_id: str
+    callback_fence: int
+    callback_status: str
+    callback_reason: str | None
+    callback_owner: str | None
+    callback_expiry: datetime | None
+    callback_checkpoints: str
+    callback_effects: str
+    original_id: str
+    original_checkpoints: str
+    seal: object
+
+
+def append_specialist_parent_gate(conditions,run,*,now):
+    """CAS exact current source-issued parent snapshots; never generic pause."""
+    if not is_specialist_root(run):
+        return False
+    from sqlalchemy import false
+    from sqlalchemy.orm import aliased
+    snapshot = getattr(run,"_specialist_parent_snapshot",None)
+    if (type(snapshot) is not _SpecialistParentSnapshot or snapshot.seal is not _SPECIALIST_SQL_SEAL
+        or snapshot.child_id != run.run_identity or snapshot.child_fence != run.fencing_token
+        or snapshot.callback_id != run.parent_job_id or snapshot.callback_fence != run.parent_fencing_token):
+        conditions.append(false())
+        return True
+    callback,original = aliased(WorkflowRunState),aliased(WorkflowRunState)
+    contact = (callback.status == "running") & (callback.lease_owner.is_not(None)) & (callback.lease_expires_at > now)
+    waiting = ((callback.status == "paused") & (callback.failure_reason == "specialist_wait")
+        & callback.lease_owner.is_(None) & callback.lease_expires_at.is_(None))
+    conditions.append(select(callback.id).join(original,original.run_identity == snapshot.original_id).where(
+        callback.run_identity == snapshot.callback_id,callback.parent_job_id == original.run_identity,
+        callback.status == snapshot.callback_status,callback.failure_reason == snapshot.callback_reason,
+        callback.lease_owner == snapshot.callback_owner,callback.lease_expires_at == snapshot.callback_expiry,
+        callback.fencing_token == snapshot.callback_fence,callback.checkpoint_receipts_json == snapshot.callback_checkpoints,
+        callback.effect_receipts_json == snapshot.callback_effects,callback.deadline_at > now,
+        contact if snapshot.callback_status == "running" else waiting,
+        original.status == "paused",original.failure_reason == "general_task_native_wait",
+        original.checkpoint_receipts_json == snapshot.original_checkpoints,original.deadline_at > now).exists())
+    return True
 
 
 def specialist_admission_check(task, attempt, spec):
@@ -365,10 +450,12 @@ def specialist_admission_check(task, attempt, spec):
             or child.authority_digest != digest(spec.declared_authority)
             or child.deadline_at.replace(tzinfo=timezone.utc) > datetime.fromisoformat(context.reservation.child_deadline_at)):
             _deny()
+        from src.workflows.specialist_lifecycle import seal_child_admission
+        await seal_child_admission(db,context,current_task,current_attempt,child)
     return check
 
 
-async def execute_specialist(jobs, *, service, invocation_id, fencing_token, principal):
+async def execute_specialist(jobs, *, service, invocation_id, fencing_token, principal, durable_wait=False):
     """Continue one reserved real Board child through the canonical dispatcher."""
     from src.work_board.contracts import GeneralTaskCreate, GeneralTaskInput, WorkBoardOwner
     from src.work_board.general_task import digest
@@ -385,6 +472,8 @@ async def execute_specialist(jobs, *, service, invocation_id, fencing_token, pri
     await reserve_delegation(jobs, invocation_id, service=service, owner=owner, fence=fencing_token)
     async with jobs._session() as db:
         context = await current_delegation(db, invocation_id, callback_fence=fencing_token)
+        from src.workflows.specialist_evidence import read_specialist_handoff
+        await read_specialist_handoff(db, context)
         operator = WorkBoardOwner(principal_id=context.task.owner_principal_id,
             session_id=context.task.owner_session_id)
         child_task = await db.scalar(select(WorkBoardTask).where(
@@ -443,7 +532,12 @@ async def execute_specialist(jobs, *, service, invocation_id, fencing_token, pri
         else:
             claim = None
     if claim is not None:
-        await dispatcher._admit_execute_project(claim)
+        admitted = await dispatcher._admit_execute_project(claim,_defer_specialist=durable_wait)
+        if durable_wait and not admitted.get("deferred_specialist"):
+            _deny("specialist_delegation_child_admission_pending")
+    if durable_wait:
+        from src.workflows.specialist_lifecycle import pause_specialist_callback
+        raise await pause_specialist_callback(jobs,invocation_id,owner=owner,fence=fencing_token)
     async with jobs._session() as db:
         child_task = await service.repository.get_task(db, operator, child_task_id)
         await specialist_for_task(db, child_task)
@@ -500,6 +594,22 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
             context.request.evidence_refs)
         await validate_delegation_instruction(db, context.request)
         await recheck_delegation_evidence(db, operator, context.envelope, evidence_handoffs)
+        from uuid import uuid4
+        from src.work_board.contracts import SpecialistEvidenceHandoffV1
+        from src.work_board.general_task_runtime_artifacts import stage_task_artifact, verify_staged_task_artifact
+        child_task_id, child_attempt_id = uuid4().hex, uuid4().hex
+        copied = SpecialistEvidenceHandoffV1(parent_job_id=context.parent.run_identity,
+            creation_digest=context.manifest.creation_digest, invocation_id=invocation_id,
+            request_digest=digest(context.request.model_dump(mode="json")), child_task_id=child_task_id,
+            owner_principal_id=evidence_handoffs.owner_principal_id,
+            original_root_id=evidence_handoffs.original_root_id, group_digest=evidence_handoffs.group_digest,
+            producer_tokens=list(evidence_handoffs.producer_tokens), vault_state_digest=evidence_handoffs.vault_state_digest,
+            entries=[entry.model_dump(mode="json") for entry in evidence_handoffs])
+        staged_copy = stage_task_artifact(parent_job_id=context.parent.run_identity,
+            creation_digest=context.manifest.creation_digest, payload=copied)
+        _copied, copied_record = verify_staged_task_artifact(staged_copy,
+            parent_job_id=context.parent.run_identity, creation_digest=context.manifest.creation_digest)
+        await recheck_delegation_evidence(db, operator, context.envelope, evidence_handoffs)
         await db.rollback()
         await db.execute(text("BEGIN IMMEDIATE"))
         context = await current_delegation(db, invocation_id,
@@ -526,8 +636,6 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
             parent_allowed_tool_ids=[item.tool_id for item in context.envelope.descriptors],
             parent_evidence_refs=context.envelope.task_input.evidence_refs,
             existing_children=retained, parent_is_child=False)
-        from uuid import uuid4
-        child_task_id, child_attempt_id = uuid4().hex, uuid4().hex
         reservation = DelegationReservationV1(delegation_invocation_id=invocation_id,
             delegation_request_digest=digest(context.request.model_dump(mode="json")),
             parent_job_id=context.parent.run_identity, parent_task_id=context.task.task_id,
@@ -541,6 +649,9 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
             child_publication_key="specialist:" + digest([invocation_id, context.native_binding.input_digest]),
             child_task_id=child_task_id, child_attempt_id=child_attempt_id,
             child_job_id="work-board:" + child_task_id + ":" + child_attempt_id,
+            handoff_ref=staged_copy.reference,
+            handoff_producer_tokens=list(evidence_handoffs.producer_tokens),
+            handoff_vault_digest=evidence_handoffs.vault_state_digest,
             original_deadline_at=context.manifest.original_deadline_at.isoformat(),
             child_deadline_at=min(context.manifest.native_deadline_at,
                 datetime.now(timezone.utc) + timedelta(seconds=context.request.limits.wall_seconds)).isoformat())
@@ -551,12 +662,19 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
         history.append({"checkpoint_id": DELEGATION_KEY, "state_digest": digest(payload),
             "payload": payload, "safe": True, "fencing_token": fence,
             "recorded_at": datetime.now(timezone.utc).isoformat()})
+        artifacts = json.loads(context.callback.artifact_receipts_json or "[]")
+        artifacts.append(copied_record)
+        if (len(artifacts) > 50 or len(json.dumps(artifacts).encode()) > 4 * 1024 * 1024
+            or len(json.dumps(history).encode()) + 3 * 65536 > 4 * 1024 * 1024
+            or len(history) + 3 > 50):
+            _deny("specialist_delegation_checkpoint_capacity")
         changed = await db.execute(update(WorkflowRunState).where(
             WorkflowRunState.run_identity == invocation_id,
             WorkflowRunState.revision == context.callback.revision,
             WorkflowRunState.status == "running", WorkflowRunState.lease_owner == owner,
             WorkflowRunState.fencing_token == fence).values(
                 checkpoint_receipts_json=json.dumps(history, sort_keys=True, separators=(",", ":")),
+                artifact_receipts_json=json.dumps(artifacts, sort_keys=True, separators=(",", ":")),
                 revision=WorkflowRunState.revision + 1))
         if changed.rowcount != 1:
             _deny()

@@ -383,10 +383,11 @@ async def _verified_workflow_readback(
     if run is None or str(run.status or "") != "succeeded":
         return None
     if task.capability_id == "agent.task.v1":
-        from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
+        from src.workflows.specialist_delegation import is_specialist_root
         if is_specialist_root(run):
             try:
-                await assert_specialist_root_current(db, run)
+                from src.workflows.specialist_lifecycle import verify_terminal_specialist_origin
+                await verify_terminal_specialist_origin(db, task, attempt, run)
             except (BoardError, ValueError, TypeError):
                 return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):

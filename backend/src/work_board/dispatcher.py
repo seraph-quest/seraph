@@ -4892,6 +4892,7 @@ class WorkBoardDispatcher:
         claim: BoardDispatchClaim,
         *,
         browser_lane: Any | None = None,
+        _defer_specialist: bool = False,
     ) -> dict[str, Any]:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
@@ -5012,6 +5013,11 @@ class WorkBoardDispatcher:
                 attempt = copy(attempt)
                 attempt.workflow_run_id = job_id
             board_revision = link_mutation.task.task_revision
+            if _defer_specialist:
+                if specialist_context is None:
+                    raise DurableJobError("Only an original specialist admission may defer execution")
+                result["deferred_specialist"] = True
+                return result
             queued = await self.jobs.queue_job(
                 job_id,
                 expected_revision=admission.get("revision"),
@@ -10667,9 +10673,14 @@ class WorkBoardDispatcher:
             if action == "resume" and manifest.phase != "operator_paused":
                 raise BoardError("general_task_control_unavailable", "Only a safely paused original task may resume", status_code=409)
         if action == "pause":
-            await self.jobs.pause_general_task_native_parent(parent_id, operator_owner=owner,
+            paused = await self.jobs.pause_general_task_native_parent(parent_id, operator_owner=owner,
                 expected_task_revision=expected_revision, expected_revision=parent_revision,
                 expected_manifest_revision=manifest_revision)
+            if isinstance(paused,dict) and paused.get("cancellation",{}).get("stop_action") == "pause":
+                # A fixed specialist held stop has no execution-current phase
+                # and no resumable lease. Its own metadata verifier ran in
+                # the authenticated stop writer; never reenter _current.
+                return paused["task"], paused["attempt"]
             task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
             return task, attempt
         await self.jobs.resume_general_task_native_parent(parent_id,
@@ -11088,8 +11099,16 @@ class WorkBoardDispatcher:
             from src.workflows.general_task_guard import _current, _assert_joint_manifest
             expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
             async with self.session_provider() as db:
-                parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
-                _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                from src.workflows.specialist_delegation import is_specialist_root,assert_specialist_root_current
+                from src.workflows.general_task_guard import read_manifest
+                parent = await self.jobs._fetch(db,expected_job_id)
+                if is_specialist_root(parent) and read_manifest(parent) is None:
+                    from src.workflows.specialist_lifecycle import verify_unclaimed_specialist
+                    await verify_unclaimed_specialist(db,parent,task,attempt)
+                    current_task,current_attempt = task,attempt
+                else:
+                    parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
+                    _assert_joint_manifest(parent, current_task, current_attempt, manifest)
                 if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
                     or current_task.task_revision != task.task_revision
                     or current_attempt.fencing_token != attempt.fencing_token):
@@ -11393,6 +11412,8 @@ class WorkBoardDispatcher:
                         recovered.append(job_id)
                         continue
                     try:
+                        from src.workflows.specialist_result import settle_specialist_waits
+                        await settle_specialist_waits(self.jobs,job_id)
                         task, attempt, _owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)
                         outcome = await self._execute_registered(task, attempt, inputs, job_id=job_id,
                             parent_runtime_owner=f"{self.runner_id}:{attempt.attempt_id}",

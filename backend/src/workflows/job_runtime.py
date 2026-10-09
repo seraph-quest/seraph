@@ -1335,6 +1335,9 @@ def _append_parent_fence_condition(
     if getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.general_task_guard import append_general_task_root_gate
         append_general_task_root_gate(conditions, run, now=now)
+        from src.workflows.specialist_delegation import append_specialist_parent_gate
+        if append_specialist_parent_gate(conditions, run, now=now):
+            return
     if getattr(run, "job_kind", None) == "readonly_research_child":
         from src.workflows.research_guard import append_research_parent_gate
         if append_research_parent_gate(conditions, run, now=now):

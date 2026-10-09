@@ -2698,6 +2698,21 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
     operator = _operator(request)
     try:
         owner = _owner(operator)
+        if body.action.value == "accept_partial_results":
+            from src.workflows.specialist_partial import accept_partial_results
+            try:
+                result = await accept_partial_results(dispatcher.jobs,task_id=task_id,operator=operator,request=body)
+            except (DurableJobError, ValueError, TypeError, KeyError, OSError) as exc:
+                raise BoardError("specialist_partial_binding_changed",
+                    "Original stopped partial-result evidence changed; refresh the task",status_code=409) from exc
+            async with get_session() as db:
+                selected = await repository.get_task(db,owner,task_id)
+                attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                    .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
+                return {"task":await _safe_task_payload(selected,latest_attempt=attempt),
+                    "attempt":_attempt_payload(attempt),**result}
+        if body.partial_decision is not None:
+            raise BoardError("unsupported_action_fields","Partial decisions require their exact typed action",status_code=422)
         if body.action.value in {"pause", "resume"}:
             if body.model_fields_set - {"action", "expected_revision"}:
                 raise BoardError("unsupported_action_fields", "Native controls accept the current task revision only", status_code=422)

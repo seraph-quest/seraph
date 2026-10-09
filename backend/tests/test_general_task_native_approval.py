@@ -100,6 +100,9 @@ async def test_actual_mcp_approval_resumes_same_native_child_once(task_runtime, 
                     operator_owner=owner, expected_task_revision=manifest.task_revision,
                     expected_revision=parent["revision"], expected_manifest_revision=manifest.manifest_revision)
             from src.work_board.general_task import GeneralTaskService
+            service.stop()
+            registry.stop()
+            registry.start()
             restarted = GeneralTaskService(registry); restarted.start()
             try:
                 with pytest.raises(DurableJobLeaseError):

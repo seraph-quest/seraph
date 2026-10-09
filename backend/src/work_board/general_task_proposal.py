@@ -44,6 +44,8 @@ async def recheck_proposal_publication(db, owner, witness):
         or group.limits_digest != digest(envelope.task_input.limits.model_dump(mode="json"))):
         raise BoardError("general_task_publication_binding_changed", "Original proposal binding changed", status_code=409)
     await validate_group_owner(db, group)
+    from src.workflows.specialist_evidence import validate_handoff_publication
+    await validate_handoff_publication(db, owner, envelope)
     operations = (await db.execute(select(InferenceCostReservation).where(
         InferenceCostReservation.owner_id == owner.principal_id))).scalars().all()
     if envelope.proposal_provenance is not None:
@@ -65,7 +67,7 @@ def publication_scan_input(witness, raw):
     if (not isinstance(witness, ProposalPublicationWitness) or witness.seal is not _PUBLICATION_SEAL
         or canonical(GeneralTaskEnvelope.model_validate(raw).model_dump(mode="json")) != witness.envelope_bytes):
         raise BoardError("general_task_publication_witness_invalid", "Exact server proposal publication required", status_code=409)
-    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance"}}
+    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance", "specialist_handoff"}}
 
 
 def stored_scan_input(record, raw):
@@ -77,7 +79,7 @@ def stored_scan_input(record, raw):
         or group.owner_session_id != record.owner_session_id or group.goal_id != record.goal_id
         or group.goal_revision != record.goal_revision):
         raise BoardError("general_task_publication_binding_changed", "Canonical proposal owner binding changed", status_code=409)
-    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance"}}
+    return {key: value for key, value in raw.items() if key not in {"proposal_group", "proposal_provenance", "specialist_handoff"}}
 
 
 def group_identity(owner, goal_id, goal_revision, request_key):

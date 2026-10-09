@@ -118,6 +118,9 @@ def validate_data(value: Any, *, dependencies: set[str], depth: int = 0):
 
 
 def has_pointer(value):
+    from src.workflows.specialist_evidence import has_evidence_pointer
+    if has_evidence_pointer(value):
+        return True
     if isinstance(value, dict):
         return "$dependency" in value or any(has_pointer(item) for item in value.values())
     if isinstance(value, list):
@@ -328,7 +331,7 @@ class GeneralTaskService:
                 "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": size})
         return result
 
-    async def validate(self, owner: WorkBoardOwner, request: GeneralTaskCreate):
+    async def validate(self, owner: WorkBoardOwner, request: GeneralTaskCreate, *, _specialist_context=None):
         descriptors, tool_digest = self.snapshot()
         if request.plan is None:
             raise BoardError("general_task_plan_required", "Generate and review a typed plan first", status_code=422)
@@ -340,6 +343,11 @@ class GeneralTaskService:
             from src.work_board.general_task_schema import schema_accepts_output
             validate_schema(request.input.requested_output, check_value=False)
             for step in request.plan.steps:
+                from src.workflows.specialist_evidence import has_evidence_pointer, validate_evidence_pointers
+                if has_evidence_pointer(step.input):
+                    if _specialist_context is None:
+                        raise ValueError("copied evidence pointers require an original specialist")
+                    validate_evidence_pointers(step.input, _specialist_context.request.evidence_refs)
                 descriptor = by_id.get(step.tool_id)
                 if descriptor is None:
                     raise ValueError("tool unavailable: " + step.tool_id)
@@ -397,6 +405,20 @@ class GeneralTaskService:
             if (compared_input != original.task_input or request.goal_revision != existing.goal_revision
                 or (request.plan is not None and request.plan != original.plan)):
                 raise BoardError("general_task_idempotency_conflict", "Request key identifies different task data", status_code=409)
+            if _specialist_context is not None:
+                from src.work_board.repository import _begin_sqlite_immediate
+                from src.workflows.specialist_delegation import specialist_for_task, specialist_publication
+                from src.workflows.specialist_lifecycle import seal_child_creation
+                from src.workflows.specialist_lineage import publish_lineage_events
+                await _begin_sqlite_immediate(db)
+                existing = await self.repository.get_task(db,owner,existing.task_id)
+                current = await specialist_for_task(db,existing)
+                if (current is None or current.request != _specialist_context.request
+                    or current.reservation != _specialist_context.reservation):
+                    raise BoardError("specialist_delegation_publication_changed","Original specialist replay required",status_code=409)
+                witness = await specialist_publication(db,current,original)
+                await seal_child_creation(db,owner,existing,witness)
+                await publish_lineage_events(db,owner,existing,witness,repository=self.repository)
             event = await db.scalar(select(WorkBoardEvent).where(WorkBoardEvent.task_id == existing.task_id)
                 .order_by(WorkBoardEvent.event_id.desc()).limit(1))
             if event is None:
@@ -405,7 +427,12 @@ class GeneralTaskService:
         await self.repository._validate_goal(db, owner, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision)
         await self.strategy(owner, request.input.goal_ref)
-        evidence = await self.evidence(db, owner, request.input.evidence_refs)
+        if _specialist_context is not None:
+            from src.workflows.specialist_evidence import read_specialist_handoff
+            copied = await read_specialist_handoff(db, _specialist_context)
+            evidence = [entry.model_dump(mode="json", exclude={"content"}) for entry in copied.entries]
+        else:
+            evidence = await self.evidence(db, owner, request.input.evidence_refs)
         if request.plan is None:
             if self.planner is None:
                 raise BoardError("general_task_planner_inactive", "Restore the governed task planner", status_code=503)
@@ -442,7 +469,7 @@ class GeneralTaskService:
                     strategy=await self.strategy(owner, task_input.goal_ref),
                     proposal_group=proposal.group, proposal_provenance=proposal.provenance)
         else:
-            envelope = await self.validate(owner, request)
+            envelope = await self.validate(owner, request, _specialist_context=_specialist_context)
             if _specialist_context is not None:
                 from src.workflows.specialist_delegation import current_delegation
                 original = await current_delegation(db, _specialist_context.callback.run_identity,
@@ -456,7 +483,8 @@ class GeneralTaskService:
                     or request.input.evidence_refs != original.request.evidence_refs):
                     raise BoardError("specialist_delegation_publication_changed", "Original reserved specialist plan required", status_code=409)
                 envelope = envelope.model_copy(update={"proposal_group": original.envelope.proposal_group,
-                    "proposal_provenance": original.envelope.proposal_provenance})
+                    "proposal_provenance": original.envelope.proposal_provenance,
+                    "specialist_handoff": original.reservation.handoff_ref})
             else:
                 from src.auth.service import authenticate_session
                 from src.work_board.general_task_proposal import new_group
@@ -509,7 +537,7 @@ class GeneralTaskService:
         accepted = any(json.loads(item.metadata_json).get("status") == "todo" for item in acceptance_events)
         payload = {"task_id": task.task_id, "task_revision": task.task_revision,
             "accepted": accepted,
-            **envelope.model_dump(mode="json"), "no_learning": True,
+            **envelope.model_dump(mode="json", exclude={"specialist_handoff"}), "no_learning": True,
             "approval_pause": await self.approval_pause(db, owner, task, envelope)}
         from src.db.models import WorkBoardAttempt, WorkflowRunState
         from src.workflows.general_task_guard import read_manifest
@@ -568,6 +596,16 @@ class GeneralTaskService:
                         "reason": "general_task_native_cancel_evidence_unavailable"}
                     payload["native_execution"]["phase"] = "unknown_recovery"
                 payload["native_execution"]["cancellation"] = cancellation
+                from src.workflows.specialist_partial import read_partial_overlay,partial_review_options
+                try:
+                    from src.workflows.job_runtime import durable_job_repository
+                    payload["native_execution"]["partial_review_options"] = await partial_review_options(
+                        durable_job_repository,db,parent.run_identity,owner=owner)
+                    overlay = await read_partial_overlay(durable_job_repository,db,parent.run_identity,owner=owner)
+                    if overlay is not None:
+                        payload["native_execution"]["partial_review"] = overlay
+                except (BoardError,DurableJobError):
+                    payload["native_execution"]["partial_review_options"] = {"eligible":False,"reason":"original_partial_evidence_unavailable"}
         return payload
 
     def recovered_outputs(self, projection, envelope):
@@ -881,6 +919,11 @@ class GeneralTaskService:
             from src.work_board.general_task_schema import schema_accepts_output
             validate_schema(envelope.task_input.requested_output, check_value=False)
             for step in envelope.plan.steps:
+                from src.workflows.specialist_evidence import has_evidence_pointer, validate_evidence_pointers
+                if has_evidence_pointer(step.input):
+                    if envelope.specialist_handoff is None:
+                        raise ValueError("copied evidence pointers require an internal handoff")
+                    validate_evidence_pointers(step.input, envelope.task_input.evidence_refs)
                 descriptor = by_id.get(step.tool_id)
                 if descriptor is None or descriptor not in envelope.descriptors:
                     raise ValueError("step descriptor is unavailable")
@@ -916,7 +959,13 @@ class GeneralTaskService:
         binding = await self.strategy(owner, envelope.task_input.goal_ref)
         if binding != envelope.strategy:
             raise BoardError("general_task_strategy_changed", "Review the current task method", status_code=409)
-        evidence = await self.evidence(db, owner, envelope.task_input.evidence_refs)
+        if envelope.specialist_handoff is not None:
+            from src.workflows.specialist_evidence import validate_handoff_publication, read_specialist_handoff
+            context = await validate_handoff_publication(db, owner, envelope)
+            copied = await read_specialist_handoff(db, context)
+            evidence = [entry.model_dump(mode="json", exclude={"content"}) for entry in copied.entries]
+        else:
+            evidence = await self.evidence(db, owner, envelope.task_input.evidence_refs)
         if evidence != envelope.evidence:
             raise BoardError("general_task_evidence_changed", "Review changed evidence", status_code=409)
 

@@ -5,7 +5,8 @@ import json
 from weakref import WeakKeyDictionary
 
 from src.work_board.contracts import (GeneralTaskArtifactRef, GeneralTaskEnvelope,
-    GeneralTaskPlanRevisionV1, GeneralTaskStepReceiptV1, GeneralTaskToolInputV1, WorkBoardOwner)
+    GeneralTaskPlanRevisionV1, GeneralTaskStepReceiptV1, GeneralTaskToolInputV1, WorkBoardOwner,
+    SpecialistEvidenceHandoffV1, SpecialistPartialResultV1)
 from src.work_board.repository import BoardError
 
 _STAGING_SEAL = object()
@@ -139,9 +140,11 @@ def read_native_cancel_output_bytes(witness, *, binding, fencing_token,
         for descriptor in reversed(descriptors):
             os.close(descriptor)
 _ARTIFACT_MODELS = {"GeneralTaskPlanRevision.v1": GeneralTaskPlanRevisionV1,
-    "StepReceipt.v1": GeneralTaskStepReceiptV1, "GeneralTaskToolInput.v1": GeneralTaskToolInputV1}
+    "StepReceipt.v1": GeneralTaskStepReceiptV1, "GeneralTaskToolInput.v1": GeneralTaskToolInputV1,
+    "SpecialistEvidenceHandoff.v1": SpecialistEvidenceHandoffV1,"SpecialistPartialResult.v1":SpecialistPartialResultV1}
 _ARTIFACT_KINDS = {"GeneralTaskPlanRevision.v1": "general_task_plan_revision",
-    "StepReceipt.v1": "general_task_step_receipt", "GeneralTaskToolInput.v1": "general_task_tool_input"}
+    "StepReceipt.v1": "general_task_step_receipt", "GeneralTaskToolInput.v1": "general_task_tool_input",
+    "SpecialistEvidenceHandoff.v1": "specialist_evidence_handoff","SpecialistPartialResult.v1":"specialist_partial_result"}
 
 
 @dataclass(frozen=True)
@@ -161,9 +164,9 @@ def stage_task_artifact(*, parent_job_id, creation_digest, payload):
     from src.artifacts.registry import artifact_id_for
     from src.workspace import canonical_workspace_root
     from config.settings import settings
-    if not isinstance(payload, (GeneralTaskPlanRevisionV1, GeneralTaskStepReceiptV1, GeneralTaskToolInputV1)):
+    if not isinstance(payload, (GeneralTaskPlanRevisionV1, GeneralTaskStepReceiptV1, GeneralTaskToolInputV1, SpecialistEvidenceHandoffV1,SpecialistPartialResultV1)):
         raise BoardError("general_task_artifact_schema", "Native immutable artifact schema required", status_code=409)
-    if (isinstance(payload, (GeneralTaskPlanRevisionV1, GeneralTaskToolInputV1)) and (payload.parent_job_id != parent_job_id or payload.creation_digest != creation_digest)
+    if (isinstance(payload, (GeneralTaskPlanRevisionV1, GeneralTaskToolInputV1, SpecialistEvidenceHandoffV1,SpecialistPartialResultV1)) and (payload.parent_job_id != parent_job_id or payload.creation_digest != creation_digest)
         or isinstance(payload, GeneralTaskStepReceiptV1) and payload.parent_creation_digest != creation_digest):
         raise BoardError("general_task_artifact_binding", "Native artifact belongs to another creation", status_code=409)
     content = canonical(payload.model_dump(mode="json"))
@@ -229,7 +232,7 @@ def read_native_artifact_reference(reference, *, parent_job_id, creation_digest)
         raise BoardError("general_task_artifact_binding", "Immutable native artifact identity changed", status_code=409)
     model = _ARTIFACT_MODELS[reference.schema_version]
     parsed = model.model_validate_json(content)
-    if (model in {GeneralTaskPlanRevisionV1, GeneralTaskToolInputV1} and (parsed.parent_job_id != parent_job_id or parsed.creation_digest != creation_digest)
+    if (model in {GeneralTaskPlanRevisionV1, GeneralTaskToolInputV1, SpecialistEvidenceHandoffV1,SpecialistPartialResultV1} and (parsed.parent_job_id != parent_job_id or parsed.creation_digest != creation_digest)
         or model is GeneralTaskStepReceiptV1 and parsed.parent_creation_digest != creation_digest):
         raise BoardError("general_task_artifact_binding", "Immutable native creation binding changed", status_code=409)
     return parsed
@@ -381,6 +384,8 @@ async def resolve_current_native_step_inputs(db, parent, task, attempt, manifest
     outputs = await read_current_native_outputs(db, parent, task, attempt, manifest, envelope,
         step.depends_on)
     inputs = resolve_input(step.input, outputs)
+    from src.workflows.specialist_evidence import resolve_specialist_evidence
+    inputs = await resolve_specialist_evidence(db, task, envelope, inputs)
     validate_data(inputs, dependencies=set())
     descriptors = {item.tool_id: item for item in envelope.descriptors}
     validate_schema(descriptors[step.tool_id].input_schema, inputs)
@@ -424,6 +429,10 @@ async def read_current_native_outputs(db, parent, task, attempt, manifest, envel
             or receipt.descriptor_digest != binding.descriptor_digest
             or receipt.effect_receipt_digest != _digest(effects)):
             raise BoardError("general_task_dependency_unverified", "Exact successful predecessor readback required", status_code=409)
+        from src.workflows.specialist_lifecycle import read_fact,CLOSURE_KEY,SpecialistDelegationClosureV1
+        if read_fact(child,CLOSURE_KEY,SpecialistDelegationClosureV1) is not None:
+            from src.workflows.specialist_result import verify_full_delegation_result
+            await verify_full_delegation_result(db,parent,child,receipt)
         references = [ref for ref in receipt.artifact_refs if ref.schema_version == "GeneralTaskOutput.v1"]
         if len(references) != 1:
             raise BoardError("general_task_dependency_unverified", "Exactly one native output artifact required", status_code=409)

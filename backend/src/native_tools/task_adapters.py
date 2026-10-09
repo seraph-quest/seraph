@@ -440,10 +440,13 @@ class ToolRegistry:
                 raise PermissionError("current specialist delegation owner unavailable")
             from src.workflows.specialist_delegation import execute_specialist
             output = await execute_specialist(service.delegation_jobs, service=service,
-                invocation_id=job_id, fencing_token=fencing_token, principal=principal)
+                invocation_id=job_id, fencing_token=fencing_token, principal=principal,durable_wait=True)
             witness = TaskToolClosureWitness(binding, "returned", _digest(output), None, _CLOSURE_SEAL)
             return _InvocationCompletion(output, None, witness)
         except BaseException as error:
+            from src.workflows.specialist_lifecycle import SpecialistWaitRequired
+            if type(error) is SpecialistWaitRequired:
+                return _InvocationCompletion(None,error,error.witness)
             witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
             return _InvocationCompletion(None, error, witness)
 

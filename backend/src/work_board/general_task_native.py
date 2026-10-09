@@ -204,9 +204,18 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         principal=replace(principal, job_id=binding.invocation_id), job_id=binding.invocation_id,
         fencing_token=fence)
     service.retain_native_invocation(jobs, binding, invocation, output_root_witness=output_root_witness)
+    from src.workflows.specialist_lifecycle import SpecialistWaitRequired
     try:
         try:
             output = await invocation.wait(timeout=min(descriptor.deadline, remaining))
+        except SpecialistWaitRequired as signal:
+            from src.workflows.specialist_lifecycle import verify_wait_signal
+            if descriptor.tool_id != "delegate_task":
+                raise BoardError("specialist_wait_signal_denied","Only original delegation may wait",status_code=409)
+            async with jobs._session() as db:
+                wait = await verify_wait_signal(db,signal,binding=binding,fencing_token=fence)
+            service.release_native_invocation(binding.invocation_id)
+            return {"awaiting_specialists":True,"child_id":wait.child_task_id},None,None
         except TaskToolApprovalRequired:
             metadata = service.registry.approval_context(descriptor, private.inputs, job_id=binding.invocation_id)
             parent = await jobs.get_job(binding.parent_job_id)

@@ -19,6 +19,7 @@ import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { ReusableProcedureSave } from "./ReusableProcedureSave";
 import { TaskApprovalReview } from "./TaskApprovalReview";
 import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { ResearchDossierPanel } from "./ResearchDossierPanel";
@@ -4285,12 +4286,17 @@ function WorkBoardPanel({
               </section>
 
               <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
+              {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && selectedTask.status === "done" && <ReusableProcedureSave task={selectedTask}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals}
+                onCreated={async id => { await refreshSnapshot(); if (!stoppedRef.current) openTask(id); }} />}
               {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || selectedTask.capability_id === NEAR_TEXT_CAPABILITY || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
                 This capability has an explicit no_learning policy. Its native receipt records that result; no memory proposal is created.
               </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
+                goals={allGoals}
+                onCreated={async id => { await refreshSnapshot(); if (!stoppedRef.current) openTask(id); }}
               />}
               {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
                 key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}

@@ -48,7 +48,7 @@ class TaskMethodReview(Closed):
     expected_revision: int = Field(ge=1)
     artifact_digest: Sha
     scope_digest: Sha
-    action: Literal["accept", "reject", "rollback"]
+    action: Literal["accept", "reject", "rollback", "disable", "activate", "delete"]
     reason: str = Field(max_length=500)
     idempotency_key: Id
 
@@ -73,7 +73,7 @@ class TaskMethodScope(Closed):
     goal_id: Id
     goal_revision: int = Field(ge=1)
     family: Literal["research", "software", "knowledge", "general"]
-    candidate_schema: Literal["TaskMethod.v1", "ResearchStrategy.v1"]
+    candidate_schema: Literal["TaskMethod.v1", "ResearchStrategy.v1", "ProcedurePlan.v3"]
     candidate_digest: Sha
     candidate_version: Id
     proposal_id: Id
@@ -126,7 +126,8 @@ def _pointer_valid(row, key):
 async def _pointer(db, identity_id, scope):
     rows = list((await db.execute(select(TaskMethodActive).where(
         TaskMethodActive.owner_identity_id == identity_id, TaskMethodActive.goal_id == scope.goal_id,
-        TaskMethodActive.goal_revision == scope.goal_revision, TaskMethodActive.family == scope.family).limit(2))).scalars())
+        TaskMethodActive.goal_revision == scope.goal_revision, TaskMethodActive.family == scope.family)
+        .limit(2).execution_options(populate_existing=True))).scalars())
     if len(rows) > 1:
         _fail("method_selection_ambiguous")
     return rows[0] if rows else None
@@ -153,9 +154,9 @@ async def _context(db, owner, goal_ref, family, programme_grant=None):
         if (operator.session_id != owner.session_id or goal.owner_principal_id != owner.principal_id
             or goal.owner_session_id != owner.session_id):
             _fail("method_current_owner_required")
-        root = await db.get(OperatorSession, operator.session_id)
+        root = await db.get(OperatorSession, operator.session_id, populate_existing=True)
         identity_id = root.operator_identity_id
-    identity = await db.get(OperatorIdentity, identity_id) if identity_id else None
+    identity = await db.get(OperatorIdentity, identity_id, populate_existing=True) if identity_id else None
     if identity_id is not None and (identity is None or identity.revoked_at):
         _fail("method_identity_revoked")
     return identity_id, LessonScope(goal_id=goal.id, goal_revision=goal.revision, family=family)
@@ -166,9 +167,9 @@ async def _source_metadata(db, proposal, scope):
     token = json.loads(proposal.provenance_json)["source_token"]
     if digest(token) != scope.source_context_digest or digest(token) != scope.source_token_digest:
         _fail("method_source_token_changed")
-    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.source_task_id))
-    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == proposal.source_attempt_id))
-    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == proposal.workflow_run_id))
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.source_task_id).execution_options(populate_existing=True))
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == proposal.source_attempt_id).execution_options(populate_existing=True))
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == proposal.workflow_run_id).execution_options(populate_existing=True))
     goal = await db.get(Goal, proposal.goal_id, populate_existing=True)
     if not all((task, attempt, run, goal)):
         _fail("method_source_missing")
@@ -217,6 +218,16 @@ async def _history(db, scope):
     if len(rows) > MAX_VERSIONS:
         _fail("method_version_capacity_requires_review")
     return rows
+
+
+async def _history_view(db, rows):
+    versions = [row.accepted_memory_id for row in rows if row.accepted_memory_id]
+    deleted = set((await db.execute(select(MemoryTombstone.memory_id).where(
+        MemoryTombstone.memory_id.in_(versions)))).scalars()) if versions else set()
+    return [{"proposal_id": item.proposal_id, "version": item.accepted_memory_id,
+        "task_id": item.source_task_id, "attempt_id": item.source_attempt_id,
+        "digest": item.accepted_memory_content_digest,
+        "status": "deleted" if item.accepted_memory_id in deleted else item.status.value} for item in rows]
 
 
 class CurrentMethod:
@@ -390,7 +401,8 @@ class CurrentMethod:
             _fail("method_signature_invalid")
         await _source_metadata(db, proposal, signed)
         if (scope.family == "research" and not isinstance(candidate, ResearchStrategy)
-            or scope.family == "general" and (not isinstance(candidate, TaskMethod) or candidate.family != "general")):
+            or scope.family == "general" and not (typed.get("schema_version") == "ProcedurePlan.v3"
+                or isinstance(candidate, TaskMethod) and candidate.family == "general")):
             _fail("method_consumer_schema_unsupported")
         return TaskStrategyBinding(status="active", method_id=proposal.proposal_id,
             version=memory.id, digest=candidate_sha, typed_data=typed)
@@ -430,8 +442,8 @@ async def _proposal(db, operator, proposal_id, *, mutate=False):
         if (mutate or scopes.get(goal.id) != row.owner_session_id
             or await selected_read_principal(operator, "goal", goal.id, db=db) != row.owner_principal_id):
             _fail("method_current_owner_required")
-    root = await db.get(OperatorSession, row.owner_session_id)
-    identity = await db.get(OperatorIdentity, root.operator_identity_id) if root else None
+    root = await db.get(OperatorSession, row.owner_session_id, populate_existing=True)
+    identity = await db.get(OperatorIdentity, root.operator_identity_id, populate_existing=True) if root else None
     if identity is None or identity.revoked_at:
         _fail("method_identity_revoked")
     return row, MethodOwner(identity_id=identity.id, issuer_principal_id=row.owner_principal_id,
@@ -482,7 +494,8 @@ def _consumer_supported(candidate, scope, proposal_id):
     """Current descriptor compatibility is data, never execution authority."""
     if isinstance(candidate, ResearchStrategy):
         return scope.family == "research"
-    if not isinstance(candidate, TaskMethod) or scope.family != "general":
+    if scope.family != "general" or not (isinstance(candidate, TaskMethod)
+        or candidate.model_dump(mode="json").get("schema_version") == "ProcedurePlan.v3"):
         return False
     from src.native_tools.registry import ToolRegistry
     from src.work_board.general_task import method_constraints
@@ -537,7 +550,11 @@ async def _stage(operator, proposal_id, *, acceptance):
     consumer_supported = _consumer_supported(candidate, scope, proposal_id)
     text = canonical(candidate.model_dump(mode="json"))
     from src.memory.m5 import sanitize_m5_memory_text_async
-    if await sanitize_m5_memory_text_async(text) != text:
+    if candidate.model_dump(mode="json").get("schema_version") == "ProcedurePlan.v3":
+        sanitized = await lessons.sanitize_procedure_candidate(candidate)
+    else:
+        sanitized = await sanitize_m5_memory_text_async(text)
+    if sanitized != text:
         _fail("method_candidate_requires_redaction")
     if key is None:
         key = await asyncio.to_thread(_effect_mac_key)
@@ -547,12 +564,24 @@ async def _stage(operator, proposal_id, *, acceptance):
     if acceptance:
         async with database.get_session() as db:
             task, attempt, run, current = await lessons._source(db, operator, request)
-            observed, audit = await lessons._observed_method(db, task, run, scope.family,
-                structured_research=isinstance(candidate, ResearchStrategy))
+            procedure_source = None
+            if candidate.model_dump(mode="json").get("schema_version") == "ProcedurePlan.v3":
+                from src.memory.task_lesson_native import stage_completed_procedure_source, build_procedure_candidate
+                from src.workflows.procedure_contracts import ProcedureParameterSelection
+                procedure_source = await stage_completed_procedure_source(db, task, run)
+                selections = [ProcedureParameterSelection.model_validate(item)
+                    for item in envelope["procedure_parameter_selections"]]
+                observed = build_procedure_candidate(procedure_source, selections)
+                if observed != candidate:
+                    _fail("method_original_candidate_changed")
+                audit = procedure_source.audit
+            else:
+                observed, audit = await lessons._observed_method(db, task, run, scope.family,
+                    structured_research=isinstance(candidate, ResearchStrategy))
             current["method_receipt"] = audit
             if current != source_token:
                 _fail("method_original_source_changed")
-            staged = lessons._SourceStage(lessons._STAGE_SEAL, current, observed, audit)
+            staged = lessons._SourceStage(lessons._STAGE_SEAL, current, observed, audit, procedure_source)
     return MethodWitness(owner, scope, token, envelope, candidate, staged, request, key, consumer_supported, accepted_version)
 
 
@@ -568,6 +597,40 @@ async def inspect_method(operator, proposal_id):
 
 
 async def _inspect_method(operator, proposal_id):
+    # Canonical deletion suppresses proposal provenance and candidate content.
+    # Read its durable tombstone/pointer receipt without reopening private
+    # candidate artifacts or rebuilding deleted text from source history.
+    async with database.get_session() as db:
+        row, owner, own = await _proposal(db, operator, proposal_id)
+        tombstone = await db.scalar(select(MemoryTombstone).where(
+            MemoryTombstone.memory_id == row.accepted_memory_id)) if row.accepted_memory_id else None
+        if tombstone is not None:
+            memory = await db.get(Memory, row.accepted_memory_id, populate_existing=True)
+            signed = TaskMethodScope.model_validate(json.loads(memory.metadata_json)["work_board_provenance"]["memory_scope"])
+            if (signed.owner != owner or signed.proposal_id != row.proposal_id
+                or signed.candidate_version != row.accepted_memory_id
+                or signed.candidate_digest != row.accepted_memory_content_digest
+                or (signed.goal_id, signed.goal_revision) != (row.goal_id, row.goal_revision)):
+                _fail("method_deleted_binding_invalid")
+            scope = LessonScope(goal_id=signed.goal_id, goal_revision=signed.goal_revision, family=signed.family)
+            from src.memory.repository import _effect_mac_key
+            key = await asyncio.to_thread(_effect_mac_key)
+            pointer = await _pointer(db, owner.identity_id, scope)
+            if pointer and not _pointer_valid(pointer, key):
+                _fail("method_pointer_invalid")
+            history = await _history(db, scope)
+            return {"proposal_id": row.proposal_id, "status": "deleted", "expected_revision": row.revision,
+                "task_id": row.source_task_id, "attempt_id": row.source_attempt_id,
+                "version": row.accepted_memory_id, "digest": signed.candidate_digest,
+                "scope": scope.model_dump(mode="json"), "new_method": None, "old_method": None,
+                "parameters": [], "parameter_selections": [], "source_receipt": None,
+                "active_binding": json.loads(pointer.binding_json) if pointer and not pointer.baseline else None,
+                "configured_baseline": bool(pointer and pointer.baseline),
+                "pointer_revision": pointer.revision if pointer else None,
+                "tombstone": {"id": tombstone.id, "created_at": tombstone.created_at.isoformat()},
+                "family_history": await _history_view(db, history),
+                "quality_evidence": "unmeasured", "behavior_changed": True,
+                "adoption_requires_current_owner": not own, "disable_scope": scope.family}
     witness = await _stage(operator, proposal_id, acceptance=False)
     async with database.get_session() as db:
         await db.execute(sql_text("BEGIN"))
@@ -582,6 +645,7 @@ async def _inspect_method(operator, proposal_id):
         pointer = await _pointer(db, owner.identity_id, witness.scope)
         if pointer and not _pointer_valid(pointer, witness.key):
             _fail("method_pointer_invalid")
+        history = await _history(db, witness.scope)
         return {"proposal_id": row.proposal_id, "status": row.status.value, "expected_revision": row.revision,
             "task_id": row.source_task_id, "attempt_id": row.source_attempt_id,
             "artifact_digest": row.artifact_digest, "scope": witness.scope.model_dump(mode="json"),
@@ -589,6 +653,13 @@ async def _inspect_method(operator, proposal_id):
             "old_method": witness.envelope["old_method"], "new_method": witness.candidate.model_dump(mode="json"),
             "source_refs": witness.envelope["source_refs"], "observed": witness.envelope["observed"],
             "active_binding": json.loads(pointer.binding_json) if pointer and not pointer.baseline else None,
+            "pointer_revision": pointer.revision if pointer else None,
+            "version": row.accepted_memory_id, "digest": digest(witness.candidate.model_dump(mode="json")),
+            "family_history": await _history_view(db, history),
+            "parameter_selections": witness.envelope.get("procedure_parameter_selections", []),
+            "parameters": witness.candidate.model_dump(mode="json").get("plan", {}).get("parameters", []),
+            "source_receipt": witness.envelope["source_token"].get("method_receipt"),
+            "disable_scope": "general-task family" if witness.scope.family == "general" else witness.scope.family,
             "configured_baseline": bool(pointer and pointer.baseline), "quality_evidence": "unmeasured",
             "adoption_requires_current_owner": not own, "behavior_changed": row.status == MemoryProposalStatus.accepted}
 
@@ -618,7 +689,7 @@ async def _review_method(operator, request: TaskMethodReview):
             if replay.kind != ACTION_KIND or replay.mutation_request_digest != request_sha:
                 _fail("method_review_idempotency_conflict")
             return {**json.loads(replay.metadata_json)["result"], "idempotent_replay": True}
-    if request.action == "rollback" and not request.reason.strip():
+    if request.action in {"rollback", "disable", "activate", "delete"} and not request.reason.strip():
         _fail("method_rollback_reason_required")
     witness = await _stage(operator, request.proposal_id, acceptance=request.action == "accept")
     typed = witness.candidate.model_dump(mode="json")
@@ -725,8 +796,52 @@ async def _review_method(operator, request: TaskMethodReview):
             row.rollback_reason = request.reason.strip()
             # Only future selection changes; the signed historical version is
             # still available to its already-admitted native pin validator.
-            pointer.binding_json, pointer.baseline = "null", True
+            previous = json.loads(pointer.previous_binding_json)
+            restored = None
+            if previous is not None and typed["schema_version"] == "ProcedurePlan.v3":
+                prior = ActiveMethodBinding.model_validate(previous)
+                if prior != selected:
+                    try:
+                        await validator._version(db, prior, owner.identity_id, witness.scope, allow_rollback=False)
+                        restored = prior
+                    except BoardError:
+                        # An unavailable exact prior pin falls back only to the
+                        # signed family baseline, never a history search.
+                        restored = None
+            pointer.previous_binding_json = pointer.binding_json
+            pointer.binding_json = restored.model_dump_json() if restored else "null"
+            pointer.baseline = restored is None
             pointer.revision += 1
+        elif request.action in {"disable", "activate", "delete"}:
+            if row.status != MemoryProposalStatus.accepted or pointer is None:
+                _fail("method_not_active")
+            validator = CurrentMethod()
+            validator._key = witness.key
+            if request.action == "activate":
+                if not pointer.baseline:
+                    _fail("method_not_disabled")
+                previous = ActiveMethodBinding.model_validate_json(pointer.previous_binding_json)
+                if previous.proposal_id != row.proposal_id or previous.version != row.accepted_memory_id:
+                    _fail("method_activation_selection_changed")
+                await validator._version(db, previous, owner.identity_id, witness.scope, allow_rollback=False)
+                pointer.binding_json, pointer.baseline = previous.model_dump_json(), False
+                pointer.previous_binding_json = "null"
+                pointer.revision += 1
+            else:
+                signed = TaskMethodScope.model_validate_json(row.memory_scope_json)
+                selected = ActiveMethodBinding(owner=owner, scope=witness.scope,
+                    version=row.accepted_memory_id, digest=signed.candidate_digest, proposal_id=row.proposal_id)
+                await validator._version(db, selected, owner.identity_id, witness.scope, allow_rollback=False)
+                if request.action == "delete":
+                    await memory_repository.mark_memory_tombstoned_in_session(db, selected.version,
+                        actor=owner_id, reason=request.reason.strip()[:255])
+                current = None if pointer.baseline else ActiveMethodBinding.model_validate_json(pointer.binding_json)
+                if request.action == "disable" and current != selected:
+                    _fail("method_disable_selection_changed")
+                if current == selected:
+                    pointer.previous_binding_json = pointer.binding_json
+                    pointer.binding_json, pointer.baseline = "null", True
+                    pointer.revision += 1
         else:
             if row.status != MemoryProposalStatus.proposed:
                 _fail("method_not_proposed")
@@ -744,6 +859,7 @@ async def _review_method(operator, request: TaskMethodReview):
             "active_binding": json.loads(pointer.binding_json) if pointer and not pointer.baseline else None,
             "configured_baseline": bool(pointer and pointer.baseline), "behavior_changed": request.action != "reject",
             "quality_evidence": "unmeasured", "idempotent_replay": False}
+        result["pointer_revision"] = pointer.revision if pointer else None
         db.add(WorkBoardEvent(task_id=row.source_task_id, owner_principal_id=owner_id, owner_session_id=root_id,
             actor_principal_id=owner_id, actor_session_id=root_id, kind=ACTION_KIND,
             mutation_idempotency_key=request.idempotency_key, mutation_request_digest=request_sha,

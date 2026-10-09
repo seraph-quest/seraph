@@ -2309,10 +2309,29 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 
 
 from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
+from src.workflows.procedure_contracts import ProcedureSaveRequest
 from src.work_board.communication_contracts import CommunicationCreate, CommunicationCleanup, ActionBundle
 from src.integrations.gmail_read import GmailReadError
 from src.integrations.google_calendar import CalendarIntegrationError
 from src.workflows.job_runtime import DurableJobNotFound
+
+
+@router.get("/tasks/{task_id}/save-method")
+async def get_save_task_method(request: Request, task_id: str):
+    from src.memory.task_lessons import eligible_procedure_source
+    try:
+        return await eligible_procedure_source(_operator(request), task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/save-method", status_code=201)
+async def post_save_task_method(request: Request, task_id: str, body: ProcedureSaveRequest):
+    from src.memory.task_lessons import save_procedure_method
+    try:
+        return await save_procedure_method(_operator(request), task_id, body)
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 
 @router.post("/general-tasks/communications")

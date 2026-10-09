@@ -301,6 +301,45 @@ M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
 
+**Reusable general procedures (#1002): Planned until the complete independently
+reviewed milestone merge reaches `develop`.** Intended post-merge availability
+adds source inspection, server-offered ordinary scalar parameter naming,
+immutable inert saving and separate signed M5 review in the existing Task
+Inspector. The exact seven-field `ProcedurePlan.v3` preserves every original
+registered typed step, fixed input, symbolic dependency, output contract and
+producer/version pin. Unsupported or forbidden leaves block the whole save;
+legacy receipts without original producer pins require a fresh eligible source
+(`source_contract_review_required`) while ordinary legacy continuation remains
+unchanged. This extends the current Python lifecycle; it does not introduce a
+Cordis bridge, authored executable pack, tool registry, queue or authority owner.
+
+The exact current signed method/version/digest/pointer revision can construct a
+new triage Task with strict fresh inputs. Explicit promotion uses existing
+durable native execution, fresh jobs/Attempts/deadlines/cost limits and current
+effect approvals. Full independent plan comparison and same-writer pin/body/
+original-event checks fence publication and exact-key replay; a changed method
+or body cannot create another Task under the original key. Family disable selects
+signed baseline, activation requires exact reviewed prior selection, rollback
+restores only the exact eligible previous signed pointer, and explicit canonical
+deletion writes a tombstone and hides candidate content. Existing admitted pins
+retain their identity under current authority/source/expiry and tombstone checks.
+Generic recall/indexing remains excluded; each exact scope retains the
+16-version bound. Typed artifacts have a 64KiB bound and full Vault/secret checks,
+without changing the 2,000-scalar generic M5 prose limit.
+
+Named provider-free Linux receipts cover the actual mixed research/file/
+registered-MCP source, save/adopt, fresh invocation with changed ordinary values,
+distinct native approvals and literal physical readback, same-key A-to-B denial,
+exact prior rollback, restart and disable/activate/tombstone readback. The
+focused source/producer/native run passed 36 checks, the consumer regression run
+66 and the UI run 64; these separate proof runs retain their own source epochs.
+Scripted final service transports and actual local SQLite/private-file effects
+prove mechanics, not provider quality, learned improvement, general usefulness
+or native macOS execution. Whole cumulative independent review and merge remain
+required. See the
+[operator flow](./12-current-app-guide.md#reusable-general-procedures-1002)
+and [accepted contract](./decisions/028-reviewed-task-methods.md).
+
 **Reviewed task methods (#1001): Shipped on `develop` revisions containing the
 independently reviewed milestone merge.** Earlier revisions require that merge;
 branch-local receipts do not establish availability. Explicit review accepts

@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from src.db.models import WorkBoardStatus
+from src.workflows.procedure_contracts import ProcedureInputContractV1
 
 
 class WorkBoardContractError(ValueError):
@@ -250,6 +251,14 @@ class ToolDescriptor(ClosedTaskModel):
     server_id: str | None = Field(default=None, max_length=128)
     connection_revision: int | None = Field(default=None, ge=1)
     policy_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    procedure_inputs: ProcedureInputContractV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_descriptor(self, handler):
+        result = handler(self)
+        if self.procedure_inputs is None:
+            result.pop("procedure_inputs", None)
+        return result
 
     @model_validator(mode="after")
     def complete(self):

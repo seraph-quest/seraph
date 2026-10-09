@@ -1560,6 +1560,89 @@ source/signature/selection tamper and revocation before contact. Scripted final
 transport proves these mechanics; learned quality, provider usefulness and
 native macOS execution remain unverified.
 
+### Reusable general procedures (#1002)
+
+**Intended Shipped scope after independently reviewed milestone merge:** the
+flow below requires an installed `develop` revision containing the complete
+[#1002](https://github.com/seraph-quest/seraph/issues/1002) merge. Earlier revisions
+do not acquire it from branch-local receipts. The existing Python/FastAPI
+owners and React Task Inspector implement this
+[ADR-028](./decisions/028-reviewed-task-methods.md#reusable-general-procedures-v3)
+boundary; no Cordis bridge or migrated agent loop is required or implied.
+
+Complete and review an ordinary general Task, then use its Inspector to inspect
+the original source for a reusable method. The server checks the latest ended
+Attempt, complete original native steps, original producer contracts and actual
+verified readbacks. It offers only safe ordinary scalar fields. Name the fields
+you want to supply on future invocations; fixed ordinary inputs and symbolic
+typed dependencies remain unchanged. A mixed research/file/registered-MCP
+journey can retain the original dependency from read output to write content
+without saving the source body as a literal or default. The browser action is
+fixed to the original extract/html mode. Unsupported, unclassified or forbidden
+input prevents saving the entire journey, with a reason in the Inspector.
+Older completed Tasks without original producer pins show
+`source_contract_review_required`; run a fresh eligible Task rather than trying
+to certify historical receipts with current code. Their ordinary execution and
+the existing v1/v2 procedure flows keep their original contracts.
+
+**Save** creates a private immutable inert proposal. It does not activate a
+method, install a tool or publish a package. Inspect its original Task/Attempt/
+Goal revision, complete seven-field plan, producer-offered parameter schemas
+and source receipt, then separately accept or reject the exact candidate in the
+existing canonical method review. Acceptance signs an immutable M5 version and
+the general-family selection for that operator and Goal revision. Up to 16
+accepted versions fit one exact scope; capacity exhaustion requires review and
+does not evict history. The typed artifact is bounded to 64KiB with full Vault
+and secret/authority checks; generic M5 prose retains its 2,000-scalar limit.
+Method JSON remains excluded from generic recall, indexing and prompts.
+
+The accepted Inspector shows the exact current version, digest and pointer
+revision, declared parameters and bounded version history with source Task
+navigation. Invoke the **current** reviewed version by supplying every declared
+fresh value, selecting the current owned Goal/revision and explicit finite
+execution limits. No previous parameter value is silently supplied as a default.
+History inspection alone cannot activate or invoke a noncurrent version.
+The server independently reconstructs and compares the full plan, fixed inputs,
+dependencies and output contracts; missing fields, wrong literal types, changed
+producer versions or undeclared changes are blocked.
+
+Invocation creates and selects a new **triage Task**. Inspect it and explicitly
+**Promote** it through the normal Work Board flow. The existing durable native
+runtime owns new jobs, Attempts, deadlines and cost limits, and requests current
+native effect approvals. The saved method carries no old Root, permission,
+credential, allowance, approval or contacted-effect identity into execution.
+Revocation and stale Goal/source state still stop the next owned boundary.
+Exact same-key retry can recover only the original Task under the exact current
+pin, pointer revision and whole request. Changed values or a different method
+under that key conflict; retry cannot create a second Task or renew old limits.
+After an uncertain response, explicitly reinspect the method before continuing;
+the Inspector retains the original publication key within the current session
+and blocks further invocation until that inspection completes.
+
+**Disable general-task method selection** affects the entire operator/Goal-
+revision general family. It selects a signed baseline, blocks new method
+invocations and preserves source Tasks and version history. **Activate** is a
+separate review action restoring only the exact previously reviewed pin.
+**Rollback** restores the exact eligible previous signed version, or explicit
+baseline when none is available; inspect the resulting current pointer before
+invoking again. Existing admitted work keeps its original immutable pin and
+current authority checks. **Delete** requires explicit canonical tombstone
+confirmation. It withdraws a matching current selection and blocks that version
+at future and in-flight boundaries. The deleted Inspector shows safe version,
+digest, pointer, history and tombstone ID/time without candidate content or
+execution controls; source Tasks, effects and audit remain inspectable.
+
+Provider-free Linux validation covers the complete original mixed native journey,
+save/adopt/fresh invocation and physical changed output, distinct current
+approvals, restart, same-key conflict and lifecycle readback. Focused producer/
+native checks (36), consumer regressions (66) and UI checks (64) passed in their
+named implementation receipts; these are separate local proof runs, not a
+single end-to-end browser run. UI responses come from the actual native journey.
+Only final HTTPS service responses were scripted, with external sockets and
+inference denied. Local mechanics are proven; learned improvement, live provider
+usefulness and native macOS execution remain unverified. The milestone's final
+independent cumulative review and merge are required for availability.
+
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
 [ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow

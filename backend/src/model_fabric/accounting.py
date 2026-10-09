@@ -28,14 +28,28 @@ _task_group: ContextVar[object | None] = ContextVar("general_task_accounting_gro
 @contextmanager
 def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None,
                                  task_attempt_id=None, plan_revision=0,
-                                 selected_grant_digest=None, parent_owner=None, parent_fence=None):
+                                 selected_grant_digest=None, parent_owner=None, parent_fence=None,
+                                 preparation_binding=None):
     from src.work_board.contracts import TaskProposalGroupV1
-    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation"}:
+    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation", "communication_preparation"}:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role == "communication_preparation":
+        from src.work_board.communication_contracts import CommunicationPreparationBinding
+        from src.work_board.communication_preparation import preparation_admission
+        if (type(preparation_binding) is not CommunicationPreparationBinding
+            or preparation_binding.group != group or task_id is not None or task_attempt_id is not None
+            or plan_revision != 0 or selected_grant_digest is not None or parent_owner is not None or parent_fence is not None):
+            raise InferenceAccountingError("general_task_group_binding_invalid")
+        try:
+            preparation_admission(preparation_binding)
+        except PermissionError as exc:
+            raise InferenceAccountingError("general_task_group_binding_invalid") from exc
+    elif preparation_binding is not None:
         raise InferenceAccountingError("general_task_group_binding_invalid")
     token = _task_group.set({"group": group, "role": role, "task_id": task_id,
         "task_attempt_id": task_attempt_id, "plan_revision": plan_revision,
         "selected_grant_digest": selected_grant_digest, "parent_owner": parent_owner,
-        "parent_fence": parent_fence})
+        "parent_fence": parent_fence, "preparation_binding": preparation_binding})
     try:
         yield
     finally:
@@ -354,10 +368,14 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("accounting_server_bound_required")
             request = replace(request, estimated_cost_microusd=bound)
             task_binding = _task_group.get()
-            if task_binding is not None and request.runtime_path != "general_task_planner":
+            expected_task_route = ("strategist_agent" if task_binding is not None
+                and task_binding.get("role") == "communication_preparation" else "general_task_planner")
+            if task_binding is not None and request.runtime_path != expected_task_route:
                 raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
+            if ephemeral and task_binding is not None and task_binding.get("role") == "communication_preparation":
+                raise InferenceAccountingError("communication_preparation_native_binding_required")
             if near and ephemeral:
                 raise InferenceAccountingError("near_native_binding_required")
             if near and _near_contact.get() is None:
@@ -443,6 +461,8 @@ class DurableInferenceBrokerMixin:
         from src.workflows.inference_accounting import InferenceProviderContactDenied
         try:
             contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
+            if _task_group.get() is not None:
+                contact_kwargs["general_task_binding"] = _task_group.get()
             await handle.repository.contact_inference_provider(handle.request.operation_id,
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:

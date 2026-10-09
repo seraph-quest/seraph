@@ -2143,6 +2143,9 @@ class WorkBoardRepository:
         await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
         await self.require_generic_recovery_allowed(db, task)
+        if task.idempotency_scope == "communication-source":
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source replay is unavailable", status_code=409)
         expected = int(expected_revision)
         if task.task_revision != expected:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
@@ -2627,6 +2630,9 @@ class WorkBoardRepository:
             await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
+        if task.idempotency_scope == "communication-source":
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source promotion is unavailable", status_code=409)
         if task.status is not WorkBoardStatus.todo:
             return None
         if task.task_revision != int(expected_revision):
@@ -2867,6 +2873,7 @@ class WorkBoardRepository:
         now: datetime | None = None,
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
+        _communication_publication=None,
     ) -> BoardDispatchClaim | None:
         """Atomically claim a Ready task and persist its pending attempt."""
 
@@ -2876,7 +2883,14 @@ class WorkBoardRepository:
         staged_dependencies = None
         dependency_error = None
         preflight_task = await self._find_task(db, task_id)
-        if preflight_task is not None:
+        if (preflight_task is not None and preflight_task.idempotency_scope == "communication-source"
+            and _communication_publication is None):
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source replay is unavailable", status_code=409)
+        if _communication_publication is not None:
+            from src.work_board.communication_preparation import verify_source_publication
+            await verify_source_publication(db, _communication_publication, preflight_task)
+        if preflight_task is not None and _communication_publication is None:
             try:
                 staged_dependencies = await stage_dependencies(db, preflight_task)
             except (BoardError, OSError, KeyError, TypeError) as exc:
@@ -2886,7 +2900,8 @@ class WorkBoardRepository:
         if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import stage_task_authority
             preference_stage = await stage_task_authority(db,preference_task)
-        await _begin_sqlite_immediate(db)
+        if _communication_publication is None:
+            await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority
@@ -2894,6 +2909,12 @@ class WorkBoardRepository:
         if task is None:
             raise BoardNotFound(task_id)
         await db.refresh(task)
+        if task.idempotency_scope == "communication-source":
+            if _communication_publication is None:
+                raise BoardError("communication_original_source_publication_required",
+                    "Inspect the original preparation; generic source replay is unavailable", status_code=409)
+            from src.work_board.communication_preparation import verify_source_publication
+            await verify_source_publication(db, _communication_publication, task)
         if task.status is not WorkBoardStatus.ready:
             return None
         if task.task_revision != int(expected_revision):
@@ -3630,6 +3651,7 @@ class WorkBoardRepository:
         attempt_id: str,
         *,
         expected_revision: int,
+        communication_binding=None,
         board_fence: int,
         lease_owner: str,
         status: WorkBoardStatus,
@@ -3724,6 +3746,12 @@ class WorkBoardRepository:
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            source_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+            source_run = await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == source_attempt.workflow_run_id)) if source_attempt and source_attempt.workflow_run_id else None
+            if source_run is not None and "communication_preparation" in json.loads(source_run.declared_authority_json or "{}"):
+                from src.work_board.communication_preparation import verify_preparation_binding
+                await verify_preparation_binding(db, communication_binding, source_run=source_run, allow_succeeded=True)
             try:
                 if dependency_error is not None:
                     raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')

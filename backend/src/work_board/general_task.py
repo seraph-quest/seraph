@@ -46,6 +46,7 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     if dispatcher.general_tasks is not None:
         raise RuntimeError("general task lifecycle already owned")
     try:
+        registry.communication_dispatcher = dispatcher
         registry.start()
         service.start()
         dispatcher.general_tasks = service
@@ -55,6 +56,7 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
             dispatcher.general_tasks = None
         service.stop()
         registry.stop()
+        registry.communication_dispatcher = None
 
 
 def canonical(value: Any) -> bytes:
@@ -448,6 +450,10 @@ class GeneralTaskService:
         self.validate_method_plan(envelope)
         from src.work_board.document_preparation import check_envelope
         check_envelope(envelope)
+        from src.work_board.communication_preparation import check_envelope as check_communication
+        check_communication(envelope)
+        if any(step.tool_id == "communication_prepare" for step in request.plan.steps) and request.input.communication_selection is None:
+            raise BoardError("communication_source_selection_required", "Explicit source selection is required", status_code=422)
         from src.work_board.document_build_native import check_envelope as check_build_envelope
         check_build_envelope(envelope)
         if any(step.tool_id == "document_prepare" for step in request.plan.steps) and request.input.document_source is None:
@@ -456,6 +462,8 @@ class GeneralTaskService:
 
     async def create(self, db, owner, request: GeneralTaskCreate, *, publication_authority_check=None,
                      publication_authority_scope=None):
+        if request.input.communication_selection is not None and request.plan is None:
+            raise BoardError("communication_fixed_plan_required", "Communications preparation requires its fixed source-only plan", status_code=422)
         if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
@@ -535,6 +543,18 @@ class GeneralTaskService:
         if envelope.task_input.document_source is not None:
             from src.work_board.document_preparation import resolve
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
+        if envelope.task_input.communication_selection is not None:
+            from src.work_board.communication_preparation import assert_source_current
+            selection = envelope.task_input.communication_selection
+            async def communication_publication_check(check_db):
+                for capability, values in (("work.mail-reply-draft.v1", selection.reply_inputs),
+                                           ("calendar.meeting-prep.v1", selection.meeting_inputs)):
+                    for value in values:
+                        await assert_source_current(check_db, owner, capability, value)
+                if original_publication_check is not None:
+                    await original_publication_check(check_db)
+            original_publication_check = publication_authority_check
+            publication_authority_check = communication_publication_check
         from src.work_board.general_task_proposal import seal_proposal_publication
         publication = await seal_proposal_publication(db, owner, envelope, goal_revision=request.goal_revision)
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
@@ -978,6 +998,8 @@ class GeneralTaskService:
 
     async def recheck_authority(self, db, owner, envelope, *, require_current_strategy=False):
         self.recheck(envelope)
+        from src.work_board.communication_preparation import check_envelope as check_communication
+        check_communication(envelope)
         from src.work_board.document_preparation import check_envelope, resolve
         check_envelope(envelope)
         from src.work_board.document_build_native import check_envelope as check_build_envelope

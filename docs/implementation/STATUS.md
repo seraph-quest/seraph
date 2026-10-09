@@ -200,6 +200,31 @@ managed lifecycle remains the execution owner before the separately owned
 Specialist delegation in
 [#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
 
+**Communication preparation (#1016): intended Partial scope after independently
+reviewed merge.** This is source-branch behavior until the installed `develop`
+revision contains that merge. One accepted original task composes actual native
+Mail reply drafts and Calendar meeting preparations from explicitly selected,
+currently granted sources under the same original inference group and cutoff.
+The private encrypted five-field plan retains exact source provenance and
+affected-only blockers. Each selected send or owned-event reschedule uses its
+own fresh exact preview, immutable approval, existing native action and
+independent provider readback; validating a subset performs no effects.
+Unknown contacts/costs retain their original liabilities and never trigger
+automatic replay. Read-only RecoveryGoal observation cannot renew an old write.
+Recovered selection grants no private-body access; generic Calendar readers
+remain root-only. Stored configuration alone establishes no readiness.
+
+Deliberate exact-task cleanup reports verified aggregate absence or unresolved
+cleanup. Access expiry does not delete bytes, and aggregate cleanup leaves
+original Mail drafts, plaintext Calendar briefs and approval/effect history with
+their existing owners. Isolated authenticated native/API and UI receipts prove
+these bounded mechanics and explicit `no_learning`, not live-provider usefulness,
+model quality or native macOS execution. Unresolved native process exits 139/245
+remain a validation limitation; a single debugger run passing 24 tests does not
+erase those failures or establish runtime readiness. Only positive cleanup has
+captured authenticated API wire evidence; unresolved cleanup has service/UI
+coverage. See the [operator contract](./12-current-app-guide.md#communication-preparation-1016).
+
 **Task lesson drafts (#1000): intended Shipped scope after merge — supported
 proposal-only lessons.** This capability provides private,
 owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native

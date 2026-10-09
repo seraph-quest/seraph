@@ -1,14 +1,27 @@
+import type { CommunicationRescheduleInput, ExactCommunicationApproval } from "../../lib/communications";
 import { useEffect, useRef, useState } from "react";
 import * as exact from "../../lib/calendarRescheduleApi";
 import type { RescheduleConsent, RescheduleJob, RescheduleProfile } from "../../lib/calendarRescheduleApi";
 
 interface Props {
+  preparedInput?: CommunicationRescheduleInput;
+  onPrepareCommunication?: (input: CommunicationRescheduleInput) => void;
+  onExactApproved?: (value: ExactCommunicationApproval | null) => void;
+  onReadback?: (value: RescheduleJob) => void;
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
   eventBindingId: string; eventBindingRevision: number; goalId: string; goalRevision: number;
   goals: { id: string; title: string; revision?: number | null }[];
   onTaskCreated?: () => void;
 }
 interface Receipt { kind: RescheduleJob["kind"]; uuid: string; jobId?: string }
+interface PreparedAdmission {
+  taskRequest: { request_uuid: string; input: CommunicationRescheduleInput };
+  task: { task_id: string; task_revision: number } | null;
+  previewRequest: Record<string, unknown> | null;
+}
+// Private proposal data is retained only in original-owner memory. A remount
+// cannot mint a replacement admission when the original response was lost.
+const pendingPreparedAdmissions = new Map<string, PreparedAdmission>();
 const button = "cockpit-feedback-button";
 export function CalendarReschedulePanel(props: Props) {
   const { ownerPrincipalId, ownerSessionId, eventBindingId, eventBindingRevision, goalId, goalRevision, goals } = props;
@@ -26,6 +39,9 @@ export function CalendarReschedulePanel(props: Props) {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [busy, setBusy] = useState(false); const [message, setMessage] = useState<string | null>(null);
   const [storageBlocked, setStorageBlocked] = useState(false);
+  const preparedTaskRequest = useRef<{ request_uuid: string; input: CommunicationRescheduleInput } | null>(null);
+  const preparedTask = useRef<{ task_id: string; task_revision: number } | null>(null);
+  const preparedPreviewRequest = useRef<Record<string, unknown> | null>(null);
   const generation = useRef(0); const controller = useRef<AbortController | null>(null);
   const read = profiles.find(p => p.connection_id === readId && p.state === "active");
   const write = profiles.find(p => p.connection_id === writeId && p.state === "active");
@@ -39,9 +55,12 @@ export function CalendarReschedulePanel(props: Props) {
     return () => { window.removeEventListener("blur", clearPrivate); document.removeEventListener("visibilitychange", clearPrivate); if (timer !== undefined) clearTimeout(timer); };
   }, [job?.preview?.expires_at]);
   useEffect(() => {
-    generation.current++; controller.current?.abort(); setBusy(false); setJob(null); setReceipt(null);
+    generation.current++; controller.current?.abort();
+    const retained = key && props.preparedInput ? pendingPreparedAdmissions.get(key) : undefined;
+    preparedTaskRequest.current = retained?.taskRequest ?? null; preparedTask.current = retained?.task ?? null; preparedPreviewRequest.current = retained?.previewRequest ?? null;
+    setBusy(false); setJob(null); setReceipt(null);
     setProfiles([]); setGrants([]); setReadId(""); setWriteId(""); setVerified(false); setAckIdentity(false);
-    setAcks([false, false, false]); setAckPreview(false); setAckRecovery(false); setStart(""); setEnd(""); setZone(""); setMessage(null); setStorageBlocked(false);
+    setAcks([false, false, false]); setAckPreview(false); setAckRecovery(false); setStart(props.preparedInput?.new_start.dateTime ?? ""); setEnd(props.preparedInput?.new_end.dateTime ?? ""); setZone(props.preparedInput?.new_start.timeZone ?? ""); setMessage(null); setStorageBlocked(false);
     if (key) try {
       const saved = sessionStorage.getItem(key);
       if (saved) {
@@ -56,7 +75,7 @@ export function CalendarReschedulePanel(props: Props) {
   async function run(action: (signal: AbortSignal, version: number) => Promise<void>) {
     if (!key || busy || storageBlocked) return;
     const version = generation.current, abort = new AbortController(); controller.current = abort;
-    const timer = setTimeout(() => abort.abort(), 125000); setBusy(true); setMessage(null);
+    const timer = setTimeout(() => abort.abort(), 125000); setBusy(true); setMessage(null); props.onExactApproved?.(null);
     // Clear private content before every operation. It is shown again only by
     // the current private-read endpoint after its authority check.
     setJob(current => current ? { ...current, preview: undefined } : current);
@@ -71,15 +90,26 @@ export function CalendarReschedulePanel(props: Props) {
   }
   async function accept(result: RescheduleJob, signal: AbortSignal, version: number) {
     if (generation.current !== version) return;
+    if (props.preparedInput && result.kind === "calendar_reschedule_v1"
+      && (!preparedTask.current || result.source_task_id !== preparedTask.current.task_id
+        || (receipt?.jobId && result.job_id !== receipt.jobId)
+        || (preparedPreviewRequest.current && result.request_uuid !== preparedPreviewRequest.current.request_uuid))) {
+      throw Error("Prepared operation readback did not match its original native Task and preview.");
+    }
     retain({ kind: result.kind, uuid: result.request_uuid, jobId: result.job_id });
     if (result.kind === "calendar_reschedule_v1" && result.source_task_id && ownerPrincipalId && ownerSessionId) {
       sessionStorage.setItem(exact.rescheduleTaskReceiptKey(ownerPrincipalId, ownerSessionId, result.source_task_id), JSON.stringify({ jobId: result.job_id, uuid: result.request_uuid }));
     }
     // Responses from actions never authorize cached private content.
-    setJob({ ...result, preview: undefined });
+    setJob({ ...result, preview: undefined }); props.onReadback?.({ ...result, preview: undefined });
     if (result.kind === "calendar_reschedule_v1" && result.private_read_available) {
       const current = await exact.inspectPrivateReschedule(result.job_id, signal);
-      if (generation.current === version) setJob(current);
+      if (props.preparedInput && (current.job_id !== result.job_id || current.source_task_id !== preparedTask.current?.task_id)) throw Error("Private reschedule readback changed its original operation.");
+      if (generation.current === version) {
+        setJob(current); props.onReadback?.(current); const preview = current.preview;
+        props.onExactApproved?.(current.status === "paused" && preview?.approval_status === "approved" && preview.expires_at * 1000 > Date.now()
+          ? { operation_id: current.job_id, exact_preview_digest: preview.decision_digest, approval_id: preview.approval_id, expires_at: preview.expires_at } : null);
+      }
     }
   }
   function pair() {
@@ -120,19 +150,40 @@ export function CalendarReschedulePanel(props: Props) {
           if (generation.current === version) { setGrants(values => [current, ...values]); setAcks([false, false, false]); }
         })}>Grant finite reschedule permission</button>
       </fieldset>}
-      <label>New start with literal UTC offset<input className="cockpit-input w-full" placeholder="2026-10-05T09:00:00+02:00" value={start} disabled={busy || !!job} onChange={e => setStart(e.target.value)} /></label>
-      <label>New end with literal UTC offset<input className="cockpit-input w-full" placeholder="2026-10-05T10:00:00+02:00" value={end} disabled={busy || !!job} onChange={e => setEnd(e.target.value)} /></label>
-      <label>Explicit IANA timezone<input className="cockpit-input w-full" placeholder="Europe/Warsaw" value={zone} disabled={busy || !!job} onChange={e => setZone(e.target.value)} /></label>
+      <label>New start with literal UTC offset<input className="cockpit-input w-full" placeholder="2026-10-05T09:00:00+02:00" value={start} disabled={busy || !!job || Boolean(props.preparedInput)} onChange={e => setStart(e.target.value)} /></label>
+      <label>New end with literal UTC offset<input className="cockpit-input w-full" placeholder="2026-10-05T10:00:00+02:00" value={end} disabled={busy || !!job || Boolean(props.preparedInput)} onChange={e => setEnd(e.target.value)} /></label>
+      <label>Explicit IANA timezone<input className="cockpit-input w-full" placeholder="Europe/Warsaw" value={zone} disabled={busy || !!job || Boolean(props.preparedInput)} onChange={e => setZone(e.target.value)} /></label>
       <label><input type="checkbox" checked={ackPreview} disabled={busy || !!job} onChange={e => setAckPreview(e.target.checked)} /> Read a fresh exact preview (four contacts); no write yet.</label>
+      {props.onPrepareCommunication && <button type="button" className={button} disabled={busy || !permissionCurrent || !read || !write || !start || !end || !zone || !ackPreview || !!job} onClick={() => {
+        if (!grant || !permissionCurrent || Date.parse(grant.expires_at) <= Date.now()) return;
+        try { props.onPrepareCommunication?.({ schema_version: 1, consent_id: grant.consent_id, expected_consent_revision: grant.revision,
+          event_binding_id: eventBindingId, expected_event_binding_revision: eventBindingRevision, goal_id: goalId, goal_revision: goalRevision,
+          new_start: { dateTime: start, timeZone: zone }, new_end: { dateTime: end, timeZone: zone } }); } catch (error) { setMessage((error as Error).message); }
+      }}>Add this reviewed reschedule proposal to communication preparation</button>}
       <button type="button" className={button} disabled={busy || !permissionCurrent || !read || !write || !start || !end || !zone || !ackPreview || !!job} onClick={() => void run(async (signal, version) => {
         if (!grant || !read || !write) return;
-        const task = await exact.createRescheduleTask({ request_uuid: crypto.randomUUID(), input: { schema_version: 1, consent_id: grant.consent_id, expected_consent_revision: grant.revision,
+        if (props.preparedInput && (props.preparedInput.consent_id !== grant.consent_id || props.preparedInput.expected_consent_revision !== grant.revision
+          || props.preparedInput.event_binding_id !== eventBindingId || props.preparedInput.expected_event_binding_revision !== eventBindingRevision
+          || props.preparedInput.goal_id !== goalId || props.preparedInput.goal_revision !== goalRevision)) throw Error("Prepared source changed; refresh the communication plan.");
+        const taskRequest = { request_uuid: crypto.randomUUID(), input: { schema_version: 1 as const, consent_id: grant.consent_id, expected_consent_revision: grant.revision,
           event_binding_id: eventBindingId, expected_event_binding_revision: eventBindingRevision, goal_id: goalId, goal_revision: goalRevision,
-          new_start: { dateTime: start, timeZone: zone }, new_end: { dateTime: end, timeZone: zone } } }, signal);
+          new_start: { dateTime: start, timeZone: zone }, new_end: { dateTime: end, timeZone: zone } } };
+        if (props.preparedInput && !preparedTaskRequest.current) {
+          preparedTaskRequest.current = { request_uuid: taskRequest.request_uuid, input: props.preparedInput };
+          if (key) pendingPreparedAdmissions.set(key, { taskRequest: preparedTaskRequest.current, task: null, previewRequest: null });
+        }
+        if (props.preparedInput && JSON.stringify(preparedTaskRequest.current?.input) !== JSON.stringify(props.preparedInput)) throw Error("An original prepared admission is unresolved. Inspect it before changing this proposal.");
+        if (props.preparedInput && receipt?.kind === "calendar_reschedule_v1" && !preparedPreviewRequest.current) throw Error("Inspect the original preview receipt; no replacement is authorized.");
+        const task = props.preparedInput && preparedTask.current ? preparedTask.current : await exact.createRescheduleTask(props.preparedInput ? preparedTaskRequest.current : taskRequest, signal);
+        if (props.preparedInput) { preparedTask.current = task; if (key) pendingPreparedAdmissions.get(key)!.task = task; }
         if (generation.current !== version) return; props.onTaskCreated?.();
-        const uuid = crypto.randomUUID(); retain({ kind: "calendar_reschedule_v1", uuid });
-        await accept(await exact.previewReschedule({ task_id: task.task_id, expected_task_revision: task.task_revision, read_connection_id: read.connection_id, expected_read_revision: read.revision,
-          write_connection_id: write.connection_id, expected_write_revision: write.revision, acknowledge_fresh_preview_read: true, request_uuid: uuid }, signal), signal, version);
+        const uuid = crypto.randomUUID();
+        const previewRequest = { task_id: task.task_id, expected_task_revision: task.task_revision, read_connection_id: read.connection_id, expected_read_revision: read.revision,
+          write_connection_id: write.connection_id, expected_write_revision: write.revision, acknowledge_fresh_preview_read: true, request_uuid: uuid };
+        if (props.preparedInput && !preparedPreviewRequest.current) { preparedPreviewRequest.current = previewRequest; if (key) pendingPreparedAdmissions.get(key)!.previewRequest = previewRequest; }
+        const request = props.preparedInput ? preparedPreviewRequest.current! : previewRequest;
+        retain({ kind: "calendar_reschedule_v1", uuid: String(request.request_uuid) });
+        await accept(await exact.previewReschedule(request, signal), signal, version);
       })}>Create native task and exact approval preview</button>
     </div>
     {receipt && <button type="button" className={button} disabled={busy} onClick={() => void run(async (signal, version) => {

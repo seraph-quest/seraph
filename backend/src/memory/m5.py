@@ -1398,6 +1398,7 @@ async def _verified_source(
     task: WorkBoardTask,
     *,
     requested_attempt_id: str | None = None,
+    native_memory_report_source=None,
 ) -> M5SourceProof:
     if task.status is not WorkBoardStatus.done:
         raise ValueError("source_not_verified")
@@ -1412,7 +1413,8 @@ async def _verified_source(
         requested_attempt_id is not None and attempt.attempt_id != requested_attempt_id
     ):
         raise ValueError("stale_source_attempt")
-    proof = await review_service._verified_workflow_readback(db, task, attempt)
+    proof = await review_service._verified_workflow_readback(db, task, attempt,
+        native_memory_report_source=native_memory_report_source)
     if proof is None:
         raise ValueError("source_not_verified")
     run = (
@@ -1422,6 +1424,10 @@ async def _verified_source(
     ).scalar_one_or_none()
     if run is None:
         raise ValueError("source_not_verified")
+    return _source_proof_from_rows(task, attempt, run, proof)
+
+
+def _source_proof_from_rows(task, attempt, run, proof):
     intent_digest = m5_task_intent_digest(task)
     context_digest = m5_source_context_digest(task, task_intent_digest=intent_digest)
     evidence_digest = m5_digest(
@@ -1462,6 +1468,7 @@ async def _validate_current_proposal_source(
     owner_session_id: str,
     expected_task_revision: int,
     expected_goal_revision: int,
+    native_memory_report_source=None,
 ) -> None:
     """Re-read every authority and evidence binding before canonical accept."""
 
@@ -1505,6 +1512,7 @@ async def _validate_current_proposal_source(
         db,
         task,
         requested_attempt_id=proposal.source_attempt_id,
+        native_memory_report_source=native_memory_report_source,
     )
     if (
         proof.attempt.fencing_token != proposal.source_attempt_fence
@@ -2169,6 +2177,7 @@ async def _create_memory_proposal_in_session(
     composition_authority_check=None,
     prepared_text=None,
     require_original_session: bool = False,
+    native_memory_report_source=None,
 ) -> dict[str, Any]:
     """Existing M5 owner; caller retains the complete mutation/result writer."""
     if not db.in_transaction():
@@ -2209,7 +2218,8 @@ async def _create_memory_proposal_in_session(
             recovery_action="refresh_goal_and_request_new_verified_source",
         )
     try:
-        proof = await _verified_source(db, task, requested_attempt_id=attempt_id)
+        proof = await _verified_source(db, task, requested_attempt_id=attempt_id,
+            native_memory_report_source=native_memory_report_source)
     except ValueError as exc:
         if str(exc) == "source_not_verified":
             return await _write_source_failure_proposal(
@@ -2707,6 +2717,7 @@ async def _apply_memory_proposal_action_in_session(
     composition_authority_check=None,
     prepared_text=None,
     require_original_session: bool = False,
+    native_memory_report_source=None,
 ) -> dict[str, Any]:
     """Same existing M5 review checks in the caller-owned result writer."""
     if not db.in_transaction():
@@ -2844,6 +2855,7 @@ async def _apply_memory_proposal_action_in_session(
             owner_session_id=owner_session_id,
             expected_task_revision=int(expected_task_revision),
             expected_goal_revision=int(expected_goal_revision),
+            native_memory_report_source=native_memory_report_source,
         )
         if corrects_memory_id is not None:
             proposal.corrects_memory_id = _safe_identifier(corrects_memory_id, field="corrects_memory_id")

@@ -7,6 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import asyncio
+import os
+import stat
+import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -123,6 +128,100 @@ def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OU
     if size < 1 or size > max_bytes:
         raise ValueError("evidence source size invalid")
     return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
+
+
+@dataclass(frozen=True)
+class _ReportOutputReadback:
+    owner: Any
+    actual: bytes
+    file_identity: tuple
+    parent_identity: tuple
+    _issuance: Any = field(default=None, init=False, repr=False, compare=False)
+
+
+def validate_native_report_readback(value):
+    from src.work_board.input_artifacts import _verified_payload_closure
+    if type(value) is not _ReportOutputReadback or value._issuance != (id(value), id(value.owner), id(value.owner.witness)):
+        raise ValueError("original report readback owner required")
+    closure = _verified_payload_closure(value.owner)
+    if (value.file_identity != closure.file_identity or value.parent_identity != closure.parent_identity
+        or len(value.actual) != closure.size_bytes or hashlib.sha256(value.actual).hexdigest() != closure.payload_sha256):
+        raise ValueError("original report readback changed")
+    return value.actual
+
+
+def read_native_report_output(reference, digest_value, owner):
+    """Read exactly the physically closed original inode; no general reader."""
+    from src.work_board.input_artifacts import _open_input_artifact_parent, _verified_payload_closure
+    closure = _verified_payload_closure(owner)
+    path = canonical_workspace_root(settings.workspace_dir) / reference
+    if (owner._path != path or digest_value != closure.payload_sha256
+        or not reference.startswith("artifacts/work-board/evidence/") or ".." in reference.split("/")):
+        raise ValueError("original report output path changed")
+    parent_fd, leaf = _open_input_artifact_parent(path, create=False)
+    descriptor = -1
+    try:
+        parent = os.fstat(parent_fd)
+        parent_identity = (parent.st_dev, parent.st_ino)
+        descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+        before = os.fstat(descriptor)
+        identity = (before.st_dev, before.st_ino, before.st_uid, stat.S_IMODE(before.st_mode), before.st_size)
+        if (identity != closure.file_identity or parent_identity != closure.parent_identity
+            or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+            raise ValueError("original report inode changed")
+        actual = os.read(descriptor, closure.size_bytes + 1)
+        after = os.fstat(descriptor)
+        if ((after.st_dev, after.st_ino, after.st_uid, stat.S_IMODE(after.st_mode), after.st_size) != identity
+            or after.st_nlink != 1 or len(actual) != closure.size_bytes
+            or hashlib.sha256(actual).hexdigest() != digest_value):
+            raise ValueError("original report readback changed")
+    finally:
+        primary = sys.exception()
+        errors = []
+        for owned_fd in (descriptor, parent_fd):
+            if owned_fd < 0:
+                continue
+            try:
+                os.close(owned_fd)
+            except OSError as error:
+                errors.append(error)
+        if errors:
+            if primary is not None:
+                primary.add_note("original_report_readback_close_unknown")
+            else:
+                raise errors[0]
+    value = _ReportOutputReadback(owner, actual, identity, parent_identity)
+    object.__setattr__(value, "_issuance", (id(value), id(owner), id(owner.witness)))
+    return value
+
+
+async def invoke_native_report(current_witness, original_scope, *, jobs):
+    """The fixed report leaf owns its actual file through close and readback."""
+    from src.runtime_plugins.task_capability import issue_report_artifact, _report_resource
+    from src.work_board.input_artifacts import _PayloadClosureOwner, _write_payload
+    resource = _report_resource(original_scope)
+    content = output_bytes(REPORT, json.loads(current_witness.input_bytes))
+    sha = hashlib.sha256(content).hexdigest()
+    reference = f"artifacts/work-board/evidence/{current_witness.task_id}-{current_witness.attempt_id}-{sha}.txt"
+    owner = _PayloadClosureOwner(canonical_workspace_root(settings.workspace_dir) / reference, content)
+    resource.file_writer = asyncio.create_task(asyncio.to_thread(_write_payload, owner._path, content, _closure_owner=owner))
+    await asyncio.shield(resource.file_writer)
+    readback = read_native_report_output(reference, sha, owner)
+    actual = validate_native_report_readback(readback)
+    if actual != content:
+        raise ValueError("evidence output readback mismatch")
+    witness = issue_report_artifact(current_witness, reference, readback, owner, original_scope)
+    resource.artifact = witness
+    claim = original_scope.witness
+    await jobs.record_artifact(claim["invocation_ref"], file_path=reference,
+        artifact_type="evidence_local_report", content=actual, owner=claim["lease_owner"],
+        fencing_token=claim["fencing_token"], native_report_witness=witness)
+    await jobs.record_readback(claim["invocation_ref"], effect_type="evidence_cpu_output",
+        target_path=reference, target_digest=sha, content_sha256=sha,
+        readback_id=f"evidence-readback-{sha[:32]}", verified_at=datetime.now(timezone.utc).isoformat(),
+        status="succeeded", details={"verified": True, "no_learning": True},
+        owner=claim["lease_owner"], fencing_token=claim["fencing_token"], native_report_witness=witness)
+    return witness
 
 
 async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, jobs: Any, runner: str, deadline: datetime, admission_only: bool, validate_current: Any, session_provider: Any) -> Mapping[str, Any]:

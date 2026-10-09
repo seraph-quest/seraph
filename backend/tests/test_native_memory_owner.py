@@ -224,3 +224,54 @@ async def test_forget_original_record_changes_deny_without_audit(async_db, monke
         await effect(async_db, admission)
     async with async_db() as db:
         assert list((await db.execute(select(AuditEvent.id))).scalars()) == before
+
+
+@pytest.mark.asyncio
+async def test_native_report_staging_rejects_legacy_goal_snapshot_before_file_access(async_db, monkeypatch):
+    from src.runtime_plugins.memory_producer import stage_memory_report_source
+    _, task, attempt = await source(async_db, monkeypatch)
+    admission = await proposal_candidate(async_db, task, attempt)
+    reads = []
+    def unexpected_read(*args, **kwargs):
+        reads.append((args, kwargs))
+        raise AssertionError("unsupported profile must not read a report file")
+    monkeypatch.setattr("src.work_board.pipeline_cpu.read_output", unexpected_read)
+    with pytest.raises(NativeServiceBlocked, match="native_memory_source_profile_unsupported"):
+        async with async_db() as db:
+            await stage_memory_report_source(db, admission)
+    assert reads == []
+    async with async_db() as db:
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(AuditEvent))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_unissued_report_witness_cannot_reach_authority_or_read(async_db, monkeypatch):
+    """Negative private boundary only; this does not produce a Task5 source."""
+    from dataclasses import replace
+    from src.runtime_plugins.memory_producer import (NativeMemoryReportSourceWitness,
+        _MemoryReportReadContext, recheck_memory_report_source)
+    _, task, attempt = await source(async_db, monkeypatch)
+    admission = await proposal_candidate(async_db, task, attempt)
+    candidate = admission.candidate()
+    fake = NativeMemoryReportSourceWitness(admission.candidate_digest, (), "{}",
+        "artifacts/work-board/evidence/fake.md", "a" * 64, 1, "{}")
+    admission = replace(admission, report_source=fake)
+    contacts = []
+    async def unexpected_authority(db):
+        contacts.append("authority")
+        raise AssertionError("unissued source cannot reach authority")
+    def unexpected_read(*args, **kwargs):
+        contacts.append("file")
+        raise AssertionError("unissued source cannot read a file")
+    monkeypatch.setattr("src.work_board.pipeline_cpu.read_output", unexpected_read)
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        db.info["native_writer_started"] = True
+        context = _MemoryReportReadContext(fake, admission, db, unexpected_authority)
+        with pytest.raises(NativeServiceBlocked, match="native_memory_original_report_witness_required"):
+            await recheck_memory_report_source(db, task, attempt, context, read_current=True)
+    assert contacts == [] and admission.candidate() == candidate
+    async with async_db() as db:
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(AuditEvent))).scalars())

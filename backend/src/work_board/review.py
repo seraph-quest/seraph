@@ -366,8 +366,13 @@ async def _verified_workflow_readback(
     db: AsyncSession,
     task: WorkBoardTask,
     attempt: WorkBoardAttempt,
+    *, native_memory_report_source=None,
 ) -> dict[str, Any] | None:
     """Require both the receipt proof and the authoritative terminal run."""
+    if native_memory_report_source is not None:
+        from src.runtime_plugins.memory_producer import recheck_memory_report_source
+        return await recheck_memory_report_source(db, task, attempt, native_memory_report_source,
+                                                read_current=True)
     if attempt.ended_at is None:
         return None
     proof = _verified_readback(attempt)
@@ -382,7 +387,10 @@ async def _verified_workflow_readback(
     ).scalar_one_or_none()
     if run is None or str(run.status or "") != "succeeded":
         return None
-    if not _workflow_run_binds_board_attempt(task, attempt, run):
+    native_report = task.capability_id == "work.local-evidence-report.v1" and run.composition_binding_json is not None
+    if native_report:
+        proof = await native_report_memory_metadata(db, task, attempt, run)
+    elif not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
     if task.capability_id == "memory.opportunity-preference.v1":
         from src.work_board.opportunity_preference_native import stage_output_source, recheck_done_source
@@ -448,6 +456,66 @@ async def _verified_workflow_readback(
     # recorded timestamp must survive projection so an operator can inspect
     # the exact proof rather than a synthesized receipt.
     return proof if _safe_verification_receipt(proof, require_complete=True) else None
+
+
+async def native_report_memory_metadata(db, task, attempt, run):
+    """Exact terminal Task5 source correlation; no file/configuration access."""
+    from src.runtime_plugins.task_capability import read_report_candidate
+    from src.runtime_plugins.ownership import validate_run
+    from src.db.models import WorkBoardInputArtifact, Goal
+    from src.work_board.pipelines import row_token
+    if (task.capability_id != "work.local-evidence-report.v1" or task.status != WorkBoardStatus.done
+        or attempt.task_id != task.task_id or attempt.ended_at is None or run.status != "succeeded"
+        or attempt.workflow_run_id != run.run_identity):
+        raise ValueError("native_memory_report_source_changed")
+    value = read_report_candidate(run)
+    await validate_run(db, run)
+    input_artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
+    goal = await db.get(Goal, task.goal_id, populate_existing=True)
+    latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    if (value["task_id"] != task.task_id or value["attempt_id"] != attempt.attempt_id
+        or value["board_fencing_token"] != attempt.fencing_token or latest != attempt.attempt_id
+        or value["owner_principal_id"] != task.owner_principal_id or value["original_root_id"] != task.owner_session_id
+        or value["goal_id"] != task.goal_id or value["goal_revision"] != task.goal_revision
+        or value["typed_input_ref"] != task.typed_input_ref or value["typed_input_digest"] != task.typed_input_digest
+        or input_artifact is None or task.input_artifact_id != input_artifact.artifact_id
+        or input_artifact.owner_principal_id != task.owner_principal_id
+        or input_artifact.owner_session_id != task.owner_session_id
+        or input_artifact.goal_id != task.goal_id or input_artifact.goal_revision != task.goal_revision
+        or input_artifact.capability_id != task.capability_id or input_artifact.capability_version != "1"
+        or input_artifact.bound_task_id != task.task_id or input_artifact.state != "consumed"
+        or input_artifact.payload_sha256 != value["payload_sha256"]
+        or input_artifact.typed_input_ref != value["typed_input_ref"]
+        or row_token(input_artifact) != value["input_token"]
+        or goal is None or goal.status != "active" or goal.revision != task.goal_revision
+        or goal.owner_principal_id != task.owner_principal_id or goal.owner_session_id != task.owner_session_id):
+        raise ValueError("native_memory_report_source_changed")
+    from src.runtime_plugins import task_capability
+    validator = getattr(task_capability, "validated_terminal_report_source", None)
+    if not callable(validator):
+        raise ValueError("native_memory_terminal_report_unavailable")
+    terminal = validator(run)
+    if (type(terminal) is not dict or set(terminal) != {"candidate", "output_reference", "output_sha256", "size_bytes"}
+        or terminal["candidate"] != value
+        or type(terminal["size_bytes"]) is not int or not 0 < terminal["size_bytes"] <= 65536
+        or type(terminal["output_reference"]) is not str
+        or not terminal["output_reference"].startswith("artifacts/work-board/evidence/")):
+        raise ValueError("native_memory_report_source_changed")
+    invoked = terminal
+    proof = _verified_readback(attempt)
+    if (proof is None or proof["content_sha256"] != invoked["output_sha256"]
+        or not _safe_verification_receipt(proof, require_complete=True)):
+        raise ValueError("native_memory_report_source_changed")
+    artifacts, effects = _decode_list(run.artifact_receipts_json), _decode_list(run.effect_receipts_json)
+    if (len([item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
+             and item.get("file_path") == invoked["output_reference"]
+             and item.get("content_sha256") == invoked["output_sha256"]]) != 1
+        or not any(isinstance(item, dict) and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
+                   and item.get("target_path") == invoked["output_reference"]
+                   and item.get("content_sha256") == invoked["output_sha256"] for item in effects)):
+        raise ValueError("native_memory_report_source_changed")
+    return dict(proof)
 
 
 def _workflow_run_binds_board_attempt(

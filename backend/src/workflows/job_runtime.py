@@ -75,6 +75,7 @@ class _NativeServiceClaimRequest:
     host: Any
     reviewed: Any
     host_boot_nonce: str
+    native_report_candidate: Any = field(default=None, repr=False, compare=False)
 
     def validate_host(self):
         if (not self.host.admitting or self.host.reviewed is not self.reviewed
@@ -124,7 +125,8 @@ async def _validate_native_service_claim(db, run, request):
     current_operator = await authenticate_principal(run.owner_principal_id, db=db)
     if run.job_kind == "work.local-evidence-report.v1":
         from src.runtime_plugins.task_capability import recheck_report_claim
-        await recheck_report_claim(db, run, host_boot_nonce=request.host_boot_nonce)
+        await recheck_report_claim(db, run, host_boot_nonce=request.host_boot_nonce,
+            candidate=request.native_report_candidate)
     if run.job_kind == "runtime_service_read_v1":
         from src.runtime_plugins.read_journal import read_context
         if read_context(run)["host_boot_nonce"] != request.host_boot_nonce:
@@ -3533,9 +3535,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 db, job_id, method, original_scope)
             if run.job_kind != "work.local-evidence-report.v1":
                 raise DurableJobTransitionError("fixed original report required")
-            previous = run.checkpoint_receipts_json
+            original = {field: getattr(run, field) for field in (
+                "checkpoint_receipts_json", "artifact_receipts_json", "effect_receipts_json",
+                "arguments_json", "declared_authority_json", "input_digest", "authority_digest",
+                "run_fingerprint", "composition_binding_json", "deadline_at", "attempt_count")}
+            previous = original["checkpoint_receipts_json"]
             receipt = await prepare_report_publication(db, run, phase=phase,
                 candidate=candidate, original_scope=original_scope)
+            if any(getattr(run, field) != value for field, value in original.items()):
+                raise DurableJobTransitionError("native report phase preparation mutated original owner")
             history = json.loads(previous)
             if any(item.get("checkpoint_id") == receipt["checkpoint_id"] for item in history):
                 raise DurableJobTransitionError("original report phase cannot be republished")
@@ -3554,7 +3562,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.composition_binding_json == run.composition_binding_json,
                 WorkflowRunState.checkpoint_receipts_json == previous,
                 WorkflowRunState.artifact_receipts_json == run.artifact_receipts_json,
-                WorkflowRunState.effect_receipts_json == run.effect_receipts_json,
+                WorkflowRunState.effect_receipts_json == original["effect_receipts_json"],
+                WorkflowRunState.arguments_json == original["arguments_json"],
+                WorkflowRunState.declared_authority_json == original["declared_authority_json"],
             ).values(checkpoint_receipts_json=_canonical(history), updated_at=now,
                 heartbeat_at=now, revision=WorkflowRunState.revision + 1))
             if not _rowcount_is_one(changed):
@@ -3925,6 +3935,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         near_text_witness=None,
         near_text_policy_scope=None,
         _general_task_resume_witness=None,
+        _native_report_terminal=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3936,6 +3947,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            report_terminal = (preflight_run.job_kind == "work.local-evidence-report.v1"
+                and preflight_run.composition_binding_json is not None
+                and to_status in {"succeeded", "degraded", "cancelled"})
+            if report_terminal:
+                if (_native_report_terminal is None or to_status == "degraded"
+                    or (to_status == "succeeded" and terminal_authority_check is None)
+                    or (to_status == "cancelled" and cancellation_authority_check is None)):
+                    raise DurableJobTransitionError("original native report terminal publication required")
+                from src.runtime_plugins.task_capability import validate_report_terminal_request
+                validate_report_terminal_request(_native_report_terminal, job_id=job_id, to_status=to_status)
+            elif _native_report_terminal is not None:
+                raise DurableJobTransitionError("native report terminal publication does not match job")
             if to_status == "queued" and preflight_run.job_kind == "agent.task.v1":
                 from src.workflows.general_task_guard import read_manifest
                 native_manifest = read_manifest(preflight_run)
@@ -3977,7 +4000,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
+            if report_terminal:
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="finite_service")
+            elif (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
@@ -3985,6 +4011,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     near_writer_started = near_queue_guard
                     general_writer_started = general_resume_guard
             run = await self._fetch(db, job_id)
+            report_original = None
+            if report_terminal:
+                report_original = {field: getattr(run, field) for field in (
+                    "checkpoint_receipts_json", "artifact_receipts_json", "effect_receipts_json",
+                    "arguments_json", "declared_authority_json", "input_digest", "authority_digest",
+                    "run_fingerprint", "composition_binding_json", "deadline_at", "attempt_count")}
             if native_writer and run.job_kind == "agent.task.v1":
                 await verify_native_writer(self, db, run)
             elif native_writer and to_status in {"succeeded", "degraded"}:
@@ -4189,6 +4221,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobTransitionError("original native read sealed completion required")
             if run.job_kind == "runtime_service_memory_v1" and to_status in {"succeeded", "degraded"}:
                 raise DurableJobTransitionError("original native Memory sealed completion required")
+            if (run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json
+                and run.attempt_count == 1 and to_status == "failed"):
+                # Only the original Task5 settle/cancel owner can prove physical closure.
+                # A failed waiter or elapsed lease does not settle the actual file callback.
+                to_status = "unknown_external_effect"
+                reason = "native_report_original_closure_unproven"
             if run.job_kind == "conversation_turn_v1" and run.composition_binding_json and to_status == "succeeded":
                 raise DurableJobTransitionError("original native turn publication required")
             if (run.job_kind == "conversation_turn_v1" and run.composition_binding_json
@@ -4279,6 +4317,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
                 if terminal_authority_check is not None:
                     await terminal_authority_check(db, run)
+            report_next_journal = None
+            if report_terminal:
+                if to_status not in {"succeeded", "cancelled"}:
+                    raise DurableJobTransitionError("original report outcome remains unresolved")
+                from src.runtime_plugins.task_capability import prepare_report_terminal_publication, preflight_report_journal
+                report_next_journal = await prepare_report_terminal_publication(
+                    db, run, terminal=_native_report_terminal, to_status=to_status)
+                if any(getattr(run, field) != value for field, value in report_original.items()):
+                    raise DurableJobTransitionError("native report terminal preparation mutated original owner")
+                preflight_report_journal(report_next_journal)
             now = _utc_now()
             values: dict[str, Any] = {
                 "status": to_status,
@@ -4327,12 +4375,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 values["result_summary"] = _text(result_summary, "result recorded")
             elif result_summary is not None:
                 values["result_summary"] = _text(result_summary)
+            if report_next_journal is not None:
+                values["checkpoint_receipts_json"] = _canonical(report_next_journal)
             if approval_resume_record is not None:
                 values["effect_receipts_json"] = _canonical(
                     _job_effect_ledger(run, [*(effect_ledger or []), approval_resume_record])
                 )
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
+            if report_original is not None:
+                conditions.extend(getattr(WorkflowRunState, field) == value
+                    for field, value in report_original.items())
+                conditions.append(WorkflowRunState.attempt_count == 1)
             if owner is not None:
                 conditions.extend(
                     (
@@ -5172,14 +5226,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
 
     async def claim_service_job(self, job_id: str, *, host, owner: str,
                                 lease_seconds: int = 300, expected_revision: int | None = None,
-                                expected_fencing_token: int | None = None, claim_authority_check=None) -> NativeServiceClaim:
+                                expected_fencing_token: int | None = None, claim_authority_check=None,
+                                native_report_candidate=None) -> NativeServiceClaim:
         from src.runtime_plugins.bridge import CordisHost
         from src.runtime_plugins.composition import ReviewedComposition
         if (not isinstance(host, CordisHost) or not host.admitting
                 or not isinstance(host.reviewed, ReviewedComposition)
                 or type(host.boot_nonce) is not str or not re.fullmatch(r"[0-9a-f]{64}", host.boot_nonce)):
             raise DurableJobLeaseError("admitting original reviewed native service host required")
-        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce)
+        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce, native_report_candidate)
         result = await self.claim_job(job_id, owner=owner, lease_seconds=lease_seconds,
             expected_revision=expected_revision, expected_fencing_token=expected_fencing_token,
             claim_authority_check=claim_authority_check, _runtime_service_claim=request)
@@ -8940,6 +8995,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if _native_turn_pending(run):
                     recovered_status, recovery_reason = await self.native_turn_family_recovery_state_in_session(db, run)
                     recovery_effects = None
+                if (run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json
+                    and run.attempt_count == 1):
+                    if recovered_status != "cost_liability":
+                        recovered_status, recovery_reason = "unknown_external_effect", "native_report_original_closure_unproven"
+                    recovery_effects = None
                 recovery_values: dict[str, Any] = {
                     "status": recovered_status,
                     "failure_reason": recovery_reason,
@@ -9041,6 +9101,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 recovery_status, recovery_reason = _restart_recovery_state(run)
             if _native_turn_pending(run):
                 recovery_status, recovery_reason = await self.native_turn_family_recovery_state_in_session(db, run)
+            if (run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json
+                and run.attempt_count == 1):
+                if recovery_status != "cost_liability":
+                    recovery_status, recovery_reason = "unknown_external_effect", "native_report_original_closure_unproven"
             expected_revision = _revision(run)
             expected_fence = int(run.fencing_token or 0)
             conditions = [

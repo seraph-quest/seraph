@@ -648,7 +648,8 @@ async def test_controlled_settlement_retains_selected_rows_decision_and_stopped_
         await validate_native_turn_claim(db, run, admission)
     claim = await repo.claim_service_job(admission.job_id, host=host, owner="original-controlled",
         expected_revision=queued["revision"], claim_authority_check=check)
-    execution = NativeTurnExecution(admission, host, claim, None)
+    from src.runtime_plugins.dispatch import capture_original_scope
+    execution = NativeTurnExecution(admission, host, claim, capture_original_scope(claim, host))
     is_approval = outcome.startswith("approval")
     if outcome == "approval_forged":
         from smolagents import ToolCallingAgent

@@ -35,6 +35,7 @@ class OriginalServiceInvocation:
     host_boot_nonce: str
     native_turn_resource: object = None
     native_report_resource: object = None
+    native_memory_report_source: object = None
 
     @property
     def deadline_at(self):

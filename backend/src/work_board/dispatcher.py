@@ -3550,6 +3550,9 @@ class WorkBoardDispatcher:
         # caller must never cancel a run merely because it guessed its ID.
         inputs = _parse_typed_input(task)
         projection = await self.jobs.get_job(job_id)
+        if task.capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import lookup_original_report_binding
+            projection = await lookup_original_report_binding(task, active, inputs, self.jobs, self.session_provider)
         if not isinstance(projection, Mapping):
             raise BoardError("workflow_run_not_found", "The linked durable run is unavailable", status_code=409)
         binding_job_id = await self._lookup_linked_binding(task, active, inputs)
@@ -3628,6 +3631,11 @@ class WorkBoardDispatcher:
                 attempt=replay_attempt,
                 event=replay_event,
             )
+
+        if task.capability_id == "work.local-evidence-report.v1":
+            receipts, proven = await self._cleanup_adapter(task, active, inputs, projection, reason=reason)
+            latest = await self.jobs.get_job(job_id)
+            return await self._project_cancel_result(task, active, latest, receipts, cleanup_proven=proven)
 
         # Mirror the board intent into the authoritative durable run before
         # adapter cleanup.  A crash after this checkpoint is replayed from the
@@ -3723,6 +3731,10 @@ class WorkBoardDispatcher:
         capability = _text(task.capability_id)
         receipts: list[dict[str, Any]] = []
         try:
+            if capability == "work.local-evidence-report.v1":
+                from src.runtime_plugins.task_capability import cancel_report_execution
+                return await cancel_report_execution(task, attempt, inputs, projection,
+                    jobs=self.jobs, session_provider=self.session_provider, reason=reason)
             if capability == "work.document-compare.v1":
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
@@ -3755,7 +3767,7 @@ class WorkBoardDispatcher:
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
                 return receipts, bool(proven)
-            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1", "inference.near-text.v1"}:
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "memory.opportunity-preference.v1", "inference.near-text.v1"}:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
@@ -5996,6 +6008,9 @@ class WorkBoardDispatcher:
             try:
                 job_id = await self._lookup_direct_job_id(task, attempt, inputs)
                 projection = await self.jobs.get_job(job_id)
+                if task.capability_id == "work.local-evidence-report.v1":
+                    from src.runtime_plugins.task_capability import lookup_original_report_binding
+                    projection = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
                 if not isinstance(projection, Mapping):
                     raise DurableJobError("durable_run_projection_missing")
                 expected = self._canonical_identity_from_projection(
@@ -6017,6 +6032,9 @@ class WorkBoardDispatcher:
             try:
                 job_id = await self._lookup_direct_job_id(task, attempt, inputs)
                 projection = await self.jobs.get_job(job_id)
+                if task.capability_id == "work.local-evidence-report.v1":
+                    from src.runtime_plugins.task_capability import lookup_original_report_binding
+                    projection = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
                 if not isinstance(projection, Mapping):
                     raise DurableJobError("durable_run_projection_missing")
                 expected = self._canonical_identity_from_projection(
@@ -6219,7 +6237,7 @@ class WorkBoardDispatcher:
                 result["awaiting_approval"] = True
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
-            if is_tool_package(task.capability_id) or task.capability_id == "work.document-compare.v1":
+            if is_tool_package(task.capability_id) or task.capability_id in {"work.document-compare.v1", "work.local-evidence-report.v1"}:
                 async with self.session_provider() as cancel_db:
                     cancelled = await cancel_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
                         WorkBoardAttempt.attempt_id==attempt.attempt_id,WorkBoardAttempt.workflow_run_id==job_id,
@@ -6562,6 +6580,11 @@ class WorkBoardDispatcher:
         }
 
     async def _verify_cpu_completion(self, task, attempt, inputs, projection, proof):
+        if task.capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import lookup_original_report_binding
+            projection = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
+            if not isinstance(projection, Mapping):
+                raise BoardError("pipeline_output_unverified", "Original report source identity is unavailable")
         from src.work_board.pipeline_cpu import read_output
         from src.work_board.pipelines import validate_cpu_current
         await validate_cpu_current(task, attempt, inputs, session_provider=self.session_provider)
@@ -9472,6 +9495,11 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
+        if task.capability_id == "work.local-evidence-report.v1":
+            if not isinstance(projection, Mapping):
+                raise DurableJobIdempotencyConflict("original report identity requires canonical admission")
+            from src.runtime_plugins.task_capability import report_identity_for_projection
+            return report_identity_for_projection(task, attempt, inputs, projection)
         if task.capability_id in {"work.document-compare.v1", "inference.near-text.v1"} or is_tool_package(task.capability_id):
             if not isinstance(projection, Mapping):
                 raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
@@ -9662,6 +9690,9 @@ class WorkBoardDispatcher:
         the fenced board link.
         """
 
+        if task.capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import report_identity_for_projection
+            return report_identity_for_projection(task, attempt, inputs, projection)
         expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
             WorkBoardDispatcher._direct_job_identity(task, attempt, inputs, procedure_binding=procedure_binding)
         )
@@ -9846,6 +9877,18 @@ class WorkBoardDispatcher:
         projection returned by that service; it never invents service digests.
         """
 
+        if task.capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import lookup_original_report_binding, report_identity_for_projection
+            original = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
+            response = {"job": original, "admission_only": True}
+            if original is None:
+                response = await self._execute_direct_adapter(task, attempt, inputs,
+                    runtime_seconds=runtime_seconds, admission_only=True)
+                original = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
+            if not isinstance(original, Mapping):
+                raise DurableJobError("admission_binding_lookup_unavailable")
+            expected = report_identity_for_projection(task, attempt, inputs, original)
+            return response, original, expected
         lookup = getattr(self.jobs, "get_by_idempotency_binding", None)
         if lookup is None:
             raise DurableJobError("admission_binding_lookup_unavailable")
@@ -10181,6 +10224,13 @@ class WorkBoardDispatcher:
         resume_child=None,
     ) -> dict[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "work.local-evidence-report.v1":
+            from src.runtime_plugins.task_capability import lookup_original_report_binding, report_identity_for_projection
+            original = await lookup_original_report_binding(task, attempt, inputs, self.jobs, self.session_provider)
+            if not isinstance(original, Mapping):
+                return None
+            expected = report_identity_for_projection(task, attempt, inputs, original)
+            return expected["job_id"]
         if capability_id == "agent.task.v1":
             from src.work_board.contracts import GeneralTaskEnvelope
             if self.general_tasks is None:
@@ -11279,6 +11329,10 @@ class WorkBoardDispatcher:
             snapshot_owner: str = ""
             try:
                 projection = await self.jobs.get_job(job_id)
+                if task.capability_id == "work.local-evidence-report.v1":
+                    from src.runtime_plugins.task_capability import lookup_original_report_binding
+                    projection = await lookup_original_report_binding(task, attempt,
+                        _parse_typed_input(task), self.jobs, self.session_provider)
                 if not isinstance(projection, Mapping):
                     await self._project(
                         task,
@@ -11344,14 +11398,19 @@ class WorkBoardDispatcher:
                         projection,
                         reason="operator_cancelled",
                     )
-                    try:
-                        tree_receipts = await self.jobs.cancel_job_tree(
-                            job_id,
-                            reason="operator_cancelled",
-                        )
-                    except Exception:
+                    if task.capability_id == "work.local-evidence-report.v1":
+                        # Its original callback/file owner exclusively proves cleanup.
+                        # A lost source handle cannot enter generic tree cancellation.
                         tree_receipts = []
-                        cleanup_proven = False
+                    else:
+                        try:
+                            tree_receipts = await self.jobs.cancel_job_tree(
+                                job_id,
+                                reason="operator_cancelled",
+                            )
+                        except Exception:
+                            tree_receipts = []
+                            cleanup_proven = False
                     latest_projection = await self.jobs.get_job(job_id) or projection
                     await self._project_cancel_result(
                         task,

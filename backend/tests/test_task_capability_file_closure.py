@@ -16,6 +16,41 @@ def target(tmp_path, monkeypatch):
     return path, b"Local evidence report\nMemory: no_learning\n"
 
 
+def test_native_readback_rejects_same_bytes_replacement_inode(target):
+    from src.work_board.pipeline_cpu import read_native_report_output
+    path, payload = target
+    owner = files._PayloadClosureOwner(path, payload)
+    files._write_payload(path, payload, _closure_owner=owner)
+    replacement = path.with_name("replacement.txt")
+    replacement.write_bytes(payload)
+    replacement.chmod(0o600)
+    assert replacement.stat().st_ino != path.stat().st_ino
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="original report inode changed"):
+        read_native_report_output("artifacts/work-board/evidence/report.txt", hashlib.sha256(payload).hexdigest(), owner)
+
+
+def test_native_readback_actual_close_failure_cannot_issue_proof(target, monkeypatch):
+    from src.work_board.pipeline_cpu import read_native_report_output
+    path, payload = target
+    owner = files._PayloadClosureOwner(path, payload)
+    files._write_payload(path, payload, _closure_owner=owner)
+    actual_close = os.close
+    observed = []
+    def fail_first_after_actual_close(fd):
+        metadata = os.fstat(fd)
+        actual_close(fd)
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity in {owner.witness.parent_identity, owner.witness.file_identity[:2]}:
+            observed.append(identity)
+        if identity == owner.witness.file_identity[:2]:
+            raise OSError("actual_readback_close_failure")
+    monkeypatch.setattr(os, "close", fail_first_after_actual_close)
+    with pytest.raises(OSError, match="actual_readback_close_failure"):
+        read_native_report_output("artifacts/work-board/evidence/report.txt", hashlib.sha256(payload).hexdigest(), owner)
+    assert observed == [owner.witness.file_identity[:2], owner.witness.parent_identity]
+
+
 def test_actual_write_readback_and_exact_replay(target):
     path, payload = target
     owner = files._PayloadClosureOwner(path, payload)
@@ -23,6 +58,12 @@ def test_actual_write_readback_and_exact_replay(target):
     proof = owner.witness
     assert proof is not None and not proof.replayed
     assert files._verified_payload_closure(owner) is proof
+    from src.work_board.pipeline_cpu import read_native_report_output, validate_native_report_readback
+    readback = read_native_report_output("artifacts/work-board/evidence/report.txt", hashlib.sha256(payload).hexdigest(), owner)
+    assert validate_native_report_readback(readback) == payload
+    for copied_readback in (copy.copy(readback), copy.deepcopy(readback)):
+        with pytest.raises(ValueError, match="original report readback owner required"):
+            validate_native_report_readback(copied_readback)
     for copied in (copy.copy(owner), copy.deepcopy(owner)):
         with pytest.raises(OSError, match="original_private_payload_closure_required"):
             files._verified_payload_closure(copied)

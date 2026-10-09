@@ -2292,6 +2292,7 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
                 _owner(operator),
                 body,
                 origin_session_id=operator.session_id,
+                priority_explicit="priority" in body.model_fields_set,
             )
             payload = {
                 "task": await _safe_task_payload(mutation.task, db=db),
@@ -2308,10 +2309,29 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 
 
 from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
+from src.workflows.procedure_contracts import ProcedureSaveRequest
 from src.work_board.communication_contracts import CommunicationCreate, CommunicationCleanup, ActionBundle
 from src.integrations.gmail_read import GmailReadError
 from src.integrations.google_calendar import CalendarIntegrationError
 from src.workflows.job_runtime import DurableJobNotFound
+
+
+@router.get("/tasks/{task_id}/save-method")
+async def get_save_task_method(request: Request, task_id: str):
+    from src.memory.task_lessons import eligible_procedure_source
+    try:
+        return await eligible_procedure_source(_operator(request), task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/save-method", status_code=201)
+async def post_save_task_method(request: Request, task_id: str, body: ProcedureSaveRequest):
+    from src.memory.task_lessons import save_procedure_method
+    try:
+        return await save_procedure_method(_operator(request), task_id, body)
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 
 @router.post("/general-tasks/communications")
@@ -2757,7 +2777,8 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
     operator = _operator(request)
     try:
         async with get_session() as db:
-            mutation = await repository.patch_task(db, _owner(operator), task_id, body)
+            mutation = await repository.patch_task(db, _owner(operator), task_id, body,
+                priority_explicit="priority" in body.model_fields_set)
             payload = {"task": await _safe_task_payload(mutation.task, db=db)}
         return payload
     except BoardError as exc:
@@ -2776,6 +2797,21 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
         operator = _operator(request)
         try:
             owner = _owner(operator)
+            if body.action.value == "accept_partial_results":
+                from src.workflows.specialist_partial import accept_partial_results
+                try:
+                    result = await accept_partial_results(dispatcher.jobs,task_id=task_id,operator=operator,request=body)
+                except (DurableJobError, ValueError, TypeError, KeyError, OSError) as exc:
+                    raise BoardError("specialist_partial_binding_changed",
+                        "Original stopped partial-result evidence changed; refresh the task",status_code=409) from exc
+                async with get_session() as db:
+                    selected = await repository.get_task(db,owner,task_id)
+                    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                        .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
+                    return {"task":await _safe_task_payload(selected,latest_attempt=attempt),
+                        "attempt":_attempt_payload(attempt),**result}
+            if body.partial_decision is not None:
+                raise BoardError("unsupported_action_fields","Partial decisions require their exact typed action",status_code=422)
             if body.action.value in {"pause", "resume"}:
                 if body.model_fields_set - {"action", "expected_revision"}:
                     raise BoardError("unsupported_action_fields", "Native controls accept the current task revision only", status_code=422)
@@ -2884,14 +2920,16 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                         expected_revision=body.expected_revision,
                     )
                 else:
+                    accepted_method_stage = None
                     if body.action.value == "promote":
                         promoted = await repository.get_task(db, owner, task_id)
                         if promoted.capability_id == "agent.task.v1":
                             if dispatcher.general_tasks is None:
                                 raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
-                            await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
+                            accepted_method_stage = await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
                                 body.expected_revision, document_build_review=body.document_build_review)
-                    mutation = await repository.action_task(db, owner, task_id, body)
+                    mutation = await repository.action_task(db, owner, task_id, body,
+                        accepted_method_stage=accepted_method_stage)
                 latest_attempt = (
                     await db.execute(
                         select(WorkBoardAttempt)

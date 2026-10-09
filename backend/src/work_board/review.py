@@ -382,6 +382,14 @@ async def _verified_workflow_readback(
     ).scalar_one_or_none()
     if run is None or str(run.status or "") != "succeeded":
         return None
+    if task.capability_id == "agent.task.v1":
+        from src.workflows.specialist_delegation import is_specialist_root
+        if is_specialist_root(run):
+            try:
+                from src.workflows.specialist_lifecycle import verify_terminal_specialist_origin
+                await verify_terminal_specialist_origin(db, task, attempt, run)
+            except (BoardError, ValueError, TypeError):
+                return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
     if task.capability_id == "memory.opportunity-preference.v1":
@@ -468,11 +476,22 @@ def _workflow_run_binds_board_attempt(
     attempt_run_id = str(attempt.workflow_run_id or "").strip()
     if not attempt_run_id or str(run.run_identity or "") != attempt_run_id:
         return False
-    if str(run.root_run_identity or run.run_identity or "") != attempt_run_id:
+    from src.workflows.specialist_delegation import is_specialist_root
+    specialist = task.capability_id == "agent.task.v1" and is_specialist_root(run)
+    if specialist:
+        authority = _decode_object(run.declared_authority_json)
+        if (run.branch_depth != 2 or not task.idempotency_key.startswith("specialist:")
+            or task.idempotency_scope != "general-task"
+            or run.parent_job_id != task.origin_thread_id
+            or run.parent_run_identity != task.origin_thread_id
+            or authority.get("specialist_delegation_invocation_id") != task.origin_thread_id
+            or run.root_run_identity != authority.get("specialist_original_parent_id")):
+            return False
+    if not specialist and str(run.root_run_identity or run.run_identity or "") != attempt_run_id:
         # A board attempt is linked to one immutable durable root.  A child run
         # may appear in receipts, but the attempt link itself remains the root.
         return False
-    if run.parent_run_identity or run.parent_job_id:
+    if not specialist and (run.parent_run_identity or run.parent_job_id):
         return False
     if str(run.goal_id or "") != str(task.goal_id or ""):
         return False

@@ -8,10 +8,12 @@ from src.native_tools.registry import ToolRegistry
 from tests.test_general_task_persistence import task_runtime, isolated_runtime
 from tests.test_general_task_native_guard import running_task
 from tests.test_inference_accounting import accounting_db
+from tests.general_task_method_lifecycle import native_admission_lifecycle
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 
 
 @pytest.mark.asyncio
-async def test_actual_empty_inspection_native_encrypted_plan(task_runtime, monkeypatch):
+async def test_actual_empty_inspection_native_encrypted_plan(task_runtime, monkeypatch, native_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.work_board.general_task_native import admit_native_step, run_native_step
     from src.workflows.mail_reply_draft import read_private_draft
@@ -85,7 +87,7 @@ async def test_actual_empty_inspection_native_encrypted_plan(task_runtime, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_calendar,failure_mode", [(False, None), (True, None), (True, "closed"), (True, "unknown"), (True, "insufficient"), (True, "revoked_closed"), (True, "effect_conflict"), (True, "effect_response_loss")])
-async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypatch, include_calendar, failure_mode):
+async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypatch, include_calendar, failure_mode, build_admission_lifecycle):
     import json
     from types import SimpleNamespace
     from tests import test_mail_reply_vertical as mail
@@ -120,6 +122,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
         monkeypatch.setattr(mail, "OpenRouterSetup", lambda **values: setup_type(**{
             **values, "spend_ceiling_microusd": 50_000, "request_cost_bound_microusd": 25_000}))
     await mail._configure_model_route(sessions, monkeypatch, workspace)
+    await build_admission_lifecycle.start()
     if include_calendar:
         from src.workflows.job_runtime import DurableJobRepository
         await DurableJobRepository().configure_inference_accounting(50_000)

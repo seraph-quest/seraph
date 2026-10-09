@@ -170,14 +170,25 @@ async def test_revoke_old_config_copy_and_managed_restore_never_import_active_gr
     calls = []
     with pytest.raises(ValueError):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("stale-policy"), lambda: calls.append("forbidden"))
+    await engine.dispose()
     restored = run_cli(root, "restore", "--archive", archive["archive_path"], "--confirm")
     config = read_model_fabric_configuration()
     assert config.egress_revoked and config.egress_revision > revoked_revision
     restored_revision = config.egress_revision
+    assert (await DurableJobRepository().inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     assert (await DurableJobRepository().inference_accounting_snapshot())["committed_microusd"] == 9
+    await engine.dispose()
     run_cli(root, "rollback", "--restore-id", restored["restore_id"], "--confirm")
     assert read_model_fabric_configuration().egress_revoked
     assert read_model_fabric_configuration().egress_revision > restored_revision
+    assert (await DurableJobRepository().inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     assert (await DurableJobRepository().inference_accounting_snapshot())["committed_microusd"] == 9
     assert calls == []
     from src.workspace import maintenance_fence, canonical_workspace_registry, restore_workspace, reconcile_production_restore

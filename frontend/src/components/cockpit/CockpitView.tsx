@@ -1,3 +1,5 @@
+import { HomeMethodInspection } from "./HomeMethodInspection";
+import type { HomeTarget } from "../../lib/homeContinuation";
 import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
@@ -95,6 +97,7 @@ import { PttAudioControl, type PttTaskRecovery } from "../chat/PttAudioControl";
 import { TelegramCaptureControl } from "./TelegramCaptureControl";
 import { ChannelOutputReview } from "./ChannelOutputReview";
 import { ChannelTaskReview } from "./ChannelTaskReview";
+import { partialInspectionKey, partialJobHasExactReceipt, type PartialArtifactInspectionBinding, type PartialArtifactInspectionRequest, type PartialArtifactInspectionReceipt } from "./partialArtifactInspection";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
@@ -6487,6 +6490,7 @@ interface BoardBrowserResultPreview {
 }
 
 type BoardArtifactRecord = ArtifactRecord & {
+  partialReceiptBinding?: PartialArtifactInspectionBinding;
   browserResultRequested?: boolean;
   browserResult?: BoardBrowserResultPreview | null;
   calendarResultRequested?: boolean;
@@ -7930,6 +7934,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ? { principalId: operatorAuth.principalId, sessionId: operatorAuth.sessionId } : null;
   const attentionNavigation = useAttentionNavigation(attentionOwner);
   const attentionOwnerKey = attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : null;
+  const [homeInspection, setHomeInspection] = useState<{ ownerKey: string; target: HomeTarget; focusId: string } | null>(null);
+  const currentHomeInspection = homeInspection?.ownerKey === attentionOwnerKey ? homeInspection : null;
   const selectedGuardianCandidate = guardianSelection?.ownerKey === attentionOwnerKey ? guardianSelection.item : null;
   const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
     setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
@@ -8006,8 +8012,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, []);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
   const workBoardInspectionGenerationRef = useRef(0);
+  const partialReceiptElement = useRef<HTMLDivElement | null>(null);
+  const partialPresentation = useRef<{ binding: PartialArtifactInspectionBinding; current: () => boolean; resolve: (value: PartialArtifactInspectionReceipt | null) => void } | null>(null);
+  const currentPartialOwner = useRef(operatorAuth);
+  currentPartialOwner.current = operatorAuth;
   useEffect(() => () => {
     workBoardInspectionGenerationRef.current += 1;
+    partialPresentation.current?.resolve(null); partialPresentation.current = null;
   }, []);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
@@ -9744,6 +9755,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     isCurrentInspection: () => boolean,
     browserReference?: WorkBoardReceiptReference | null,
     calendarReference?: WorkBoardReceiptReference | null,
+    partialBinding?: PartialArtifactInspectionBinding,
   ): Promise<{
     job: Record<string, unknown> | null;
     workflow: BoardBoundWorkflowRun | null;
@@ -9792,6 +9804,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         calendarResultRequested,
         calendarResult: null,
       };
+    }
+    if (partialBinding && !partialJobHasExactReceipt(job, partialBinding)) {
+      return { job: null, workflow: null, status: result.status };
     }
     const browserResultStatus = job.browser_result_status;
     const browserResult = browserResultRequested && browserResultStatus === "available"
@@ -9848,6 +9863,55 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus(message);
     });
   }
+  useEffect(() => {
+    const pending = partialPresentation.current;
+    if (!pending) return;
+    const artifact = selectedInspector?.kind === "artifact" ? selectedInspector.artifact as BoardArtifactRecord : null;
+    const key = partialInspectionKey(pending.binding);
+    if (pending.current() && visibleSections.inspector && artifact?.partialReceiptBinding
+      && partialInspectionKey(artifact.partialReceiptBinding) === key
+      && partialReceiptElement.current?.dataset.partialReceipt === key) {
+      partialPresentation.current = null;
+      pending.resolve({ binding: pending.binding, presented: true });
+    } else if (!pending.current() || (artifact && artifact.partialReceiptBinding && partialInspectionKey(artifact.partialReceiptBinding) !== key)) {
+      partialPresentation.current = null; pending.resolve(null);
+    }
+  }, [selectedInspector, visibleSections.inspector, operatorAuth.status, operatorAuth.principalId, operatorAuth.sessionId]);
+
+  async function inspectPartialArtifactReceipt({ binding, signal }: PartialArtifactInspectionRequest): Promise<PartialArtifactInspectionReceipt | null> {
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    partialPresentation.current?.resolve(null); partialPresentation.current = null;
+    const current = () => !signal.aborted && cockpitMountedRef.current
+      && inspectionGeneration === workBoardInspectionGenerationRef.current
+      && currentPartialOwner.current.status === "authenticated"
+      && currentPartialOwner.current.principalId === binding.ownerPrincipalId
+      && currentPartialOwner.current.sessionId === binding.ownerSessionId;
+    if (!current()) return null;
+    const output = binding.output;
+    setWorkBoardEvidenceStatus("Loading the exact authenticated partial artifact receipt.");
+    const reference = { artifact_id: output.artifact_id, content_sha256: output.content_sha256 };
+    try {
+      const { job, workflow } = await loadBoardBoundWorkflowRun(output.child_job_id, binding.ownerSessionId, current, null, null, binding);
+      if (!current()) return null;
+      if (!job || !workflow || !partialJobHasExactReceipt(job, binding)) throw Error("Exact partial artifact receipt or child lineage is unavailable.");
+      const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId: binding.ownerSessionId, workflowRunId: output.child_job_id });
+      if (!artifact || artifact.sizeBytes !== output.size_bytes) throw Error("Exact partial artifact metadata is unavailable.");
+      return await new Promise(resolve => {
+        const pending = { binding, current, resolve };
+        partialPresentation.current = pending;
+        const abort = () => { if (partialPresentation.current === pending) partialPresentation.current = null; resolve(null); };
+        signal.addEventListener("abort", abort, { once: true });
+        pending.resolve = value => { signal.removeEventListener("abort", abort); resolve(value); };
+        setSelectedInspector({ kind: "artifact", artifact: { ...artifact, partialReceiptBinding: binding } as BoardArtifactRecord });
+        focusPane("inspector_pane");
+        setWorkBoardEvidenceStatus(null);
+      });
+    } catch (error) {
+      if (current()) { const message = (error as Error).message; setWorkBoardEvidenceStatus(message); setOperatorStatus(message); }
+      return null;
+    }
+  }
+
   function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
@@ -15926,6 +15990,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 3);
           return (
             <>
+              {(artifact as BoardArtifactRecord).partialReceiptBinding && <div ref={partialReceiptElement}
+                data-partial-receipt={partialInspectionKey((artifact as BoardArtifactRecord).partialReceiptBinding!)}
+                aria-label="Authenticated partial artifact receipt">
+                <p>Artifact receipt {artifact.id} · {artifact.sizeBytes} bytes · SHA-256 {artifact.contentSha256}</p>
+                <p>Owner {(artifact as BoardArtifactRecord).partialReceiptBinding!.ownerSessionId} · child {artifact.runId} · delegation {(artifact as BoardArtifactRecord).partialReceiptBinding!.output.delegation_invocation_id}</p>
+                <p>Metadata only. File content is not previewed; the server physically verifies it when accepting the partial decision.</p>
+              </div>}
               <div className="cockpit-feedback-row">
                 <button
                   className="cockpit-feedback-button"
@@ -16517,10 +16588,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <CockpitSectionNav activeSection={activeSection} onSelect={selectCockpitSection} />
         <main className="cockpit-section-content">
 
-      {activeSection === "home" ? (
+      {currentHomeInspection && activeSection !== "home" ? <button type="button" onClick={() => selectCockpitSection("home")}>Return to Home snapshot</button> : null}
+      <div hidden={activeSection !== "home"}>
         <CockpitHome
+          active={activeSection === "home"}
+          authenticated={Boolean(attentionOwner)}
           owner={attentionOwner}
-          focusAttentionId={attentionNavigation.homeFocusId}
+          focusAttentionId={currentHomeInspection?.focusId ?? attentionNavigation.homeFocusId}
+          onOpenContinuation={(target, item, focusId) => {
+            if (!attentionOwner || !attentionOwnerKey) return;
+            setHomeInspection({ ownerKey: attentionOwnerKey, target, focusId });
+            if (target.kind === "task" || target.kind === "output") {
+              attentionNavigation.fromHome({ id: focusId, kind: "task", taskId: target.task_id, title: target.task_id, reason: "Inspect owning metadata", updatedAt: item.source_at, goalId: "goal_id" in item ? item.goal_id : null, threadId: null, recoveryAction: null, readOnly: item.ownership_access === "recovered_read_only", metadataConfirmed: true, priority: 0 });
+              setFocusTaskId(target.task_id); selectCockpitSection("work");
+            } else if (target.kind === "inbox") {
+              setSelectedGuardianCandidate(null);
+              attentionNavigation.focusInbox(target.inbox_id);
+              selectCockpitSection("inbox");
+            } else if (target.kind === "approval") openApprovalsPane(target.approval_id);
+            else if (target.kind === "method") selectCockpitSection("library");
+            else { selectCockpitSection("goals"); appEventBus.emit("attention:inspect-goal", { ...attentionOwner, goalId: target.goal_id, goalRevision: target.goal_revision, programmeId: target.kind === "programme" ? target.programme_id : null }); }
+          }}
           onOpenAttention={(item) => {
             if (item.taskId && attentionNavigation.fromHome(item)) {
               setFocusTaskId(item.taskId);
@@ -16534,16 +16622,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           onOpenSection={selectCockpitSection}
           onOpenApprovals={openApprovalsPane}
           goalSummary={currentGoal ? {
+            goalId: currentGoal.id,
+            goalRevision: currentGoal.revision ?? 0,
+            ownerSessionId: currentGoal.owner_session_id ?? "",
             title: currentGoal.title,
             status: currentGoal.status,
-            criterion: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+            criterion: currentGoalLoop?.goal.id===currentGoal.id && currentGoalLoop.goal.revision===currentGoal.revision
+              ? currentGoalLoop.criterion?.description ?? null : currentGoal.success_criterion?.description ?? null,
           } : null}
           onOpenTask={(taskId) => {
             setFocusTaskId(taskId);
             selectCockpitSection("work");
           }}
         />
-      ) : null}
+      </div>
 
       {activeSection === "inbox" ? (
         <section className="cockpit-section-surface cockpit-inbox-surface" data-testid="cockpit-inbox-section">
@@ -16602,6 +16694,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       {activeSection === "library" ? (
         <>
+          {currentHomeInspection?.target.kind === "method" && attentionOwner ? <HomeMethodInspection key={`${attentionOwnerKey}:${currentHomeInspection.target.proposal_id}`} target={currentHomeInspection.target} owner={attentionOwner} /> : null}
           <ProcedureV2Review
             active
             ownerPrincipalId={operatorAuth.principalId}
@@ -17610,6 +17703,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
             <WorkBoardPanel
               key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+              continuationOutput={currentHomeInspection?.target.kind === "output" ? currentHomeInspection.target : null}
               attentionContext={attentionNavigation.origin}
               onReturnAttention={() => {
                 const section = attentionNavigation.returnContext();
@@ -17640,6 +17734,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 selectCockpitSection("inbox");
               }}
               onInspectArtifact={inspectWorkBoardArtifact}
+              onInspectPartialArtifact={inspectPartialArtifactReceipt}
               onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
             />
           </CockpitWorkspaceWindow>

@@ -137,7 +137,7 @@ def period_id(now: datetime) -> str:
 
 
 def _operation_payload(row: InferenceCostReservation) -> dict[str, object]:
-    return row.model_dump(mode="json")
+    return row.model_dump(mode="json", exclude={"group_lookup_key"})
 
 
 def _provider_contact_denied(row: InferenceCostReservation) -> bool:
@@ -411,12 +411,26 @@ class InferenceAccountingRepositoryMixin:
         return account, rows
 
     def _assert_accounting_continuity(self, workspace, account, rows):
+        from src.workflows.general_task_accounting import entry_for
+        from src.workflows.inference_group_lookup import assert_group_lookup
+        # Original evidence failures take precedence over derived lookup drift,
+        # including drift on an earlier reservation in this complete ledger.
+        for row in rows:
+            entry_for(row)
+        for row in rows:
+            assert_group_lookup(row)
         receipt = read_lifecycle_receipt(workspace)
         expected = receipt.get("inference_accounting") if receipt is not None else None
         if account is None or expected != _witness(account) or account.ledger_digest != _ledger_digest(account, rows):
             raise InferenceAccountingError("accounting_continuity_unavailable")
 
     async def _persist_accounting_witness(self, db, workspace, account, rows):
+        from src.workflows.inference_group_lookup import assert_group_lookup, classify_group_lookup
+        for row in rows:
+            # This also covers the existing atomic research-group writer.
+            if inspect(row).pending and row.group_lookup_key is None:
+                row.group_lookup_key = classify_group_lookup(row)
+            assert_group_lookup(row)
         base = _witness(account) if account.revision else None
         changed = [row for row in rows if inspect(row).modified or inspect(row).pending]
         account.revision += 1
@@ -584,6 +598,9 @@ class InferenceAccountingRepositoryMixin:
                         evidence = json.loads(row.evidence_json)
                         evidence.append({"kind": "goal_programme_binding", **programme_budget})
                         row.evidence_json = _json(evidence)
+                    from src.workflows.inference_group_lookup import classify_group_lookup, assert_group_lookup
+                    row.group_lookup_key = classify_group_lookup(row)
+                    assert_group_lookup(row)
                     db.add(row)
                     rows.append(row)
                     await self._persist_accounting_witness(db, workspace, account, rows)

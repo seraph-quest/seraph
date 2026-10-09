@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+from threading import RLock
 from urllib.parse import urlsplit
 
 from config.settings import settings
@@ -61,6 +62,7 @@ SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
         "vlm_analyze_file",
     }
 )
+_policy_publication_lock = RLock()
 
 
 @dataclass(frozen=True)
@@ -319,23 +321,33 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration, *,
     validated = _configuration_from_payload(_configuration_payload(configuration))
     path = model_fabric_configuration_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    def publish(publication):
+        # Accounting is already held for governed branches. Never acquire it
+        # underneath this process lock; STATE exchanges remain short/pure.
+        from src.operator.home_projection import home_projection
+        with _policy_publication_lock:
+            generation = home_projection.begin_policy_publication()
+            publication()
+            home_projection.finish_policy_publication(generation,validated)
     if validated.openrouter_setup is not None or validated.near_text is not None:
-        from src.workspace.accounting_witness import _publish_policy_locked, publish_policy_configuration
+        from src.workspace.accounting_witness import _publish_policy_locked, maintenance_accounting_lock
         if publication_workspace is None:
-            publish_policy_configuration(path.parent, _configuration_payload(validated), expected_revision=expected_revision)
+            with maintenance_accounting_lock(path.parent) as workspace:
+                publish(lambda: _publish_policy_locked(workspace,_configuration_payload(validated),
+                    target_path=path,expected_revision=expected_revision))
         else:
             if publication_workspace.host_root != path.parent:
                 raise ValueError("publication workspace does not match configuration")
-            _publish_policy_locked(publication_workspace, _configuration_payload(validated), target_path=path, expected_revision=expected_revision)
+            publish(lambda: _publish_policy_locked(publication_workspace,_configuration_payload(validated),
+                target_path=path,expected_revision=expected_revision))
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(_configuration_payload(validated), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
-    path.chmod(0o600)
+    def publish_legacy():
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_configuration_payload(validated),indent=2,sort_keys=True),encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary,path)
+        path.chmod(0o600)
+    publish(publish_legacy)
 
 
 def validate_active_model_fabric_configuration(

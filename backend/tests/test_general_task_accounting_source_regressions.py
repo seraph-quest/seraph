@@ -7,11 +7,12 @@ from src.workflows.general_task_accounting import entry_for, validate_recovered_
 from src.workflows.inference_accounting import InferenceAccountingError
 from tests.test_general_task_continuation_accounting import continuation_fixture
 from tests.test_general_task_persistence import task_runtime
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
 @pytest.mark.asyncio
-async def test_recovered_group_row_requires_original_role_and_current_parent(task_runtime, monkeypatch):
+async def test_recovered_group_row_requires_original_role_and_current_parent(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,

@@ -5,6 +5,7 @@ import { ProgrammeDigestContent } from "./ProgrammeDigestContent";
 import { isProgrammeDigestSnapshot } from "./programmeDigestApi";
 import { GuardianInboxPanel } from "./GuardianInboxPanel";
 import { CockpitHome } from "./CockpitHome";
+import { homeFixture } from "../../lib/homeContinuation.fixture";
 
 // Finite API fixtures establish UI bindings, not discovery or model quality.
 function receipt() {
@@ -134,7 +135,7 @@ describe("Programme digest binding", () => {
     expect(screen.queryByText("An actual source finding")).not.toBeInTheDocument();
   });
 
-  it("binds actual programme receipts inside the existing Inbox and Home Goals surfaces", async () => {
+  it("keeps actual programme readback in Inbox while Home uses one metadata projection", async () => {
     const data = receipt(); data.digests[0].findings[0].task_id = "native-task";
     const open = vi.fn(); const section = vi.fn();
     fetchMock.mockImplementation((url) => Promise.resolve(reply(String(url).endsWith("/programme-digests") ? data : { items: [] })));
@@ -142,13 +143,14 @@ describe("Programme digest binding", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Review prepared proposal in Work" }));
     expect(open).toHaveBeenCalledWith("native-task");
     view.unmount();
+    const priorCalls = fetchMock.mock.calls.length;
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(homeFixture())));
     render(<CockpitHome owner={{ principalId: "operator", sessionId: "root" }} onOpenSection={section} />);
-    await screen.findByText(/sources checked 3/);
-    expect(screen.getByText(/output · actual-brief/)).toBeInTheDocument();
-    expect(screen.getByText(/Next digest/)).toBeInTheDocument();
-    expect(screen.getByText(/Next source eligibility · scheduled/)).toHaveTextContent(new Date("2026-10-10T00:00:00Z").toLocaleString());
+    await screen.findByText(/Programme a{32}/);
+    expect(screen.getByRole("article", { name: "Prepared results" })).toHaveTextContent("result unknown");
     expect(screen.queryByText(/Next source run/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open daily digest in Inbox" }));
+    expect(fetchMock.mock.calls.slice(priorCalls)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Open Inbox" }));
     expect(section).toHaveBeenCalledWith("inbox");
     expect(fetchMock.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(0);
   });

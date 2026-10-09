@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import type { WorkBoardTask } from "../../types";
+import type { GoalInfo, WorkBoardTask } from "../../types";
 import { TaskMethodReview } from "./TaskMethodReview";
 import { ResearchMethodProposalForm } from "./ResearchMethodProposalForm";
 import { validateProvenance, validSourceRefs, validObservation, validateResearchSource, validateResearchStrategy } from "../../lib/researchMethods";
@@ -62,11 +62,11 @@ function lessonRead(result: unknown, task: WorkBoardTask, proposalId: string, so
   if (record(result.new_method) && result.new_method.schema_version === "ResearchStrategy.v1") validateResearchStrategy(result.new_method);
   return result as unknown as Lesson;
 }
-interface Props { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null; proposalId?: string | null }
+interface Props { task: WorkBoardTask; ownerPrincipalId?: string | null; ownerSessionId?: string | null; proposalId?: string | null; goals?: GoalInfo[]; onCreated?: (id: string) => Promise<void> }
 export function TaskLessonReview(props: Props) {
   return <OwnedTaskLessonReview key={`${props.task.task_id}:${props.task.task_revision}:${props.ownerPrincipalId}:${props.ownerSessionId}`} {...props} />;
 }
-function OwnedTaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposalId }: Props) {
+function OwnedTaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposalId, goals, onCreated }: Props) {
   const [source, setSource] = useState<Source | null>(null), [lesson, setLesson] = useState<Lesson | null>(null);
   const [correction, setCorrection] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
@@ -151,7 +151,7 @@ function OwnedTaskLessonReview({ task, ownerPrincipalId, ownerSessionId, proposa
       <h4>Old method</h4><pre aria-label="Old task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.old_method, null, 2)}</pre>
       <h4>Proposed method</h4><pre aria-label="Proposed task method" className="whitespace-pre-wrap break-all">{JSON.stringify(lesson.new_method, null, 2)}</pre>
       <p>This candidate alone establishes no method adoption or measured quality improvement.</p>
-      {lesson.new_method && lesson.source_current && <TaskMethodReview key={`${ownerSessionId}:${lesson.proposal_id}`} task={task} proposalId={lesson.proposal_id} owned={owned} attemptId={lesson.attempt_id} sourceRefs={lesson.source_refs} />}
+      {lesson.new_method && lesson.source_current && <TaskMethodReview key={`${ownerSessionId}:${lesson.proposal_id}`} task={task} proposalId={lesson.proposal_id} owned={owned} attemptId={lesson.attempt_id} sourceRefs={lesson.source_refs} goals={goals} onCreated={onCreated} />}
     </div>}
   </section>;
 }

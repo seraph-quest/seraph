@@ -250,4 +250,8 @@ describe("Goal programme cockpit journey", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Retained history remains visible"));
     expect(screen.getByLabelText("Programme programme-1")).toBeInTheDocument();
   });
+  it("opens only the exact Home programme and never substitutes an unrelated generation", async () => { stored = [programme, { ...programme, id: "other", grant_revision: 4 }]; render(<GoalProgrammePanel goal={goal} focusProgrammeId="programme-1" />); await screen.findByLabelText("Programme programme-1"); expect(screen.queryByLabelText("Programme other")).not.toBeInTheDocument(); });
+  it("shows the exact missing Home programme as unavailable even when other generations exist", async () => { stored = [programme]; render(<GoalProgrammePanel goal={goal} focusProgrammeId="missing-original" />); await screen.findByText(/exact Home programme is unavailable/); expect(screen.queryByLabelText("Programme programme-1")).not.toBeInTheDocument(); });
+  it("does not expose mutation controls as ready for recovered Goal history", async () => { stored = [programme]; render(<GoalProgrammePanel goal={{ ...goal, ownership_access: "recovered_read_only" }} focusProgrammeId="programme-1" />); await screen.findByLabelText("Programme programme-1"); expect(screen.getByRole("button", { name: "Preview finite public programme" })).toBeDisabled(); expect(screen.getByRole("button", { name: "Pause programme 3" })).toBeDisabled(); expect(screen.getByRole("button", { name: "Revoke programme 3" })).toBeDisabled(); });
+
 });

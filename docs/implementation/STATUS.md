@@ -61,6 +61,14 @@ For a shorter reader-facing overview of the current app, start with
 dense shipped-state record.
 
 **Bounded general documents: Partial.**
+The following correction describes intended post-merge behavior on an open
+implementation branch; installed availability requires its independently reviewed
+merge. Invoice comparison process identity uses its fixed native publication owner
+after actual supervisor readiness and before private source delivery. Current
+owner/Root/Goal/task/attempt/input, original durable lease/fence/deadline and exact
+capacity are rechecked before bounded history adoption; generic document process
+checkpoint writes remain denied. Unknown cleanup retains capacity. This baseline
+correction adds no provider, managed TCP, browser or native macOS availability claim.
 Availability follows the independently reviewed installed revision containing
 the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
 owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,
@@ -197,8 +205,58 @@ restart boundaries, full-capacity cancellation and `no_learning`; macOS executio
 and live external/provider usefulness remain unverified. The current Python
 managed lifecycle remains the execution owner before the separately owned
 [#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
-Specialist delegation in
-[#999](https://github.com/seraph-quest/seraph/issues/999) remains **Planned**.
+**Bounded specialist delegation (#999): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#999](https://github.com/seraph-quest/seraph/issues/999)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-specialist-delegation-999)
+extends an accepted native task with actual specialist Work cards, private
+copied handoffs, durable wait and physically verified child outputs. The original
+group admits at most two active and four retained specialist children, depth
+one, and shares its twelve-call ceiling, explicit cost allowance and original
+deadline. Parent/child navigation is informational; reserved identities do not
+mean that a child has been claimed or executed. Completion remains no-learning.
+
+An authenticated private child reservation preserves and revalidates the
+parent's original immutable reviewed-method authority while executing only its
+narrower reserved plan. Ordinary public admission still selects the current
+method and enforces its complete sequence. Lesson projection matches each
+callback to its verified admitted continuation revision and unchanged frozen
+step; method acceptance rechecks compatibility against the actual started
+registry when available. Descriptor projection grants no authority. The genuine
+reviewed-method journey completes the original source and operator review, then
+brings both next-task children to Done and their parent to Review, awaiting its
+separate operator completion.
+
+The four proposal and specialist accounting readers use private indexed
+owner/classification checks and at most thirteen group rows, preserving all original liabilities and
+detecting overflow beyond twelve. Startup strictly classifies legacy rows in
+batches of at most 128. Historical financial seals retain their original typed
+defaults and field presence without resealing. The private hint grants no
+authority and is not a direct-database-tamper integrity seal. Stopped stdlib
+workspace backup/restore accepts the sole added hint column; restored NULL hints
+require canonical startup migration before accounting readiness. This does not
+bound the existing global `_accounting_rows` deployment-ledger baseline.
+
+Private handoff publication derives at most twelve specialist callback identities
+from validated original-group reservations and uses exact unique run-identity
+lookups with the original owner, Root, reservation and current-delegation gates.
+The existing full Vault fingerprint still scales with secret rows and bytes;
+the entire publication path is not claimed independent of global workspace size.
+
+Original-root cancel and held pause fence further work while retaining Unknown
+callbacks, effects and contacted cost liabilities. A failed sibling does not
+discard an already verified output. The current authenticated owner can inspect
+eligible physical child outputs and explicitly accept an immutable partial
+review, including after the execution cutoff. This preserves the original
+Task, Attempt and stop state; it cannot complete the task, settle liabilities
+or resume work. Current unresolved job/effect/cost counts remain separate from
+the accepted decision's historical debt. Exact action replay requires current
+paired-owner authorization; recovered read-only access cannot issue or replay
+the decision. Isolated Linux native/API/stock-MCP, accounting and UI receipts
+cover copied-evidence boundaries, durable waits, failed-sibling retention,
+stop races, physical selection and authenticated restart replay. They establish
+neither model quality nor general callback recovery; native macOS execution and
+live external/provider usefulness remain unverified.
 
 **Communication preparation (#1016): intended Partial scope after independently
 reviewed merge.** This is source-branch behavior until the installed `develop`
@@ -250,6 +308,44 @@ cleanup, private inspectable candidate and no output adoption, plus isolated
 M5/evolution/dispatcher regressions. Successful formatter execution is not
 claimed: this host denies bubblewrap loopback setup. See the
 [operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
+**Reusable general procedures (#1002): Shipped in `develop` through #1053.**
+The independently reviewed milestone adds source inspection, server-offered ordinary scalar parameter naming,
+immutable inert saving and separate signed M5 review in the existing Task
+Inspector. The exact seven-field `ProcedurePlan.v3` preserves every original
+registered typed step, fixed input, symbolic dependency, output contract and
+producer/version pin. Unsupported or forbidden leaves block the whole save;
+legacy receipts without original producer pins require a fresh eligible source
+(`source_contract_review_required`) while ordinary legacy continuation remains
+unchanged. This extends the current Python lifecycle; it does not introduce a
+Cordis bridge, authored executable pack, tool registry, queue or authority owner.
+
+The exact current signed method/version/digest/pointer revision can construct a
+new triage Task with strict fresh inputs. Explicit promotion uses existing
+durable native execution, fresh jobs/Attempts/deadlines/cost limits and current
+effect approvals. Full independent plan comparison and same-writer pin/body/
+original-event checks fence publication and exact-key replay; a changed method
+or body cannot create another Task under the original key. Family disable selects
+signed baseline, activation requires exact reviewed prior selection, rollback
+restores only the exact eligible previous signed pointer, and explicit canonical
+deletion writes a tombstone and hides candidate content. Existing admitted pins
+retain their identity under current authority/source/expiry and tombstone checks.
+Generic recall/indexing remains excluded; each exact scope retains the
+16-version bound. Typed artifacts have a 64KiB bound and full Vault/secret checks,
+without changing the 2,000-scalar generic M5 prose limit.
+
+Named provider-free Linux receipts cover the actual mixed research/file/
+registered-MCP source, save/adopt, fresh invocation with changed ordinary values,
+distinct native approvals and literal physical readback, same-key A-to-B denial,
+exact prior rollback, restart and disable/activate/tombstone readback. The
+focused source/producer/native run passed 36 checks, the consumer regression run
+66 and the UI run 64; these separate proof runs retain their own source epochs.
+Scripted final service transports and actual local SQLite/private-file effects
+prove mechanics, not provider quality, learned improvement, general usefulness
+or native macOS execution. Whole cumulative independent review passed before
+the milestone merged through #1053. See the
+[operator flow](./12-current-app-guide.md#reusable-general-procedures-1002)
+and [accepted contract](./decisions/028-reviewed-task-methods.md).
 
 **Reviewed task methods (#1001): Shipped on `develop` revisions containing the
 independently reviewed milestone merge.** Earlier revisions require that merge;
@@ -658,7 +754,7 @@ they do not establish real-account or production usefulness. See the
 - [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This remains **Partial**; live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
 - [ ] M7 #890 adds a bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. This remains **Partial**. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
 - [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. This remains **Partial**; local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. See [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).
-- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
+- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Home adds one authenticated six-section metadata snapshot with 20 items per page, original-cutoff pagination, explicit degraded/Unknown states and exact owning-inspector navigation. Historical method metadata and passive programme digest timing establish no execution readiness; full private-source checks remain in the owning inspector. Focused component and retained authenticated API-consumer receipts verify local bindings, without claiming a new browser journey or live external usefulness. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
 - [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
 - [ ] Reviewed public opportunity judgments extend that Inbox with finite Goal policy, immutable public excerpts, one governed native strategist request and exact SHA256 citations. Fixed read-only browser/report plans add bounded generation, separately acknowledged automatic Triage staging, exact Work preview and explicit acceptance through existing native execution. Managed receipts cover browser readback, automatic CPU reports, silent staging, verified cancellation and same-workspace Unknown recovery with unchanged liability. Accepted review corrections preserve current authority, original output integrity and cleanup receipts. Judgment, planning and these executions retain `no_learning`; general proactive learning and live external/provider usefulness remain **Partial**. See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-read-only-opportunity-plans).
 - [ ] Reviewed opportunity feedback and reversible preferences add explicit append-only judgments, one bounded provider-free CPU recommendation, separate literal memory adoption and rollback. Two current verified Helpful outcomes can order eligible blueprint offers for display; two exact-watch Not helpful judgments can suppress optional candidates while source reads continue. Delivery, acknowledgment, unjudged work and task success supply no inferred vote. Current source/outcome/population checks and private-memory retrieval isolation constrain every adopted effect. Generalized learning, measured usefulness and live external/provider usefulness remain **Partial**; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-opportunity-feedback-and-reversible-preferences).

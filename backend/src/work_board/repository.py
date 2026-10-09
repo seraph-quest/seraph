@@ -1074,6 +1074,8 @@ class WorkBoardRepository:
         values: dict[str, Any],
     ) -> None:
         """Apply one task mutation only if the loaded revision still matches."""
+        if "priority" in values and "priority_explicit" not in values and values["priority"] != task.priority:
+            values = {**values, "priority_explicit": False}
         result = await db.execute(
             update(WorkBoardTask)
             .where(
@@ -1139,9 +1141,15 @@ class WorkBoardRepository:
         *,
         origin_session_id: str | None = None,
         publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
+        priority_explicit: bool = False,
+        accepted_method_stage=None,
+        _specialist_publication=None,
+        _procedure_invocation=None,
     ) -> BoardMutation:
         return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
-            publication_authority_check=publication_authority_check)
+            publication_authority_check=publication_authority_check, priority_explicit=priority_explicit,
+            accepted_method_stage=accepted_method_stage, _specialist_publication=_specialist_publication,
+            _procedure_invocation=_procedure_invocation)
 
     async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
                                   staged_input=None, publication_witness=None) -> BoardMutation:
@@ -1154,8 +1162,13 @@ class WorkBoardRepository:
 
     async def _create_task(self, db, owner, request, *, origin_session_id=None,
                            publication_authority_check=None, staged_text=None,
-                           staged_input=None, publication_witness=None) -> BoardMutation:
+                           staged_input=None, publication_witness=None, priority_explicit=False,
+                           accepted_method_stage=None, _specialist_publication=None,
+                           _procedure_invocation=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if (request.idempotency_scope == "general-task" and request.idempotency_key.startswith("specialist:")
+            and _specialist_publication is None):
+            raise BoardError("specialist_delegation_publication_denied","Specialist publication namespace is private",status_code=422)
         if request.capability_id == "inference.near-text.v1":
             from uuid import UUID
             try:
@@ -1214,13 +1227,15 @@ class WorkBoardRepository:
                 or staged_text.original_root_id != owner.session_id
                 or staged_text.request_digest != _payload_digest(request)):
                 raise BoardError("pipeline_task_changed", "The staged task binding changed", status_code=409)
-        elif request.input_artifact_id or publication_authority_check is not None:
+        elif request.input_artifact_id or publication_authority_check is not None or _procedure_invocation is not None:
             # Reserve the writer before reading the owner/goal/artifact graph.
             # Those reads establish the authority that is bound by the task
             # insert; moving the fence after redaction would allow a stale
             # graph snapshot to be bound by a later mutation.
             await _begin_sqlite_immediate(db)
         digest = _payload_digest(request)
+        if priority_explicit:
+            digest = hashlib.sha256(("seraph-explicit-priority-v1:" + digest).encode()).hexdigest()
         existing_result = await db.execute(
             select(WorkBoardTask).where(
                 WorkBoardTask.owner_principal_id == owner.principal_id,
@@ -1230,6 +1245,8 @@ class WorkBoardRepository:
             )
         )
         existing = existing_result.scalar_one_or_none()
+        if _procedure_invocation is not None:
+            await _procedure_invocation.check(db, existing)
         if existing is not None:
             if request.input_artifact_id:
                 # Replays must remain idempotent after a successful browser
@@ -1256,6 +1273,13 @@ class WorkBoardRepository:
                     raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             if existing.idempotency_payload_digest != digest:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
+            if _specialist_publication is not None:
+                from src.workflows.specialist_delegation import verify_specialist_publication
+                from src.workflows.specialist_lifecycle import seal_child_creation
+                from src.workflows.specialist_lineage import publish_lineage_events
+                await verify_specialist_publication(db,owner,request,_specialist_publication)
+                await seal_child_creation(db,owner,existing,_specialist_publication)
+                await publish_lineage_events(db,owner,existing,_specialist_publication,repository=self)
             latest_event = await db.execute(
                 select(WorkBoardEvent)
                 .where(
@@ -1327,7 +1351,11 @@ class WorkBoardRepository:
         safe_title = staged_text.title if staged_text else await self._safe_text(request.title, db=db)
         safe_body = staged_text.body if staged_text else await self._safe_text(request.body, db=db)
 
-        task = WorkBoardTask(
+        reserved_identity = {}
+        if _specialist_publication is not None:
+            from src.workflows.specialist_delegation import verify_specialist_publication
+            reserved_identity["task_id"] = await verify_specialist_publication(db, owner, request, _specialist_publication)
+        task = WorkBoardTask(**reserved_identity,
             owner_principal_id=owner.principal_id,
             owner_session_id=owner.session_id,
             origin_session_id=origin_session_id or owner.session_id,
@@ -1343,6 +1371,7 @@ class WorkBoardRepository:
             executor_id=request.executor_id,
             assignee_id=request.assignee_id,
             priority=request.priority,
+            priority_explicit=priority_explicit,
             idempotency_scope=request.idempotency_scope,
             idempotency_key=request.idempotency_key,
             idempotency_payload_digest=digest,
@@ -1422,6 +1451,15 @@ class WorkBoardRepository:
                 task_id=task.task_id,
                 task_revision=task.task_revision,
             )
+        if accepted_method_stage is not None:
+            from src.work_board.historical_method import publish_accepted_method
+            task.admitted_method_json = await publish_accepted_method(db, task, accepted_method_stage)
+            await db.flush()
+        if _specialist_publication is not None:
+            from src.workflows.specialist_lifecycle import seal_child_creation
+            await seal_child_creation(db,owner,task,_specialist_publication)
+            from src.workflows.specialist_lineage import publish_lineage_events
+            await publish_lineage_events(db,owner,task,_specialist_publication,repository=self)
         return BoardMutation(task, event)
 
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
@@ -1664,6 +1702,7 @@ class WorkBoardRepository:
         owner: WorkBoardOwner,
         task_id: str,
         request: WorkBoardTaskPatch,
+        *, priority_explicit: bool = False,
     ) -> BoardMutation:
         task = await self._owned_task(db, owner, task_id)
         expected = request.expected_revision
@@ -1692,6 +1731,8 @@ class WorkBoardRepository:
                 status_code=409,
             )
         safe_changes: dict[str, Any] = {}
+        if priority_explicit and "priority" in changes and changes["priority"] is not None:
+            safe_changes["priority_explicit"] = True
         for field, value in changes.items():
             if field in {"title", "body"}:
                 safe_changes[field] = await self._safe_text(str(value))
@@ -1825,7 +1866,10 @@ class WorkBoardRepository:
         owner: WorkBoardOwner,
         task_id: str,
         request: WorkBoardActionRequest,
+        *, accepted_method_stage=None,
     ) -> BoardMutation:
+        if accepted_method_stage is not None:
+            await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
         expected = request.expected_revision
         if task.task_revision != expected:
@@ -1994,6 +2038,10 @@ class WorkBoardRepository:
             expected_revision=expected,
             values=values,
         )
+        if accepted_method_stage is not None and request.action.value == "promote":
+            from src.work_board.historical_method import publish_accepted_method
+            task.admitted_method_json = await publish_accepted_method(db, task, accepted_method_stage)
+            await db.flush()
         event = await self._event(
             db,
             task,
@@ -3146,7 +3194,14 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt = WorkBoardAttempt(
+        reserved_identity = {}
+        if task.capability_id == "agent.task.v1" and task.idempotency_key.startswith("specialist:"):
+            from src.workflows.specialist_delegation import specialist_for_task
+            context = await specialist_for_task(db, task)
+            if context is None or previous_fence or attempt_count:
+                raise BoardError("specialist_delegation_attempt_changed", "Original reserved specialist attempt required", status_code=409)
+            reserved_identity["attempt_id"] = context.reservation.child_attempt_id
+        attempt = WorkBoardAttempt(**reserved_identity,
             task_id=task.task_id,
             task_revision_at_claim=int(expected_revision),
             lease_owner=str(lease_owner)[:256],
@@ -3159,6 +3214,8 @@ class WorkBoardRepository:
             parent_handoff_context_json=_canonical_json(parent_handoff_context),
             parent_handoff_digest=parent_handoff_digest,
         )
+        from src.work_board.historical_method import stage_attempt_method_metadata
+        attempt.admitted_method_json = await stage_attempt_method_metadata(db, task=task, new_attempt=attempt)
         db.add(attempt)
         await self._cas_task_update(
             db,
@@ -4313,7 +4370,7 @@ class WorkBoardRepository:
         attempt there could replay an external effect.
         """
 
-        observed_at = now or _now()
+        observed_at = _utc_datetime(now) if now is not None else _now()
         lease_seconds = max(1, min(int(lease_seconds), 900))
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
@@ -4348,7 +4405,7 @@ class WorkBoardRepository:
         # current task revision are the recovery fence.
         if not attempt.lease_owner or attempt.fencing_token <= 0:
             raise BoardError("stale_fence", "The board attempt fence is stale")
-        if attempt.lease_expires_at is None or attempt.lease_expires_at > observed_at:
+        if attempt.lease_expires_at is None or _utc_datetime(attempt.lease_expires_at) > _utc_datetime(observed_at):
             raise BoardError("lease_active", "The board attempt lease is still active")
 
         attempt_count = int(
@@ -4444,6 +4501,8 @@ class WorkBoardRepository:
             started_at=observed_at,
             outcome="pending_admission",
         )
+        from src.work_board.historical_method import stage_attempt_method_metadata
+        replacement.admitted_method_json = await stage_attempt_method_metadata(db, task=task, new_attempt=replacement)
         db.add(replacement)
         await self._cas_task_update(
             db,

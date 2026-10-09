@@ -1,3 +1,4 @@
+import type { HomeTarget } from "../../lib/homeContinuation";
 import { CommunicationPlanPanel } from "./CommunicationPlanPanel";
 import type { CommunicationSelection, CommunicationReplyInput, CommunicationRescheduleInput } from "../../lib/communications";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,6 +19,7 @@ import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { ReusableProcedureSave } from "./ReusableProcedureSave";
 import { TaskApprovalReview } from "./TaskApprovalReview";
 import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { ResearchDossierPanel } from "./ResearchDossierPanel";
@@ -28,6 +30,7 @@ import { NearTextWorkPanel } from "./NearTextWorkPanel";
 import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import type { InspectPartialArtifact } from "./partialArtifactInspection";
 import { GeneralTaskPanel } from "./GeneralTaskPanel";
 import { GENERAL_TASK_CAPABILITY } from "../../lib/generalTask";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
@@ -144,6 +147,8 @@ export interface WorkBoardPanelProps {
   onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  continuationOutput?: Extract<HomeTarget, {kind: "output"}> | null;
+  onInspectPartialArtifact?: InspectPartialArtifact;
   focusTaskId?: string | null;
   discardFocusedTaskId?: string | null;
   onFocusTaskHandled?: (taskId: string) => void;
@@ -540,6 +545,9 @@ function normalizedIsoOrNull(value: string | null | undefined): string | null {
 }
 
 function eventSummary(event: WorkBoardEvent): string {
+  if (event.kind === "task.specialist_published" || event.kind === "task.specialist_origin") {
+    return event.kind.replace(/[_.]/g, " ");
+  }
   const metadata = event.metadata;
   const parts = [
     metadata.status,
@@ -548,6 +556,81 @@ function eventSummary(event: WorkBoardEvent): string {
     metadata.recovery_action,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   return parts.length ? parts.join(" · ") : event.kind.replace(/[_.]/g, " ");
+}
+
+const SPECIALIST_LINEAGE_FIELDS = ["parent_task_id", "parent_attempt_id", "step_id", "child_task_id",
+  "child_attempt_id", "child_job_id", "delegation_invocation_id", "reservation_digest"] as const;
+type SpecialistLineage = Record<typeof SPECIALIST_LINEAGE_FIELDS[number], string>;
+
+function specialistLineage(event: WorkBoardEvent): SpecialistLineage | null {
+  if (event.kind !== "task.specialist_published" && event.kind !== "task.specialist_origin") return null;
+  const metadata = event.metadata;
+  if (!metadata || Object.keys(metadata).length !== SPECIALIST_LINEAGE_FIELDS.length
+    || !SPECIALIST_LINEAGE_FIELDS.every((field) => typeof metadata[field] === "string")) return null;
+  const tuple = metadata as SpecialistLineage;
+  if (!SPECIALIST_LINEAGE_FIELDS.filter((field) => field !== "reservation_digest")
+    .every((field) => /^[A-Za-z0-9_.:-]{1,128}$/.test(tuple[field]))
+    || !/^[a-f0-9]{64}$/.test(tuple.reservation_digest)
+    || !/^[A-Za-z0-9_-]{1,64}$/.test(tuple.step_id)
+    || !/^general-tool:[a-f0-9]{48}$/.test(tuple.delegation_invocation_id)
+    || tuple.parent_task_id === tuple.child_task_id
+    || tuple.child_job_id !== `work-board:${tuple.child_task_id}:${tuple.child_attempt_id}`
+    || event.task_id !== (event.kind === "task.specialist_published" ? tuple.parent_task_id : tuple.child_task_id)) return null;
+  return tuple;
+}
+
+function SpecialistLineageEvent({ event, detail, readDetail, onOpenTask, ownerPrincipalId, ownerSessionId }: {
+  event: WorkBoardEvent;
+  detail: WorkBoardTaskDetail;
+  readDetail: (taskId: string, signal?: AbortSignal) => Promise<WorkBoardTaskDetail>;
+  onOpenTask: (taskId: string) => void;
+  ownerPrincipalId?: string | null;
+  ownerSessionId?: string | null;
+}) {
+  const [verified, setVerified] = useState<{ event: WorkBoardEvent; detail: WorkBoardTaskDetail;
+    targetId: string; attemptClaimed: boolean; jobAdmitted: boolean } | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  useEffect(() => {
+    setVerified(null);
+    setLookupError(null);
+    const tuple = specialistLineage(event);
+    if (!tuple || event.task_id !== detail.task.task_id || !ownerPrincipalId || !ownerSessionId
+      || detail.task.owner_principal_id !== ownerPrincipalId || detail.task.owner_session_id !== ownerSessionId) return;
+    const controller = new AbortController();
+    const targetId = event.kind === "task.specialist_published" ? tuple.child_task_id : tuple.parent_task_id;
+    void readDetail(targetId, controller.signal).then((target) => {
+      if (controller.signal.aborted || target.task.task_id !== targetId
+        || target.task.owner_principal_id !== detail.task.owner_principal_id
+        || target.task.owner_session_id !== detail.task.owner_session_id) return;
+      const oppositeKind = event.kind === "task.specialist_published" ? "task.specialist_origin" : "task.specialist_published";
+      const paired = target.events.some((other) => {
+        const opposite = specialistLineage(other);
+        return other.kind === oppositeKind && opposite !== null
+          && SPECIALIST_LINEAGE_FIELDS.every((field) => opposite[field] === tuple[field]);
+      });
+      const parent = event.kind === "task.specialist_published" ? detail : target;
+      const child = event.kind === "task.specialist_origin" ? detail : target;
+      if (!paired || !parent.attempts.some((attempt) => attempt.attempt_id === tuple.parent_attempt_id
+        && attempt.task_id === tuple.parent_task_id)) return;
+      const attempt = child.attempts.find((item) => item.attempt_id === tuple.child_attempt_id);
+      if (attempt && (attempt.task_id !== tuple.child_task_id
+        || (attempt.workflow_run_id !== null && attempt.workflow_run_id !== tuple.child_job_id))) return;
+      setVerified({ event, detail, targetId, attemptClaimed: Boolean(attempt?.started_at),
+        jobAdmitted: Boolean(attempt?.started_at && attempt.workflow_run_id === tuple.child_job_id) });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setLookupError(errorText(error));
+    });
+    return () => controller.abort();
+  }, [event, detail, readDetail, ownerPrincipalId, ownerSessionId]);
+  const current = verified?.event === event && verified.detail === detail
+    && detail.task.owner_principal_id === ownerPrincipalId && detail.task.owner_session_id === ownerSessionId ? verified : null;
+  if (!current) return lookupError ? <div className="text-[10px] opacity-70">Linked task unavailable: {lookupError}</div> : null;
+  return <div className="mt-1 text-[10px]">
+    <div>Specialist task published · Attempt {current.attemptClaimed ? "claimed" : "reserved"} · Job {current.jobAdmitted ? "admitted" : "reserved"}</div>
+    <button type="button" className="underline" onClick={() => onOpenTask(current.targetId)}>
+      {event.kind === "task.specialist_published" ? "Open specialist" : "Open delegating task"}
+    </button>
+  </div>;
 }
 
 function attemptLabel(task: WorkBoardTask): string {
@@ -804,6 +887,8 @@ function WorkBoardPanel({
   onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
+  continuationOutput,
+  onInspectPartialArtifact,
   focusTaskId,
   discardFocusedTaskId,
   onFocusTaskHandled,
@@ -1041,6 +1126,12 @@ function WorkBoardPanel({
   }
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  useEffect(() => {
+    if (!continuationOutput || selectedDetail?.task.task_id !== continuationOutput.task_id) return;
+    const exact = [...taskDetailPanelRef.current?.querySelectorAll<HTMLElement>("[data-output-attempt-id]") ?? []].find(node => node.dataset.outputAttemptId === continuationOutput.attempt_id);
+    exact?.focus();
+    exact?.scrollIntoView?.({ block: "nearest" });
+  }, [continuationOutput, selectedDetail]);
   const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
   const selectedPlanPreview = selectedDetail?.task.plan_preview ?? selectedDetail?.plan_preview;
   const selectedPlanProposalId = normalizeOpportunityPlanReference(selectedPlanReference)?.proposal_id;
@@ -1817,7 +1908,9 @@ function WorkBoardPanel({
 
   useEffect(() => {
     if (!focusTaskId) return;
-    openTask(focusTaskId);
+    // A metadata refresh changes openTask's tasks dependency. It must not
+    // reopen the same selected Task and erase its inspector edits/readback.
+    if (selectedTaskIdRef.current !== focusTaskId) openTask(focusTaskId);
     onFocusTaskHandled?.(focusTaskId);
   }, [focusTaskId, onFocusTaskHandled, openTask]);
 
@@ -4099,7 +4192,7 @@ function WorkBoardPanel({
                 {selectedTask.latest_attempt && <div className="mt-1">Latest attempt: {attemptLabel(selectedTask)} · readback {READBACK_LABELS[selectedTask.latest_attempt.readback_status]} · verification {VERIFICATION_LABELS[selectedTask.latest_attempt.verification_status]}</div>}
                 <div className="mt-2 grid gap-2">
                   {selectedDetail?.attempts.map((attempt) => (
-                    <div key={attempt.attempt_id} className="rounded bg-black/20 p-2">
+                    <div key={attempt.attempt_id} data-output-attempt-id={attempt.attempt_id} tabIndex={-1} aria-label={`Output Attempt ${attempt.attempt_id}`} className="rounded bg-black/20 p-2">
                       <div>Attempt {attempt.attempt_id} · {attempt.ended_at ? attempt.outcome ?? "ended" : "active"} · fence {attempt.fencing_token}</div>
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
                       <div>Readback {READBACK_LABELS[attempt.readback_status]} · verification {VERIFICATION_LABELS[attempt.verification_status]}</div>
@@ -4210,12 +4303,17 @@ function WorkBoardPanel({
               </section>
 
               <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
+              {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && selectedTask.status === "done" && <ReusableProcedureSave task={selectedTask}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals}
+                onCreated={async id => { await refreshSnapshot(); if (!stoppedRef.current) openTask(id); }} />}
               {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || selectedTask.capability_id === NEAR_TEXT_CAPABILITY || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
                 This capability has an explicit no_learning policy. Its native receipt records that result; no memory proposal is created.
               </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
+                goals={allGoals}
+                onCreated={async id => { await refreshSnapshot(); if (!stoppedRef.current) openTask(id); }}
               />}
               {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
                 key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
@@ -4242,7 +4340,9 @@ function WorkBoardPanel({
               {selectedTask.capability_id === GENERAL_TASK_CAPABILITY && <GeneralTaskPanel
                 key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onInspectArtifact={onInspectArtifact} onInspectPartialArtifact={onInspectPartialArtifact}
                 onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
+              {continuationOutput?.task_id === selectedTask.task_id ? <section aria-label="Selected Home output"><h3>Selected output Attempt {continuationOutput.attempt_id}</h3><p>{selectedDetail?.attempts.some(attempt => attempt.attempt_id === continuationOutput.attempt_id) ? "Exact Attempt metadata found. Inspect its evidence below; physical availability and source authority remain owned by the reader." : "The exact original Attempt is unavailable. No replacement output was selected."}{selectedTask.task_revision !== continuationOutput.task_revision ? " Task revision changed since the Home snapshot." : ""}</p></section> : null}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
               <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 
@@ -4303,7 +4403,7 @@ function WorkBoardPanel({
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Safe task event timeline</div>
                 <div className="mt-2 grid gap-2">
-                  {selectedDetail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div></div>)}
+                  {selectedDetail?.events.map((event) => <div key={event.event_id} className="border-l border-white/20 pl-2"><div>{event.kind.replace(/[_.]/g, " ")} · {safeDateTime(event.created_at)}</div><div className="text-[10px] opacity-70">{eventSummary(event)}</div><SpecialistLineageEvent event={event} detail={selectedDetail} readDetail={fetchTaskDetail} onOpenTask={openTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} /></div>)}
                   {(!selectedDetail?.events.length) && <div className="cockpit-empty">No task events yet.</div>}
                 </div>
               </section>

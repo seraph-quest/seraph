@@ -466,6 +466,14 @@ cached output. Completed execution history remains visible when current
 Root/Goal authority blocks later private reads. The comparison records an
 explicit `no_learning` result and makes no model/provider call.
 
+The comparison's fixed native owner persists its actual ready supervisor/parser
+identity before source delivery. This publication rechecks current private
+authority, the original durable lease/fence/deadline and exact capacity under
+one bounded checkpoint-history CAS. Generic checkpoint calls cannot publish
+document capacity, child or reap identities. Changed authority leaves source
+delivery blocked; positive original supervision remains necessary for capacity
+release. This correction does not establish managed TCP, browser or macOS proof.
+
 Cancellation can leave the generic task card Blocked while its document
 inspector records the actual cancelled parser and reap state. Unknown cleanup
 holds capacity; the original exact witness permits cleanup reconciliation.
@@ -768,7 +776,8 @@ chat reports that it was blocked before provider contact and tells the operator
 which setup controls are missing. That state does not imply an uncertain
 provider outcome and does not trigger an automatic retry.
 
-Home also has a bounded **Your first verified result** journey: choose
+Home also has a bounded **Your first verified result** journey behind the explicit
+**Open first-result setup** control: choose
 a deterministic local snapshot or public-source baseline plus snapshot, review
 the $0 model cost and finite permissions, queue a typed task through the managed
 dispatcher, and explicitly open its independently verified result. Progress is
@@ -1183,6 +1192,138 @@ cover exact control bindings and truthful cancellation states. These isolated
 Linux receipts make no external provider call or quality claim. The contract is
 OS-agnostic; native macOS execution remains unverified.
 
+#### Bounded specialist delegation (#999)
+
+**Intended Shipped scope after reviewed merge:** available on the installed
+`develop` revision containing the independently reviewed
+[#999](https://github.com/seraph-quest/seraph/issues/999) implementation merge.
+It extends the accepted native task contract above, using the same Python
+dispatcher, canonical Work cards and governed inference accounting owner.
+
+An accepted plan can invoke the fixed `specialist_delegate` tool. The server
+reserves the original parent/step association and publishes a real specialist
+Work card with an immutable private input. Both cards expose reciprocal
+navigation after canonical publication. This is informational lineage, not a
+dependency edge or permission: Attempt/job identities are labeled reserved
+until the existing dispatcher actually claims them. Missing or foreign cards
+remain unavailable through the existing owner-filtered inspector.
+
+When the parent has an accepted reviewed task method, the authenticated private
+specialist reservation revalidates that parent's original immutable method pin.
+The child executes its narrower server-reserved plan and allowed tool subset,
+without selecting a fresh general method or inheriting the parent's full tool
+sequence. Original owner, Goal, callback/fence, request and handoff bindings
+remain mandatory. Ordinary public task admission still selects the current
+method and requires its complete reviewed sequence; caller-supplied lineage
+cannot authorize a narrowed plan.
+
+The original group permits at most two active and four retained specialist
+children and one specialist depth; a specialist cannot delegate recursively.
+Planning and execution share the original task's allowance of at most twelve
+inference calls, explicit cost ceiling and absolute deadline. No child obtains
+a new inference lane, approval, Root or budget from its lineage. Selected
+execution evidence is copied into a bounded private handoff under current
+producer, Goal and owner checks. The child consumes that sealed copy; it does
+not regain an arbitrary source path or inherit credentials. Changed source or
+Vault metadata, missing or altered copied artifacts and unrelated pointers
+block the governed use.
+
+Proposal publication, specialist planning, stop compilation and partial-review
+cost readback each use three private indexed queries: one-row checks for missing
+or invalid classification,
+then at most thirteen original-group rows to detect overflow beyond twelve.
+Released, settled and Unknown history remains included; original evidence,
+group, owner, Root, ordinal and deadline bindings still determine authority.
+Canonical startup strictly classifies legacy rows in batches of at most 128;
+malformed or unsupported evidence stays invalid for fail-closed admission.
+Historical financial membership seals retain their original typed defaults and
+field presence; migration neither normalizes retained evidence bytes nor reseals
+existing journals. The private lookup
+hint is not a grant or integrity seal against arbitrary direct database edits.
+
+The stopped workspace CLI accepts the old schema and its sole added private
+hint column for backup/restore and continuity readback. Restore leaves that hint
+NULL; canonical startup migration must classify it before governed accounting
+is ready. Other unexpected columns still fail closed. These bounded specialist
+reads do not bound the existing global `_accounting_rows` baseline, which still
+loads the deployment ledger.
+
+Private handoff publication discovers at most twelve distinct specialist
+callback identities from validated original-group reservations, then checks each
+through an exact unique run-identity lookup. Original owner, Root, callback kind,
+reservation, current delegation and narrowed envelope checks remain mandatory;
+unrelated same-Root job history is not scanned. The existing full Vault
+fingerprint still scales with all secret rows and bytes. These bounded lookups
+do not make the entire publication path independent of global workspace size.
+
+The parent enters a durable wait rather than holding an active callback while
+the child works. Reconciliation uses the original protected reservation and
+actual child execution/readback. Restart can continue that retained wait or
+adopt already verified physical child output without launching another child.
+Only verified parent assembly reaches Review. A failed sibling retains the
+successful child's private output and visible original accounting; it does not
+convert partial work into successful final assembly. Outcomes record
+`no_learning`; task or child success does not update canonical memory.
+
+Cancel on the original root fences the complete original direct/specialist
+descendant set and further output adoption. Held pause also stops admission;
+it provides no new resume bridge for uncertain work. Original callbacks,
+Unknown effects and contacted cost liabilities stay visible. A stop receipt,
+lease expiry, absent process or reserved child identity does not prove positive
+callback closure. Existing original-source closure and accounting readbacks
+remain necessary for reconciliation; the partial-review action cannot supply
+them or renew execution.
+
+For eligible stopped work, the GeneralTask inspector shows producer-issued
+verified specialist steps and exact private output references. Inspect each
+selected artifact through the existing artifact inspector, then explicitly
+acknowledge the remaining effects and accounting debt. Opening that inspector
+alone is not a successful physical-readback claim. The existing task action
+`accept_partial_results` binds the original task revision, Attempt, workflow,
+manifest and plan revisions, selected steps and one UUID idempotency key.
+The server physically verifies those selected outputs and records an immutable
+`SpecialistPartialResult.v1` review artifact without changing the original
+Task/Attempt, stop state or callback closure. This metadata review can occur
+after the original execution cutoff; it grants no new contact.
+
+Accepted selections remain **partial review pending debt**, never full task
+success. The display separates the historical unresolved jobs/effects at
+acceptance from current unresolved job, effect and cost-operation counts and
+current cancellation state. Even zero current counts or later genuine stop
+reconciliation cannot make that decision a full-success result or authorize
+resume. An uncertain POST retains its exact original request for explicit
+reconciliation; there is no automatic retry or new selection. Exact replay
+after restart still requires the current authenticated paired owner before
+stale-revision handling. Foreign or recovered read-only access cannot accept
+or replay private decisions; changed selections, stale source and mismatched
+bindings require inspection and recovery.
+
+[Native specialist journeys](../../backend/tests/test_specialist_delegation_runtime.py),
+[copied evidence tests](../../backend/tests/test_specialist_evidence_runtime.py),
+[durable wait tests](../../backend/tests/test_specialist_durable_wait.py),
+[stop tests](../../backend/tests/test_specialist_stop.py) and
+[authenticated partial-review tests](../../backend/tests/test_specialist_partial.py)
+exercise actual production owners and private physical outputs with only the
+final approved model/MCP transports scripted. The
+[partial UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.partial.test.tsx)
+cover inspection, exact replay, owner changes and truthful historical/current
+debt display. These isolated Linux receipts make no external provider call,
+quality or general callback-recovery claim. Native macOS execution remains
+unverified. The optional Cordis bridge remains separately owned by #1007.
+
+The [reviewed-method specialist journey](../../backend/tests/test_specialist_reviewed_method.py)
+completes a real native source task and its operator review, derives and accepts
+its signed method, then executes a new parent under that immutable pin. Both
+narrower children reach Done with distinct physical outputs; the new parent
+reaches Review and still awaits its normal operator completion. Legitimate
+continuations retain each callback's exact admitted revision and digest from
+the verified finite consecutive revision manifest; the executed step must equal
+the final frozen step and its private inputs must match current dependency
+resolution. Missing revisions or altered source bytes block lesson eligibility.
+Method compatibility uses detached descriptors from the genuinely started
+dispatcher registry when available, with stage and final-writer rechecks. Those
+descriptors describe compatibility only and grant no execution authority.
+
 #### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for
@@ -1443,6 +1584,89 @@ future baseline after rollback, original-pin continuation, read-only recovery,
 source/signature/selection tamper and revocation before contact. Scripted final
 transport proves these mechanics; learned quality, provider usefulness and
 native macOS execution remain unverified.
+
+### Reusable general procedures (#1002)
+
+**Shipped in `develop` through [#1053](https://github.com/seraph-quest/seraph/pull/1053):** the
+flow below requires an installed revision containing the complete
+[#1002](https://github.com/seraph-quest/seraph/issues/1002) milestone. Earlier revisions
+do not acquire it from branch-local receipts. The existing Python/FastAPI
+owners and React Task Inspector implement this
+[ADR-028](./decisions/028-reviewed-task-methods.md#reusable-general-procedures-v3)
+boundary; no Cordis bridge or migrated agent loop is required or implied.
+
+Complete and review an ordinary general Task, then use its Inspector to inspect
+the original source for a reusable method. The server checks the latest ended
+Attempt, complete original native steps, original producer contracts and actual
+verified readbacks. It offers only safe ordinary scalar fields. Name the fields
+you want to supply on future invocations; fixed ordinary inputs and symbolic
+typed dependencies remain unchanged. A mixed research/file/registered-MCP
+journey can retain the original dependency from read output to write content
+without saving the source body as a literal or default. The browser action is
+fixed to the original extract/html mode. Unsupported, unclassified or forbidden
+input prevents saving the entire journey, with a reason in the Inspector.
+Older completed Tasks without original producer pins show
+`source_contract_review_required`; run a fresh eligible Task rather than trying
+to certify historical receipts with current code. Their ordinary execution and
+the existing v1/v2 procedure flows keep their original contracts.
+
+**Save** creates a private immutable inert proposal. It does not activate a
+method, install a tool or publish a package. Inspect its original Task/Attempt/
+Goal revision, complete seven-field plan, producer-offered parameter schemas
+and source receipt, then separately accept or reject the exact candidate in the
+existing canonical method review. Acceptance signs an immutable M5 version and
+the general-family selection for that operator and Goal revision. Up to 16
+accepted versions fit one exact scope; capacity exhaustion requires review and
+does not evict history. The typed artifact is bounded to 64KiB with full Vault
+and secret/authority checks; generic M5 prose retains its 2,000-scalar limit.
+Method JSON remains excluded from generic recall, indexing and prompts.
+
+The accepted Inspector shows the exact current version, digest and pointer
+revision, declared parameters and bounded version history with source Task
+navigation. Invoke the **current** reviewed version by supplying every declared
+fresh value, selecting the current owned Goal/revision and explicit finite
+execution limits. No previous parameter value is silently supplied as a default.
+History inspection alone cannot activate or invoke a noncurrent version.
+The server independently reconstructs and compares the full plan, fixed inputs,
+dependencies and output contracts; missing fields, wrong literal types, changed
+producer versions or undeclared changes are blocked.
+
+Invocation creates and selects a new **triage Task**. Inspect it and explicitly
+**Promote** it through the normal Work Board flow. The existing durable native
+runtime owns new jobs, Attempts, deadlines and cost limits, and requests current
+native effect approvals. The saved method carries no old Root, permission,
+credential, allowance, approval or contacted-effect identity into execution.
+Revocation and stale Goal/source state still stop the next owned boundary.
+Exact same-key retry can recover only the original Task under the exact current
+pin, pointer revision and whole request. Changed values or a different method
+under that key conflict; retry cannot create a second Task or renew old limits.
+After an uncertain response, explicitly reinspect the method before continuing;
+the Inspector retains the original publication key within the current session
+and blocks further invocation until that inspection completes.
+
+**Disable general-task method selection** affects the entire operator/Goal-
+revision general family. It selects a signed baseline, blocks new method
+invocations and preserves source Tasks and version history. **Activate** is a
+separate review action restoring only the exact previously reviewed pin.
+**Rollback** restores the exact eligible previous signed version, or explicit
+baseline when none is available; inspect the resulting current pointer before
+invoking again. Existing admitted work keeps its original immutable pin and
+current authority checks. **Delete** requires explicit canonical tombstone
+confirmation. It withdraws a matching current selection and blocks that version
+at future and in-flight boundaries. The deleted Inspector shows safe version,
+digest, pointer, history and tombstone ID/time without candidate content or
+execution controls; source Tasks, effects and audit remain inspectable.
+
+Provider-free Linux validation covers the complete original mixed native journey,
+save/adopt/fresh invocation and physical changed output, distinct current
+approvals, restart, same-key conflict and lifecycle readback. Focused producer/
+native checks (36), consumer regressions (66) and UI checks (64) passed in their
+named implementation receipts; these are separate local proof runs, not a
+single end-to-end browser run. UI responses come from the actual native journey.
+Only final HTTPS service responses were scripted, with external sockets and
+inference denied. Local mechanics are proven; learned improvement, live provider
+usefulness and native macOS execution remain unverified. The milestone passed
+final independent cumulative review and merged through #1053.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
@@ -2398,14 +2622,52 @@ unverified.
 The bounded cockpit capability provides six persistent cockpit sections: **Home**,
 **Inbox**, **Work**, **Goals**, **Library**, and **Connections**. These select
 existing cockpit surfaces and retain the conversation, selected task, and
-window layout. Home is a bounded operational summary, not a second scheduler:
-page counts are labelled as such, failed refreshes preserve last-known data,
-and unavailable queue or spend evidence remains unavailable. Pending approvals
-open the existing approval surface.
+window layout. Home uses one authenticated local metadata snapshot with six
+sections: next steps, pending approvals, recovery and Unknown work, active Goals,
+programme progress, and prepared results. Each page contains at most 20 items in
+aggregate. Pending approvals are separate from prepared results. Exact Goal,
+Task, output Attempt, programme, approval, Inbox decision and original-method identities open
+existing owning inspectors; the metadata snapshot releases no private bodies. Pending
+or snoozed Inbox decisions use safe source labels; only proposed opportunities
+count as decisions. Active Goals show bounded titles, and exact current selected
+Goal context retains its existing status and criterion.
 
-Home's bounded **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
+Home preserves server order within each section. Explicit pagination retains the
+original as_of and opaque continuation, which expires after five minutes or
+the original operator-session cutoff. Each page rechecks current metadata and
+excludes newly created work; an existing decision may become eligible. Original
+anchor changes or expired authority require an explicit fresh snapshot. Failed or degraded refreshes retain confirmed rows and
+timestamps as historical metadata; a confirmed blocked source displays its
+current state. Missing metadata does not establish empty work or readiness.
+Current Root metadata remains available without stable-identity enrollment,
+while unsupported programme or method sources stay visibly blocked or Unknown.
+Recovered Task history grants no recovered Goal, programme or method access.
 
-The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The bounded tested-publication profile separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
+An originally admitted method tuple is historical evidence. Canonical scalar
+lifecycle and pointer metadata can show active or rolled-back history, but do not
+establish current private-body authenticity, suppression parity, execution
+readiness, rollback permission or measured improvement. Known deletion,
+suppression or unavailable metadata removes the method navigation target; the
+owning inspector rechecks its full private-source predicate before release or
+control. Programme next-digest timing is a passive quote for the original
+snapshot and timezone, never a promised inference run or renewed standing work.
+
+Home and Inbox attention return keyboard focus to their originating context.
+Recovered history remains read only. Exact output inspection retains the selected
+original Attempt and reports its absence rather than substituting a newer one.
+Pending approval timestamps retain their UTC expiry instant. Verified GitHub
+readback converges the original latest attempt only while the original owner,
+Goal and connection authority remain valid; authority changes preserve settled
+effect truth and a specific blocked Task reason. Cost recovery links to Settings
+only after the owning API advertises the exact job/Goal control. See
+[Attention and Recovery](./attention-recovery.md).
+
+Focused component checks and retained authenticated public-API responses verify
+Home's local metadata bindings and native Task inspector routing. These controlled
+transport receipts do not establish a new rendered browser journey or live
+external usefulness.
+
+The earlier attention/recovery journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The bounded tested-publication profile separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
 
 This remains **Partial**; live provider and external-account usefulness remain
 explicitly **external-unverified**.

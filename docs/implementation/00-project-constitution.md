@@ -162,7 +162,7 @@ The following architecture decisions are normative:
 25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
 26. [ADR-026: All-plugin Cordis agent architecture](./decisions/026-all-plugin-cordis-architecture.md)
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
-28. [ADR-028: Reviewed typed task methods](./decisions/028-reviewed-task-methods.md)
+28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 32. [ADR-032: Optional governed OpenRouter audio transcription](./decisions/032-governed-optional-audio-route.md)

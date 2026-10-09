@@ -1318,6 +1318,10 @@ class WorkBoardTask(SQLModel, table=True):
     executor_id: Optional[str] = Field(default=None, index=True)
     assignee_id: Optional[str] = Field(default=None, index=True)
     priority: int = Field(default=50, index=True)
+    # Only authenticated public Task writers may mark an explicitly supplied priority.
+    priority_explicit: bool = Field(default=False)
+    # Historical admission metadata only; never an execution authority.
+    admitted_method_json: Optional[str] = Field(default=None)
     idempotency_scope: str = Field(default="task", index=True)
     idempotency_key: str = Field(index=True)
     idempotency_payload_digest: str = Field(default="", index=True)
@@ -1598,6 +1602,7 @@ class WorkBoardAttempt(SQLModel, table=True):
     task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
     workflow_run_id: Optional[str] = Field(default=None, index=True)
     task_revision_at_claim: int = Field(default=1, index=True)
+    admitted_method_json: Optional[str] = Field(default=None)
     lease_owner: Optional[str] = Field(default=None, index=True)
     lease_expires_at: Optional[datetime] = Field(default=None, index=True)
     heartbeat_at: Optional[datetime] = Field(default=None, index=True)
@@ -1955,6 +1960,7 @@ class InferenceCostReservation(SQLModel, table=True):
     """Accounting evidence for a canonical job, never a second job lifecycle."""
 
     __tablename__ = "inference_cost_reservations"
+    __table_args__ = (Index("ix_inference_cost_reservations_owner_group_lookup", "owner_id", "group_lookup_key"),)
     operation_id: str = Field(primary_key=True)
     deployment_id: str = Field(index=True)
     job_id: str = Field(index=True)
@@ -1979,6 +1985,7 @@ class InferenceCostReservation(SQLModel, table=True):
     actual_cost_microusd: Optional[int] = None
     provider_operation_id: Optional[str] = None
     evidence_json: str = Field(default="[]")
+    group_lookup_key: Optional[str] = Field(default=None, exclude=True)
     recovery_reason: Optional[str] = None
     revision: int = Field(default=1)
     created_at: datetime = Field(default_factory=_now)

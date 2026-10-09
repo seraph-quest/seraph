@@ -171,7 +171,11 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
         try:
-            operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
+            if request.method == "GET" and request.url.path == "/api/operator/continuation":
+                from src.auth.service import authenticate_home_token_readonly
+                operator = await authenticate_home_token_readonly(request.cookies.get(settings.operator_auth_cookie_name))
+            else:
+                operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
         except AuthFailure as exc:
             return _auth_failure_response(request.url.path, exc.code, status_code=401)
         request.state.operator = operator

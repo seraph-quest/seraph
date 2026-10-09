@@ -86,6 +86,39 @@ async def failed_local_task(async_db, monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_redacted_lesson_inspection_never_opens_private_artifact_or_mirror(async_db, monkeypatch, tmp_path):
+    operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
+    result = await create_task_lesson(operator, request)
+    # Authorized live legacy inspection retains its original full wire.
+    assert (await inspect_task_lesson(operator, result["proposal_id"]))["new_method"]["schema_version"] == "TaskMethod.v1"
+    from src.db.models import MemoryProposalPrivacyState
+    from src.memory import task_lessons
+    real_mirror = task_lessons._repair_lesson_mirror
+    async def redact_after_staging(row):
+        mirror = await real_mirror(row)
+        async with async_db() as db:
+            current = await db.get(MemoryProposal, result["proposal_id"])
+            current.privacy_state = MemoryProposalPrivacyState.redacted
+        return mirror
+    # Withdrawal after private staging must be observed by the final fresh
+    # canonical read rather than the originally visible detached proposal.
+    with monkeypatch.context() as staged_patch:
+        staged_patch.setattr(task_lessons, "_repair_lesson_mirror", redact_after_staging)
+        with pytest.raises(BoardError) as staged_denial:
+            await inspect_task_lesson(operator, result["proposal_id"])
+        assert staged_denial.value.code == "lesson_private_content_unavailable"
+    def forbidden_private_read(*args, **kwargs):
+        raise AssertionError("redacted lesson read a private artifact")
+    async def forbidden_mirror(*args, **kwargs):
+        raise AssertionError("redacted lesson reconstructed its mirror")
+    monkeypatch.setattr(task_lessons, "read_private_proof", forbidden_private_read)
+    monkeypatch.setattr(task_lessons, "_repair_lesson_mirror", forbidden_mirror)
+    with pytest.raises(BoardError) as denied:
+        await inspect_task_lesson(operator, result["proposal_id"])
+    assert denied.value.code == "lesson_private_content_unavailable" and denied.value.status_code == 410
+
+
+@pytest.mark.asyncio
 async def test_failed_task_correction_is_private_inspectable_idempotent_and_inert(async_db, monkeypatch, tmp_path, no_inference):
     operator, request = await failed_local_task(async_db, monkeypatch, tmp_path)
     result = await create_task_lesson(operator, request)

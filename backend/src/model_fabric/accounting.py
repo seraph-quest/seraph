@@ -29,11 +29,28 @@ _task_group: ContextVar[object | None] = ContextVar("general_task_accounting_gro
 def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None,
                                  task_attempt_id=None, plan_revision=0,
                                  selected_grant_digest=None, parent_owner=None, parent_fence=None,
+                                 delegation_invocation_id=None, delegation_request_digest=None,
                                  preparation_binding=None):
     from src.work_board.contracts import TaskProposalGroupV1
-    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation", "communication_preparation"}:
+    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation", "specialist", "communication_preparation"}:
         raise InferenceAccountingError("general_task_group_binding_invalid")
-    if role == "communication_preparation":
+    if role != "specialist" and (delegation_invocation_id is not None or delegation_request_digest is not None):
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role != "communication_preparation" and preparation_binding is not None:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role == "specialist":
+        from src.workflows.general_task_accounting import GeneralTaskGroupReservationEvidenceV1
+        from src.work_board.general_task import digest
+        try:
+            GeneralTaskGroupReservationEvidenceV1(group=group, group_digest=digest(group.model_dump(mode="json")),
+                role=role, call_ordinal=1, original_operation_id=delegation_invocation_id,
+                original_job_id=delegation_invocation_id, initial_proposal_operation_id=None,
+                task_id=task_id, task_attempt_id=task_attempt_id, plan_revision=plan_revision,
+                selected_grant_digest=selected_grant_digest, parent_owner=parent_owner, parent_fence=parent_fence,
+                delegation_invocation_id=delegation_invocation_id, delegation_request_digest=delegation_request_digest)
+        except (ValueError, TypeError):
+            raise InferenceAccountingError("general_task_group_binding_invalid") from None
+    elif role == "communication_preparation":
         from src.work_board.communication_contracts import CommunicationPreparationBinding
         from src.work_board.communication_preparation import preparation_admission
         if (type(preparation_binding) is not CommunicationPreparationBinding
@@ -44,12 +61,12 @@ def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None
             preparation_admission(preparation_binding)
         except PermissionError as exc:
             raise InferenceAccountingError("general_task_group_binding_invalid") from exc
-    elif preparation_binding is not None:
-        raise InferenceAccountingError("general_task_group_binding_invalid")
     token = _task_group.set({"group": group, "role": role, "task_id": task_id,
         "task_attempt_id": task_attempt_id, "plan_revision": plan_revision,
         "selected_grant_digest": selected_grant_digest, "parent_owner": parent_owner,
-        "parent_fence": parent_fence, "preparation_binding": preparation_binding})
+        "parent_fence": parent_fence, "preparation_binding": preparation_binding,
+        **({"delegation_invocation_id": delegation_invocation_id,
+            "delegation_request_digest": delegation_request_digest} if role == "specialist" else {})})
     try:
         yield
     finally:

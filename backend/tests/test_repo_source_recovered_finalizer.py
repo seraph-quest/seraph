@@ -45,7 +45,7 @@ async def _session_rows(db):
 
 
 async def _signed_ownerless_fixture(accounting_db, monkeypatch, language, *, failed=False,
-                                    unknown=False):
+                                    unknown=False, stop_requested=False):
     from src.execution import repo_original_producer as producer
     from src.workflows import general_task_guard as guard
     from src.workflows import repo_repair_stop as stop
@@ -65,13 +65,14 @@ async def _signed_ownerless_fixture(accounting_db, monkeypatch, language, *, fai
             captured["registration"] = registered
         callback = service._iterative_process_callbacks[registered["iteration_id"]]
         assert callback.done() and callback.result() is kwargs["actual_result"]
-        if unknown:
+        if unknown or stop_requested:
             async with recovery._repository_recovery_fence(service, jobs,
                     job_id=kwargs["job_id"], owner=kwargs["owner"]) as held:
                 context = await stop._context(service, jobs,
                     job_id=kwargs["job_id"], owner=kwargs["owner"])
                 await stop._persist_repository_stop_intent_locked(service, jobs, context=context,
                     owner=kwargs["owner"], reason="operator_cancelled", fence=held)
+        if unknown:
             await source._quarantine_original_uncertainty(service, jobs,
                 job_id=kwargs["job_id"], owner=kwargs["owner"], lease_owner=lease_owner,
                 fencing_token=fence, reason="repository_process_closure_unproven",

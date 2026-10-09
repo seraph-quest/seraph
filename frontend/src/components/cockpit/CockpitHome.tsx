@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FirstResultSetup } from "./FirstResultSetup";
 import { AttentionList } from "./AttentionList";
+import { ProgrammeDigestContent } from "./ProgrammeDigestContent";
 import { buildCockpitAttention, type AttentionItem, type AttentionOwner } from "../../lib/cockpitAttention";
 
 import {
@@ -166,6 +167,8 @@ function CockpitHomeContent({ onOpenSection, onOpenApprovals, onOpenTask, onOpen
           <p className="cockpit-home-muted">criterion · {goalSummary?.criterion ?? "not configured or unavailable"}</p>
           <p className="cockpit-home-muted">next eligible · reported in the existing Goals surface</p>
           <button type="button" onClick={() => onOpenSection("goals")}>Open Goals</button>
+          <ProgrammeDigestContent summaryOnly ownerKey={owner?.principalId && owner?.sessionId ? `${owner.principalId}:${owner.sessionId}` : ""}
+            onOpenGoals={() => onOpenSection("goals")} onOpenInbox={() => onOpenSection("inbox")} onOpenTask={onOpenTask} />
         </article>
         <AttentionList items={unifiedAttention} confirmedAt={snapshot.last_confirmed_at} available={resourceConfirmed("inbox")} focusItemId={focusAttentionId} onOpen={(item) => {
           if (onOpenAttention) onOpenAttention(item);

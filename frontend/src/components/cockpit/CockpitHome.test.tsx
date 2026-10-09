@@ -140,3 +140,11 @@ describe("CockpitHome", () => {
     expect(screen.getByText("Current root runtime")).toBeInTheDocument();
   });
 });
+// Programme readbacks are tested separately from the six legacy Home resources.
+vi.mock("./programmeDigestApi", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./programmeDigestApi")>(),
+  programmeDigestRequest: vi.fn().mockResolvedValue({ digests: [], programmes: [], notifications: {
+    enabled: false, deadline_categories: [], digest_slots_remaining: 1, deadline_slots_remaining: 1,
+    quiet_hours_active: false, delivery_debt: false,
+  } }),
+}));

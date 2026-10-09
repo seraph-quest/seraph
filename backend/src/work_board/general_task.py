@@ -364,7 +364,8 @@ class GeneralTaskService:
             raise BoardError("document_local_consent_required", "Explicit source selection is required", status_code=422)
         return envelope
 
-    async def create(self, db, owner, request: GeneralTaskCreate):
+    async def create(self, db, owner, request: GeneralTaskCreate, *, publication_authority_check=None,
+                     publication_authority_scope=None):
         if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
@@ -452,13 +453,22 @@ class GeneralTaskService:
             idempotency_key="general:" + request.idempotency_key), general_task_publication=publication)
         # prepare_input_artifact reserves durably before filesystem I/O; task
         # publication binds that exact artifact under the repository writer CAS.
-        return await self.repository.create_task(db, owner, WorkBoardTaskCreate(
-            title=request.input.intent[:200], body="General registered-tool task",
-            goal_id=request.input.goal_ref, goal_revision=request.goal_revision,
-            capability_id=CAPABILITY, input_artifact_id=artifact.artifact_id,
-            status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
-            idempotency_scope="general-task", idempotency_key=request.idempotency_key,
-            requires_review=True))
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as scopes:
+            if publication_authority_scope is not None:
+                await scopes.enter_async_context(publication_authority_scope())
+            mutation = await self.repository.create_task(db, owner, WorkBoardTaskCreate(
+                title=request.input.intent[:200], body="General registered-tool task",
+                goal_id=request.input.goal_ref, goal_revision=request.goal_revision,
+                capability_id=CAPABILITY, input_artifact_id=artifact.artifact_id,
+                status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
+                idempotency_scope="general-task", idempotency_key=request.idempotency_key,
+                requires_review=True), publication_authority_check=publication_authority_check)
+            if publication_authority_scope is not None:
+                # The original publication CAS commits before its canonical
+                # configuration fence is released. Files were staged earlier.
+                await db.commit()
+            return mutation
 
     async def plan(self, db, owner, task_id):
         from src.work_board.dispatcher import _parse_typed_input

@@ -116,6 +116,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.work_board.dispatcher import run_work_board_dispatch
     from src.guardian.opportunity_runtime import run_opportunity_tick
     from src.guardian.goal_discovery import run_goal_discovery_tick
+    from src.guardian.programme_digest import tick as run_programme_digest_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -128,6 +129,14 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
 
     jobs = [
+        {
+            "func": _async_job_wrapper(run_programme_digest_tick, loop, job_id="programme_daily_digest"),
+            "trigger": IntervalTrigger(seconds=60),
+            "id": "programme_daily_digest",
+            "name": "Daily programme Inbox digest (08:00 local)",
+            "next_run_time": _startup_next_run(True, delay_seconds=10),
+            "misfire_grace_time": 60,
+        },
         {
             "func": _async_job_wrapper(run_goal_discovery_tick, loop, job_id="goal_public_discovery"),
             "trigger": IntervalTrigger(seconds=60),

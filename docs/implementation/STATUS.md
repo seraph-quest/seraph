@@ -262,7 +262,42 @@ inspection/readback is available in the Goal panel. See the
 Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
 mechanical contracts and failure boundaries. Whole cumulative independent review
 and merge are still required; real provider/model quality, native macOS execution
-and digest delivery are not established.
+and digest delivery were not established by the #1004 receipts; #1005's bounded
+delivery mechanics have their separate receipts below.
+
+**Daily programme digest and follow-through: on `develop` revisions containing
+the #1005 milestone merge, Shipped.** The validated feature-branch implementation
+awaits independent review and merge on earlier revisions.
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) slice implements
+the current Python scheduler's local 08:00 stable-owner/day Inbox receipt,
+bounded same-receipt pending/finalization, passive blocked recovery, persistent
+finding defer/dismiss and a same-card inert C1 task proposal. Existing native
+task acceptance/execution and verified physical checklist readback link completed
+output to the original finding. Original Goal/generation/Root/source freshness
+and canonical publication fences remain binding; recovered Goal reads grant no
+task creation authority. This adds no model calls or alternative execution/cost
+owners and leaves discovery's UTC occurrence and original clocks unchanged.
+Optional native delivery uses the existing outbox, recipient-bound opt-in,
+owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
+ambiguous display consumes the slot without automatic retry. Home distinguishes
+actual run/source/output evidence from the next digest timer and source
+eligibility under the existing UTC cadence, scheduler, finite allowance and
+native holds. Unavailable or blocked eligibility has an explicit reason; it
+does not promise execution. Source freshness is rechecked in the final C1
+publication writer, so expiry after staging cannot publish a Task or bind its
+proposal artifact. Existing private unbound staging retains its size bound/expiry
+cleanup. Missing, unreadable or altered physical sources finalize the original
+pending receipt with passive blocked recovery and bounded digest/status reads;
+cited source reads require review. An opted-in deadline failure retains a bounded
+negative memo without repeated unchanged-tick file reads, a notice slot or task
+creation. Actual source-file unlink, tamper and truncation journeys verify these
+failure paths. See the
+[operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
+Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
+file journey and two-programme cited-deadline/native-slot readbacks prove these
+mechanics with inference intercepted at its owned transport. Provider/model
+quality, actual external spending and macOS native display are not
+established by these receipts.
 
 ## Bounded operator workflows (program #899)
 

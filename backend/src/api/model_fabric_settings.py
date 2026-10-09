@@ -39,6 +39,10 @@ from src.model_fabric.configuration import (
     OPENROUTER_ENV_CREDENTIAL_REF,
     OPENROUTER_SETUP_SCHEMA_VERSION,
     OPENROUTER_SETUP_V2_SCHEMA_VERSION,
+    OPENROUTER_SETUP_V3_SCHEMA_VERSION,
+    OPENROUTER_V3_ROUTE_SLOTS,
+    route_slots_for_setup,
+    migrate_openrouter_setup_to_v3,
     OPENROUTER_ROUTE_SLOTS,
     OPENROUTER_VAULT_CREDENTIAL_REF,
     OpenRouterSetup,
@@ -99,7 +103,7 @@ _MANUAL_CANARY_LOCK = threading.Lock()
 _MAX_CANARY_TIMEOUT_SECONDS = 180
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROBE_CAPABILITIES = {
-    *(capability.value for capability in ModelCapability),
+    *(capability.value for capability in ModelCapability if capability is not ModelCapability.AUDIO_INPUT),
     "latency_ms",
     "health",
 }
@@ -177,12 +181,17 @@ class OpenRouterRouteSlotsInput(BaseModel):
     embedding: OpenRouterRouteInput | None = None
 
 
+class OpenRouterRouteSlotsV3Input(OpenRouterRouteSlotsInput):
+    audio: OpenRouterRouteInput | None = None
+
+
 class OpenRouterSetupInput(BaseModel):
     """Write-only operator setup fields for the fixed OpenRouter route."""
 
     model_config = ConfigDict(extra="forbid")
-    schema_version: Literal["seraph.openrouter.setup.v1", "seraph.openrouter.setup.v2"] = OPENROUTER_SETUP_SCHEMA_VERSION
-    routes: OpenRouterRouteSlotsInput | None = None
+    schema_version: Literal["seraph.openrouter.setup.v1", "seraph.openrouter.setup.v2", "seraph.openrouter.setup.v3"] = OPENROUTER_SETUP_SCHEMA_VERSION
+    routes: OpenRouterRouteSlotsV3Input | OpenRouterRouteSlotsInput | None = None
+    audio_egress_acknowledged: bool = Field(default=False, strict=True)
     vision_egress_acknowledged: bool = Field(default=False, strict=True)
     embedding_egress_acknowledged: bool = Field(default=False, strict=True)
 
@@ -232,7 +241,10 @@ class OpenRouterSetupInput(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def closed_v2_contract(cls, data):
-        if isinstance(data, dict) and data.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        if isinstance(data, dict) and data.get("schema_version") != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+            if "audio_egress_acknowledged" in data or isinstance(data.get("routes"), dict) and "audio" in data["routes"]:
+                raise ValueError("audio_setup_v3_required")
+        if isinstance(data, dict) and data.get("schema_version") in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
             legacy = {"model_ids", "models", "model_id", "capabilities", "modalities", "temperature", "max_output_tokens", "timeout_seconds", "timeout", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd", "cloud_egress", "max_cost_microusd", "max_queue_size", "fallback_allowed"}
             if legacy.intersection(data):
                 raise ValueError("v2 route fields belong inside routes")
@@ -373,8 +385,8 @@ def _openrouter_setup_from_input(
         routes={slot: OpenRouterRoute(**{**route.model_dump(),
             "model_id": normalize_openrouter_model_id(route.model_id),
             "capabilities": tuple(route.capabilities), "allowed_upstreams": tuple(route.allowed_upstreams)}) if route is not None else None
-            for slot, route in ((slot, getattr(body.routes, slot)) for slot in OPENROUTER_ROUTE_SLOTS)} if body.routes is not None else None,
-        purpose_consents=existing.purpose_consents if existing is not None and body.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else None,
+            for slot, route in ((slot, getattr(body.routes, slot)) for slot in (OPENROUTER_V3_ROUTE_SLOTS if body.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else OPENROUTER_ROUTE_SLOTS))} if body.routes is not None else None,
+        purpose_consents=existing.purpose_consents if existing is not None and body.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION} else None,
     )
 
 
@@ -500,6 +512,7 @@ def _setup_configuration(
         configured_policies = tuple(
             openrouter_policy_for_setup(setup, runtime_path)
             for runtime_path in CANONICAL_ROUTE_SPECS
+            if runtime_path != "audio_transcription" or setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION
         )
     return ModelFabricConfiguration(
         profiles=configured_profiles,
@@ -633,11 +646,11 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
             # An omitted optional setup is preservation, never deletion/regrant.
             return await model_fabric_settings_payload()
         existing = persisted.openrouter_setup
-        if setup_input is not None and (setup_input.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION or persisted.near_text is not None):
-            if existing is not None and existing.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION and setup_input.schema_version != OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        if setup_input is not None and (setup_input.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION} or persisted.near_text is not None):
+            if existing is not None and (existing.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION and setup_input.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION or existing.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION and setup_input.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION):
                 raise HTTPException(status_code=409, detail="setup_schema_upgrade_required")
             return await _put_openrouter_v2(body, setup_input, persisted)
-        if existing is not None and existing.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        if existing is not None and existing.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
             raise HTTPException(status_code=409, detail="setup_schema_upgrade_required")
         if persisted.egress_revoked and body.expected_policy_revision != persisted.egress_revision:
             raise HTTPException(status_code=409, detail="Explicit current policy revision is required to re-grant egress")
@@ -724,8 +737,8 @@ async def _put_openrouter_v2(body, setup_input, persisted):
     if persisted.status == "degraded":
         raise HTTPException(status_code=409, detail="provider_policy_reconciliation_required")
     existing = persisted.openrouter_setup
-    prior = migrate_openrouter_setup_v1_to_v2(existing, egress_revision=revision,
-        allow_unconsented=persisted.near_text is not None) if existing and setup_input.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else existing
+    prior = (migrate_openrouter_setup_to_v3 if setup_input.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else migrate_openrouter_setup_v1_to_v2)(existing, egress_revision=revision,
+        allow_unconsented=persisted.near_text is not None) if existing and setup_input.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION} else existing
     setup = _openrouter_setup_from_input(setup_input, existing=prior)
     raw_key = setup_input.api_key.get_secret_value() if setup_input.api_key is not None else ""
     if raw_key.strip() and (len(raw_key) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in raw_key)):
@@ -735,7 +748,7 @@ async def _put_openrouter_v2(body, setup_input, persisted):
             credential_fingerprint=_fingerprint_secret(raw_key))
     final_revision = revision + 2
     consents = {}
-    for slot in ("vision", "embedding"):
+    for slot in (("vision", "embedding", "audio") if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else ("vision", "embedding")):
         route = (setup.routes or {}).get(slot)
         if route is None or not route.enabled:
             continue
@@ -885,6 +898,8 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
 
 @router.post("/settings/model-fabric/canary")
 async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Request):
+    if body.profile_id == "openrouter.audio":
+        raise HTTPException(status_code=403, detail="audio_official_endpoint_evidence_required")
     if body.profile_id == "near.text":
         raise HTTPException(status_code=403, detail="near_text_dedicated_native_required")
     if not _is_local_request(request):
@@ -906,7 +921,7 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         raise HTTPException(status_code=404, detail="Model-fabric profile not found")
     configured = read_model_fabric_configuration()
     setup = configured.openrouter_setup
-    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if setup is not None and setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         # This existing proof generator is an explicit target exception, never
         # an ordinary task-class mapping or an unknown-to-text fallback.
         slot = next((slot for slot in OPENROUTER_ROUTE_SLOTS if profile.id == f"openrouter.{slot}"), None)
@@ -1245,7 +1260,7 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
             credential_store_error = "credential_store_unavailable"
     original_setup = setup
     revision = configuration.egress_revision if configuration is not None else 1
-    setup = migrate_openrouter_setup_v1_to_v2(setup, egress_revision=revision,
+    setup = (migrate_openrouter_setup_to_v3 if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else migrate_openrouter_setup_v1_to_v2)(setup, egress_revision=revision,
         allow_unconsented=configuration is not None and configuration.near_text is not None)
     payload = _openrouter_setup_payload(setup)
     payload.update(
@@ -1265,7 +1280,7 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
         payload.pop(secret_field, None)
     payload.pop("purpose_consents", None)
     payload["slot_statuses"] = {}
-    for slot in OPENROUTER_ROUTE_SLOTS:
+    for slot in route_slots_for_setup(setup):
         route = (setup.routes or {}).get(slot)
         payload["routes"].setdefault(slot, None)
         state = {"status": "configuration_required", "error_code": "route_disabled" if route is not None else "route_missing", "proof_expires_at": None}
@@ -1292,10 +1307,13 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                                 break
                             proofs.append(proof)
                         else:
+                            if slot == "audio":
+                                from src.model_fabric.audio_contracts import audio_route_witness
+                                await audio_route_witness(profile)
                             state.update(status="ready", error_code=None,
                                 proof_expires_at=datetime.fromtimestamp(min(proof.expires_at for proof in proofs), timezone.utc).isoformat())
                     except Exception:
-                        state["error_code"] = "proof_metadata_unavailable"
+                        state["error_code"] = "audio_format_unverified" if slot == "audio" else "proof_metadata_unavailable"
             if original_setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
                 try:
                     validate_openrouter_setup(replace(setup, routes={slot: route}))

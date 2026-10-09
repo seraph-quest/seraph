@@ -35,6 +35,9 @@ class CanonicalRouteSpec:
 
 
 CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
+    "audio_transcription": CanonicalRouteSpec(InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT, ModelCapability.AUDIO_INPUT), "audio_transcription",
+        ContentOrigin.EXTERNAL_UNTRUSTED, "interactive"),
     "general_task_planner": CanonicalRouteSpec(
         InferenceWorkload.INTERACTIVE,
         (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
@@ -217,6 +220,8 @@ def build_canonical_inference_context(
     effective_principal = principal or get_current_trust_principal()
     if effective_principal is None:
         raise PermissionError("inference context requires an authenticated runtime principal")
+    if runtime_path == "audio_transcription" and AuthorityGrant.INGRESS not in effective_principal.grants:
+        raise PermissionError("audio ingress authority required")
     if AuthorityGrant.MODEL_INFERENCE not in effective_principal.grants:
         raise PermissionError("inference principal lacks model_inference authority")
 

@@ -917,8 +917,17 @@ def _safe_routine_publication_binding(value: Any) -> dict[str, Any] | None:
 
 def _safe_durable_authority(
     value: Any, *, repo_node_posture_expectation: Mapping[str, Any] | None = None,
-    native_research_projection=None, native_job_kind=None,
+    native_research_projection=None, native_job_kind=None, audio_admission=None,
 ) -> dict[str, Any]:
+    if native_job_kind == "audio_transcription_v1":
+        from src.workflows.audio_native import AudioNativeAdmissionBindingV1, AUTHORITY_KEY
+        if type(audio_admission) is not AudioNativeAdmissionBindingV1 or value.get(AUTHORITY_KEY) != audio_admission.payload():
+            raise ValueError("audio_native_protected_binding_required")
+        safe = _safe_structure({key: item for key, item in value.items() if key != AUTHORITY_KEY})
+        safe[AUTHORITY_KEY] = audio_admission.payload()
+        return safe
+    if isinstance(value, Mapping) and "audio_native_admission" in value:
+        raise ValueError("audio_native_binding_unexpected")
     if isinstance(value, Mapping) and value.get("authority_type") == "goal_programme_discovery_v1":
         from src.work_board.research_parent import discovery_authority
         return discovery_authority(value).model_dump(mode="json")
@@ -1346,6 +1355,10 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
 
 
 async def _verify_native_child_sql_scope(db, run):
+    if run.job_kind == "audio_transcription_v1":
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        _binding, audio = await guard_audio_pair(db, run, require_current=False)
+        await advance_audio_pair(db, run, audio)
     """Compile a private canonical journal witness before every child CAS."""
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
@@ -2642,11 +2655,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         opportunity_preference_witness=None,
         near_text_policy_scope=None,
         native_research_projection=None,
+        audio_admission=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if identity.job_kind == "audio_transcription_v1":
+            from src.workflows.audio_native import validate_spec
+            validate_spec(spec, audio_admission)
+        elif audio_admission is not None:
+            raise DurableJobAdmissionDenied("audio_native_binding_unexpected")
         if identity.job_kind == "general_task_native_tool_v1":
             from src.workflows.general_task_guard import is_fixed_child_admission
             if not is_fixed_child_admission(admission_authority_check):
@@ -2718,6 +2737,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             spec.declared_authority,
             native_research_projection=native_research_projection, native_job_kind=identity.job_kind,
             repo_node_posture_expectation=repo_node_posture_expectation,
+            audio_admission=audio_admission,
         )
         root_run_identity = identity.job_id
         branch_depth = 0
@@ -2748,6 +2768,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     admission_dependencies = None
             await db.rollback()
             transaction_started = False
+            audio_capture = None
+            if audio_admission is not None:
+                if dialect_name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    transaction_started = True
+                from src.workflows.audio_native import guard_admission
+                audio_capture = await guard_admission(db, spec, audio_admission)
             if selected_context_admission is not None:
                 # The capture identity is independent from mutable Goal/Root/
                 # Task fields. Its exact primary lookup must precede ordinary
@@ -3091,6 +3118,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.add(run)
             try:
                 await db.flush()
+                if audio_admission is not None:
+                    from src.workflows.audio_native import bind_capture
+                    await bind_capture(db, audio_capture, audio_admission)
             except IntegrityError as exc:
                 # The unique binding is the authoritative concurrent-admission
                 # fence.  Re-read after rollback so the losing invocation is
@@ -3153,6 +3183,166 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def create_job(self, spec: DurableJobSpec) -> dict[str, Any]:
         """Compatibility alias emphasizing that ScheduledJob is only a trigger."""
         return await self.admit_job(spec)
+
+    async def load_audio_native_binding(self, job_id):
+        from src.workflows.audio_native import guard_audio_pair
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            binding, _ = await guard_audio_pair(db, run)
+            if binding is None:
+                raise DurableJobLeaseError("audio_native_binding_required")
+            return binding
+
+    async def validate_audio_inference_binding(self, request, binding):
+        from src.workflows.audio_native import guard_audio_pair
+        if binding.repository is not self or binding.job_id != request.job_id:
+            raise DurableJobLeaseError("audio_native_receipt_binding_mismatch")
+        async with self._session() as db:
+            run = await self._fetch(db, binding.job_id)
+            self._assert_lease(run, owner=binding.owner, fencing_token=binding.fencing_token)
+            native, _ = await guard_audio_pair(db, run, physical=True)
+            if (native is None or request.session_id != native.conversation_session_id
+                or request.owner_id != native.owner_principal_id or request.operation_id != native.operation_id
+                or request.runtime_path != "audio_transcription"
+                or request.deadline_at != _as_utc(native.original_deadline_at).timestamp()):
+                raise DurableJobLeaseError("audio_native_request_mismatch")
+            return native
+
+    async def audio_transition(self, job_id, *, expected_revision, expected_audio_revision,
+                               status, audio_changes, owner=None, fencing_token=None,
+                               require_current=True, audio_result=None):
+        """One writer for audio claim, cancellation, publication and cleanup."""
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            native, audio = await guard_audio_pair(db, run, require_current=require_current)
+            if native is None or _revision(run) != expected_revision or audio.revision != expected_audio_revision:
+                raise DurableJobLeaseError("audio_pair_revision_stale")
+            values = {"status": status, "revision": WorkflowRunState.revision + 1,
+                      "updated_at": _utc_now()}
+            cleanup_only = (status == run.status and run.lease_owner is None
+                and set(audio_changes) <= {"cleanup_status", "raw_path", "normalized_path", "error_code"})
+            if cleanup_only:
+                pass
+            elif status == "running":
+                if run.status not in {"accepted", "queued"} or run.attempt_count not in {0, 1} or audio.admission_operation_id:
+                    raise DurableJobLeaseError("audio_original_attempt_exhausted")
+                if not owner or fencing_token != run.fencing_token:
+                    raise DurableJobLeaseError("audio_claim_fence_invalid")
+                values.update(lease_owner=owner, lease_expires_at=_as_utc(native.original_deadline_at),
+                              fencing_token=WorkflowRunState.fencing_token + 1, attempt_count=1,
+                              started_at=_utc_now())
+            elif status == "cancelled":
+                values.update(lease_owner=None, lease_expires_at=None, finished_at=_utc_now())
+            elif status in {"succeeded", "degraded", "failed"}:
+                self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                if status == "succeeded":
+                    from src.workflows.audio_native import AudioTranscriptionResultV1
+                    from src.db.models import InferenceCostReservation
+                    from src.llm_runtime import _provider_profile
+                    from src.model_fabric.audio_contracts import audio_route_witness
+                    reservation = await db.get(InferenceCostReservation, native.operation_id)
+                    profile = _provider_profile("openrouter.audio")
+                    evidence, _ = await audio_route_witness(profile, proof_ref=native.endpoint_witness_ref)
+                    if (type(audio_result) is not AudioTranscriptionResultV1 or reservation is None
+                        or reservation.job_id != job_id or reservation.state != "settled"
+                        or reservation.contact_started_at is None or reservation.actual_cost_microusd != audio_result.actual_cost_microusd
+                        or reservation.provider_operation_id != audio_result.provider_generation_id
+                        or audio.admission_operation_id != native.operation_id
+                        or audio_result.audio_job_id != audio.id or audio_result.operation_id != native.operation_id
+                        or audio_result.effective_model_id != evidence.endpoint.model_id
+                        or audio_result.effective_upstream_endpoint_tag != evidence.endpoint.upstream_endpoint_tag):
+                        raise DurableJobLeaseError("audio_settled_original_result_required")
+                    audio_changes = {**audio_changes, "transcript": audio_result.transcript,
+                        "transcript_digest": audio_result.transcript_digest,
+                        "result_digest": _digest({key: value for key, value in __import__("dataclasses").asdict(audio_result).items() if key != "transcript"})}
+                values.update(lease_owner=None, lease_expires_at=None, finished_at=_utc_now())
+            elif status != run.status or run.status not in DURABLE_JOB_TERMINAL_STATUSES:
+                raise DurableJobTransitionError("audio_transition_invalid")
+            await advance_audio_pair(db, run, audio, changes=audio_changes)
+            changed = await db.execute(update(WorkflowRunState).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == expected_revision,
+                WorkflowRunState.fencing_token == run.fencing_token).values(**values).execution_options(synchronize_session=False))
+            if not _rowcount_is_one(changed):
+                raise DurableJobLeaseError("audio_workflow_revision_stale")
+            result = await self._fetch(db, job_id)
+            db.expunge(result)
+            return _serialize(result)
+
+    async def recover_audio_owner(self):
+        """Startup releases dead Python leases, never replays contact."""
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        from src.db.models import InferenceCostReservation
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            runs = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.job_kind == "audio_transcription_v1", WorkflowRunState.status == "running"))).scalars().all()
+            for run in runs:
+                _binding, audio = await guard_audio_pair(db, run, require_current=False)
+                reservations = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == run.run_identity))).scalars().all()
+                await advance_audio_pair(db, run, audio)
+                run.revision += 1
+                run.lease_expires_at = _utc_now() - timedelta(seconds=1)
+                if not reservations:
+                    run.status = "queued"
+                    run.lease_owner = None
+                    run.lease_expires_at = None
+                    run.fencing_token += 1
+                db.add(run)
+        await self.recover_inference_accounting()
+
+    async def confirm_audio_transcript(self, job_id, *, transcript, expected_digest,
+                                       owner_principal_id, operator_session_id):
+        from src.workflows.audio_native import guard_audio_pair, accounting_pair
+        from src.agent.session import session_manager
+        from src.db.models import Message
+        if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 20_000 or len(transcript.encode()) > 80_000 or "\x00" in transcript:
+            raise DurableJobTransitionError("transcript_invalid")
+        transcript = transcript.strip()
+        confirmed = hashlib.sha256(transcript.encode()).hexdigest()
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            native, audio = await guard_audio_pair(db, run)
+            if (native.owner_principal_id != owner_principal_id or native.original_root_id != operator_session_id
+                or run.status != "succeeded" or audio.status not in {"transcript_ready", "confirmed"}
+                or expected_digest != audio.transcript_digest):
+                raise DurableJobTransitionError("transcript_confirmation_stale")
+            existing = await db.get(Message, audio.message_id)
+            if audio.status == "confirmed":
+                if audio.confirmed_transcript_digest != confirmed or existing is None or existing.content != transcript:
+                    raise DurableJobTransitionError("transcript_confirmation_stale")
+                return audio.request_id
+            if existing is not None:
+                raise DurableJobTransitionError("canonical_message_identity_conflict")
+            ref = _json_load(audio.attachment_ref_json, {})
+            metadata = {"audio": {"request_id": audio.request_id, "workflow_job_id": job_id,
+                "transcript_digest": confirmed, "confirmed": True, "canonical_memory": "no_learning"},
+                "lineage": {"owner_principal_id": owner_principal_id, "operator_session_id": operator_session_id,
+                    "conversation_id": audio.session_id, "thread_id": audio.session_id, "attachment_refs": [ref]}}
+            await session_manager._add_message_in_db(db, audio.session_id, "user", transcript,
+                message_id=audio.message_id, metadata_json=_canonical(metadata), attachment_refs=[ref])
+            await accounting_pair(db, run, changes={"status": "confirmed", "confirmed_transcript_digest": confirmed,
+                "transcript": None})
+            return audio.request_id
+
+    async def cancel_audio_in_session(self, db, job_id, *, reason):
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        run = await self._fetch(db, job_id)
+        _native, audio = await guard_audio_pair(db, run, require_current=False)
+        await advance_audio_pair(db, run, audio, changes={"status": "cancelled", "transcript": None,
+            "error_code": reason, "transport_status": "unknown" if audio.admission_operation_id else "cancelled"})
+        changed = await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id,
+            WorkflowRunState.revision == run.revision, WorkflowRunState.fencing_token == run.fencing_token).values(
+            status="cancelled", revision=WorkflowRunState.revision + 1, lease_owner=None,
+            lease_expires_at=None, finished_at=_utc_now(), updated_at=_utc_now()).execution_options(synchronize_session=False))
+        if not _rowcount_is_one(changed):
+            raise DurableJobLeaseError("audio_cancel_pair_stale")
 
     async def replace_general_task_manifest(self, job_id, **bindings):
         from src.workflows.general_task_guard import replace_manifest
@@ -3515,6 +3705,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            if preflight_run.job_kind == "audio_transcription_v1":
+                raise DurableJobTransitionError("audio_paired_writer_required")
             if to_status == "queued" and preflight_run.job_kind == "agent.task.v1":
                 from src.workflows.general_task_guard import read_manifest
                 native_manifest = read_manifest(preflight_run)
@@ -4366,6 +4558,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
+            if preflight_run.job_kind == "audio_transcription_v1":
+                raise DurableJobLeaseError("audio_paired_writer_required")
             if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:

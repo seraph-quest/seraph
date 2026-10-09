@@ -228,11 +228,16 @@ class AudioIngressJob(SQLModel, table=True):
     __tablename__ = "audio_ingress_jobs"
     __table_args__ = (
         Index("ux_audio_ingress_jobs_request_id", "request_id", unique=True),
+        Index("ux_audio_ingress_jobs_workflow_job_id", "workflow_job_id", unique=True),
+        CheckConstraint("revision >= 0", name="ck_audio_ingress_revision_nonnegative"),
     )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     request_id: str = Field(index=True)
     request_digest: str = Field(index=True)
+    workflow_job_id: Optional[str] = Field(default=None, foreign_key="workflow_run_states.run_identity")
+    execution_binding_digest: Optional[str] = Field(default=None)
+    revision: int = Field(default=0)
     owner_principal_id: str = Field(index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     session_id: str = Field(foreign_key="sessions.id", index=True)
@@ -294,6 +299,8 @@ class AudioConsentGrant(SQLModel, table=True):
     owner_principal_id: str = Field(index=True)
     operator_session_id: str = Field(index=True)
     boundary: str = Field(index=True)  # capture | cloud_upload
+    # Issued only by the canonical paired admission transaction, once.
+    audio_execution_binding_json: Optional[str] = Field(default=None)
     state: str = Field(default="active", index=True)  # active | revoked
     granted_at: datetime = Field(default_factory=_now, index=True)
     expires_at: datetime = Field(index=True)

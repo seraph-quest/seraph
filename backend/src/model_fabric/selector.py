@@ -502,6 +502,15 @@ def _proof_reason(
             and proof_is_fresh(proof, now=now)
         ):
             exact[proof.capability] = proof
+    if "audio_input" in required:
+        from .audio_contracts import validate_audio_route_proof
+        try:
+            validate_audio_route_proof(exact.get("audio_input"), candidate.profile, now=now)
+            # Structural documentary JSON cannot replace an issued source
+            # attestation. The current repository has no adopted issuer.
+            return "audio_documentary_acquisition_unavailable"
+        except (ValueError, TypeError, AttributeError):
+            return "audio_format_unverified"
     if missing := sorted(required - exact.keys()):
         return f"proof_missing:{missing[0]}"
     values = {

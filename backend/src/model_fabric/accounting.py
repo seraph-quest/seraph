@@ -332,12 +332,14 @@ class DurableInferenceBrokerMixin:
             near = request.runtime_path == "near_text_native"
             setup = configured.near_text if near else configured.openrouter_setup
             bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
-            from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
+            from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
+            if request.runtime_path == "audio_transcription" and setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+                raise InferenceAccountingError("audio_setup_v3_required")
             if near:
                 if _profile_bindings.get().get(request.operation_id) != "near.text":
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
                 bound = setup.request_cost_bound_microusd
-            elif setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            elif setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
                 from .caller_context import canonical_route_spec
                 profile_id = _profile_bindings.get().get(request.operation_id)
                 if request.runtime_path == "capability_probe":
@@ -345,7 +347,7 @@ class DurableInferenceBrokerMixin:
                     if slot is None:
                         raise InferenceAccountingError("accounting_profile_binding_invalid")
                 else:
-                    slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                    slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class, schema_version=setup.schema_version)
                 route = (setup.routes or {}).get(slot)
                 if route is None or not route.enabled or profile_id != f"openrouter.{slot}" or slot != "text" and (setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
@@ -358,6 +360,25 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
+            if request.runtime_path == "audio_transcription":
+                if setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+                    raise InferenceAccountingError("audio_setup_v3_required")
+                if ephemeral:
+                    raise InferenceAccountingError("audio_native_binding_required")
+                native_audio = await binding.repository.validate_audio_inference_binding(request, binding)
+                from src.workflows.audio_native import AudioNativeAdmissionBindingV1
+                if type(native_audio) is not AudioNativeAdmissionBindingV1:
+                    raise InferenceAccountingError("audio_native_binding_required")
+                if type(native_audio.audio_budget_microusd) is not int or bound > native_audio.audio_budget_microusd:
+                    raise InferenceAccountingError("audio_budget_insufficient")
+                from src.llm_runtime import provider_profiles
+                from .audio_contracts import audio_route_witness
+                profile = provider_profiles().get("openrouter.audio")
+                if profile is None or profile.contract_hash != native_audio.profile_hash:
+                    raise InferenceAccountingError("audio_profile_binding_invalid")
+                evidence, _ = await audio_route_witness(profile, native_audio.endpoint_witness_ref)
+                if evidence.pricing.reserve_microusd > bound:
+                    raise InferenceAccountingError("audio_pricing_unbounded")
             if near and ephemeral:
                 raise InferenceAccountingError("near_native_binding_required")
             if near and _near_contact.get() is None:
@@ -437,7 +458,10 @@ class DurableInferenceBrokerMixin:
                 await repository.transition_job(job_id, "blocked", owner=owner, fencing_token=fence,
                     reason=getattr(exc, "code", "accounting_admission_blocked"),
                     result_summary="Inference admission blocked before provider contact; no_learning")
-            raise RemoteInferenceBindingError(getattr(exc, "code", "accounting_admission_blocked")) from exc
+            rejected = RemoteInferenceBindingError(getattr(exc, "code", "accounting_admission_blocked"))
+            if request.runtime_path == "audio_transcription":
+                rejected.code = getattr(exc, "code", "accounting_admission_blocked")
+            raise rejected from exc
 
     async def _contact_accounting(self, handle):
         from src.workflows.inference_accounting import InferenceProviderContactDenied

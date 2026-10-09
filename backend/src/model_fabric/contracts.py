@@ -74,6 +74,7 @@ class InferenceWorkload(str, Enum):
 
 class ModelCapability(str, Enum):
     TEXT = "text"
+    AUDIO_INPUT = "audio_input"
     EMBEDDING = "embedding"
     VISION = "vision"
     TOOL_USE = "tool_use"

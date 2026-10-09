@@ -576,8 +576,25 @@ async def _ensure_legacy_columns(conn) -> None:
             "transport_status": "VARCHAR DEFAULT 'unknown'",
             "transport_lease_id": "VARCHAR",
             "cleanup_status": "VARCHAR DEFAULT 'complete'",
+            "workflow_job_id": "VARCHAR REFERENCES workflow_run_states(run_identity)",
+            "execution_binding_digest": "VARCHAR",
+            "revision": "INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)",
         },
     )
+    await _add_missing_columns("audio_consent_grants", {"audio_execution_binding_json": "VARCHAR"})
+    await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_audio_ingress_jobs_workflow_job_id ON audio_ingress_jobs (workflow_job_id)")
+    # Preserve exact original authority even when a legacy database cannot
+    # acquire new table constraints through additive ALTER TABLE.
+    await conn.exec_driver_sql("""CREATE TRIGGER IF NOT EXISTS audio_binding_immutable
+        BEFORE UPDATE OF workflow_job_id, execution_binding_digest ON audio_ingress_jobs
+        WHEN OLD.workflow_job_id IS NOT NULL AND
+        (NEW.workflow_job_id IS NOT OLD.workflow_job_id OR NEW.execution_binding_digest IS NOT OLD.execution_binding_digest)
+        BEGIN SELECT RAISE(ABORT, 'audio binding is immutable'); END""")
+    await conn.exec_driver_sql("""CREATE TRIGGER IF NOT EXISTS audio_grant_binding_immutable
+        BEFORE UPDATE OF audio_execution_binding_json ON audio_consent_grants
+        WHEN OLD.audio_execution_binding_json IS NOT NULL AND
+        NEW.audio_execution_binding_json IS NOT OLD.audio_execution_binding_json
+        BEGIN SELECT RAISE(ABORT, 'audio grant binding is immutable'); END""")
     if "requested_capability" in audio_ingress_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "

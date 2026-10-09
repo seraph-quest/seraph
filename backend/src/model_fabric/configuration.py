@@ -33,6 +33,8 @@ from .selector import active_provider_exclusion_reason, classify_endpoint, profi
 CONFIG_SCHEMA_VERSION = "seraph.model-fabric.settings.v1"
 OPENROUTER_SETUP_SCHEMA_VERSION = "seraph.openrouter.setup.v1"
 OPENROUTER_SETUP_V2_SCHEMA_VERSION = "seraph.openrouter.setup.v2"
+OPENROUTER_SETUP_V3_SCHEMA_VERSION = "seraph.openrouter.setup.v3"
+OPENROUTER_V3_ROUTE_SLOTS = ("text", "vision", "embedding", "audio")
 OPENROUTER_ROUTE_SLOTS = ("text", "vision", "embedding")
 OPENROUTER_VAULT_CREDENTIAL_REF = "vault:openrouter_api_key"
 OPENROUTER_ENV_CREDENTIAL_REF = "env:OPENROUTER_API_KEY"
@@ -51,7 +53,7 @@ _MAX_OPENROUTER_QUEUE = 64
 _MAX_OPENROUTER_OWNER_OUTSTANDING = 16
 _MAX_OPENROUTER_RETRIES = 2
 OPENROUTER_RUNTIME_CONTROLS_KEY = "_seraph_openrouter"
-_OPENROUTER_CAPABILITIES = frozenset(item.value for item in ModelCapability)
+_OPENROUTER_CAPABILITIES = frozenset({"text", "embedding", "vision", "tool_use", "structured_output", "streaming"})
 SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
     {
         "openai_compatible_chat",
@@ -226,10 +228,12 @@ def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> Wo
     route.  Keeping this derivation here prevents readiness and caller-side
     admission from falling back to mutable legacy environment controls.
     """
+    if runtime_path == "audio_transcription" and setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        raise ValueError("audio_setup_v3_required")
     profile_id = setup.profile_id
-    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         from .caller_context import canonical_route_spec
-        slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+        slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=setup.schema_version)
         route = (setup.routes or {}).get(slot)
         if route is None or not route.enabled or slot != "text" and slot not in (setup.purpose_consents or {}):
             return WorkloadPolicy(runtime_path=runtime_path)
@@ -391,9 +395,9 @@ def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
         if configured.openrouter_setup is not None:
             if not configured.openrouter_setup.cloud_egress_acknowledged:
                 return WorkloadPolicy(runtime_path=runtime_path)
-            if configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            if configured.openrouter_setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
                 from .caller_context import canonical_route_spec
-                slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+                slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=configured.openrouter_setup.schema_version)
                 if slot != "text" and (configured.openrouter_setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     return WorkloadPolicy(runtime_path=runtime_path)
             return openrouter_policy_for_setup(configured.openrouter_setup, runtime_path)
@@ -587,10 +591,12 @@ def normalize_openrouter_model_id(value: object) -> str:
     return f"openrouter/{candidate}"
 
 
-def route_slot_for_task_class(task_class: str) -> str:
+def route_slot_for_task_class(task_class: str, *, schema_version: str | None = None) -> str:
+    if task_class == "audio_transcription" and schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        raise ValueError("audio_setup_v3_required")
     mapping = {"interactive_chat": "text", "agent_reasoning": "text",
         "report_synthesis": "text", "memory_synthesis": "text",
-        "vision_analysis": "vision", "memory_embedding": "embedding"}
+        "vision_analysis": "vision", "memory_embedding": "embedding", "audio_transcription": "audio"}
     if task_class not in mapping:
         raise ValueError("route_slot_unmapped")
     return mapping[task_class]
@@ -598,9 +604,11 @@ def route_slot_for_task_class(task_class: str) -> str:
 
 def openrouter_profile_id_for_runtime_path(runtime_path: str) -> str:
     configured = read_model_fabric_configuration()
-    if configured.openrouter_setup is not None and configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if runtime_path == "audio_transcription" and (configured.openrouter_setup is None or configured.openrouter_setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION):
+        raise ValueError("audio_setup_v3_required")
+    if configured.openrouter_setup is not None and configured.openrouter_setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         from .caller_context import canonical_route_spec
-        return f"openrouter.{route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)}"
+        return f"openrouter.{route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=configured.openrouter_setup.schema_version)}"
     return "openrouter"
 
 
@@ -625,6 +633,19 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
             raise ValueError("OpenRouter route numbers must be finite")
     if not 0 <= route.temperature <= 2 or not 1 <= route.timeout_seconds <= _MAX_OPENROUTER_TIMEOUT_SECONDS:
         raise ValueError("OpenRouter route numbers must be within declared bounds")
+    if slot == "audio":
+        from .audio_contracts import validate_exact_audio_endpoint_slug
+        if setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+            raise ValueError("audio_setup_v3_required")
+        if len(route.capabilities) != 2 or set(route.capabilities) != {"text", "audio_input"}:
+            raise ValueError("audio_capabilities_invalid")
+        if len(route.allowed_upstreams) != 1:
+            raise ValueError("audio_endpoint_not_exact")
+        validate_exact_audio_endpoint_slug(route.allowed_upstreams[0])
+        normalize_openrouter_model_id(route.model_id)
+        if not math.isfinite(route.temperature) or not math.isfinite(route.timeout_seconds) or not 1 <= route.timeout_seconds <= 60 or not 1 <= route.max_output_tokens <= 8192 or route.zero_data_retention is not True or not 1 <= route.request_cost_bound_microusd <= setup.spend_ceiling_microusd:
+            raise ValueError("audio_route_bounds_invalid")
+        return
     required = {"text": {"text"}, "vision": {"text", "vision"}, "embedding": {"embedding"}}[slot]
     if not required.issubset(route.capabilities) or slot != "embedding" and "embedding" in route.capabilities or slot == "text" and "vision" in route.capabilities:
         raise ValueError("OpenRouter route capabilities do not match its purpose")
@@ -635,7 +656,7 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
 
 def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision: int = 1, allow_unconsented: bool = False) -> OpenRouterSetup:
     """Pure projection; no publication, provider contact or proof migration."""
-    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         return setup
     validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
     route = OpenRouterRoute(model_id=setup.model_ids[0], enabled=True,
@@ -663,12 +684,13 @@ def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[Pro
         return (openrouter_profile_for_setup(setup),)
     validate_openrouter_setup(setup)
     profiles = []
-    for slot in OPENROUTER_ROUTE_SLOTS:
+    for slot in route_slots_for_setup(setup):
         route = (setup.routes or {}).get(slot)
         if route is None:
             continue
-        profile = openrouter_profile_for_setup(_legacy_setup_for_route(setup, route))
-        tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis", "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot)
+        profile = (_profile_for_validated_setup(_legacy_setup_for_route(setup, route))
+            if slot == "audio" else openrouter_profile_for_setup(_legacy_setup_for_route(setup, route)))
+        tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis", "vision_analysis", "memory_embedding", "audio_transcription") if (task != "audio_transcription" or setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION) and route_slot_for_task_class(task, schema_version=setup.schema_version) == slot)
         controls = dict(profile.options[OPENROUTER_RUNTIME_CONTROLS_KEY])
         controls["request_cost_bound_microusd"] = route.request_cost_bound_microusd
         profile = replace(profile, id=f"openrouter.{slot}", enabled=route.enabled,
@@ -685,11 +707,11 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
     """Validate the complete user-facing OpenRouter setup contract."""
     # A retained revoked OR object is inspectable beside NEAR, never authority.
     # Only complete dual-provider configuration parsing uses this mode.
-    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION}:
+    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         raise ValueError("unsupported OpenRouter setup schema")
     if setup.profile_id != "openrouter":
         raise ValueError("OpenRouter setup must use the canonical openrouter profile")
-    v2 = setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    v2 = setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}
     if v2:
         # Persisted JSON has no Pydantic boundary. Reject malformed shared
         # shapes before numeric conversion, hashing, or collection operations.
@@ -709,11 +731,11 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
             raise ValueError("OpenRouter setup booleans must be literal")
         if not isinstance(setup.credential_ref, str) or setup.credential_fingerprint is not None and not isinstance(setup.credential_fingerprint, str):
             raise ValueError("OpenRouter setup credential metadata must be strings")
-        if not isinstance(setup.routes, dict) or set(setup.routes) - set(OPENROUTER_ROUTE_SLOTS):
+        if not isinstance(setup.routes, dict) or set(setup.routes) - set(route_slots_for_setup(setup)):
             raise ValueError("unsupported OpenRouter route slot")
         if setup.purpose_consents is not None and (
             not isinstance(setup.purpose_consents, dict)
-            or set(setup.purpose_consents) - {"vision", "embedding"}
+            or set(setup.purpose_consents) - ({"vision", "embedding", "audio"} if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else {"vision", "embedding"})
             or any(type(value) is not int or value < 1 for value in setup.purpose_consents.values())
         ):
             raise ValueError("invalid OpenRouter purpose consent")
@@ -782,7 +804,7 @@ def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool =
     if set(payload) - allowed:
         raise ValueError("OpenRouter setup contains unsupported fields")
     values = dict(payload)
-    if values.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if values.get("schema_version") in (OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION):
         if "credential_ref" in values and not isinstance(values["credential_ref"], str):
             raise ValueError("OpenRouter setup credential reference must be a string")
         raw_routes = values.get("routes")
@@ -790,7 +812,7 @@ def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool =
             raise ValueError("OpenRouter routes must be an object")
         routes = {}
         for slot, raw in raw_routes.items():
-            if slot not in OPENROUTER_ROUTE_SLOTS:
+            if slot not in (OPENROUTER_V3_ROUTE_SLOTS if values.get("schema_version") == OPENROUTER_SETUP_V3_SCHEMA_VERSION else OPENROUTER_ROUTE_SLOTS):
                 raise ValueError("unsupported OpenRouter route slot")
             if raw is None:
                 routes[slot] = None
@@ -842,6 +864,10 @@ def _openrouter_setup_payload(setup: OpenRouterSetup) -> dict[str, object]:
 def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:
     """Build the existing canonical profile from one validated setup."""
     validate_openrouter_setup(setup)
+    return _profile_for_validated_setup(setup)
+
+
+def _profile_for_validated_setup(setup: OpenRouterSetup) -> ProviderProfile:
     routing_model = setup.model_ids[0]
     transport_model = transport_model_for_provider(OPENROUTER_PROVIDER_KIND, routing_model)
     runtime_controls = {
@@ -901,3 +927,17 @@ def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:
         cost_source_updated_at=datetime.now(timezone.utc).timestamp(),
         max_latency_ms=max(int(setup.timeout_seconds * 1000), 1),
     )
+
+
+def route_slots_for_setup(setup: OpenRouterSetup) -> tuple[str, ...]:
+    return OPENROUTER_V3_ROUTE_SLOTS if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else OPENROUTER_ROUTE_SLOTS
+
+
+def migrate_openrouter_setup_to_v3(setup: OpenRouterSetup, *, egress_revision: int = 1, allow_unconsented: bool = False) -> OpenRouterSetup:
+    """Pure optional projection; preserves all original receipts and consent."""
+    if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
+        return setup
+    projected = migrate_openrouter_setup_v1_to_v2(setup, egress_revision=egress_revision, allow_unconsented=allow_unconsented)
+    return replace(projected, schema_version=OPENROUTER_SETUP_V3_SCHEMA_VERSION,
+        routes={**projected.routes, "audio": None})

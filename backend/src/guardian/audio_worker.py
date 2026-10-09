@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import resource
+import signal
 import shutil
 import stat
 import subprocess
@@ -38,7 +39,7 @@ import uuid
 import wave
 import weakref
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from sqlalchemy.exc import IntegrityError
 
 from src.agent.session import MessageIngressConflictError, session_manager
@@ -315,10 +316,14 @@ class AudioJobSnapshot:
     transport_status: str
     cleanup_status: str
     duplicate: bool = False
+    workflow_job_id: str | None = None
+    revision: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": AUDIO_WORKER_SCHEMA_VERSION,
+            "workflow_job_id": self.workflow_job_id,
+            "revision": self.revision,
             "id": self.id,
             "request_id": self.request_id,
             "request_digest": self.request_digest,
@@ -507,7 +512,7 @@ def _bounded_json(value: object) -> str:
 def _decoder_preexec() -> None:
     """Apply #747-style resource bounds before a local decoder starts."""
     if os.name != "posix":
-        return
+        raise RuntimeError("decoder resource enforcement unavailable")
     for limit_name, requested in (
         (resource.RLIMIT_CPU, DECODER_CPU_SECONDS),
         (resource.RLIMIT_AS, DECODER_MEMORY_BYTES),
@@ -518,8 +523,11 @@ def _decoder_preexec() -> None:
             if hard == resource.RLIM_INFINITY:
                 hard = requested
             resource.setrlimit(limit_name, (min(requested, hard), hard))
-        except (AttributeError, OSError, ValueError):
-            continue
+            actual, _ = resource.getrlimit(limit_name)
+            if actual == resource.RLIM_INFINITY or actual > requested:
+                raise RuntimeError("decoder resource enforcement failed")
+        except (AttributeError, OSError, ValueError) as exc:
+            raise RuntimeError("decoder resource enforcement unavailable") from exc
 
 
 def _safe_decoder_env() -> dict[str, str]:
@@ -616,6 +624,8 @@ def _read_wav_and_write_normalized(source: Path, normalized: Path) -> _DecodedAu
 
 async def _run_process(argv: list[str], *, timeout: float) -> tuple[int, bytes, bytes]:
     """Run a fixed local decoder command with a process-group cancellation bound."""
+    if os.name != "posix" or not 0 < timeout <= DECODER_TIMEOUT_SECONDS:
+        raise AudioWorkerError("decoder_unavailable", "bounded local decoder is unavailable")
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -625,33 +635,55 @@ async def _run_process(argv: list[str], *, timeout: float) -> tuple[int, bytes, 
             start_new_session=True,
             preexec_fn=_decoder_preexec if os.name == "posix" else None,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise AudioWorkerError("decoder_unavailable", "bounded local decoder is unavailable") from exc
+    async def bounded_read(pipe):
+        result = bytearray()
+        while True:
+            chunk = await pipe.read(4096)
+            if not chunk:
+                return bytes(result)
+            if len(result) + len(chunk) > DECODER_STDERR_MAX_BYTES:
+                raise AudioWorkerError("decoder_output_exceeds_limit")
+            result.extend(chunk)
+
+    drains = [asyncio.create_task(bounded_read(process.stdout)), asyncio.create_task(bounded_read(process.stderr))]
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        await process.wait()
-        raise AudioWorkerError("decoder_timeout", "bounded decoder exceeded its time limit")
-    except asyncio.CancelledError:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        await process.wait()
+        stdout, stderr, _ = await asyncio.wait_for(asyncio.gather(*drains, process.wait()), timeout=timeout)
+        return process.returncode or 0, stdout, stderr
+    except BaseException as exc:
+        # Kill the whole new process group, including inherited pipe holders,
+        # and reap the original child on timeout, overflow and cancellation.
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await asyncio.shield(process.wait())
+        for task in drains:
+            task.cancel()
+        await asyncio.gather(*drains, return_exceptions=True)
+        if isinstance(exc, asyncio.TimeoutError):
+            raise AudioWorkerError("decoder_timeout", "bounded decoder exceeded its time limit") from exc
         raise
-    return process.returncode or 0, stdout[:DECODER_STDERR_MAX_BYTES], stderr[:DECODER_STDERR_MAX_BYTES]
 
 
-async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tuple[str, str, str]) -> _DecodedAudio:
+async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tuple[str, str, str], *, original_deadline_at: datetime | None = None) -> _DecodedAudio:
     """Decode one compressed local file using a fixed, no-network command."""
+    demuxer = {"webm": "matroska", "m4a": "mov", "wav": "wav"}.get(source_format[1])
+    if demuxer is None:
+        raise AudioWorkerError("audio_codec_rejected")
+    deadline = min(asyncio.get_running_loop().time() + 2 * DECODER_TIMEOUT_SECONDS,
+                   asyncio.get_running_loop().time() + max(0, (_utc(original_deadline_at) - datetime.now(timezone.utc)).total_seconds()) if original_deadline_at else float("inf"))
+    def remaining():
+        value = min(DECODER_TIMEOUT_SECONDS, deadline - asyncio.get_running_loop().time())
+        if value <= 0:
+            raise AudioWorkerError("decoder_timeout")
+        return value
     probe = [
         "/usr/bin/ffprobe",
         "-v",
         "error",
+        "-protocol_whitelist", "file",
+        "-format_whitelist", demuxer,
+        "-f", demuxer,
         "-select_streams",
         "a",
         "-show_entries",
@@ -661,7 +693,7 @@ async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tup
         str(source),
     ]
     try:
-        code, stdout, _ = await _run_process(probe, timeout=DECODER_TIMEOUT_SECONDS)
+        code, stdout, _ = await _run_process(probe, timeout=remaining())
         data = json.loads(stdout.decode("utf-8", "replace")) if code == 0 else {}
         streams = data.get("streams") if isinstance(data, dict) else None
         if not isinstance(streams, list) or len(streams) != 1 or not isinstance(streams[0], dict):
@@ -692,6 +724,9 @@ async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tup
         "1",
         "-t",
         str(MAX_AUDIO_SECONDS),
+        "-protocol_whitelist", "file",
+        "-format_whitelist", demuxer,
+        "-f", demuxer,
         "-i",
         str(source),
         "-map",
@@ -709,7 +744,7 @@ async def _decode_with_ffmpeg(source: Path, normalized: Path, source_format: tup
         "-y",
         str(normalized),
     ]
-    code, _, _ = await _run_process(command, timeout=DECODER_TIMEOUT_SECONDS)
+    code, _, _ = await _run_process(command, timeout=remaining())
     if code != 0:
         raise AudioWorkerError("audio_decode_failed", "bounded decoder rejected the audio")
     try:
@@ -996,6 +1031,8 @@ class AudioIngressWorker:
                     if isinstance(value, datetime) and value.tzinfo is None:
                         setattr(row, field_name, value.replace(tzinfo=timezone.utc))
                 db.expunge(row)
+                if row.workflow_job_id and row.status == "transcript_ready" and row.transcript:
+                    self._set_review_transcript(row, row.transcript)
             return row
 
     @staticmethod
@@ -1204,6 +1241,8 @@ class AudioIngressWorker:
             )
             current = _utc(now or self._now())
             async with get_session() as db:
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 result = await db.execute(
                     select(AudioConsentGrant).where(AudioConsentGrant.reference == reference)
                 )
@@ -1225,6 +1264,13 @@ class AudioIngressWorker:
                     (AudioIngressJob.capture_consent_reference == reference)
                     | (AudioIngressJob.model_consent_reference == reference)
                 )
+                bound = (await db.execute(select(AudioIngressJob).where(job_reference_filter,
+                    AudioIngressJob.workflow_job_id.is_not(None)))).scalars().all()
+                from src.workflows.job_runtime import durable_job_repository
+                for native in bound:
+                    await durable_job_repository.cancel_audio_in_session(db, native.workflow_job_id,
+                        reason=f"{row.boundary}_consent_revoked")
+                job_reference_filter = job_reference_filter & AudioIngressJob.workflow_job_id.is_(None)
                 await db.execute(
                     update(AudioIngressJob)
                     .where(
@@ -1423,6 +1469,12 @@ class AudioIngressWorker:
         if row is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         current = _utc(now or self._now())
+        if row.workflow_job_id:
+            if _utc(row.raw_audio_retention_deadline) <= current and row.status != "confirmed":
+                return await self._cleanup_native(row, reason="raw_audio_retention_expired")
+            if row.status in {"confirmed", "cancelled", "blocked"} and (row.raw_path or row.normalized_path):
+                return await self._cleanup_native(row)
+            return self._snapshot(row)
         deadline = row.raw_audio_retention_deadline
         if isinstance(deadline, datetime):
             if deadline.tzinfo is None:
@@ -1519,6 +1571,8 @@ class AudioIngressWorker:
             transport_status=str(getattr(row, "transport_status", "unknown") or "unknown"),
             cleanup_status=str(getattr(row, "cleanup_status", "complete") or "complete"),
             duplicate=duplicate,
+            workflow_job_id=row.workflow_job_id,
+            revision=row.revision,
         )
 
     def _prepare_cleanup_changes(
@@ -1559,6 +1613,8 @@ class AudioIngressWorker:
             row = await db.get(AudioIngressJob, job_id)
             if row is None:
                 raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+            if row.workflow_job_id:
+                raise AudioWorkerError("audio_paired_writer_required")
             changes = self._prepare_cleanup_changes(row, dict(changes))
             for key, value in changes.items():
                 if hasattr(row, key):
@@ -1587,6 +1643,8 @@ class AudioIngressWorker:
             current = await db.get(AudioIngressJob, job_id)
             if current is None:
                 raise AudioWorkerError("audio_job_not_found", "audio job is not available")
+            if current.workflow_job_id:
+                raise AudioWorkerError("audio_paired_writer_required")
             status_matches = current.status in expected_statuses
             path_clear_requested = (
                 values.get("raw_path", object()) is None
@@ -2113,10 +2171,11 @@ class AudioIngressWorker:
                 return existing_snapshot
             # The quarantined source is no longer needed once conversion has
             # succeeded.  Keep only normalized bytes until confirmation/expiry.
-            self._unlink_tree(raw_path)
+            if self.transport is not None:
+                self._unlink_tree(raw_path)
             await self._update(
                 row.id,
-                raw_path=None,
+                raw_path=None if self.transport is not None else str(raw_path),
                 decoded_duration_seconds=decoded.normalized_duration_seconds,
                 normalized_wav_size_bytes=decoded.normalized_size_bytes,
             )
@@ -2178,6 +2237,7 @@ class AudioIngressWorker:
         owner_principal_id: str | None = None,
         operator_session_id: str | None = None,
         authority_principal: object | None = None,
+        audio_budget_microusd: int | None = None,
     ) -> AudioJobSnapshot:
         """Run one process task and register it for cancellation fencing."""
         request_id = _validate_request_id(request_id) or ""
@@ -2185,6 +2245,17 @@ class AudioIngressWorker:
         if row_for_identity is None:
             raise AudioWorkerError("audio_job_not_found", "audio job is not available")
         self._assert_operator_session(row_for_identity, owner_principal_id, operator_session_id)
+        if row_for_identity.workflow_job_id or (self.transport is None and audio_budget_microusd is not None):
+            await self._require_current_operator_authority(owner_principal_id=owner_principal_id,
+                operator_session_id=operator_session_id,
+                required_grants=(AuthorityGrant.INGRESS, AuthorityGrant.MODEL_INFERENCE))
+            from src.guardian.audio_native_executor import execute
+            try:
+                return await execute(self, row_for_identity, audio_budget_microusd)
+            except AudioWorkerError:
+                raise
+            except (ValueError, RuntimeError, PermissionError, OSError) as exc:
+                raise AudioWorkerError("audio_native_execution_blocked") from exc
         # Expiry/cleanup is side-effecting.  Authenticate the durable owner and
         # operator session before allowing a direct worker caller to reach it.
         try:
@@ -2840,6 +2911,16 @@ class AudioIngressWorker:
         row = await self._job(request_id)
         if row is None:
             raise AudioConfirmationConflict("audio_job_not_found")
+        if row.workflow_job_id:
+            from src.workflows.job_runtime import durable_job_repository
+            try:
+                await durable_job_repository.confirm_audio_transcript(row.workflow_job_id,
+                    transcript=transcript, expected_digest=expected_transcript_digest,
+                    owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
+            except (ValueError, RuntimeError) as exc:
+                raise AudioConfirmationConflict(str(exc)) from exc
+            self._drop_review_transcript(request_id)
+            return self._snapshot(await self._job(request_id))
         try:
             self._assert_operator_session(row, owner_principal_id, operator_session_id)
         except AudioWorkerError as exc:
@@ -3100,6 +3181,13 @@ class AudioIngressWorker:
         self._assert_operator_session(row, owner_principal_id, operator_session_id)
         if row.status == "confirming_reserved":
             raise AudioWorkerError("confirmation_in_progress", "transcript confirmation has already fenced cancellation")
+        if row.workflow_job_id:
+            from src.workflows.job_runtime import durable_job_repository
+            async with durable_job_repository._session() as db:
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                await durable_job_repository.cancel_audio_in_session(db, row.workflow_job_id, reason="operator_cancelled")
+            return await self._cleanup_native(await self._job(request_id))
         transport_outcome_unknown = row.status == "transporting"
         if row.status in {"confirmed", "failed", "blocked", "cancelled", "degraded"}:
             await self._require_current_operator_authority(
@@ -3188,6 +3276,23 @@ class AudioIngressWorker:
                 await asyncio.shield(task)
         return cancelled
 
+    async def _cleanup_native(self, row, *, reason=None):
+        from src.workflows.job_runtime import durable_job_repository as jobs
+        if reason:
+            async with jobs._session() as db:
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                await jobs.cancel_audio_in_session(db, row.workflow_job_id, reason=reason)
+        current = await jobs.get_job(row.workflow_job_id)
+        row = await self._job(row.request_id)
+        cleaned = self._cleanup_job_paths(row.raw_path, row.normalized_path)
+        await jobs.audio_transition(row.workflow_job_id, expected_revision=current["revision"],
+            expected_audio_revision=row.revision, status=current["status"], require_current=False,
+            audio_changes={"cleanup_status": "complete" if cleaned else "failed",
+                **({"raw_path": None, "normalized_path": None} if cleaned else {"error_code": "audio_cleanup_failed"})})
+        self._drop_review_transcript(row.request_id)
+        return self._snapshot(await self._job(row.request_id))
+
     async def cleanup_after_restart(
         self,
         *,
@@ -3202,10 +3307,29 @@ class AudioIngressWorker:
         """
         current = _utc(now or self._now())
         removed = 0
+        from src.workflows.job_runtime import durable_job_repository
+        if recover_process_local:
+            await durable_job_repository.recover_audio_owner()
+        async with get_session() as native_db:
+            native_rows = (await native_db.execute(select(AudioIngressJob).where(
+                AudioIngressJob.workflow_job_id.is_not(None)))).scalars().all()
+            for native in native_rows:
+                native_db.expunge(native)
+        for native in native_rows:
+            if _utc(native.raw_audio_retention_deadline) <= current:
+                await self._cleanup_native(native, reason="raw_audio_retention_expired")
+                removed += 1
+            elif native.status in {"cancelled", "confirmed", "blocked"} and (native.raw_path or native.normalized_path):
+                await self._cleanup_native(native)
+                removed += 1
         async with get_session() as db:
             result = await db.execute(select(AudioIngressJob))
             rows = result.scalars().all()
             for row in rows:
+                if row.workflow_job_id:
+                    # The Workflow owner, not this legacy cleanup loop, owns
+                    # bound execution and durable transcript recovery.
+                    continue
                 deadline_value = row.raw_audio_retention_deadline
                 malformed_deadline = not isinstance(deadline_value, datetime)
                 if malformed_deadline:

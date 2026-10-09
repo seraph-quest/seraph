@@ -9,7 +9,7 @@ from typing import Literal
 from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from src.guardian.audio_worker import (
     AudioConfirmationConflict,
@@ -47,6 +47,12 @@ class TranscriptConfirmationBody(BaseModel):
 
 class AudioConsentGrantBody(BaseModel):
     boundary: Literal["capture", "cloud_upload", "model"]
+
+
+class AudioExecutionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    audio_budget_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    max_calls: Literal[1] = 1
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -277,7 +283,7 @@ async def get_audio(request_id: str, request: Request) -> dict:
 
 
 @router.post("/audio/ptt/{request_id}/process")
-async def process_audio(request_id: str, request: Request) -> dict:
+async def process_audio(request_id: str, request: Request, body: AudioExecutionBody | None = None) -> dict:
     snapshot, owner, operator_session_id, operator = await _owned_job(request_id, request, require_model=True)
     try:
         result = await default_audio_worker.process(
@@ -285,6 +291,7 @@ async def process_audio(request_id: str, request: Request) -> dict:
             owner_principal_id=owner,
             operator_session_id=operator_session_id,
             authority_principal=getattr(operator, "principal", None),
+            audio_budget_microusd=body.audio_budget_microusd if body else None,
         )
     except AudioWorkerError as exc:
         raise _error(exc) from exc

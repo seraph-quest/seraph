@@ -168,9 +168,10 @@ async def test_signed_ownerless_completion_uses_original_factories_and_writers(
 
             async def gate(jobs, db, run, **kw):
                 assert transaction["immediate"]
-                kinds.append(kw["kind"])
-                with pytest.raises(DurableJobLeaseError, match="pending original write"):
-                    await real_gate(jobs, db, run, **{**kw, "kind": "not_original_phase"})
+                if kw["completion_witness"] is objects["completion"]:
+                    kinds.append(kw["kind"])
+                    with pytest.raises(DurableJobLeaseError, match="pending original write"):
+                        await real_gate(jobs, db, run, **{**kw, "kind": "not_original_phase"})
                 return await real_gate(jobs, db, run, **kw)
             patch.setattr(source, "verify_recovered_repository_final_writer", gate)
             real_wait = recovery.repository_completion_recovered_wait
@@ -224,6 +225,7 @@ async def test_signed_ownerless_completion_uses_original_factories_and_writers(
                 return await real_publish(jobs, parent_id, **kw)
             patch.setattr(guard, "publish_repository_child_final", publication)
             async with await _scope(flow) as completion:
+                objects["completion"] = completion
                 assert configuration_mutation_lock.locked()
                 assert "iteration_cleanup_witness" not in recovery.repository_completion_result(completion)
                 for bad in (copy.copy(completion), {}, recovery._OriginalRepositoryProducerCompletionWitness()):

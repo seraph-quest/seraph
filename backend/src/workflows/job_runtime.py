@@ -1351,13 +1351,14 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
     return normalized
 
 
-async def _verify_native_child_sql_scope(db, run):
+async def _verify_native_child_sql_scope(db, run, *, _repository_completion_witness=None):
     """Compile a private canonical journal witness before every child CAS."""
     from src.work_board.communication_preparation import assert_preparation_run_current
     await assert_preparation_run_current(db, run)
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
-        await assert_general_task_child_phase_current(db, run)
+        await assert_general_task_child_phase_current(db, run,
+            _repository_completion_witness=_repository_completion_witness)
     elif getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
         if is_specialist_root(run):
@@ -1365,7 +1366,8 @@ async def _verify_native_child_sql_scope(db, run):
 
 
 def _append_parent_fence_condition(
-    conditions: list[Any], run: WorkflowRunState, *, now: datetime
+    conditions: list[Any], run: WorkflowRunState, *, now: datetime,
+    _repository_completion_witness=None
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
@@ -1381,7 +1383,8 @@ def _append_parent_fence_condition(
             return
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import append_general_task_parent_gate
-        if append_general_task_parent_gate(conditions, run, now=now):
+        if append_general_task_parent_gate(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness):
             return
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
@@ -5093,7 +5096,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 await recheck_native(db,run,witness=opportunity_preference_witness)
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
-                await verify_native_writer(self, db, run)
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
@@ -5193,8 +5197,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner == owner,
                 WorkflowRunState.lease_expires_at > now,
             ]
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(checkpoint_conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(checkpoint_conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -6335,12 +6341,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
                 run = await self._fetch(db, job_id)
-                if requires_native_writer(run):
-                    await verify_native_writer(self, db, run)
             if _repository_completion_witness is not None:
                 await verify_recovered_repository_final_writer(self, db, run,
                     completion_witness=_repository_completion_witness, kind="artifact",
                     descriptor={"file_path": file_path, "artifact_type": artifact_type, "content": content})
+            if requires_native_writer(run):
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -6401,8 +6408,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -6955,7 +6964,6 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     from src.work_board.repository import _begin_sqlite_immediate
                     await _begin_sqlite_immediate(db)
                     run = await self._fetch(db, job_id)
-                await verify_native_writer(self, db, run)
             if _repository_completion_witness is not None:
                 await verify_recovered_repository_final_writer(self, db, run,
                     completion_witness=_repository_completion_witness, kind="readback",
@@ -6963,6 +6971,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         "target_path": target_path, "target_digest": target_digest,
                         "content_sha256": content_sha256, "readback_id": readback_id,
                         "verified_at": verified_at, "details": details})
+            if requires_native_writer(run):
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -7241,8 +7252,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)

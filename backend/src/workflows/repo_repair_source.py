@@ -2548,6 +2548,118 @@ async def _recovered_repository_terminal_events(db, *, task_id):
     ).order_by(WorkBoardEvent.event_id).limit(2).execution_options(populate_existing=True))).all())
 
 
+async def _stage_recovered_repository_native_writer(jobs, state):
+    """Read only the original native root and two bounded receipt roles before SQL."""
+    from config.settings import settings
+    from src.work_board.pipelines import root_binding
+    from src.work_board.pipeline_contracts import digest
+    from src.work_board.contracts import GeneralTaskArtifactRef
+    from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+    from src.workflows.general_task_guard import (child_binding, read_manifest, _step_receipt,
+        assert_general_task_child_current, verify_native_approval_transition)
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    bound = state["bound"]
+    binding = bound["context"]["binding"]
+    workspace_dir = settings.workspace_dir
+    physical_root = root_binding()
+    if (digest(physical_root) != binding.live_root_digest
+            or [physical_root["device"], physical_root["inode"]]
+                != bound["registration"]["native_host_binding"]["workspace_identity"]):
+        raise DurableJobLeaseError("recovered original native workspace changed")
+    async with jobs._session() as db:
+        child = await jobs._fetch(db, binding.invocation_id)
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        for row in (child, parent):
+            if state["rows"].get((type(row), row.id)) != _canonical(row.model_dump(mode="json")):
+                raise DurableJobLeaseError("recovered original native staging rows changed")
+        if child_binding(child) != binding:
+            raise DurableJobLeaseError("recovered original native staging binding changed")
+        await assert_general_task_child_current(db, child)
+        manifest = read_manifest(parent)
+        receipt = _step_receipt(manifest, binding.step_id)
+        index = manifest.step_ids.index(binding.step_id)
+        reference = GeneralTaskArtifactRef(artifact_id=manifest.step_receipt_artifact_ids[index],
+            digest=manifest.step_receipt_digests[index], schema_version=manifest.step_receipt_schemas[index])
+        receipts = {"claim": {"reference": reference, "receipt": receipt,
+            "receipt_json": _canonical(receipt.model_dump(mode="json"))}}
+        if (manifest.phase != "native_wait" or manifest.phase_revision != binding.phase_revision
+                or manifest.phase_digest != binding.phase_digest):
+            witness, _approval = await verify_native_approval_transition(db, child, parent)
+            awaiting = read_native_artifact_reference(witness.awaiting_receipt,
+                parent_job_id=parent.run_identity, creation_digest=binding.creation_digest)
+            receipts["awaiting"] = {"reference": witness.awaiting_receipt, "receipt": awaiting,
+                "receipt_json": _canonical(awaiting.model_dump(mode="json"))}
+        if settings.workspace_dir != workspace_dir:
+            raise DurableJobLeaseError("recovered original native staging configuration changed")
+        return {"root": dict(physical_root), "workspace_dir": workspace_dir,
+            "child_json": _canonical(child.model_dump(mode="json")),
+            "parent_json": _canonical(parent.model_dump(mode="json")),
+            "manifest_json": _canonical(manifest.model_dump(mode="json")), "receipts": receipts}
+
+
+def _recovered_repository_native_stage(completion_witness, *, run, parent=None, manifest=None):
+    """The active original Source phase supplies staged data, never caller authority."""
+    from config.settings import settings
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    from src.workflows.general_task_guard import child_binding
+    state = _recovered_finalizer_slot(completion_witness)["state"]
+    pending = state["pending"] if state is not None else None
+    if (pending is None or not pending["entered"] or state["phase"] not in range(4)
+            or pending["kind"] not in {"checkpoint", "artifact", "readback"}
+            or pending.get("writer_run") is not run or pending["job_id"] != run.run_identity):
+        raise DurableJobLeaseError("recovered original native writer stage required")
+    staged = pending["native"]
+    binding = state["bound"]["context"]["binding"]
+    if (settings.workspace_dir != staged["workspace_dir"] or child_binding(run) != binding
+            or _canonical(run.model_dump(mode="json")) != staged["child_json"]
+            or parent is not None and _canonical(parent.model_dump(mode="json")) != staged["parent_json"]
+            or manifest is not None and _canonical(manifest.model_dump(mode="json")) != staged["manifest_json"]):
+        raise DurableJobLeaseError("recovered original native writer binding changed")
+    return staged, binding
+
+
+def _recovered_repository_native_root_digest(completion_witness, *, run):
+    from src.work_board.pipeline_contracts import digest
+    from src.workflows.general_task_guard import _VerifiedParentJournal, _PHASE_SQL_SEAL
+    from src.workflows.job_runtime import DurableJobLeaseError
+    staged, _binding = _recovered_repository_native_stage(completion_witness, run=run)
+    verified = getattr(run, "_general_task_verified_parent_journal", None)
+    parent = json.loads(staged["parent_json"])
+    if (type(verified) is not _VerifiedParentJournal or verified._seal is not _PHASE_SQL_SEAL
+            or verified.child_id != run.run_identity or verified.child_fence != run.fencing_token
+            or verified.checkpoint_json != parent["checkpoint_receipts_json"]
+            or verified.authority_json != parent["declared_authority_json"]):
+        raise DurableJobLeaseError("recovered original native parent journal changed")
+    return digest(staged["root"])
+
+
+def _recovered_repository_native_claim_receipt(completion_witness, *, run, parent, manifest):
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    staged, binding = _recovered_repository_native_stage(
+        completion_witness, run=run, parent=parent, manifest=manifest)
+    entry = staged["receipts"]["claim"]
+    index = manifest.step_ids.index(binding.step_id)
+    reference = entry["reference"]
+    if ((reference.artifact_id, reference.digest, reference.schema_version) != (
+            manifest.step_receipt_artifact_ids[index], manifest.step_receipt_digests[index],
+            manifest.step_receipt_schemas[index])
+            or _canonical(entry["receipt"].model_dump(mode="json")) != entry["receipt_json"]):
+        raise DurableJobLeaseError("recovered original native claim receipt changed")
+    return entry["receipt"]
+
+
+def _recovered_repository_native_awaiting_receipt(completion_witness, *, run, parent, manifest, reference):
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    staged, _binding = _recovered_repository_native_stage(
+        completion_witness, run=run, parent=parent, manifest=manifest)
+    entry = staged["receipts"].get("awaiting")
+    if (entry is None or _canonical(reference.model_dump(mode="json")) != _canonical(
+            entry["reference"].model_dump(mode="json"))
+            or _canonical(entry["receipt"].model_dump(mode="json")) != entry["receipt_json"]):
+        raise DurableJobLeaseError("recovered original native awaiting receipt changed")
+    return entry["receipt"]
+
+
 async def _expect_recovered_repository_final_writer(jobs, *, completion_witness, kind, job_id, descriptor):
     from src.workflows.repo_repair_source_recovery import repository_completion_scoped_binding
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical
@@ -2573,6 +2685,8 @@ async def _expect_recovered_repository_final_writer(jobs, *, completion_witness,
         raise DurableJobLeaseError("recovered finalizer write order changed")
     pending = {"kind": kind, "job_id": job_id, "descriptor": _recovered_descriptor(kind, descriptor),
         "entered": False, "after": None}
+    if phase in range(4):
+        pending["native"] = await _stage_recovered_repository_native_writer(jobs, state)
     if kind == "artifact":
         from src.artifacts.registry import build_artifact_record
         target = next(json.loads(raw) for raw in state["rows"].values()
@@ -2685,7 +2799,7 @@ async def verify_recovered_repository_final_writer(jobs, db, run, *, completion_
         from src.workflows.repo_repair_source_recovery import assert_repository_completion_final_source
         final = state["final_witness"]
         assert_repository_completion_final_source(final._source_binding._final_source, final_witness=final)
-    pending["entered"], pending["since"] = True, _utc_now()
+    pending["entered"], pending["since"], pending["writer_run"] = True, _utc_now(), run
 
 
 def _recovered_publish_delta(old, current, pending, timestamp, *, child_id, parent_id):
@@ -2895,6 +3009,20 @@ async def observe_recovered_repository_final_writer(jobs, *, completion_witness,
             expected_events = [raw for (model, _key), raw in pending["after"].items() if model is WorkBoardEvent]
             if len(events) != 1 or [_canonical(event.model_dump(mode="json")) for event in events] != expected_events:
                 raise DurableJobLeaseError("recovered original terminal event committed membership changed")
+    if "native" in pending:
+        from config.settings import settings
+        from src.work_board.pipelines import root_binding
+        from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
+        staged = pending["native"]
+        binding = state["bound"]["context"]["binding"]
+        if settings.workspace_dir != staged["workspace_dir"] or _canonical(root_binding()) != _canonical(staged["root"]):
+            raise DurableJobLeaseError("recovered original native workspace postcommit changed")
+        for entry in staged["receipts"].values():
+            receipt = read_native_artifact_reference(entry["reference"],
+                parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest)
+            if _canonical(receipt.model_dump(mode="json")) != entry["receipt_json"]:
+                raise DurableJobLeaseError("recovered original native receipt postcommit changed")
+        _recovered_finalizer_slot(completion_witness)
     state["rows"], state["phase"], state["pending"] = pending["after"], state["phase"] + 1, None
 
 

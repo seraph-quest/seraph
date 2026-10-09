@@ -466,6 +466,14 @@ cached output. Completed execution history remains visible when current
 Root/Goal authority blocks later private reads. The comparison records an
 explicit `no_learning` result and makes no model/provider call.
 
+The comparison's fixed native owner persists its actual ready supervisor/parser
+identity before source delivery. This publication rechecks current private
+authority, the original durable lease/fence/deadline and exact capacity under
+one bounded checkpoint-history CAS. Generic checkpoint calls cannot publish
+document capacity, child or reap identities. Changed authority leaves source
+delivery blocked; positive original supervision remains necessary for capacity
+release. This correction does not establish managed TCP, browser or macOS proof.
+
 Cancellation can leave the generic task card Blocked while its document
 inspector records the actual cancelled parser and reap state. Unknown cleanup
 holds capacity; the original exact witness permits cleanup reconciliation.

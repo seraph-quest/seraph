@@ -61,6 +61,14 @@ For a shorter reader-facing overview of the current app, start with
 dense shipped-state record.
 
 **Bounded general documents: Partial.**
+The following correction describes intended post-merge behavior on an open
+implementation branch; installed availability requires its independently reviewed
+merge. Invoice comparison process identity uses its fixed native publication owner
+after actual supervisor readiness and before private source delivery. Current
+owner/Root/Goal/task/attempt/input, original durable lease/fence/deadline and exact
+capacity are rechecked before bounded history adoption; generic document process
+checkpoint writes remain denied. Unknown cleanup retains capacity. This baseline
+correction adds no provider, managed TCP, browser or native macOS availability claim.
 Availability follows the independently reviewed installed revision containing
 the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
 owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,

@@ -42,6 +42,108 @@ def _source_digest(value):
     return canonical_digest(value)
 
 
+def _repository_policy_limits():
+    """Stage the same canonical route bound used by the accounting owner.
+
+    This reads configuration and must only run outside a SQL writer while the
+    Source orchestration owns the configuration mutation fence.
+    """
+    from src.model_fabric.accounting import _policy_for_runtime
+    from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
+    from src.model_fabric.caller_context import canonical_route_spec
+    from src.workflows.job_runtime import DurableJobLeaseError
+    configured, digest = _policy_for_runtime("strategist_agent")
+    setup = configured.openrouter_setup
+    bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
+    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        slot = route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class)
+        route = (setup.routes or {}).get(slot)
+        if slot != "text" or route is None or not route.enabled:
+            raise DurableJobLeaseError("original repository text route unavailable")
+        bound = route.request_cost_bound_microusd
+    if type(bound) is not int or bound <= 0 or not _SHA.fullmatch(digest):
+        raise DurableJobLeaseError("original repository server bound required")
+    return digest, bound
+
+
+def _repository_original_limits(goal, policy):
+    from src.goals.repository import deserialize_admission_budget
+    from src.workflows.job_runtime import DurableJobLeaseError, _as_utc
+    if goal is None:
+        raise DurableJobLeaseError("original repository Goal required")
+    budget = deserialize_admission_budget(goal)
+    if budget is None:
+        raise DurableJobLeaseError("original repository Goal budget required")
+    def timestamp(value):
+        return _as_utc(value).isoformat() if value is not None else None
+    return {"original_goal_row_digest": _source_digest(goal.model_dump(mode="json")),
+        "original_goal_id": goal.id, "original_goal_revision": goal.revision,
+        "original_goal_owner_principal_id": goal.owner_principal_id,
+        "original_goal_owner_session_id": goal.owner_session_id,
+        "original_goal_limits": {"max_runtime_seconds": budget.max_runtime_seconds,
+            "period_started_at": timestamp(budget.period_started_at),
+            "period_expires_at": timestamp(budget.period_expires_at), "due_date": timestamp(goal.due_date)},
+        "original_inference_policy_digest": policy[0], "original_server_bound_microusd": policy[1]}
+
+
+def read_repository_inventory(run):
+    """Closed immutable original limits, never reconstructed on recovery."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    original, work, _, _, binding, _ = read_repository_original(run)
+    record = _repository_record(run, "repository:inventory:v1")
+    expected_keys = {"schema", "identities", "max_records", "max_metadata_bytes_per_record",
+        "original_limits", "original_limits_digest"}
+    limits_keys = {"original_goal_row_digest", "original_goal_id", "original_goal_revision",
+        "original_goal_owner_principal_id", "original_goal_owner_session_id", "original_goal_limits",
+        "original_inference_policy_digest", "original_server_bound_microusd"}
+    if not isinstance(record, dict) or set(record) != expected_keys:
+        raise DurableJobLeaseError("original repository limits inventory required")
+    limits = record["original_limits"]
+    if (record["schema"] != "repository.checkpoint_inventory.v1"
+            or record["identities"] != repository_checkpoint_inventory(run, work)
+            or type(record["max_records"]) is not int or record["max_records"] != 50
+            or type(record["max_metadata_bytes_per_record"]) is not int or record["max_metadata_bytes_per_record"] != 16384
+            or not isinstance(limits, dict) or set(limits) != limits_keys
+            or record["original_limits_digest"] != _source_digest(limits)
+            or any(not isinstance(limits[key], str) or not _SHA.fullmatch(limits[key]) for key in (
+                "original_goal_row_digest", "original_inference_policy_digest"))
+            or limits["original_goal_id"] != binding.goal_id
+            or type(limits["original_goal_revision"]) is not int or limits["original_goal_revision"] != binding.goal_revision
+            or limits["original_goal_owner_principal_id"] != binding.owner_principal_id
+            or limits["original_goal_owner_session_id"] != binding.original_root_id
+            or type(limits["original_server_bound_microusd"]) is not int or limits["original_server_bound_microusd"] <= 0):
+        raise DurableJobLeaseError("original repository limits inventory changed")
+    temporal = limits["original_goal_limits"]
+    if (not isinstance(temporal, dict) or set(temporal) != {
+            "max_runtime_seconds", "period_started_at", "period_expires_at", "due_date"}
+            or type(temporal["max_runtime_seconds"]) is not int or not 1 <= temporal["max_runtime_seconds"] <= 900):
+        raise DurableJobLeaseError("original repository Goal limits changed")
+    for key in ("period_started_at", "period_expires_at", "due_date"):
+        value = temporal[key]
+        if value is not None:
+            try:
+                if not isinstance(value, str) or TaskProposalGroupV1.utc_timestamp(value).isoformat() != value:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise DurableJobLeaseError("original repository Goal temporal limit changed")
+    return record
+
+
+def _assert_repository_original_limits(run, goal, policy):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    limits = read_repository_inventory(run)["original_limits"]
+    if _repository_original_limits(goal, policy) != limits:
+        raise DurableJobLeaseError("original repository Goal or inference policy changed")
+    return limits
+
+
+def _repository_goal_cutoff(limits, group):
+    temporal = limits["original_goal_limits"]
+    return min((group.issued_at + timedelta(seconds=temporal["max_runtime_seconds"]),
+        *(TaskProposalGroupV1.utc_timestamp(temporal[key]) for key in ("period_expires_at", "due_date")
+            if temporal[key] is not None)))
+
+
 def _iterative_executor_preflight(service, compiled=None):
     from src.execution.repo_node import NodeRepoRepairExecutor
     from src.execution.repo_sandbox import LocalRepoRepairExecutor
@@ -221,7 +323,7 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
     child = await jobs.claim_job(binding.invocation_id, owner=child_owner, lease_seconds=max(1, ceil(remaining)))
     await publish_positive_claim(jobs, binding, child_owner=child_owner,
         child_fence=child["lease"]["fencing_token"])
-    from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input
+    from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input, read_current_native_envelope
     async with jobs._session() as db:
         current_child = await jobs._fetch(db, binding.invocation_id)
         private = await read_current_native_tool_input(db, current_child)
@@ -229,6 +331,11 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
         goal = await db.get(Goal, binding.goal_id)
         budget = deserialize_admission_budget(goal)
         capacity = budget.max_outstanding_jobs if budget else 1
+        from src.db.models import WorkBoardTask
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+        parent_attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+        original_group = (await read_current_native_envelope(db, parent, parent_task, parent_attempt)).proposal_group
     owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
     repository = general_task_service.repository
     async with source.session_factory() as db:
@@ -259,6 +366,10 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
     root_id = "repository:" + _source_digest([binding.invocation_id, "original-root"])
     deadline = min(cutoff, _as_utc(claimed.attempt.lease_expires_at),
         _utc_now() + timedelta(seconds=work.limits.max_total_seconds))
+    if budget is None:
+        raise DurableJobLeaseError("original repository Goal budget required")
+    deadline = min(deadline, original_group.issued_at + timedelta(seconds=budget.max_runtime_seconds),
+        *(_as_utc(value) for value in (goal.due_date, budget.period_expires_at) if value is not None))
     spec = DurableJobSpec(identity=DurableJobIdentity(root_id, "user", owner.principal_id,
         "engineering.repo-repair.v1", "1", "original-repository-child", binding.invocation_id),
         inputs=inputs, session_id=owner.session_id, operator_session_id=owner.session_id,
@@ -283,6 +394,14 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
         await db.commit()
     await jobs.queue_job(root_id)
     await jobs.claim_job(root_id, owner=child_owner, lease_seconds=max(1, ceil((deadline - _utc_now()).total_seconds())))
+    from src.work_board.dispatcher import _reserve_repo_repair_execution_capacity
+    async with jobs._session() as db:
+        root = await jobs._fetch(db, root_id)
+    source._iterative_lanes[root_id] = await _reserve_repo_repair_execution_capacity(
+        jobs=jobs, job_id=root_id, attempt_id=claimed.attempt.attempt_id,
+        workspace_root=str(source._workspace()), owner=root.lease_owner,
+        fencing_token=root.fencing_token, authority_digest=root.authority_digest,
+        execution_deadline_at=deadline.isoformat(), expected_revision=root.revision)
     return await prepare_repository_iteration(source, jobs, job_id=root_id, owner=owner, iteration_index=1)
 
 
@@ -304,6 +423,8 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
             raise DurableJobLeaseError("original repository stop prevents further execution")
         if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
             raise DurableJobLeaseError("original repository owner changed")
+        goal = await db.get(Goal, group.goal_id)
+        original_limits = _assert_repository_original_limits(run, goal, _repository_policy_limits())
         child = await jobs._fetch(db, binding.invocation_id)
         await assert_general_task_child_current(db, child)
         parent = await jobs._fetch(db, binding.parent_job_id)
@@ -324,7 +445,7 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
             raise DurableJobLeaseError("original running repository claims required")
         await validate_group_owner(db, group)
         originals = [run, child, parent, task, attempt, authority.task, authority.attempt,
-            await db.get(Goal, group.goal_id), await db.get(OperatorSession, group.owner_session_id),
+            goal, await db.get(OperatorSession, group.owner_session_id),
             await db.get(WorkBoardInputArtifact, authority.task.input_artifact_id)]
         from sqlalchemy import inspect as inspect_mapper
         rows = []
@@ -337,7 +458,7 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
         service.recheck_task_source_snapshot(work, source_facts)
         return {"run": run, "child": child, "parent": parent, "original": original,
             "work": work, "compiled": compiled, "group": group, "binding": binding,
-            "source": source, "authority": authority, "rows": rows}
+            "source": source, "authority": authority, "rows": rows, "original_limits": original_limits}
 
 
 async def _recheck_repository_sql(db, context, *, allow_stop_cleanup=False):
@@ -416,6 +537,22 @@ async def _repository_remaining(db, context, *, allow_exhausted_readback=False):
 
 
 async def prepare_repository_iteration(service, jobs, *, job_id, owner, iteration_index):
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    from src.workflows.repo_repair_stop import repository_automatic_limit_reason, stop_repository_root
+    async with configuration_mutation_lock:
+        reason = await repository_automatic_limit_reason(service, jobs, job_id=job_id, owner=owner)
+    if reason is not None:
+        stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+            general_task_service=None, reason=reason)
+        return {"repository_job_id": job_id, "awaiting_repository_consent": False,
+            "stop_pending": stopped["pending"], "stop_reason": reason,
+            "recovery_action": "repository_stop_pending" if stopped["pending"] else "original_" + reason,
+            "no_learning": True}
+    return await _prepare_repository_iteration(service, jobs, job_id=job_id, owner=owner,
+        iteration_index=iteration_index)
+
+
+async def _prepare_repository_iteration(service, jobs, *, job_id, owner, iteration_index):
     from src.model_fabric.effective_policy import configuration_mutation_lock
     from src.workflows.repo_repair import RepoRepairModelOutput, _canonical_bytes
     from src.workflows.job_runtime import _as_utc, _digest, _canonical, DurableJobLeaseError
@@ -711,9 +848,10 @@ async def repository_operator_projection(service, jobs, *, job_id, owner):
         stop = _repository_record(run, "repository:stop-intent:v1")
         terminal = _repository_record(run, "repository:terminal:v1")
         if stop is not None:
-            if stop.get("stop_reason") not in {"operator_cancelled", "iterations_exhausted"}:
+            from src.workflows.repo_repair_stop import AUTOMATIC_REASONS
+            if stop.get("stop_reason") not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
                 raise DurableJobLeaseError("original repository stop metadata is malformed")
-            action = ("original_iterations_exhausted" if stop["stop_reason"] == "iterations_exhausted" else "repository_stopped") if (
+            action = ("repository_stopped" if stop["stop_reason"] == "operator_cancelled" else "original_" + stop["stop_reason"]) if (
                 terminal and terminal.get("schema") == "repository.stop_terminal.v1"
                 and run.status in {"cancelled", "failed"}) else "repository_stop_pending"
         elif run.status == "unknown_external_effect":
@@ -1284,13 +1422,14 @@ async def recover_repository_wait_witness(service, jobs, *, job_id, owner, itera
         _repository_checkpoint_payload, assert_general_task_child_phase_current)
     from src.work_board.contracts import GENERAL_TASK_MANIFEST_KEY
     from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
-    from src.db.models import WorkBoardTask, WorkBoardAttempt
+    from src.db.models import WorkBoardTask, WorkBoardAttempt, Goal
     from sqlalchemy import select
     async with configuration_mutation_lock:
         _assert_task_publication_configuration(service)
         async with jobs._session() as db:
             run = await jobs._fetch(db, job_id)
             original, work, compiled, group, binding, task_source = read_repository_original(run)
+            _assert_repository_original_limits(run, await db.get(Goal, binding.goal_id), _repository_policy_limits())
             if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
                 raise DurableJobLeaseError("original repository recovery owner changed")
             if (type(iteration_index) is not int or not 1 <= iteration_index <= work.limits.max_iterations
@@ -2166,6 +2305,8 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
                 if existing_mapping is not None:
                     raise DurableJobLeaseError("original native invocation already has its permanent repository mapping")
             staged_config = _assert_task_publication_configuration(service)
+            staged_policy = _repository_policy_limits()
+            staged_limits = _repository_original_limits(goal, staged_policy)
             facts = json.loads(service._read_private_artifact(source.source_artifact_ref,
                 expected_digest=source.source_artifact_digest))
             compiled = service.recheck_task_source_snapshot(work, facts)
@@ -2174,7 +2315,7 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
                     or repository_work_descriptor() != fixed_descriptor):
                 raise DurableJobLeaseError("original inspected repository source changed")
             token = entered.set((asyncio.current_task(), witness, staged_config,
-                canonical_digest(settings.repo_sandbox.model_dump(mode="json"))))
+                canonical_digest(settings.repo_sandbox.model_dump(mode="json")), staged_limits, staged_policy))
             try:
                 yield
                 if not issued:
@@ -2228,6 +2369,7 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
                 or (run.owner_principal_id, run.operator_session_id, run.goal_id, run.goal_revision) !=
                     (binding.owner_principal_id, binding.original_root_id, binding.goal_id, binding.goal_revision)
                 or cutoff is None or not now < cutoff <= min(group.original_deadline_at,
+                    _repository_goal_cutoff(held[4], group),
                     binding.original_deadline_at, binding.native_deadline_at,
                     _as_utc(child.lease_expires_at), _as_utc(attempt.lease_expires_at),
                     now + timedelta(seconds=work.limits.max_total_seconds))
@@ -2246,7 +2388,9 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         inventory = repository_checkpoint_inventory(run, work)
         _append_repository_record(run, "repository:inventory:v1",
             {"schema": "repository.checkpoint_inventory.v1", "identities": inventory,
-             "max_records": 50, "max_metadata_bytes_per_record": 16384}, inventory=inventory)
+             "max_records": 50, "max_metadata_bytes_per_record": 16384,
+             "original_limits": held[4], "original_limits_digest": _source_digest(held[4])}, inventory=inventory)
+        read_repository_inventory(run)
         issued = True
 
     return check, scope
@@ -2328,6 +2472,8 @@ class _CanonicalRepositorySource:
     input_artifact_row_json: str
     consent_row_json: str
     consent_id: str
+    goal_row_json: str = ""
+    original_limits_json: str = ""
     _contacted_wait_parent_json: str | None = field(default=None, repr=False, compare=False)
     _contacted_wait_child_json: str | None = field(default=None, repr=False, compare=False)
     _final_source: Any = field(default=None, repr=False, compare=False)
@@ -2348,7 +2494,8 @@ def assert_repository_canonical_source(source) -> None:
                 "parent_row_json", "task_row_json", "parent_attempt_row_json",
                 "parent_envelope_json",
                 "repository_attempt_row_json", "child_row_json", "repository_task_row_json",
-                "input_artifact_row_json", "consent_row_json", "consent_id", "native_binding_json"))):
+                "input_artifact_row_json", "consent_row_json", "consent_id", "native_binding_json",
+                "goal_row_json", "original_limits_json"))):
         raise DurableJobLeaseError("original producer-sealed repository canonical source required")
 
 
@@ -2360,7 +2507,7 @@ async def stage_repository_canonical_source(service, db, *, repository_job_id,
     exist, with the same seven-field input and source-issued Task artifact.
     """
     from src.db.models import (WorkflowRunState, WorkBoardTask, WorkBoardAttempt,
-        WorkBoardInputArtifact, RepoRepairEgressConsent)
+        WorkBoardInputArtifact, RepoRepairEgressConsent, Goal)
     from src.workflows.repo_repair import RepoRepairService
     from src.work_board.contracts import WorkBoardOwner
     from src.workflows.general_task_guard import (child_binding, read_manifest,
@@ -2377,6 +2524,8 @@ async def stage_repository_canonical_source(service, db, *, repository_job_id,
     if run is None or child is None:
         raise DurableJobLeaseError("original repository and native child required")
     original, work, compiled, group, binding, task_source = read_repository_original(run)
+    goal = await db.get(Goal, binding.goal_id, populate_existing=True)
+    original_limits = _assert_repository_original_limits(run, goal, _repository_policy_limits())
     if child_binding(child) != binding:
         raise DurableJobLeaseError("original repository native child changed")
     await assert_general_task_child_current(db, child)
@@ -2436,7 +2585,8 @@ async def stage_repository_canonical_source(service, db, *, repository_job_id,
         parent_attempt_row_json=row_json(attempt), repository_attempt_row_json=row_json(repo_authority.attempt),
         child_row_json=row_json(child), repository_task_row_json=row_json(repo_authority.task),
         input_artifact_row_json=row_json(input_artifact), consent_row_json=row_json(consent),
-        consent_id=consent.id, _seal=_SEAL)
+        consent_id=consent.id, goal_row_json=row_json(goal),
+        original_limits_json=json.dumps(original_limits, sort_keys=True, separators=(",", ":")), _seal=_SEAL)
     assert_repository_canonical_source(source)
     return source
 
@@ -2518,7 +2668,7 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     """Recheck private source and both original owners in the accounting writer."""
     from sqlalchemy import select
     from src.db.models import (WorkflowRunState, WorkBoardAttempt, WorkBoardTask,
-        WorkBoardInputArtifact, RepoRepairEgressConsent)
+        WorkBoardInputArtifact, RepoRepairEgressConsent, Goal)
     from src.workflows.general_task_guard import _history, child_binding, read_manifest
     from src.workflows.inference_accounting import InferenceAccountingError, _utc
     assert_repository_iteration_witness(witness)
@@ -2532,6 +2682,12 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     now = datetime.now(timezone.utc)
     def blocked(code="repository_iteration_binding_changed"):
         raise InferenceAccountingError(code)
+    goal = await db.get(Goal, witness.group.goal_id, populate_existing=True)
+    limits = read_repository_inventory(run)["original_limits"]
+    if (goal is None or json.dumps(goal.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) != source.goal_row_json
+            or json.dumps(limits, sort_keys=True, separators=(",", ":")) != source.original_limits_json
+            or bound_microusd != limits["original_server_bound_microusd"]):
+        blocked("repository_original_limits_changed")
     if _repository_record(run, "repository:stop-intent:v1") is not None:
         existing = next((row for row in rows if row.operation_id == operation_id), None)
         if not already_reserved or existing is None or existing.contact_started_at is None:
@@ -2747,6 +2903,7 @@ async def stage_repository_publication_witness(service, jobs, *, repair_job_id, 
         goal = await db.get(Goal, binding.goal_id)
         await _assert_canonical_goal_fence(db, goal_id=binding.goal_id, goal_revision=binding.goal_revision,
             owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
+        _assert_repository_original_limits(run, goal, _repository_policy_limits())
         operator = await db.get(OperatorSession, owner.session_id)
         connection = await db.scalar(select(GitHubFollowthroughConnection).where(
             GitHubFollowthroughConnection.owner_principal_id == owner.principal_id))

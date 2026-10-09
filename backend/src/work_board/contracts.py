@@ -450,6 +450,28 @@ class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
     no_learning: Literal[True] = True
 
 
+class RepositoryNativeLimitEvidenceV1(ClosedTaskModel):
+    schema_version: Literal["repository.native_limit_evidence.v1"] = "repository.native_limit_evidence.v1"
+    original_limits_digest: TaskDigest
+    original_deadline_at: datetime
+    original_server_bound_microusd: int = Field(gt=0)
+    root_liability_microusd: int = Field(ge=0)
+    group_liability_microusd: int = Field(ge=0)
+    group_calls: int = Field(ge=0)
+    original_root_max_cost_microusd: int = Field(ge=0)
+    original_group_max_cost_microusd: int = Field(ge=0)
+    original_group_max_calls: int = Field(ge=0, le=12)
+    goal_cutoff_at: datetime | None = None
+    cause: Literal["deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"]
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @field_validator("goal_cutoff_at", mode="before")
+    @classmethod
+    def optional_goal_cutoff(cls, value):
+        return None if value is None else TaskProposalGroupV1.utc_timestamp(value)
+
+
 class RepositoryNativeStopClosureV1(ClosedTaskModel):
     """Closed metadata for a source-owned repository stop.
 
@@ -470,7 +492,10 @@ class RepositoryNativeStopClosureV1(ClosedTaskModel):
     original_deadline_at: datetime
     original_claim_fence: int = Field(ge=0)
     iteration_ids: list[TaskIdentity] = Field(default_factory=list, max_length=3)
-    stop_reason: Literal["operator_cancelled", "iterations_exhausted"]
+    stop_reason: Literal["operator_cancelled", "iterations_exhausted", "deadline_exhausted", "cost_exhausted",
+        "shared_group_exhausted", "goal_limit_exhausted"]
+    limit_evidence: RepositoryNativeLimitEvidenceV1 | None = None
+    limit_evidence_digest: TaskDigest | None = None
     stop_intent_digest: TaskDigest
     model_quiescence_digest: TaskDigest
     process_quiescence_digest: TaskDigest
@@ -480,6 +505,25 @@ class RepositoryNativeStopClosureV1(ClosedTaskModel):
     no_learning: Literal[True] = True
 
     _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @model_serializer(mode="wrap")
+    def preserve_original_limit_absence(self, handler):
+        result = handler(self)
+        if self.limit_evidence is None:
+            result.pop("limit_evidence", None)
+        if self.limit_evidence_digest is None:
+            result.pop("limit_evidence_digest", None)
+        return result
+
+    @model_validator(mode="after")
+    def exact_limit_cause(self):
+        automatic = self.stop_reason not in {"operator_cancelled", "iterations_exhausted"}
+        if ((automatic and (self.limit_evidence is None or self.limit_evidence_digest is None))
+                or (not automatic and (self.limit_evidence is not None or self.limit_evidence_digest is not None))):
+            raise ValueError("repository limit closure requires exact cause evidence")
+        if self.limit_evidence is not None and self.limit_evidence.cause != self.stop_reason:
+            raise ValueError("repository limit cause changed")
+        return self
 
     @field_validator("iteration_ids")
     @classmethod

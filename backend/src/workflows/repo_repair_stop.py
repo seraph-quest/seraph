@@ -15,6 +15,7 @@ from src.work_board.contracts import WorkBoardOwner, RepositoryNativeStopClosure
 from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
 
 STOP_ID = "repository:stop-intent:v1"
+AUTOMATIC_REASONS = frozenset({"deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"})
 _ISSUED = weakref.WeakKeyDictionary()
 _STAGED = weakref.WeakKeyDictionary()
 
@@ -54,7 +55,7 @@ def _static(row, context):
     return source._source_digest({key: value for key, value in values.items() if key not in mutable})
 
 
-async def _context(service, jobs, *, job_id, owner):
+async def _context(service, jobs, *, job_id, owner, limit_reason=None):
     """Cleanup-only metadata first, then current original physical source."""
     from src.workflows.repo_repair import RepoRepairService
     from src.workflows.general_task_guard import _cancel_original, child_binding
@@ -116,16 +117,22 @@ async def _context(service, jobs, *, job_id, owner):
             raise DurableJobLeaseError("original repository stop metadata changed:" + ",".join(key for key, okay in facts.items() if not okay))
         await _assert_canonical_goal_fence(db, goal_id=binding.goal_id, goal_revision=binding.goal_revision,
             owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
+        limits = None
+        if limit_reason is not None:
+            limits = source._assert_repository_original_limits(run, goal, source._repository_policy_limits())
         inventory = source._repository_record(run, "repository:inventory:v1")
         if inventory is None or inventory.get("identities") != source.repository_checkpoint_inventory(run, work):
             raise DurableJobLeaseError("original stop identity was not reserved before effects")
         context = {"run": run, "original": original, "work": work, "compiled": compiled,
             "group": group, "binding": binding, "task_source": task_source,
             "parent": parent, "task": task, "attempt": attempt, "child": child,
-            "repo_task": repo_task, "repo_attempt": repo_attempt, "owner": owner}
+            "repo_task": repo_task, "repo_attempt": repo_attempt, "owner": owner,
+            "goal": goal, "original_limits": limits}
         rows = [run, parent, child, task, attempt, artifact, goal, root, repo_task, repo_attempt, repo_artifact]
         context["rows"] = [(type(row), _key(row), _canonical(row.model_dump(mode="json"))) for row in rows]
         context["static_rows"] = {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows}
+        if limit_reason is not None:
+            context["limit_evidence"] = await _limit_evidence(db, context, reason=limit_reason)
         stop = source._repository_record(run, STOP_ID)
         if stop is not None and stop.get("static_rows") != context["static_rows"]:
             raise DurableJobLeaseError("original stop snapshot changed before private read")
@@ -149,7 +156,27 @@ async def _context(service, jobs, *, job_id, owner):
                         or callback.get("child_static_digest") != source._source_digest({k: v for k, v in child.model_dump(mode="json").items()
                             if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}})):
                     raise DurableJobLeaseError("original callback stop scope changed before private read")
-        envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
+        if limit_reason in AUTOMATIC_REASONS and _utc_now() >= group.original_deadline_at:
+            # This is negative cleanup of the already-issued original Source
+            # child. The exact cause was proven above; do not publish an
+            # expired proposal as a new grant through the live resolver.
+            from src.work_board.input_artifacts import (_metadata_digest, _safe_file_bytes,
+                _payload_path, _decode_and_validate_payload)
+            from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+            from src.work_board.contracts import GeneralTaskEnvelope
+            if (artifact.state != "bound" or artifact.bound_task_id != task.task_id
+                    or artifact.capability_id != "agent.task.v1" or artifact.capability_version != "1"
+                    or artifact.typed_input_ref != task.typed_input_ref
+                    or artifact.payload_sha256 != task.typed_input_digest
+                    or _as_utc(artifact.expires_at) <= _utc_now()
+                    or _metadata_digest(artifact) != artifact.metadata_digest):
+                raise DurableJobLeaseError("original expired-cleanup artifact metadata changed")
+            payload = _safe_file_bytes(_payload_path(artifact),
+                expected_digest=artifact.payload_sha256, expected_size=artifact.size_bytes)
+            envelope = GeneralTaskEnvelope.model_validate(_decode_and_validate_payload(artifact, payload))
+            await _verify_native_manifest_data(parent, task, attempt, manifest, envelope)
+        else:
+            envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
         if envelope.repository_source != task_source or envelope.proposal_group != group:
             raise DurableJobLeaseError("original scoped stop Task changed")
         if source._source_digest(root_binding()) != binding.live_root_digest:
@@ -191,6 +218,63 @@ async def _accounting(db, context):
             or sum(reservation_liability(row) for row in root_members) > context["work"].limits.max_cost_microusd):
         raise DurableJobLeaseError("original stop accounting exceeded original bounds")
     return source._source_digest([row.model_dump(mode="json") for row in sorted(members, key=lambda row: row.operation_id)])
+
+
+async def _limit_evidence(db, context, *, reason):
+    """Canonical original cause; the caller stages policy outside this writer."""
+    from src.workflows.general_task_accounting import entry_for, reservation_liability
+    from src.work_board.contracts import RepositoryNativeLimitEvidenceV1
+    source = _source()
+    limits = source.read_repository_inventory(context["run"])["original_limits"]
+    if limits != context["original_limits"]:
+        raise DurableJobLeaseError("original stop limit facts changed")
+    goal = await db.get(Goal, context["goal"].id, populate_existing=True)
+    if goal is None or source._source_digest(goal.model_dump(mode="json")) != limits["original_goal_row_digest"]:
+        raise DurableJobLeaseError("original stop Goal limit facts changed")
+    await _accounting(db, context)
+    rows = list((await db.scalars(select(InferenceCostReservation))).all())
+    members = [row for row in rows if (entry_for(row) or {}).get("group", {}).get("group_id") == context["group"].group_id]
+    root_members = [row for row in members if row.job_id == context["run"].run_identity]
+    root_cost, group_cost = sum(map(reservation_liability, root_members)), sum(map(reservation_liability, members))
+    group, work = context["group"], context["work"]
+    cutoff, goal_cutoff = _as_utc(context["run"].deadline_at), source._repository_goal_cutoff(limits, group)
+    now, bound = _utc_now(), limits["original_server_bound_microusd"]
+    causes = {
+        "deadline_exhausted": now >= cutoff,
+        "goal_limit_exhausted": now >= goal_cutoff and cutoff <= goal_cutoff,
+        "cost_exhausted": work.limits.max_cost_microusd - root_cost < bound,
+        "shared_group_exhausted": len(members) >= group.max_inference_calls or group.max_cost_microusd - group_cost < bound
+            or now >= group.original_deadline_at,
+    }
+    if reason is None:
+        candidates = ["goal_limit_exhausted", "deadline_exhausted", "cost_exhausted", "shared_group_exhausted"]
+        reason = next((candidate for candidate in candidates if causes[candidate]), None)
+        if reason is None:
+            return None
+    if reason not in AUTOMATIC_REASONS or not causes[reason]:
+        raise DurableJobLeaseError("actual original repository limit cause is unproven")
+    return RepositoryNativeLimitEvidenceV1(original_limits_digest=source._source_digest(limits),
+        original_deadline_at=cutoff, original_server_bound_microusd=bound,
+        root_liability_microusd=root_cost, group_liability_microusd=group_cost, group_calls=len(members),
+        original_root_max_cost_microusd=work.limits.max_cost_microusd,
+        original_group_max_cost_microusd=group.max_cost_microusd, original_group_max_calls=group.max_inference_calls,
+        goal_cutoff_at=goal_cutoff, cause=reason).model_dump(mode="json")
+
+
+async def repository_automatic_limit_reason(service, jobs, *, job_id, owner):
+    """Check current original metadata before any private Source body read."""
+    source = _source()
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        original, work, compiled, group, binding, task_source = source.read_repository_original(run)
+        if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
+            raise DurableJobLeaseError("original repository limit owner changed")
+        goal = await db.get(Goal, binding.goal_id)
+        limits = source._assert_repository_original_limits(run, goal, source._repository_policy_limits())
+        context = {"run": run, "original": original, "work": work, "group": group,
+            "goal": goal, "original_limits": limits}
+        evidence = await _limit_evidence(db, context, reason=None)
+        return None if evidence is None else evidence["cause"]
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
@@ -298,7 +382,9 @@ async def _positive_witness(service, jobs, context, stop):
         iteration_ids=identities, stop_reason=stop["stop_reason"], stop_intent_digest=source._source_digest(stop),
         model_quiescence_digest=source._source_digest(models), process_quiescence_digest=source._source_digest(processes),
         all_original_accounting_digest=accounting_digest, request_response_approval_digest=source._source_digest(lineage),
-        source_binding_digest=context["task_source"].binding_digest)
+        source_binding_digest=context["task_source"].binding_digest,
+        limit_evidence=context["limit_evidence"] if stop["stop_reason"] in AUTOMATIC_REASONS else None,
+        limit_evidence_digest=source._source_digest(context["limit_evidence"]) if stop["stop_reason"] in AUTOMATIC_REASONS else None)
     witness = _RepositoryStopWitness(service, jobs, context, closure)
     _ISSUED[witness] = service
     return witness
@@ -321,6 +407,13 @@ async def validate_repository_stop_witness(db, witness, *, parent, task, attempt
     if (stop is None or source._source_digest(stop) != closure.stop_intent_digest
             or await _accounting(db, context) != closure.all_original_accounting_digest):
         raise DurableJobLeaseError("original stop intent or accounting changed")
+    if closure.stop_reason in AUTOMATIC_REASONS:
+        evidence = await _limit_evidence(db, context, reason=closure.stop_reason)
+        if (evidence != closure.limit_evidence.model_dump(mode="json")
+                or source._source_digest(evidence) != closure.limit_evidence_digest
+                or stop.get("limit_evidence") != evidence
+                or stop.get("limit_evidence_digest") != closure.limit_evidence_digest):
+            raise DurableJobLeaseError("original stop canonical limit cause changed")
     return {closure.original_binding.invocation_id: closure}
 
 
@@ -341,7 +434,7 @@ async def complete_repository_stop_in_writer(db, witness, *, jobs):
     source._append_repository_record(run, "repository:terminal:v1",
         {"schema": "repository.stop_terminal.v1", "closure": closure.model_dump(mode="json"),
          "no_learning": True}, inventory=source.repository_checkpoint_inventory(run, context["work"]))
-    terminal = "failed" if closure.stop_reason == "iterations_exhausted" else "cancelled"
+    terminal = "cancelled" if closure.stop_reason == "operator_cancelled" else "failed"
     await source.append_repository_release_in_writer(db, jobs, run,
         original=context["original"], work=context["work"], witness=witness, outcome_status=terminal)
     updated_journal = run.checkpoint_receipts_json
@@ -392,11 +485,12 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
     from src.model_fabric.effective_policy import configuration_mutation_lock
     from src.work_board.repository import _begin_sqlite_immediate, WorkBoardRepository, BoardAttemptProjection
     source = _source()
-    if reason not in {"operator_cancelled", "iterations_exhausted"}:
+    if reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
         raise DurableJobLeaseError("closed original repository stop reason required")
     async with configuration_mutation_lock:
         source._assert_task_publication_configuration(service)
-        context = await _context(service, jobs, job_id=job_id, owner=owner)
+        context = await _context(service, jobs, job_id=job_id, owner=owner,
+            limit_reason=reason if reason in AUTOMATIC_REASONS else None)
         existing_stop = source._repository_record(context["run"], STOP_ID)
         if existing_stop is None:
             snapshot = {"schema": "repository.stop_snapshot.v1", "static_rows": context["static_rows"],
@@ -421,6 +515,9 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
                     "native_binding_digest": source._source_digest(context["binding"].model_dump(mode="json")),
                     "static_rows": context["static_rows"], "snapshot_artifact_ref": snapshot_ref,
                     "snapshot_artifact_digest": snapshot_digest, "no_learning": True}
+                if reason in AUTOMATIC_REASONS:
+                    stop.update(limit_evidence=context["limit_evidence"],
+                        limit_evidence_digest=source._source_digest(context["limit_evidence"]))
                 source._append_repository_record(run, STOP_ID, stop,
                     inventory=source.repository_checkpoint_inventory(run, context["work"]))
                 run.revision += 1
@@ -447,7 +544,8 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
     try:
         async with configuration_mutation_lock:
             source._assert_task_publication_configuration(service)
-            context = await _context(service, jobs, job_id=job_id, owner=owner)
+            context = await _context(service, jobs, job_id=job_id, owner=owner,
+                limit_reason=reason if reason in AUTOMATIC_REASONS else None)
             witness = await _positive_witness(service, jobs, context, stop)
             if job_id not in service._iterative_lanes:
                 # Cleanup recovery reacquires only the actual physical handle
@@ -468,9 +566,17 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
                 lane.bind_owner(job_id=job_id, attempt_id=context["original"]["repository_attempt_id"],
                     fence_token=run.fencing_token, authority_digest=run.authority_digest)
                 service._iterative_lanes[job_id] = lane
-        result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
-            operator_owner=owner, expected_task_revision=context["task"].task_revision,
-            repository_stop_witness=witness)
+            if reason in AUTOMATIC_REASONS:
+                # The Source owns this actual scope continuously through the
+                # existing terminal writer and commit; no configuration read
+                # or lock reacquisition occurs inside that writer.
+                result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
+                    operator_owner=owner, expected_task_revision=context["task"].task_revision,
+                    repository_stop_witness=witness)
+        if reason not in AUTOMATIC_REASONS:
+            result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
+                operator_owner=owner, expected_task_revision=context["task"].task_revision,
+                repository_stop_witness=witness)
     except DurableJobLeaseError:
         lane = service._iterative_lanes.get(job_id)
         if lane is not None:

@@ -22,7 +22,7 @@ from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
 
-async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False):
+async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:
@@ -33,7 +33,9 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
         async with factory.accounting_sessions() as db:
             goal = await db.get(Goal, 'goal:fixture')
             goal.admission_budget_json = GoalAdmissionBudget(max_outstanding_jobs=goal_capacity,
-                max_runtime_seconds=900).model_dump_json()
+                **({"max_runtime_seconds": 900} | (goal_limits or {}).get("budget", {}))).model_dump_json()
+            if goal_limits and "due_date" in goal_limits:
+                goal.due_date = goal_limits["due_date"]
     # The persisted selector owner requires a private directory, unlike the
     # broader accounting fixture's disposable workspace.
     workspace.chmod(0o700)
@@ -76,10 +78,13 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
     git(repository, 'init', '--template=', '--initial-branch=develop')
     git(repository, 'add', '.')
     git(repository, 'commit', '-m', 'actual source')
-    work = RepoWorkInput.model_validate(selection(repository_ref='example', language_profile=language,
+    work_selection = selection(repository_ref='example', language_profile=language,
         requested_checks=['build', 'test'] if node_build else ['test'],
         allowed_paths=(['calculator.js', 'tests/calculator.test.js'] if language == 'test_node' else ['calculator.py', 'tests/test_calculator.py']),
-        base_commit=git(repository, 'rev-parse', 'HEAD').decode().strip()))
+        base_commit=git(repository, 'rev-parse', 'HEAD').decode().strip())
+    if work_limits is not None:
+        work_selection['limits'] = work_limits
+    work = RepoWorkInput.model_validate(work_selection)
     source = RepoRepairService(session_factory=factory)
     assert source.sandbox.config.model_dump(mode='json') == settings.repo_sandbox.model_dump(mode='json')
     class FixedDescriptorView:
@@ -97,7 +102,7 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
         expected_plan_revision=1,
         input=GeneralTaskInput(goal_ref='goal:fixture', intent='Repair the selected repository',
             requested_output=descriptor.output_schema,
-            limits=TaskLimits(max_inference_calls=5, max_cost_microusd=500, wall_seconds=900),
+            limits=task_limits or TaskLimits(max_inference_calls=5, max_cost_microusd=500, wall_seconds=900),
             tool_set_digest=digest([item.model_dump(mode='json') for item in
                 sorted(registry.descriptors(), key=lambda item: item.tool_id)])),
         plan=PlanSpec(revision=1, steps=[{'step_id': 'repair', 'tool_id': 'repository_work',
@@ -206,10 +211,10 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False):
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
     factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
         goal_capacity=goal_capacity, language=language, node_build=node_build, ordinary_prior=ordinary_prior,
-        publication_profile=publication_profile)
+        publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits, goal_limits=goal_limits)
     return await admit_existing_source_request(factory, owner, service, request,
         claim_child=claim_child, ordinary_prior=ordinary_prior)
 
@@ -627,7 +632,7 @@ async def test_actual_source_unknown_model_cost_retains_original_capacity(accoun
 
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
-        unknown_model_cost=False):
+        unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0):
     import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
@@ -635,7 +640,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         repository_source_preview, grant_repository_iteration_consent)
     factory, owner, service, jobs, binding, creation_request = await actual_native_source(
         accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language, node_build=node_build,
-        publication_profile=publication_profile)
+        publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits)
     operator = await authenticate_session(owner.session_id, touch=False)
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner='actual-consent-callback-worker', principal=operator.principal)
@@ -682,7 +687,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         contacted.append(request)
         usage = {'prompt_tokens': 1, 'completion_tokens': 1}
         if not unknown_model_cost:
-            usage['cost'] = '0'
+            usage['cost'] = format(actual_model_cost_microusd / 1000000, '.6f')
         return httpx.Response(200, json={'id': 'scripted-source-final-transport',
             'usage': usage,
             'choices': [{'message': {'role': 'assistant', 'content': json.dumps(output)}}]})
@@ -748,7 +753,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     async with factory() as db:
         rows = list((await db.scalars(select(InferenceCostReservation))).all())
         assert len(rows) == 1 and rows[0].state == 'settled'
-        assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == 0
+        assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == actual_model_cost_microusd
         assert rows[0].job_id == root_id
     if stop_at == 'contacted_wait':
         from src.workflows.repo_repair_stop import stop_repository_root
@@ -900,6 +905,24 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     executed = await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
         owner=owner, request=execution_request, principal=operator.principal)
     assert executed['status'] == ('failed' if three_iterations else 'succeeded') and executed['cleanup_proven'] is True
+    if stop_at in {'cost_exhausted', 'shared_group_exhausted'}:
+        from src.workflows.repo_repair_source import _repository_record
+        review = executed['repository_review']
+        assert review['stop_reason'] == stop_at and review['stop_pending'] is False
+        assert len(contacted) == 1
+        assert (await jobs.get_job(root_id))['status'] == 'failed'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'cancelled'
+        assert (await jobs.get_job(binding.parent_job_id))['status'] == 'cancelled'
+        assert root_id not in service.repository_source_service._iterative_lanes
+        async with factory() as db:
+            root = await jobs._fetch(db, root_id)
+            assert jobs._repo_repair_reservation_state(root)['status'] == 'released'
+            terminal = _repository_record(root, 'repository:terminal:v1')
+            assert terminal['closure']['limit_evidence']['cause'] == stop_at
+            rows = list((await db.scalars(select(InferenceCostReservation))).all())
+            assert len(rows) == 1 and rows[0].state == 'settled'
+            assert rows[0].actual_cost_microusd == actual_model_cost_microusd
+        return {'factory': factory, 'owner': owner, 'service': service, 'jobs': jobs, 'root_id': root_id}
     if stop_at == 'failed_process':
         from src.workflows.repo_repair_stop import stop_repository_root
         stopped = await stop_repository_root(service.repository_source_service, jobs,
@@ -1206,7 +1229,9 @@ async def test_actual_original_repository_admission_mints_protected_source(accou
         resource_claims=('repo-repair-execution',), declared_authority=authority,
         max_attempts=1, max_outstanding_jobs=goal_capacity or 1, run_fingerprint=_digest(inputs))
     if goal_capacity != 2:
-        with pytest.raises(DurableJobAdmissionDenied, match='goal_budget_outstanding_limit'):
+        failure = DurableJobLeaseError if goal_capacity is None else DurableJobAdmissionDenied
+        message = 'Goal budget required' if goal_capacity is None else 'goal_budget_outstanding_limit'
+        with pytest.raises(failure, match=message):
             async with scope():
                 await jobs.admit_job(spec, admission_authority_check=check)
         async with factory() as db:

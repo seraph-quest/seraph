@@ -3527,6 +3527,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         near_text_witness=None,
         near_text_policy_scope=None,
         _general_task_resume_witness=None,
+        _repository_publication_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3547,6 +3548,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 to_status == "queued" and _general_task_approval_wait(preflight_run)
             )
             near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
+            repository_publication_guard = (
+                preflight_run.job_kind == "engineering.repo-publication.v1" and to_status == "queued"
+            )
+            if _repository_publication_witness is not None and not repository_publication_guard:
+                raise DurableJobTransitionError("repository publication witness does not match this capability")
             if near_queue_guard or near_text_policy_scope is not None:
                 if to_status != "queued":
                     raise DurableJobTransitionError("NEAR policy scope is only valid for queueing")
@@ -3579,7 +3585,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer or repository_publication_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
@@ -3694,6 +3700,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     approval_resume_receipt,
                     now=_utc_now(),
                 )
+                if repository_publication_guard:
+                    from src.workflows.repo_repair_source import validate_repository_publication_in_writer
+                    await validate_repository_publication_in_writer(db, _repository_publication_witness,
+                        publication_run=run)
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
                 if _job_has_unsafe_effects(effect_ledger):
                     raise DurableJobTransitionError(
@@ -4168,6 +4178,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         expires_at: float,
         expected_revision: int | None = None,
         reason: str = "operator_approval_resumed",
+        _repository_publication_witness=None,
     ) -> dict[str, Any]:
         """Resume approval-held work through the current authority binding.
 
@@ -4240,6 +4251,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             expected_revision=expected_revision,
             reason=reason,
             approval_resume_receipt=approval_resume_receipt,
+            _repository_publication_witness=_repository_publication_witness,
         )
 
     async def revoke_job(

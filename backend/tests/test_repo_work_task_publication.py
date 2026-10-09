@@ -22,7 +22,7 @@ from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
 
-async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False):
+async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False):
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:
@@ -38,7 +38,7 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
     # broader accounting fixture's disposable workspace.
     workspace.chmod(0o700)
     monkeypatch.setattr(settings, 'repo_sandbox', RepoSandboxSettings(enabled=True,
-        executor_kind='local', profile='repo-python-pytest-v1'))
+        executor_kind='local', profile='repo-python-pytest-publication-v1' if publication_profile else 'repo-python-pytest-v1'))
     from src.execution.repo_sandbox import persist_repo_sandbox_settings
     persist_repo_sandbox_settings(settings.repo_sandbox)
     repository = workspace / 'example'
@@ -88,15 +88,27 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
         async def invoke(self, *args, **kwargs):
             raise AssertionError('Task publication must execute no tool')
     registry = FixedDescriptorView()
+    if ordinary_prior:
+        from tests.test_general_task_contract import Registry
+        registry = Registry()
+        registry.entries.insert(0, repository_work_descriptor())
     descriptor = registry.descriptors()[0]
     request = GeneralTaskCreate(goal_revision=1, idempotency_key='source-original',
         expected_plan_revision=1,
         input=GeneralTaskInput(goal_ref='goal:fixture', intent='Repair the selected repository',
             requested_output=descriptor.output_schema,
             limits=TaskLimits(max_inference_calls=5, max_cost_microusd=500, wall_seconds=900),
-            tool_set_digest=digest([descriptor.model_dump(mode='json')])),
+            tool_set_digest=digest([item.model_dump(mode='json') for item in
+                sorted(registry.descriptors(), key=lambda item: item.tool_id)])),
         plan=PlanSpec(revision=1, steps=[{'step_id': 'repair', 'tool_id': 'repository_work',
             'input': work.model_dump(mode='json'), 'output_contract': descriptor.output_schema}]))
+    if ordinary_prior:
+        prior_descriptor = registry.descriptors()[1]
+        repair = request.plan.steps[0].model_copy(update={'depends_on': ['prior']})
+        request = request.model_copy(update={'plan': PlanSpec(revision=1, steps=[
+            {'step_id': 'prior', 'tool_id': prior_descriptor.tool_id,
+                'input': {'text': 'actual original ordinary callback'},
+                'output_contract': prior_descriptor.output_schema}, repair])})
     service = GeneralTaskService(registry, repository_source_service=source)
     service.start()
     return factory, workspace, owner, service, request
@@ -194,9 +206,16 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False):
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False):
     factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
-        goal_capacity=goal_capacity, language=language, node_build=node_build)
+        goal_capacity=goal_capacity, language=language, node_build=node_build, ordinary_prior=ordinary_prior,
+        publication_profile=publication_profile)
+    return await admit_existing_source_request(factory, owner, service, request,
+        claim_child=claim_child, ordinary_prior=ordinary_prior)
+
+
+async def admit_existing_source_request(factory, owner, service, request, *, claim_child=True, ordinary_prior=False):
+    """Admit another distinct original Task through the unchanged real owners."""
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_native import (
@@ -214,6 +233,8 @@ async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None
     async with factory.accounting_sessions() as db:
         claimed = await service.repository.claim_ready_task(db, created.task.task_id,
             expected_revision=ready.task.task_revision, lease_owner=dispatcher.runner_id)
+        assert claimed is not None, {key: getattr(ready.task, key) for key in
+            ('status', 'block_kind', 'block_reason', 'scheduled_at', 'task_revision')}
     task, attempt = claimed.task, claimed.attempt
     spec, inputs, *_ = dispatcher._build_spec(task, attempt)
     admitted = await jobs.admit_job(spec)
@@ -237,10 +258,30 @@ async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None
         owner=parent['lease']['owner'], fence=parent['lease']['fencing_token'], service=service)
     envelope = GeneralTaskEnvelope.model_validate(inputs)
     assert envelope.repository_source is not None
+    if ordinary_prior:
+        from src.work_board.general_task_native import run_native_step
+        from src.workflows.general_task_guard import read_manifest
+        from src.auth.service import authenticate_session
+        prior = envelope.plan.steps[0]
+        prior_descriptor = next(item for item in envelope.descriptors if item.tool_id == prior.tool_id)
+        prior_binding, _ = await admit_native_step(jobs, spec.identity.job_id,
+            owner=parent['lease']['owner'], fence=parent['lease']['fencing_token'],
+            step=prior, descriptor=prior_descriptor, inputs=prior.input, service=service)
+        principal = (await authenticate_session(owner.session_id, touch=False)).principal
+        await run_native_step(service, jobs, prior_binding, child_owner='actual-prior-native-worker', principal=principal)
+        async with factory.accounting_sessions() as db:
+            original_parent = await jobs._fetch(db, spec.identity.job_id)
+            manifest = read_manifest(original_parent)
+        resumed = await jobs.resume_general_task_native_parent(spec.identity.job_id,
+            owner=parent['lease']['owner'], expected_revision=original_parent.revision,
+            expected_manifest_revision=manifest.manifest_revision)
+        parent = resumed['job']
+    selected_step = envelope.plan.steps[-1]
+    selected_descriptor = next(item for item in envelope.descriptors if item.tool_id == selected_step.tool_id)
     binding, child = await admit_native_step(jobs, spec.identity.job_id,
         owner=parent['lease']['owner'], fence=parent['lease']['fencing_token'],
-        step=envelope.plan.steps[0], descriptor=envelope.descriptors[0],
-        inputs=envelope.plan.steps[0].input, service=service)
+        step=selected_step, descriptor=selected_descriptor,
+        inputs=selected_step.input, service=service)
     child_id = binding.invocation_id
     if not claim_child:
         return factory, owner, service, jobs, binding, request
@@ -257,7 +298,7 @@ async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None
         assert binding.task_id == created.task.task_id
         assert binding.attempt_id == linked.attempt.attempt_id
         assert binding.original_root_id == owner.session_id
-        assert binding.input_digest == digest(request.plan.steps[0].input)
+        assert binding.input_digest == digest(request.plan.steps[-1].input)
         assert len(list((await db.execute(select(WorkBoardTask))).scalars())) == 1
         assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
     return factory, owner, service, jobs, binding, request
@@ -322,6 +363,11 @@ async def test_actual_source_stop_before_contact_atomic_original(accounting_db, 
     root_id = prepared['repository_job_id']
     actual_cancel = jobs.cancel_general_task_native_parent
     async def sql_only_cancel(*args, **kwargs):
+        from dataclasses import replace
+        from src.workflows.job_runtime import DurableJobLeaseError
+        copied = replace(kwargs['repository_stop_witness'])
+        with pytest.raises(DurableJobLeaseError, match='source-owned'):
+            await actual_cancel(*args, **{**kwargs, 'repository_stop_witness': copied})
         def forbidden(*_args, **_kwargs):
             raise AssertionError('Original stop writer must use staged Source, not private IO/projection')
         with monkeypatch.context() as writer_boundary:
@@ -353,7 +399,45 @@ async def test_actual_source_stop_before_contact_atomic_original(accounting_db, 
     assert child['attempt_count'] == 1
     assert root_id not in service.repository_source_service._iterative_lanes
     async with factory() as db:
+        released = jobs._repo_repair_reservation_state(await jobs._fetch(db, root_id))
+        assert released['status'] == 'released' and released['outcome_status'] == 'cancelled'
         assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_terminal_release_admits_distinct_successor(accounting_db, monkeypatch, language):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source, read_repository_original, _repository_record
+    from src.workflows.repo_repair_stop import stop_repository_root
+    factory, owner, service, jobs, binding, request = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    first = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-first-root-worker', principal=operator.principal)
+    root_id = first['repository_job_id']
+    async with factory() as db:
+        original = await jobs._fetch(db, root_id)
+        inventory = _repository_record(original, 'repository:inventory:v1')['identities']
+        assert len(inventory) == 44 and 'repo-repair-execution-release' in inventory
+        first_scope = read_repository_original(original)[0]
+    stopped = await stop_repository_root(service.repository_source_service, jobs,
+        job_id=root_id, owner=owner, general_task_service=service)
+    assert stopped['pending'] is False
+    new_request = request.model_copy(update={'idempotency_key': 'explicit-distinct-successor'})
+    _, _, same_service, successor_jobs, next_binding, _ = await admit_existing_source_request(
+        factory, owner, service, new_request, claim_child=False)
+    assert same_service is service and next_binding.parent_job_id != binding.parent_job_id
+    next_root = await prepare_repository_native_source(service, successor_jobs, next_binding,
+        child_owner='actual-successor-root-worker', principal=operator.principal)
+    assert next_root['repository_job_id'] != root_id
+    async with factory() as db:
+        prior = await successor_jobs._fetch(db, root_id)
+        current = await successor_jobs._fetch(db, next_root['repository_job_id'])
+        assert successor_jobs._repo_repair_reservation_state(prior)['status'] == 'released'
+        assert successor_jobs._repo_repair_reservation_state(current)['status'] == 'held'
+        assert read_repository_original(prior)[0] == first_scope
+    assert next_root['repository_job_id'] in service.repository_source_service._iterative_lanes
 
 
 @pytest.mark.asyncio
@@ -404,17 +488,154 @@ async def test_actual_source_stop_writer_failure_retains_original(accounting_db,
             stop._source().read_repository_original(await jobs._fetch(db, root_id))[0]['repository_task_id']))
         assert repo_task.status.value == 'running'
         assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+    # The actual retained stop snapshot must reject unrelated row drift before
+    # reopening any private artifact. A fresh service cannot reseal that drift.
+    async with factory() as db:
+        parent_task = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == binding.task_id))
+        previous_title = parent_task.title
+        parent_task.title = previous_title + ' changed after stop intent'
+        await db.commit()
+    def forbidden_stop_read(*args, **kwargs):
+        raise AssertionError('Retained stop scope drift must deny before private read')
+    with monkeypatch.context() as boundary:
+        boundary.setattr(service.repository_source_service, '_read_private_artifact', forbidden_stop_read)
+        with pytest.raises(DurableJobLeaseError, match='snapshot changed before private read'):
+            await stop._context(service.repository_source_service, jobs, job_id=root_id, owner=owner)
+    async with factory() as db:
+        parent_task = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == binding.task_id))
+        parent_task.title = previous_title
+        await db.commit()
+        run = await jobs._fetch(db, root_id)
+        retained = stop._source()._repository_record(run, stop.STOP_ID)
+    from pathlib import Path
+    snapshot_ref = retained['snapshot_artifact_ref']
+    assert snapshot_ref.startswith('workspace-json:artifacts/repo-repair/stop-')
+    (Path(settings.workspace_dir) / snapshot_ref.removeprefix('workspace-json:')).unlink()
+    with pytest.raises((OSError, ValueError, DurableJobLeaseError)):
+        await stop._context(service.repository_source_service, jobs, job_id=root_id, owner=owner)
+    assert root_id in service.repository_source_service._iterative_lanes
+    assert (await jobs.get_job(root_id))['status'] == original[root_id]['status']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+@pytest.mark.parametrize('drift', ['unchanged', 'unknown_task_field'])
+async def test_actual_source_stop_restart_rebinds_only_original_physical_owner(accounting_db, monkeypatch, language, drift):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source
+    from src.workflows.repo_repair_stop import stop_repository_root
+    from src.workflows.job_runtime import DurableJobLeaseError
+    from src.work_board.repository import WorkBoardRepository
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-restart-original-worker', principal=operator.principal)
+    root_id = prepared['repository_job_id']
+    original_lane = service.repository_source_service._iterative_lanes[root_id]
+    actual_event = WorkBoardRepository._event
+    async def reject_terminal(*args, **kwargs):
+        if kwargs['kind'] == 'attempt.repository_stopped':
+            raise DurableJobLeaseError('actual restart fixture retains original stop transaction')
+        return await actual_event(*args, **kwargs)
+    with monkeypatch.context() as failure:
+        failure.setattr(WorkBoardRepository, '_event', reject_terminal)
+        pending = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service)
+        assert pending['pending'] is True
+    assert original_lane.quarantined and original_lane._descriptor is not None
+    before = await jobs.get_job(root_id)
+    fresh = RepoRepairService(session_factory=factory)
+    fresh.jobs = jobs
+    assert fresh._iterative_lanes == {}
+    service.repository_source_service = fresh
+    if drift == 'unknown_task_field':
+        async with factory() as db:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            task.title += ' changed outside immutable stop snapshot'
+            await db.commit()
+        def deny_private(*args, **kwargs):
+            raise AssertionError('Changed original scope must block restart before private read')
+        monkeypatch.setattr(fresh, '_read_private_artifact', deny_private)
+        with pytest.raises(DurableJobLeaseError, match='snapshot changed before private read'):
+            await stop_repository_root(fresh, jobs, job_id=root_id, owner=owner, general_task_service=service)
+        assert (await jobs.get_job(root_id)) == before
+        assert original_lane._descriptor is not None and original_lane.quarantined
+        assert fresh._iterative_lanes == {}
+    else:
+        finished = await stop_repository_root(fresh, jobs, job_id=root_id, owner=owner, general_task_service=service)
+        assert finished['pending'] is False
+        assert original_lane._descriptor is None and root_id not in fresh._iterative_lanes
+        async with factory() as db:
+            run = await jobs._fetch(db, root_id)
+            assert jobs._repo_repair_reservation_state(run)['status'] == 'released'
+            assert run.status == 'cancelled' and run.fencing_token == before['lease']['fencing_token']
+            assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ordinary_closure', ['positive', 'missing'])
+async def test_actual_source_stop_preserves_prior_ordinary_closure_requirement(accounting_db, monkeypatch, ordinary_closure):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source
+    from src.workflows.repo_repair_stop import stop_repository_root
+    from src.workflows.general_task_guard import child_binding, cleanup_checkpoint_id
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, ordinary_prior=True)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await prepare_repository_native_source(service, jobs, binding,
+        child_owner='actual-source-after-ordinary', principal=operator.principal)
+    root_id = prepared['repository_job_id']
+    async with factory() as db:
+        children = list((await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.parent_job_id == binding.parent_job_id))).scalars())
+        ordinary = next(row for row in children if row.run_identity != binding.invocation_id)
+        assert json.loads(ordinary.arguments_json)['tool_id'] == 'fixture.read'
+        assert ordinary.status == 'succeeded' and ordinary.attempt_count == 1
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        cleanup_id = cleanup_checkpoint_id(child_binding(ordinary), ordinary.fencing_token)
+        history = json.loads(parent.checkpoint_receipts_json)
+        assert any(row['checkpoint_id'] == cleanup_id for row in history)
+        if ordinary_closure == 'missing':
+            # Negative corruption of a genuinely executed prior sibling; no
+            # invented parallel grant or fabricated successful Source proof.
+            parent.checkpoint_receipts_json = json.dumps([
+                row for row in history if row['checkpoint_id'] != cleanup_id])
+            await db.commit()
+    result = await stop_repository_root(service.repository_source_service, jobs,
+        job_id=root_id, owner=owner, general_task_service=service)
+    assert result['pending'] is (ordinary_closure == 'missing')
+    root = await jobs.get_job(root_id)
+    parent = await jobs.get_job(binding.parent_job_id)
+    if ordinary_closure == 'positive':
+        assert root['status'] == parent['status'] == 'cancelled'
+        assert root_id not in service.repository_source_service._iterative_lanes
+    else:
+        assert root['status'] == 'running' and parent['status'] == 'paused'
+        assert root_id in service.repository_source_service._iterative_lanes
+    assert (await jobs.get_job(ordinary.run_identity))['status'] == 'succeeded'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_unknown_model_cost_retains_original_capacity(accounting_db, monkeypatch, language):
+    await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
+        unknown_model_cost=True)
 
 
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
-        node_readback_drift=None, node_build=False, stop_at=None):
+        node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
+        unknown_model_cost=False):
     import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
         repository_source_preview, grant_repository_iteration_consent)
-    factory, owner, service, jobs, binding, _ = await actual_native_source(
-        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language, node_build=node_build)
+    factory, owner, service, jobs, binding, creation_request = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, language=language, node_build=node_build,
+        publication_profile=publication_profile)
     operator = await authenticate_session(owner.session_id, touch=False)
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner='actual-consent-callback-worker', principal=operator.principal)
@@ -459,8 +680,11 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         assert str(request.url) == 'https://openrouter.ai/api/v1/chat/completions'
         assert json.loads(request.content) == egress['request_body']
         contacted.append(request)
+        usage = {'prompt_tokens': 1, 'completion_tokens': 1}
+        if not unknown_model_cost:
+            usage['cost'] = '0'
         return httpx.Response(200, json={'id': 'scripted-source-final-transport',
-            'usage': {'cost': '0', 'prompt_tokens': 1, 'completion_tokens': 1},
+            'usage': usage,
             'choices': [{'message': {'role': 'assistant', 'content': json.dumps(output)}}]})
     real_client = httpx.Client
     def owned_client(*args, **kwargs):
@@ -477,6 +701,39 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     async with factory() as db:
         assert list((await db.scalars(select(InferenceCostReservation))).all()) == []
     assert (await jobs.get_job(binding.invocation_id))['lease'] == before_child['lease']
+    if unknown_model_cost:
+        with pytest.raises(Exception):
+            await grant_repository_iteration_consent(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, request=request, general_task_service=service,
+                principal=operator.principal)
+        assert len(contacted) == 1
+        async with factory() as db:
+            rows = list((await db.scalars(select(InferenceCostReservation))).all())
+            assert len(rows) == 1 and rows[0].state == 'unknown'
+            assert rows[0].contact_started_at is not None
+            assert rows[0].actual_cost_microusd is None
+            from src.workflows.general_task_accounting import reservation_liability
+            assert rows[0].bound_microusd > 0
+            assert reservation_liability(rows[0]) == rows[0].bound_microusd
+            run = await jobs._fetch(db, root_id)
+            held = jobs._repo_repair_reservation_state(run)
+            assert held['status'] == 'held'
+        assert (await jobs.get_job(root_id))['status'] == 'unknown_external_effect'
+        from src.workflows.job_runtime import DurableJobLeaseError
+        with pytest.raises((RepoRepairError, DurableJobLeaseError)):
+            await grant_repository_iteration_consent(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, request=request, general_task_service=service,
+                principal=operator.principal)
+        from src.workflows.repo_repair_stop import stop_repository_root
+        stopped = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service)
+        assert stopped['pending'] is True
+        assert root_id in service.repository_source_service._iterative_lanes
+        async with factory() as db:
+            run = await jobs._fetch(db, root_id)
+            assert jobs._repo_repair_reservation_state(run)['status'] == 'held'
+        assert len(contacted) == 1
+        return
     result = await grant_repository_iteration_consent(service.repository_source_service, jobs,
         job_id=root_id, owner=owner, request=request, general_task_service=service,
         principal=operator.principal)
@@ -796,7 +1053,26 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         parent_runtime['lease']['fencing_token'], parent_outcome)
     parent_terminal = await jobs.get_job(binding.parent_job_id)
     assert parent_terminal['status'] == 'succeeded'
+    from src.work_board.contracts import WorkBoardStatus
+    from src.db.models import WorkBoardAttempt
+    async with factory() as db:
+        parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+        parent_attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+    parent_proof = dispatcher._workflow_readback(parent_terminal, binding.parent_job_id)
+    assert parent_proof is not None
+    projected = await dispatcher._project(parent_task, parent_attempt,
+        board_revision=parent_task.task_revision, status=WorkBoardStatus.done, outcome='verified',
+        proof=parent_proof, result_refs=parent_outcome.get('result_refs'),
+        artifact_refs=parent_outcome.get('artifact_refs'), lease_owner=parent_attempt.lease_owner)
+    assert projected.task.status is WorkBoardStatus.done and projected.attempt.ended_at is not None
     assert len(contacted) == (3 if three_iterations else 1)
+    async with factory() as db:
+        current_proposal = await db.get(RepoRepairProposal, proposal.proposal_id)
+        actual_proposal = current_proposal.model_dump(mode='json')
+    return {'factory': factory, 'workspace': service.repository_source_service._workspace(),
+        'repository': service.repository_source_service._workspace() / 'example', 'owner': owner,
+        'service': service, 'jobs': jobs, 'root_id': root_id, 'proposal': actual_proposal,
+        'creation_request': creation_request}
 
 
 @pytest.mark.asyncio
@@ -804,6 +1080,35 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
 async def test_actual_source_consent_callback_and_settled_c1_wait(accounting_db, monkeypatch, three_iterations, language):
     await _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['test_python', 'test_node'])
+async def test_actual_source_success_release_admits_explicit_successor(accounting_db, monkeypatch, language):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source, read_repository_original
+    finished = await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
+    factory, jobs, service, owner = (finished[key] for key in ('factory', 'jobs', 'service', 'owner'))
+    async with factory() as db:
+        original = await jobs._fetch(db, finished['root_id'])
+        original_scope = read_repository_original(original)[0]
+        assert original.status == 'succeeded'
+        assert jobs._repo_repair_reservation_state(original)['status'] == 'released'
+    request = finished['creation_request'].model_copy(update={'idempotency_key': 'explicit-success-successor'})
+    _, _, same_service, successor_jobs, binding, _ = await admit_existing_source_request(
+        factory, owner, service, request, claim_child=False)
+    assert same_service is service
+    operator = await authenticate_session(owner.session_id, touch=False)
+    successor = await prepare_repository_native_source(service, successor_jobs, binding,
+        child_owner='actual-after-success-worker', principal=operator.principal)
+    assert successor['repository_job_id'] != finished['root_id']
+    async with factory() as db:
+        prior = await successor_jobs._fetch(db, finished['root_id'])
+        current = await successor_jobs._fetch(db, successor['repository_job_id'])
+        assert read_repository_original(prior)[0] == original_scope
+        assert successor_jobs._repo_repair_reservation_state(prior)['status'] == 'released'
+        assert successor_jobs._repo_repair_reservation_state(current)['status'] == 'held'
+    assert successor['repository_job_id'] in service.repository_source_service._iterative_lanes
 
 
 @pytest.mark.asyncio

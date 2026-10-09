@@ -74,7 +74,7 @@ def repository_checkpoint_inventory(run, work):
             "approval", "execution", "cleanup", "readback", "accounting", "iteration"))
     ids.extend(("repo-repair-source-intent:" + run.run_identity,
                 "repo-repair-source:" + run.run_identity,
-                "repo-repair-execution-reservation"))
+                "repo-repair-execution-reservation", "repo-repair-execution-release"))
     if len(ids) != len(set(ids)) or len(ids) > 50:
         from src.workflows.job_runtime import DurableJobTransitionError
         raise DurableJobTransitionError("repository fixed checkpoint capacity exceeded")
@@ -113,6 +113,47 @@ def _append_repository_record(run, identity, payload, *, inventory):
         "state_digest": _digest(payload), "created_at": _utc_now().isoformat()})
     run.checkpoint_receipts_json = _canonical(history)
     return True
+
+
+async def append_repository_release_in_writer(db, jobs, run, *, original, work, witness, outcome_status):
+    """Same-terminal-transaction release of the original canonical hold."""
+    from src.workflows.job_runtime import DurableJobLeaseError, _utc_now
+    from src.workflows.repo_repair_stop import assert_repository_stop_witness, _accounting
+    from src.workflows.general_task_guard import _assert_repository_child_final_witness_shape
+    if outcome_status not in {"succeeded", "failed", "cancelled"}:
+        raise DurableJobLeaseError("original repository terminal release outcome required")
+    if outcome_status == "succeeded":
+        _assert_repository_child_final_witness_shape(witness)
+        assert_repository_canonical_source(witness._source_binding._final_source)
+        if witness.wait_witness.repository_job_id != run.run_identity:
+            raise DurableJobLeaseError("original repository final release witness changed")
+        accounting_context = {"group": read_repository_original(run)[3], "run": run,
+            "work": work, "original": original}
+    else:
+        assert_repository_stop_witness(witness)
+        if witness.closure.repository_job_id != run.run_identity:
+            raise DurableJobLeaseError("original repository stop release witness changed")
+        accounting_context = witness.context
+    with db.no_autoflush:
+        await _accounting(db, accounting_context)
+    inventory = repository_checkpoint_inventory(run, work)
+    reserved = _repository_record(run, "repository:inventory:v1")
+    if reserved is None or reserved.get("identities") != inventory:
+        raise DurableJobLeaseError("original repository release identity was not reserved before effects")
+    hold = jobs._repo_repair_reservation_state(run)
+    if (hold is None or hold.get("status") != "held"
+            or not jobs._repo_repair_reservation_matches(hold, job_id=run.run_identity,
+                attempt_id=original["repository_attempt_id"], fence=run.fencing_token,
+                authority_digest=run.authority_digest)
+            or hold.get("execution_deadline_at") != original["original_deadline_at"]):
+        raise DurableJobLeaseError("exact original held repository reservation required")
+    payload = {"kind": "repo_repair_execution_reservation", "status": "released",
+        "job_id": run.run_identity, "attempt_id": original["repository_attempt_id"],
+        "fence": run.fencing_token, "authority_digest": run.authority_digest,
+        "execution_deadline_at": hold["execution_deadline_at"], "outcome_status": outcome_status,
+        "cleanup_proven": True, "readback_verified": True, "operator_visible": True,
+        "recorded_at": _utc_now().isoformat()}
+    _append_repository_record(run, "repo-repair-execution-release", payload, inventory=inventory)
 
 
 async def repository_source_root(db, *, job_id, owner):
@@ -1711,14 +1752,42 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
         manifest_path = readback["artifact_ref"].removeprefix("workspace-json:")
         await jobs.record_artifact(job_id, file_path=manifest_path, artifact_type="repo_repair_manifest",
             content=manifest_bytes, owner=root_owner, fencing_token=root_fence)
+        publication_artifacts = {}
+        approved_patch_bytes = service._read_private_artifact(patch["patch_artifact_ref"],
+            expected_digest=patch["patch_sha256"])
+        diagnostics = json.loads(service._read_private_artifact(readback["diagnostics_artifact_ref"],
+            expected_digest=readback["diagnostics_artifact_digest"]))
+        patch_bytes = diagnostics["cumulative_diff"].encode("utf-8")
+        tested_diff_digest = hashlib.sha256(patch_bytes).hexdigest()
+        if (tested_diff_digest != manifest.get("diff_sha256")
+                or tested_diff_digest != diagnostics.get("cumulative_diff_sha256")
+                or tested_diff_digest != actual_cleanup.projection()["artifact_digests"].get("diff.patch")
+                or hashlib.sha256(approved_patch_bytes).hexdigest() != execution["patch_sha256"]
+                or work.language_profile == "test_python" and (
+                    manifest.get("patch_sha256") != execution["patch_sha256"]
+                    or manifest["publication_test_input"].get("patch_sha256") != execution["patch_sha256"])):
+            raise DurableJobLeaseError("actual final cumulative publication patch changed")
+        for filename, literal in (("manifest.json", manifest_bytes), ("readback.json", manifest_bytes),
+                ("diff.patch", patch_bytes)):
+            path = "artifacts/repo-repair/" + job_id + "/" + filename
+            ref, digest = service._write_private_artifact(path, literal)
+            if service._read_private_artifact(ref, expected_digest=digest) != literal:
+                raise DurableJobLeaseError("literal final publication artifact readback changed")
+            await jobs.record_artifact(job_id, file_path=path, artifact_type="repo_repair_" + filename,
+                content=literal, owner=root_owner, fencing_token=root_fence)
+            publication_artifacts[filename] = {"path": path, "sha256": digest}
         from src.workflows.job_runtime import _utc_now
-        root_readback = await jobs.record_readback(job_id, target_path=manifest_path, status="succeeded",
+        root_readback = await jobs.record_readback(job_id, target_path=publication_artifacts["readback.json"]["path"], status="succeeded",
             effect_type="repository_iteration_verified", content_sha256=readback["artifact_digest"],
             readback_id="repository-final:" + identity, verified_at=_utc_now().isoformat(),
             details={"verified": True, "output_exists": True, "no_learning": True,
                 "iteration_id": identity, "original_child_id": binding.invocation_id},
             owner=root_owner, fencing_token=root_fence)
         from src.work_board.repository import _begin_sqlite_immediate
+        from src.workflows.general_task_guard import _cancel_cas_job
+        from src.workflows.repo_repair_stop import _cas_repository_stop_board_row
+        from src.work_board.repository import WorkBoardRepository
+        from src.db.models import WorkBoardTask, WorkBoardAttempt
         async with jobs._session() as db:
             await _begin_sqlite_immediate(db)
             current = await jobs._fetch(db, job_id)
@@ -1727,39 +1796,53 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
                     or closed_child.fencing_token != child_fence or closed_child.lease_owner
                     or current.status != "running" or current.fencing_token != root_fence):
                 raise DurableJobLeaseError("actual original final adoption must precede root closure")
+            original_journal = current.checkpoint_receipts_json
             _append_repository_record(current, "repository:terminal:v1",
                 {"schema": "repository.final_verified.v1", "iteration_id": identity,
                     "original_child_id": binding.invocation_id, "final_witness_digest": _source_digest(final.projection()),
-                    "manifest_artifact_digest": readback["artifact_digest"], "no_learning": True},
+                    "manifest_artifact_digest": readback["artifact_digest"],
+                    "publication_artifacts": publication_artifacts,
+                    "approved_input_patch_digest": execution["patch_sha256"],
+                    "approved_input_patch_artifact_ref": patch["patch_artifact_ref"],
+                    "tested_cumulative_diff_digest": tested_diff_digest, "no_learning": True},
                 inventory=repository_checkpoint_inventory(current, work))
-            current.revision += 1
-            await db.commit()
-        current = await jobs.get_job(job_id)
-        terminal = await jobs.transition_job(job_id, "succeeded", owner=root_owner, fencing_token=root_fence,
-            expected_revision=current["revision"], result={"verified": True, "no_learning": True,
+            await append_repository_release_in_writer(db, jobs, current,
+                original=original, work=work, witness=final, outcome_status="succeeded")
+            updated_journal = current.checkpoint_receipts_json
+            current.checkpoint_receipts_json = original_journal
+            result_payload = {"verified": True, "no_learning": True,
                 "iteration_count": iteration_index, "manifest_artifact_ref": readback["artifact_ref"],
-                "patch_artifact_ref": patch["patch_artifact_ref"], "original_child_id": binding.invocation_id})
-        from src.work_board.repository import WorkBoardRepository
-        from src.work_board.contracts import WorkBoardStatus
-        proof = next(item for item in terminal["effects"]
-            if item.get("readback_id") == "repository-final:" + identity)
-        async with jobs._session() as db:
+                "patch_artifact_ref": patch["patch_artifact_ref"], "original_child_id": binding.invocation_id}
+            await _cancel_cas_job(db, current, {"checkpoint_receipts_json": updated_journal,
+                "status": "succeeded", "finished_at": _utc_now(), "lease_owner": None,
+                "lease_expires_at": None, "result_digest": _source_digest(result_payload),
+                "result_summary": "repository_cumulative_repair_verified"})
             authority = context["authority"]
-            board = await WorkBoardRepository().project_attempt(db, original["repository_task_id"],
-                original["repository_attempt_id"], expected_revision=authority.task.task_revision,
-                board_fence=authority.attempt.fencing_token, lease_owner=authority.attempt.lease_owner,
-                status=WorkBoardStatus.done, outcome="repository_cumulative_repair_verified",
-                result_refs=[{"job_id": job_id, "status": "succeeded", "no_learning": True}],
-                verified_readback={"source": "workflow_run", "status": "succeeded", "verified": True,
-                    "workflow_run_id": job_id, "readback_id": proof["readback_id"],
-                    "content_sha256": proof["content_sha256"], "verified_at": proof["verified_at"]})
+            repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
+            repo_attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
+            if (repo_task is None or repo_attempt is None
+                    or _canonical(repo_task.model_dump(mode="json")) != _canonical(authority.task.model_dump(mode="json"))
+                    or _canonical(repo_attempt.model_dump(mode="json")) != _canonical(authority.attempt.model_dump(mode="json"))):
+                raise DurableJobLeaseError("original repository final board epoch changed")
+            now = _utc_now()
+            await _cas_repository_stop_board_row(db, repo_task, {"status": "done",
+                "task_revision": repo_task.task_revision + 1, "updated_at": now, "completed_at": now,
+                "block_kind": None, "block_reason": None, "block_source_status": None,
+                "result_refs_json": _canonical([{"job_id": job_id, "status": "succeeded", "no_learning": True}])})
+            await _cas_repository_stop_board_row(db, repo_attempt, {
+                "outcome": "repository_cumulative_repair_verified", "ended_at": now,
+                "lease_owner": None, "lease_expires_at": None, "updated_at": now})
+            await WorkBoardRepository._event(db, repo_task, owner, kind="attempt.repository_verified",
+                metadata={"attempt_id": repo_attempt.attempt_id, "workflow_run_id": job_id,
+                    "readback_id": "repository-final:" + identity, "no_learning": True})
             await db.commit()
+        terminal = await jobs.get_job(job_id)
         lane = service._iterative_lanes.pop(job_id, None)
         if lane is None:
             raise DurableJobLeaseError("original physical root capacity owner disappeared")
-        lane.release()
+        lane.clear_quarantine()
         published["repository_root"] = terminal
-        published["repository_task_status"] = board.task.status.value
+        published["repository_task_status"] = "done"
         return published
 
 
@@ -2571,3 +2654,266 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     if liability + (0 if already_reserved else bound_microusd) > witness.original_max_cost_microusd:
         blocked("repository_iteration_original_cost_limit")
     return witness.projection()
+
+
+# Optional publication carries private authority from this same inspected Source
+# owner. Its JSON projection is only preview evidence, never an issuer input.
+import weakref as _publication_weakref
+_PUBLICATION_WITNESSES = _publication_weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _RepositoryPublicationWitness:
+    service: object = field(repr=False)
+    jobs: object = field(repr=False)
+    rows: tuple = field(repr=False)
+    projection_json: str = field(repr=False)
+    original_json: str = field(repr=False)
+    configuration_json: str = field(repr=False)
+
+    def projection(self):
+        return json.loads(self.projection_json)
+
+
+def assert_repository_publication_witness(witness):
+    from src.workflows.repo_repair import RepoRepairService
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if (type(witness) is not _RepositoryPublicationWitness
+            or _PUBLICATION_WITNESSES.get(witness) is not witness.service
+            or type(witness.service) is not RepoRepairService or witness.service.jobs is not witness.jobs):
+        raise DurableJobLeaseError("actual registered repository publication Source witness required")
+
+
+async def repository_publication_source_present(jobs, repair_job_id):
+    from sqlalchemy import select
+    from src.db.models import WorkflowRunState
+    async with jobs._session() as db:
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == repair_job_id))
+        if run is None:
+            return False
+        original = _repository_record(run, "repository:original:v1")
+        if original is None:
+            from src.workflows.general_task_guard import _history
+            from src.workflows.job_runtime import DurableJobLeaseError
+            if any(item["checkpoint_id"].startswith("repository:") for item in _history(run)):
+                raise DurableJobLeaseError("protected repository Source original is missing")
+            return False
+        read_repository_original(run)
+        return True
+
+
+async def stage_repository_publication_witness(service, jobs, *, repair_job_id, owner):
+    from sqlalchemy import select, inspect as inspect_mapper
+    from src.db.models import (WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact, Goal,
+        OperatorSession, RepoRepairProposal, RepoRepairSourcePacket, ApprovalRequest,
+        GitHubFollowthroughConnection, WorkflowRunState)
+    from src.workflows.repo_repair import RepoRepairService
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now, _binding, _assert_canonical_goal_fence
+    from src.workflows.general_task_guard import child_binding, read_manifest
+    from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
+    from src.work_board.input_artifacts import resolve_input_artifact_for_task
+    from src.work_board.contracts import GeneralTaskEnvelope
+    from src.workflows.repo_repair_stop import _accounting
+    from src.work_board.pipelines import root_binding
+    if type(service) is not RepoRepairService or service.jobs is not jobs:
+        raise DurableJobLeaseError("actual original publication Source owner required")
+    _assert_task_publication_configuration(service)
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, repair_job_id)
+        original, work, compiled, group, binding, task_source = read_repository_original(run)
+        terminal = _repository_record(run, "repository:terminal:v1")
+        reservation = jobs._repo_repair_reservation_state(run)
+        if (run.status != "succeeded" or run.lease_owner or run.lease_expires_at
+                or (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id)
+                or terminal is None or terminal.get("schema") != "repository.final_verified.v1"
+                or _repository_record(run, "repository:stop-intent:v1") is not None
+                or reservation is None or reservation.get("status") != "released"):
+            raise DurableJobLeaseError("actual final original repository success required for publication")
+        permanent = _binding(owner_principal_id=binding.owner_principal_id, goal_id=binding.goal_id,
+            goal_revision=binding.goal_revision, idempotency_scope="original-repository-child", dedupe_key=binding.invocation_id)
+        mapped = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.idempotency_binding == permanent))
+        if mapped is None or mapped.run_identity != run.run_identity:
+            raise DurableJobLeaseError("original publication native mapping changed")
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        child = await jobs._fetch(db, binding.invocation_id)
+        c1task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+        c1attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
+        attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
+        artifact = await db.get(WorkBoardInputArtifact, c1task.input_artifact_id) if c1task else None
+        repo_artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id) if task else None
+        goal = await db.get(Goal, binding.goal_id)
+        await _assert_canonical_goal_fence(db, goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+            owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
+        operator = await db.get(OperatorSession, owner.session_id)
+        connection = await db.scalar(select(GitHubFollowthroughConnection).where(
+            GitHubFollowthroughConnection.owner_principal_id == owner.principal_id))
+        identity = terminal["iteration_id"]
+        execution = _repository_record(run, "repository:execution:" + identity)
+        readback = _repository_record(run, "repository:readback:" + identity)
+        prepared = _repository_record(run, "repository:prepared:" + identity)
+        proposal = await db.get(RepoRepairProposal, execution["proposal_id"]) if execution else None
+        approval = await db.get(ApprovalRequest, execution["approval_id"]) if execution else None
+        packet = await db.get(RepoRepairSourcePacket, proposal.source_packet_id) if proposal else None
+        if (any(row is None for row in (c1task, c1attempt, task, attempt, artifact, repo_artifact, goal,
+                operator, proposal, approval, packet, connection))
+                or child.status != "succeeded" or child_binding(child) != binding
+                or child.attempt_count != 1 or child.lease_owner
+                or parent.status != "succeeded" or parent.lease_owner or parent.lease_expires_at
+                or c1task.status.value != "done" or c1attempt.ended_at is None
+                or c1attempt.cancel_requested_at or c1attempt.workflow_run_id != parent.run_identity
+                or read_manifest(parent) is None or read_manifest(parent).phase != "complete"
+                or task.status.value != "done" or attempt.ended_at is None or attempt.cancel_requested_at
+                or goal.revision != binding.goal_revision
+                or (goal.owner_principal_id, goal.owner_session_id) != (owner.principal_id, owner.session_id)
+                or operator.principal_id != owner.principal_id or operator.revoked_at or operator.replaced_by_id
+                or operator.is_bearer_tombstone or _as_utc(operator.absolute_expires_at) <= _utc_now()
+                or _as_utc(operator.idle_expires_at) <= _utc_now()
+                or proposal.workflow_run_id != run.run_identity or proposal.status != "execution_verified"
+                or approval.status != "consumed" or approval.fingerprint != execution["approval_fingerprint"]
+                or proposal.approval_id != approval.id or readback is None or readback.get("status") != "succeeded"):
+            raise DurableJobLeaseError("original publication current Source lineage changed")
+        # Publication consumes retained terminal lineage, never a renewed live
+        # native attempt. Keep the ordinary live-envelope verifier unchanged.
+        resolved = await resolve_input_artifact_for_task(db, owner,
+            artifact_id=c1task.input_artifact_id, goal_id=c1task.goal_id,
+            goal_revision=c1task.goal_revision, capability_id="agent.task.v1",
+            expected_task_id=c1task.task_id)
+        envelope = await _verify_native_manifest_data(parent, c1task, c1attempt,
+            read_manifest(parent), GeneralTaskEnvelope.model_validate(resolved.input))
+        if envelope.repository_source != task_source or envelope.proposal_group != group:
+            raise DurableJobLeaseError("original scoped publication Task changed")
+        await _accounting(db, {"group": group, "run": run, "work": work, "original": original})
+        rows = []
+        for row in (run,parent,child,c1task,c1attempt,task,attempt,artifact,repo_artifact,goal,operator,
+                proposal,approval,packet,connection):
+            keys = tuple(getattr(row,col.key) for col in inspect_mapper(type(row)).primary_key)
+            rows.append((type(row), keys[0] if len(keys)==1 else keys, _canonical(row.model_dump(mode="json"))))
+    if _source_digest(root_binding()) != binding.live_root_digest:
+        raise DurableJobLeaseError("original physical publication Root changed")
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    parent_projection = await jobs.get_job(parent.run_identity)
+    parent_readback = WorkBoardDispatcher._workflow_readback(parent_projection or {}, parent.run_identity)
+    references = json.loads(c1task.result_refs_json or "[]")
+    verified_refs = [item for item in references if isinstance(item, dict)
+        and isinstance(item.get("file_path"), str) and parent_readback is not None
+        and item.get("content_sha256") == parent_readback["content_sha256"]]
+    if parent_readback is None or len(verified_refs) != 1:
+        raise DurableJobLeaseError("actual final C1 publication artifact readback required")
+    service._read_private_artifact("workspace-json:" + verified_refs[0]["file_path"],
+        expected_digest=parent_readback["content_sha256"])
+    source_facts = json.loads(service._read_private_artifact(task_source.source_artifact_ref,
+        expected_digest=task_source.source_artifact_digest))
+    if service.recheck_task_source_snapshot(work, source_facts) != compiled:
+        raise DurableJobLeaseError("original acknowledged publication source changed")
+    artifacts = terminal.get("publication_artifacts")
+    if not isinstance(artifacts,dict) or set(artifacts) != {"manifest.json","readback.json","diff.patch"}:
+        raise DurableJobLeaseError("literal publication artifacts absent")
+    bodies = {}
+    registered = json.loads(run.artifact_receipts_json)
+    for name, item in artifacts.items():
+        if set(item) != {"path","sha256"} or item["path"] != f"artifacts/repo-repair/{repair_job_id}/{name}":
+            raise DurableJobLeaseError("original publication artifact mapping changed")
+        if len([row for row in registered if row.get("file_path")==item["path"] and row.get("content_sha256")==item["sha256"]]) != 1:
+            raise DurableJobLeaseError("original publication artifact registration changed")
+        bodies[name] = service._read_private_artifact("workspace-json:"+item["path"], expected_digest=item["sha256"])
+    if bodies["manifest.json"] != bodies["readback.json"]:
+        raise DurableJobLeaseError("literal publication manifest/readback differ")
+    manifest = json.loads(bodies["manifest.json"])
+    tested = manifest.get("publication_test_input")
+    if (not isinstance(tested,dict) or tested.get("schema")!="seraph.repo-publication.tested-input.v1"
+            or manifest.get("authority_digest")!=proposal.authority_digest
+            or manifest.get("diff_sha256")!=hashlib.sha256(bodies["diff.patch"]).hexdigest()
+            or terminal.get("tested_cumulative_diff_digest") != manifest.get("diff_sha256")
+            or terminal.get("approved_input_patch_digest") != proposal.patch_sha256
+            or manifest.get("patch_sha256") != proposal.patch_sha256
+            or tested.get("patch_sha256") != proposal.patch_sha256
+            or prepared is None or manifest.get("posture_digest") != prepared.get("executor_posture_digest")
+            or str(service.sandbox.config.profile) != "repo-python-pytest-publication-v1"
+            or not isinstance(tested.get("environment"),dict)
+            or tested["environment"].get("available") is not True
+            or tested.get("environment_unchanged") is not True
+            or tested.get("tested_files") != tested.get("output_files")):
+        raise DurableJobLeaseError("actual publication-tested runtime/input required")
+    environment = tested["environment"]
+    approved_bytes = service._read_private_artifact(terminal["approved_input_patch_artifact_ref"],
+        expected_digest=terminal["approved_input_patch_digest"])
+    if hashlib.sha256(approved_bytes).hexdigest() != proposal.patch_sha256:
+        raise DurableJobLeaseError("literal original approved publication input changed")
+    projection = {"repair_job_id":repair_job_id,"repair_task_id":task.task_id,"repair_attempt_id":attempt.attempt_id,
+        "root_authority_digest":run.authority_digest,"iteration_authority_digest":proposal.authority_digest,
+        "source_checkpoint_digest":_source_digest(original),"source_scope_digest":_source_digest(task_source.model_dump(mode="json")),
+        "final_iteration_id":identity,"final_iteration_index":prepared["iteration_index"],
+        "final_proposal_id":proposal.proposal_id,"final_proposal_revision":proposal.revision,
+        "consumed_approval_id":approval.id,"native_invocation_id":child.run_identity,
+        "terminal_certificate_digest":_source_digest(terminal),"publication_artifacts":artifacts,
+        "runtime_proof_digest":_source_digest(environment["runtime_proof"]),
+        "executor_kind": "local", "executor_posture_digest": prepared["executor_posture_digest"],
+        "approved_input_patch_digest": terminal["approved_input_patch_digest"],
+        "approved_input_patch_artifact_ref": terminal["approved_input_patch_artifact_ref"],
+        "tested_cumulative_diff_digest": terminal["tested_cumulative_diff_digest"],
+        "configuration_revision":environment["configuration_revision"]}
+    witness = _RepositoryPublicationWitness(service,jobs,tuple(rows),_canonical(projection),_canonical(original),
+        _canonical(service.sandbox.config.model_dump(mode="json")))
+    _PUBLICATION_WITNESSES[witness]=service
+    return witness
+
+
+async def validate_repository_publication_in_writer(db, witness, *, publication_run=None,
+        preview_digest=None, connection_id=None, connection_revision=None, consent_binding=None):
+    from src.db.models import WorkflowRunState, GitHubFollowthroughConnection, ApprovalRequest
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
+    if publication_run is None or publication_run.job_kind != "engineering.repo-publication.v1":
+        raise DurableJobLeaseError("actual publication writer root required")
+    authority = json.loads(publication_run.declared_authority_json)
+    repair_binding = authority.get("repair_binding")
+    dependencies = json.loads(publication_run.dependencies_json)
+    if (not isinstance(repair_binding,dict) or dependencies != [repair_binding.get("repair_job_id")]):
+        raise DurableJobLeaseError("original publication repair dependency changed")
+    from sqlalchemy import select
+    repair = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==dependencies[0]))
+    if repair is None:
+        raise DurableJobLeaseError("original publication repair missing")
+    original = _repository_record(repair,"repository:original:v1")
+    if witness is None and original is None:
+        from src.workflows.general_task_guard import _history
+        if any(item["checkpoint_id"].startswith("repository:") for item in _history(repair)):
+            raise DurableJobLeaseError("protected repository Source original is missing")
+        if "source_binding" in repair_binding:
+            raise DurableJobLeaseError("Source projection on unscoped repair forbidden")
+        return
+    assert_repository_publication_witness(witness)
+    projection = witness.projection()
+    if (original is None or projection["repair_job_id"]!=repair.run_identity
+            or repair_binding.get("source_binding")!=_source_digest(projection)
+            or (publication_run.owner_principal_id,publication_run.operator_session_id)!=(repair.owner_principal_id,repair.operator_session_id)
+            or _canonical(witness.service.sandbox.config.model_dump(mode="json"))!=witness.configuration_json):
+        raise DurableJobLeaseError("current original publication Source binding changed")
+    for model,key,expected in witness.rows:
+        row=await db.get(model,key,populate_existing=True)
+        if row is None or _canonical(row.model_dump(mode="json"))!=expected:
+            raise DurableJobLeaseError("staged original publication Source row changed")
+    if preview_digest is not None and authority.get("preview_digest")!=preview_digest:
+        raise DurableJobLeaseError("exact publication preview changed")
+    consent = consent_binding if consent_binding is not None else authority.get("github_consent")
+    connection = await db.get(GitHubFollowthroughConnection,connection_id or authority.get("connection_id"))
+    if (not isinstance(consent,dict) or connection is None or connection.mode!="active"
+            or connection.id!=authority.get("connection_id") or connection.revision!=authority.get("connection_revision")
+            or (connection_revision is not None and connection.revision!=connection_revision)
+            or connection.owner_principal_id!=publication_run.owner_principal_id
+            or connection.consent_revoked_at or connection.consent_id!=consent.get("consent_id")
+            or connection.consent_payload_digest!=consent.get("consent_payload_digest")
+            or connection.consent_owner_session_id!=publication_run.operator_session_id
+            or _as_utc(connection.consent_expires_at)<=_utc_now()):
+        raise DurableJobLeaseError("current exact publication connection consent changed")
+    if publication_run.status=="awaiting_approval":
+        approval=await db.get(ApprovalRequest,authority.get("approval_id"))
+        details=json.loads(approval.details_json) if approval is not None else {}
+        if (approval is None or approval.status not in {"pending","approved"}
+                or approval.owner_principal_id!=publication_run.owner_principal_id
+                or approval.operator_session_id!=publication_run.operator_session_id
+                or details.get("preview_digest")!=authority.get("preview_digest")
+                or details.get("durable_job_id")!=publication_run.run_identity
+                or details.get("durable_authority_digest")!=publication_run.authority_digest
+                or _as_utc(approval.expires_at)<=_utc_now()):
+            raise DurableJobLeaseError("current Source publication approval required")

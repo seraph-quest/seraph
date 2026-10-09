@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import weakref
+from types import MappingProxyType
 
 from sqlalchemy import select, update, inspect as inspect_mapper
 
@@ -15,6 +16,15 @@ from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc,
 
 STOP_ID = "repository:stop-intent:v1"
 _ISSUED = weakref.WeakKeyDictionary()
+_STAGED = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
+class _RepositoryStopContext:
+    data: object = field(repr=False)
+
+    def __getitem__(self, key):
+        return self.data[key]
 
 
 def _source():
@@ -46,11 +56,14 @@ def _static(row, context):
 
 async def _context(service, jobs, *, job_id, owner):
     """Cleanup-only metadata first, then current original physical source."""
+    from src.workflows.repo_repair import RepoRepairService
     from src.workflows.general_task_guard import _cancel_original, child_binding
     from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
     from src.work_board.pipelines import root_binding
     from src.workflows.job_runtime import _binding, _assert_canonical_goal_fence
     source = _source()
+    if type(service) is not RepoRepairService or service.jobs is not jobs:
+        raise DurableJobLeaseError("actual current repository stop Source and job owner required")
     async with jobs._session() as db:
         run = await jobs._fetch(db, job_id)
         original, work, compiled, group, binding, task_source = source.read_repository_original(run)
@@ -145,7 +158,9 @@ async def _context(service, jobs, *, job_id, owner):
             expected_digest=task_source.source_artifact_digest))
         if service.recheck_task_source_snapshot(work, source_facts) != compiled:
             raise DurableJobLeaseError("original physical repository stop source changed")
-        return context
+        staged = _RepositoryStopContext(MappingProxyType(context))
+        _STAGED[staged] = service
+        return staged
 
 
 async def _accounting(db, context):
@@ -187,11 +202,14 @@ class _RepositoryStopWitness:
 
 
 def assert_repository_stop_witness(witness):
-    if type(witness) is not _RepositoryStopWitness or _ISSUED.get(witness) is not witness.service:
+    if (type(witness) is not _RepositoryStopWitness or _ISSUED.get(witness) is not witness.service
+            or type(witness.context) is not _RepositoryStopContext or _STAGED.get(witness.context) is not witness.service):
         raise DurableJobLeaseError("actual source-owned repository stop witness required")
 
 
 async def _positive_witness(service, jobs, context, stop):
+    if type(context) is not _RepositoryStopContext or _STAGED.get(context) is not service:
+        raise DurableJobLeaseError("actual source-staged stop context required")
     source = _source()
     models, processes, lineage, identities = [], [], [], []
     run, work, original, binding = (context[key] for key in ("run", "work", "original", "binding"))
@@ -323,10 +341,12 @@ async def complete_repository_stop_in_writer(db, witness, *, jobs):
     source._append_repository_record(run, "repository:terminal:v1",
         {"schema": "repository.stop_terminal.v1", "closure": closure.model_dump(mode="json"),
          "no_learning": True}, inventory=source.repository_checkpoint_inventory(run, context["work"]))
+    terminal = "failed" if closure.stop_reason == "iterations_exhausted" else "cancelled"
+    await source.append_repository_release_in_writer(db, jobs, run,
+        original=context["original"], work=context["work"], witness=witness, outcome_status=terminal)
     updated_journal = run.checkpoint_receipts_json
     # The existing CAS compares the untouched original journal.
     run.checkpoint_receipts_json = original_journal
-    terminal = "failed" if closure.stop_reason == "iterations_exhausted" else "cancelled"
     await _cancel_cas_job(db, run, {"checkpoint_receipts_json": updated_journal, "status": terminal,
         "failure_reason": "repository_" + closure.stop_reason, "finished_at": _utc_now(),
         "lease_owner": None, "lease_expires_at": None,
@@ -429,16 +449,38 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
             source._assert_task_publication_configuration(service)
             context = await _context(service, jobs, job_id=job_id, owner=owner)
             witness = await _positive_witness(service, jobs, context, stop)
+            if job_id not in service._iterative_lanes:
+                # Cleanup recovery reacquires only the actual physical handle
+                # for this existing exact held reservation. It admits no work,
+                # extends no cutoff and creates no new reservation or lease.
+                run = context["run"]
+                held = jobs._repo_repair_reservation_state(run)
+                if (held is None or held.get("status") != "held"
+                        or not jobs._repo_repair_reservation_matches(held, job_id=job_id,
+                            attempt_id=context["original"]["repository_attempt_id"],
+                            fence=run.fencing_token, authority_digest=run.authority_digest)
+                        or held.get("execution_deadline_at") != context["original"]["original_deadline_at"]):
+                    raise DurableJobLeaseError("original stop recovery held reservation changed")
+                from src.workflows.repair_capacity import try_acquire_repo_repair_capacity
+                lane = try_acquire_repo_repair_capacity(service._workspace(), job_id=job_id)
+                if lane is None:
+                    raise DurableJobLeaseError("original stop recovery physical capacity is still owned")
+                lane.bind_owner(job_id=job_id, attempt_id=context["original"]["repository_attempt_id"],
+                    fence_token=run.fencing_token, authority_digest=run.authority_digest)
+                service._iterative_lanes[job_id] = lane
         result = await jobs.cancel_general_task_native_parent(context["binding"].parent_job_id,
             operator_owner=owner, expected_task_revision=context["task"].task_revision,
             repository_stop_witness=witness)
     except DurableJobLeaseError:
+        lane = service._iterative_lanes.get(job_id)
+        if lane is not None:
+            lane.quarantine(job_id)
         return {"pending": True, "projection": BoardAttemptProjection(context["task"], context["attempt"], event),
             "repository_projection": BoardAttemptProjection(context["repo_task"], context["repo_attempt"], repository_event),
             "job_id": job_id, "stop_reason": reason, "no_learning": True}
     lane = service._iterative_lanes.pop(job_id, None)
     if lane is not None:
-        lane.release()
+        lane.clear_quarantine()
     _ISSUED.pop(witness, None)
     from src.db.models import WorkBoardEvent
     async with jobs._session() as db:

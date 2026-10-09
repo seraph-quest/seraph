@@ -235,6 +235,14 @@ def run_python(job: dict[str, Any]) -> int:
     token = job["token"]
     identity = start_identity(os.getpid())
     runtime = job["runtime"]
+    publication_runtime = None
+    if "publication_runtime" in runtime:
+        from src.execution.repo_publication_runtime import capture
+        captured = capture(deadline_at=deadline)
+        if captured["proof"] != runtime["publication_runtime"]:
+            raise ValueError("python_publication_runtime_changed")
+        publication_runtime = {"root": stage / "python-runtime", "captured": captured,
+            "configuration_revision": runtime["publication_configuration_revision"]}
     if (runtime.get("interpreter_entry_path") != str(Path(sys.executable).absolute())
         or runtime.get("interpreter_sha256") != hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()
         or runtime.get("worker_source_sha256") != hashlib.sha256(Path(repo_worker.__file__).read_bytes()).hexdigest()
@@ -279,6 +287,7 @@ def run_python(job: dict[str, Any]) -> int:
         worker_exit = repo_worker.run_supervised_local_job(stage / "input" / "job.json",
             command_runner=command, workspace_root=stage / "workspace", output_root=output,
             pytest_executable=runtime["pytest_executable_path"], environment=job["environment"],
+            **({"publication_runtime": publication_runtime} if publication_runtime is not None else {}),
             deadline_at=deadline, expected_identity={key: runtime[key] for key in (
                 "worker_source_sha256", "interpreter_sha256", "pytest_executable_sha256", "pytest_package_sha256")})
     if CANCELLED and worker_exit is None:

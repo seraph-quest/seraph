@@ -3216,7 +3216,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             return ordinary
         posture = dict(ordinary.posture)
         try:
-            if self.config.executor_kind != "local" or str(self.config.profile) != PROFILE:
+            if self.config.executor_kind != "local" or str(self.config.profile) not in {PROFILE, "repo-python-pytest-publication-v1"}:
                 raise RepoSandboxError("iterative_python_profile_unsupported")
             platform_ready()
             supervisor = Path(__file__).with_name("repo_supervisor.py")

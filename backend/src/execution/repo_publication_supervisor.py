@@ -307,7 +307,10 @@ def main(path, control_fd, guard_fd):
     from src.execution.repo_sandbox import _open_trusted_directory
     enable_subreaper()
     directory = _open_trusted_directory(path.parent)
-    control = socket.socket(fileno=control_fd)
+    control = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET, fileno=control_fd)
+    if (control.getsockopt(socket.SOL_SOCKET, socket.SO_DOMAIN) != socket.AF_UNIX
+            or control.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET):
+        raise ValueError("publication_supervisor_control_socket_invalid")
     raw = _read(directory, path.name, MAX_REQUEST)
     admission = json.loads(raw)
     runtime = identity()

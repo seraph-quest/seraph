@@ -213,7 +213,7 @@ async def _vault_rows_digest(db) -> str:
     return m5_digest([row.model_dump(mode="json") for row in rows])
 
 
-async def prepare_m5_text(db, value: str) -> PreparedM5Text:
+async def prepare_m5_text(db, value: str, *, header_budget=None) -> PreparedM5Text:
     """Read/decrypt before the native writer; retain no decrypted secret set."""
     if db.info.get("native_writer_started"):
         raise RuntimeError("Vault staging must precede the native writer")
@@ -221,7 +221,8 @@ async def prepare_m5_text(db, value: str) -> PreparedM5Text:
         raise ValueError("M5 memory text must be a string")
     original_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     before = await _vault_rows_digest(db)
-    redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True)
+    redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True,
+        **({"header_budget": header_budget} if header_budget is not None else {}))
     if redacted == "[redaction unavailable]":
         raise ValueError("memory proposal redaction is unavailable")
     text = sanitize_m5_memory_text(redacted)
@@ -1697,6 +1698,51 @@ async def _reverify_blocked_proposal(
     return recovered
 
 
+def _prepare_memory_action_audit(
+    *, owner_principal_id: str, owner_session_id: str, proposal: MemoryProposal,
+    action: str, _proposal_changes: dict | None = None,
+) -> AuditEvent:
+    """Prepare the original complete audit row without Session creation or writes."""
+    def value(name):
+        return (_proposal_changes[name] if _proposal_changes is not None and name in _proposal_changes
+            else getattr(proposal, name))
+    memory_id = value("accepted_memory_id")
+    event_type = {
+        "accept": "memory_corrected" if value("corrects_memory_id") else "memory_learning_accepted",
+        "edit_accept": "memory_corrected" if value("corrects_memory_id") else "memory_learning_accepted",
+        "reject": "memory_learning_rejected",
+        "expire": "memory_learning_expired",
+        "rollback": "memory_learning_rolled_back",
+        "recover": "memory_learning_source_reverified",
+    }[action]
+    event = AuditEvent(
+        session_id=owner_session_id,
+        actor=owner_principal_id,
+        event_type=event_type,
+        tool_name="memory_control",
+        risk_level="low",
+        policy_mode="operator_controlled",
+        summary="Operator reviewed verified work-board memory",
+        details_json=m5_canonical_json(
+            {
+                "proposal_id": value("proposal_id"),
+                "source_task_id": value("source_task_id"),
+                "source_attempt_id": value("source_attempt_id"),
+                "accepted_memory_id": memory_id,
+                "corrects_memory_id": value("corrects_memory_id"),
+                "recovered_from_proposal_id": value("recovered_from_proposal_id"),
+                "action": action,
+                **(
+                    {"rollback_reason": value("rollback_reason")}
+                    if action == "rollback"
+                    else {}
+                ),
+            }
+        ),
+    )
+    return event
+
+
 async def _write_memory_action_audit(
     db: AsyncSession,
     *,
@@ -1714,40 +1760,8 @@ async def _write_memory_action_audit(
         await db.flush()
     elif session.owner_principal_id not in {None, owner_principal_id}:
         raise PermissionError("session_owner_mismatch")
-    memory_id = proposal.accepted_memory_id
-    event_type = {
-        "accept": "memory_corrected" if proposal.corrects_memory_id else "memory_learning_accepted",
-        "edit_accept": "memory_corrected" if proposal.corrects_memory_id else "memory_learning_accepted",
-        "reject": "memory_learning_rejected",
-        "expire": "memory_learning_expired",
-        "rollback": "memory_learning_rolled_back",
-        "recover": "memory_learning_source_reverified",
-    }[action]
-    event = AuditEvent(
-        session_id=owner_session_id,
-        actor=owner_principal_id,
-        event_type=event_type,
-        tool_name="memory_control",
-        risk_level="low",
-        policy_mode="operator_controlled",
-        summary="Operator reviewed verified work-board memory",
-        details_json=m5_canonical_json(
-            {
-                "proposal_id": proposal.proposal_id,
-                "source_task_id": proposal.source_task_id,
-                "source_attempt_id": proposal.source_attempt_id,
-                "accepted_memory_id": memory_id,
-                "corrects_memory_id": proposal.corrects_memory_id,
-                "recovered_from_proposal_id": proposal.recovered_from_proposal_id,
-                "action": action,
-                **(
-                    {"rollback_reason": proposal.rollback_reason}
-                    if action == "rollback"
-                    else {}
-                ),
-            }
-        ),
-    )
+    event = _prepare_memory_action_audit(owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id, proposal=proposal, action=action)
     db.add(event)
     await db.flush()
     return event
@@ -1767,6 +1781,16 @@ def _m5_receipt_integrity_mac_or_none(receipt: WorkBoardDecisionReceipt, *, _sig
         return None
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedM5Baseline:
+    db: object
+    transaction: object
+    receipt: WorkBoardDecisionReceipt
+    before: tuple
+    changes: tuple
+    new_row: bool
+
+
 async def _write_source_baseline(
     db: AsyncSession,
     proof: M5SourceProof,
@@ -1775,6 +1799,19 @@ async def _write_source_baseline(
     allow_reseal: bool = False,
     _signing_key: bytes | None = None,
 ) -> WorkBoardDecisionReceipt:
+    prepared = await _prepare_source_baseline(db, proof, proposal,
+        allow_reseal=allow_reseal, _signing_key=_signing_key)
+    return await _apply_prepared_source_baseline(db, prepared)
+
+
+async def _prepare_source_baseline(
+    db: AsyncSession,
+    proof: M5SourceProof,
+    proposal: MemoryProposal,
+    *,
+    allow_reseal: bool = False,
+    _signing_key: bytes | None = None,
+) -> _PreparedM5Baseline:
     action_id = f"dispatch:{proof.task.capability_id}"
     before = m5_digest(
         _receipt_input_value(
@@ -1814,6 +1851,8 @@ async def _write_source_baseline(
         )
     ).scalars().one_or_none()
     if existing is not None:
+        before_fields = tuple((name, getattr(existing, name)) for name in WorkBoardDecisionReceipt.__table__.columns.keys())
+        changes = {}
         expected_fields = {
             "receipt_stage": WorkBoardDecisionReceiptStage.source_baseline,
             "owner_principal_id": proof.task.owner_principal_id,
@@ -1852,16 +1891,14 @@ async def _write_source_baseline(
         }
         if allow_reseal:
             for field_name, expected in expected_fields.items():
-                setattr(existing, field_name, expected)
-            existing.receipt_binding_digest = binding
-            existing.revision = max(1, int(existing.revision or 0)) + 1
-            existing.updated_at = _now()
-            existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing, _signing_key=_signing_key)
-            if existing.receipt_integrity_mac is None:
+                changes[field_name] = expected
+            changes["receipt_binding_digest"] = binding
+            changes["revision"] = max(1, int(existing.revision or 0)) + 1
+            changes["updated_at"] = _now()
+            changes["receipt_integrity_mac"] = _m5_receipt_integrity_mac_or_none(dict(before_fields) | changes, _signing_key=_signing_key)
+            if changes["receipt_integrity_mac"] is None:
                 raise CapabilityJournalError("source baseline signing unavailable")
-            db.add(existing)
-            await db.flush()
-            return existing
+            return _PreparedM5Baseline(db, db.sync_session.get_transaction(), existing, before_fields, tuple(changes.items()), False)
         allowed_unavailable_state = (
             existing.decision_status is WorkBoardDecisionStatus.blocked
             and existing.admission_status is WorkBoardDecisionAdmissionStatus.blocked
@@ -1882,18 +1919,16 @@ async def _write_source_baseline(
         binding_matches = _m5_receipt_binding_matches(existing, proposal)
         if not binding_matches or mismatched_fields:
             raise ValueError("source_baseline_binding_mismatch")
-        existing.candidate_set_digest = expected_candidate_set_digest
-        existing.decision_status = WorkBoardDecisionStatus.no_change
-        existing.admission_status = WorkBoardDecisionAdmissionStatus.not_required
-        existing.revision += 1
-        existing.updated_at = _now()
-        existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing, _signing_key=_signing_key)
-        if existing.receipt_integrity_mac is None:
-            existing.decision_status = WorkBoardDecisionStatus.blocked
-            existing.admission_status = WorkBoardDecisionAdmissionStatus.blocked
-        db.add(existing)
-        await db.flush()
-        return existing
+        changes["candidate_set_digest"] = expected_candidate_set_digest
+        changes["decision_status"] = WorkBoardDecisionStatus.no_change
+        changes["admission_status"] = WorkBoardDecisionAdmissionStatus.not_required
+        changes["revision"] = existing.revision + 1
+        changes["updated_at"] = _now()
+        changes["receipt_integrity_mac"] = _m5_receipt_integrity_mac_or_none(dict(before_fields) | changes, _signing_key=_signing_key)
+        if changes["receipt_integrity_mac"] is None:
+            changes["decision_status"] = WorkBoardDecisionStatus.blocked
+            changes["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
+        return _PreparedM5Baseline(db, db.sync_session.get_transaction(), existing, before_fields, tuple(changes.items()), False)
     receipt = WorkBoardDecisionReceipt(
         receipt_stage=WorkBoardDecisionReceiptStage.source_baseline,
         receipt_binding_digest=binding,
@@ -1933,9 +1968,21 @@ async def _write_source_baseline(
     if receipt.receipt_integrity_mac is None:
         receipt.decision_status = WorkBoardDecisionStatus.blocked
         receipt.admission_status = WorkBoardDecisionAdmissionStatus.blocked
-    db.add(receipt)
+    return _PreparedM5Baseline(db, db.sync_session.get_transaction(), receipt, (), (), True)
+
+
+async def _apply_prepared_source_baseline(db, prepared) -> WorkBoardDecisionReceipt:
+    from sqlalchemy import inspect
+    if (type(prepared) is not _PreparedM5Baseline or prepared.db is not db
+        or prepared.transaction is not db.sync_session.get_transaction()
+        or (prepared.new_row and not inspect(prepared.receipt).transient)
+        or any(getattr(prepared.receipt, name) != value for name, value in prepared.before)):
+        raise ValueError("prepared_source_baseline_changed")
+    for name, value in prepared.changes:
+        setattr(prepared.receipt, name, value)
+    db.add(prepared.receipt)
     await db.flush()
-    return receipt
+    return prepared.receipt
 
 
 async def _write_source_failure_proposal(
@@ -2507,6 +2554,16 @@ async def list_work_board_decision_receipts(
         ]
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedCanonicalAccept:
+    db: object
+    transaction: object
+    proposal: MemoryProposal
+    proposal_before: tuple
+    proposal_changes: tuple
+    memory_plan: object
+
+
 async def _canonical_accept(
     db: AsyncSession,
     proposal: MemoryProposal,
@@ -2519,8 +2576,31 @@ async def _canonical_accept(
     preferred_capability_id: str | None,
     prepared_text=None,
 ) -> None:
+    prepared = await _prepare_canonical_accept(db, proposal,
+        actor_principal_id=actor_principal_id, actor_session_id=actor_session_id,
+        edited_text=edited_text, decision_effect=decision_effect,
+        corrects_memory_id=corrects_memory_id, preferred_capability_id=preferred_capability_id,
+        prepared_text=prepared_text)
+    await _apply_prepared_canonical_accept(db, prepared)
+
+
+async def _prepare_canonical_accept(
+    db: AsyncSession,
+    proposal: MemoryProposal,
+    *,
+    actor_principal_id: str,
+    actor_session_id: str,
+    edited_text: str | None,
+    decision_effect: MemoryProposalDecisionEffect,
+    corrects_memory_id: str | None,
+    preferred_capability_id: str | None,
+    prepared_text=None,
+) -> _PreparedCanonicalAccept:
     if proposal.status is not MemoryProposalStatus.proposed:
         raise ValueError("proposal_not_accepting")
+    proposal_before = tuple((name, getattr(proposal, name)) for name in MemoryProposal.__table__.columns.keys())
+    proposal_changes = {}
+    selected_correction_id = proposal.corrects_memory_id
     original_text = edited_text if edited_text is not None else proposal.preview_text or ""
     text = (await _consume_prepared_m5_text(db, original_text, prepared_text)
         if prepared_text is not None else await sanitize_m5_memory_text_async(original_text))
@@ -2537,7 +2617,7 @@ async def _canonical_accept(
         scope["preferred_capability_id"] = preferred_capability_id
         scope["preferred_capability_version"] = version
         scope["candidate_capability_ids"] = [preferred_capability_id]
-        proposal.memory_scope_json = m5_canonical_json(scope)
+        proposal_changes["memory_scope_json"] = m5_canonical_json(scope)
     provenance = _decode_object(proposal.provenance_json)
     correction_target = None
     correction_target_content_digest = None
@@ -2558,7 +2638,8 @@ async def _canonical_accept(
         if _canonical_memory_deletion_marker(correction_target) is not None:
             raise ValueError("correction_target_deleted")
         correction_target_content_digest = m5_text_digest(correction_target.content)
-        proposal.corrects_memory_id = correction_target.id
+        selected_correction_id = correction_target.id
+        proposal_changes["corrects_memory_id"] = selected_correction_id
         provenance.update(
             {
                 "corrects_memory_id": correction_target.id,
@@ -2608,13 +2689,13 @@ async def _canonical_accept(
         source_binding=source_binding,
         decision_effect=decision_effect,
         memory_scope=scope,
-        corrects_memory_id=proposal.corrects_memory_id,
+        corrects_memory_id=selected_correction_id,
         corrected_memory_previous_status=provenance.get("corrected_memory_previous_status"),
         corrected_memory_content_digest=correction_target_content_digest,
         recovered_from_proposal_id=proposal.recovered_from_proposal_id,
     )
     metadata_json = m5_canonical_json({"work_board_provenance": provenance})
-    memory = await memory_repository.create_m5_memory_in_session(
+    memory_plan = await memory_repository._prepare_m5_memory_in_session(
         db,
         content=text,
         kind=kind,
@@ -2622,23 +2703,36 @@ async def _canonical_accept(
         scope_key=scope_key,
         metadata_json=metadata_json,
         confidence=float(proposal.confidence or 0.5),
-        corrects_memory_id=proposal.corrects_memory_id,
+        corrects_memory_id=selected_correction_id,
         proposal_id=proposal.proposal_id,
     )
-    proposal.accepted_memory_id = memory.id
-    proposal.accepted_memory_content_digest = m5_text_digest(memory.content)
-    proposal.preview_text = text
-    proposal.preview_text_digest = m5_text_digest(text)
-    proposal.decision_effect = decision_effect
-    proposal.accepted_by_principal_id = actor_principal_id
-    proposal.accepted_by_session_id = actor_session_id
-    proposal.accepted_at = _now()
-    proposal.status = MemoryProposalStatus.accepted
-    proposal.recovery_action = "none"
-    proposal.reason_code = "accepted"
-    proposal.revision += 1
-    proposal.updated_at = _now()
-    db.add(proposal)
+    memory = memory_plan.memory
+    proposal_changes["accepted_memory_id"] = memory.id
+    proposal_changes["accepted_memory_content_digest"] = m5_text_digest(memory.content)
+    proposal_changes["preview_text"] = text
+    proposal_changes["preview_text_digest"] = m5_text_digest(text)
+    proposal_changes["decision_effect"] = decision_effect
+    proposal_changes["accepted_by_principal_id"] = actor_principal_id
+    proposal_changes["accepted_by_session_id"] = actor_session_id
+    proposal_changes["accepted_at"] = _now()
+    proposal_changes["status"] = MemoryProposalStatus.accepted
+    proposal_changes["recovery_action"] = "none"
+    proposal_changes["reason_code"] = "accepted"
+    proposal_changes["revision"] = proposal.revision + 1
+    proposal_changes["updated_at"] = _now()
+    return _PreparedCanonicalAccept(db, db.sync_session.get_transaction(), proposal,
+        proposal_before, tuple(proposal_changes.items()), memory_plan)
+
+
+async def _apply_prepared_canonical_accept(db, prepared) -> None:
+    if (type(prepared) is not _PreparedCanonicalAccept or prepared.db is not db
+        or prepared.transaction is not db.sync_session.get_transaction()
+        or any(getattr(prepared.proposal, name) != value for name, value in prepared.proposal_before)):
+        raise ValueError("prepared_canonical_accept_changed")
+    await memory_repository._apply_prepared_m5_memory_in_session(db, prepared.memory_plan)
+    for name, value in prepared.proposal_changes:
+        setattr(prepared.proposal, name, value)
+    db.add(prepared.proposal)
 
 
 async def apply_memory_proposal_action(

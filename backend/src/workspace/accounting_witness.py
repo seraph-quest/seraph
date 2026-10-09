@@ -350,13 +350,15 @@ def _native_memory_transient_sql_row(instance):
     from sqlalchemy import Boolean, DateTime, Enum, Float, Integer, String, inspect
     from sqlalchemy.dialects.sqlite import dialect
     from sqlmodel.sql.sqltypes import AutoString
-    from src.db.models import AuditEvent
-    from src.memory.header_bounds import HeaderBoundsError, MEMORY_DESCRIPTORS, _MEMORY_MODELS, AUDIT_EVENT
+    from src.db.models import AuditEvent, WorkflowRunState
+    from src.memory.header_bounds import HeaderBoundsError, MEMORY_DESCRIPTORS, _MEMORY_MODELS, AUDIT_EVENT, WRS_BY_RUN
     table = getattr(type(instance), "__tablename__", None)
-    model = AuditEvent if table == "audit_events" else _MEMORY_MODELS.get(table)
+    model = {"audit_events": AuditEvent, "workflow_run_states": WorkflowRunState}.get(table, _MEMORY_MODELS.get(table))
     if model is None or type(instance) is not model or not inspect(instance).transient:
         raise HeaderBoundsError("memory_transient_row_unavailable")
-    descriptor = AUDIT_EVENT if table == "audit_events" else MEMORY_DESCRIPTORS[table]
+    descriptor = {"audit_events": AUDIT_EVENT, "workflow_run_states": WRS_BY_RUN}.get(table)
+    if descriptor is None:
+        descriptor = MEMORY_DESCRIPTORS[table]
     selected_dialect = dialect()
     row = {}
     allowed_types = {String, Integer, Boolean, Float, DateTime, Enum, AutoString}
@@ -379,6 +381,34 @@ def _native_memory_transient_sql_row(instance):
             raise HeaderBoundsError("memory_transient_bind_value_invalid")
         row[name] = value
     return row
+
+
+async def reserve_native_memory_admission_run(db,run,admission):
+    """Resource-only reservation immediately before the original WRS write.
+
+    The actual admission owner remains responsible for authority/current rows.
+    Future M5 constructors/results are separately reserved before their effect.
+    No opaque receipt, callback, JSON or byte certificate grants admission here.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget, WRS_BY_RUN, _connection_state
+    from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission, candidate_context
+    from sqlalchemy import inspect
+    from src.db.models import WorkflowRunState
+    if (type(admission) is not NativeMemoryMutationAdmission or type(run) is not WorkflowRunState
+            or not inspect(run).transient or type(admission.header_budget) is not HeaderReadBudget):
+        raise HeaderBoundsError("memory_admission_reserve_unavailable")
+    await _connection_state(db)
+    expected=candidate_context(admission)
+    if run.checkpoint_context_json!=expected or run.input_digest!=admission.candidate_digest:
+        raise HeaderBoundsError("memory_admission_reserve_changed")
+    row=_native_memory_transient_sql_row(run)
+    # Exact currently produced row/container, including candidate and its known
+    # result=None wrapper, with the original complete SQLite scalar encoding.
+    encoded=json.dumps(["native-composition-memory.v1",WRS_BY_RUN.table,run.run_identity,
+        [[name,row[name].hex() if type(row[name]) is float else row[name]] for name in WRS_BY_RUN.columns]],
+        ensure_ascii=True,sort_keys=True,separators=(",",":"),allow_nan=False).encode("utf-8")
+    admission.header_budget.reserve_future_row(WRS_BY_RUN,run.run_identity,len(encoded))
+    return len(encoded)
 
 
 async def _preflight_native_memory_journal_headers(db, *, existing_references=(),
@@ -487,12 +517,31 @@ def validate_retained_table_schema(connection, table, *, error="composition_proj
         raise ProductionWorkspaceReconciliationError(error)
 
 
+def _composition_address(table, key):
+    if table == "work_board_events":
+        if type(key) is int and -(2**63) <= key < 2**63:
+            return str(key)
+        if type(key) is str:
+            try:
+                value = int(key)
+            except ValueError:
+                pass
+            else:
+                if -(2**63) <= value < 2**63 and str(value) == key:
+                    return key
+        raise ProductionWorkspaceReconciliationError("composition_reference_invalid")
+    return key
+
+
 def _composition_row(connection, table, key):
+    key = _composition_address(table, key)
     if table not in RETAINED_FIELDS or type(key) is not str or len(key.encode()) > 512:
         raise ProductionWorkspaceReconciliationError("composition_reference_invalid")
+    from src.memory.composition_headers import charge_row
+    charge_row(connection, table, key)
     columns = RETAINED_FIELDS[table]
     names = ",".join('"' + field + '"' for field in columns)
-    result = _sql(connection, f'SELECT {names} FROM "{table}" WHERE "{COMPOSITION_KEYS[table]}"=?', (key,)).fetchall()
+    result = _sql(connection, f'SELECT {names} FROM "{table}" WHERE "{COMPOSITION_KEYS[table]}"=?', ((int(key) if table == "work_board_events" else key),)).fetchall()
     if len(result) != 1:
         raise ProductionWorkspaceReconciliationError("composition_canonical_row_missing")
     if table == "sessions":
@@ -590,6 +639,8 @@ def composition_closure(connection, *, verify_files=None):
     tables = {row[0] for row in _sql(connection, "SELECT name FROM sqlite_master WHERE type='table'")}
     if "runtime_composition_states" not in tables:
         return None, set()
+    from src.memory.composition_headers import charge_table
+    charge_table(connection, "runtime_composition_states")
     inventory = list(_sql(connection, "SELECT runtime_domain,owner_kind,epoch,composition_digest,state,recovery_receipt_ref FROM runtime_composition_states ORDER BY runtime_domain"))
     if not inventory:
         return None, set()
@@ -612,9 +663,11 @@ def composition_closure(connection, *, verify_files=None):
             raise ProductionWorkspaceReconciliationError("composition_projection_schema_changed")
         validate_retained_table_schema(connection, table)
     pending = [("runtime_composition_states", row[0]) for row in inventory]
+    charge_table(connection, "workflow_run_states")
     pending.extend(("workflow_run_states", row[0]) for row in _sql(connection,
         "SELECT run_identity FROM workflow_run_states WHERE composition_binding_json IS NOT NULL"))
     if "inference_cost_reservations" in tables:
+        charge_table(connection, "inference_cost_reservations")
         pending.extend(("workflow_run_states", row[0]) for row in _sql(connection,
             "SELECT DISTINCT job_id FROM inference_cost_reservations"))
     visited = set()
@@ -625,10 +678,10 @@ def composition_closure(connection, *, verify_files=None):
     def add(table, field, value):
         if value is not None:
             for row in _sql(connection, f'SELECT "{COMPOSITION_KEYS[table]}" FROM "{table}" WHERE "{field}"=?', (value,)):
-                pending.append((table, row[0]))
+                pending.append((table, _composition_address(table, row[0])))
     def required(table, value):
         if value is not None:
-            pending.append((table, value))
+            pending.append((table, _composition_address(table, value)))
     def session_role(role, source_table, source_key, session_id):
         if session_id is not None:
             roles.add((role, source_table, source_key, "sessions", session_id))
@@ -743,6 +796,7 @@ def composition_closure(connection, *, verify_files=None):
                         owner_run = _composition_row(connection, "workflow_run_states", operation["job_id"])
                         if "inference_cost_reservations" not in tables:
                             raise ProductionWorkspaceReconciliationError("composition_turn_family_owner_missing")
+                        charge_table(connection, "inference_cost_reservations")
                         result = _sql(connection, 'SELECT * FROM inference_cost_reservations WHERE operation_id=?', (operation["operation_id"],))
                         columns = list(result.keys()) if hasattr(result, "keys") else [item[0] for item in result.description]
                         matches = result.fetchall()
@@ -814,6 +868,7 @@ def composition_closure(connection, *, verify_files=None):
                 marker_family = checked_turn_family(marker_turn)
                 if marker_family is None or marker_family["original_claim_digest"] != marker_payload["turn_claim_digest"]:
                     raise ProductionWorkspaceReconciliationError("composition_inference_candidate_claim_changed")
+                charge_table(connection, "inference_cost_reservations")
                 result = _sql(connection, 'SELECT * FROM inference_cost_reservations WHERE operation_id=?', (marker_payload["operation_id"],))
                 columns = list(result.keys()) if hasattr(result, "keys") else [item[0] for item in result.description]
                 matches = result.fetchall()
@@ -944,17 +999,19 @@ def validate_composition_progression(previous, incoming):
             raise ProductionWorkspaceReconciliationError("composition_high_water_conflict")
 
 
-def native_composition_files(table, row, *, root=None):
+def native_composition_files(table, row, *, root=None, header_budget=None):
     """Positive bytes through the existing fixed private artifact reader."""
     from types import SimpleNamespace
     from config.settings import settings
+    from src.memory.composition_headers import current_budget
+    header_budget = header_budget if header_budget is not None else current_budget()
     from src.workspace import canonical_workspace_root
     from src.work_board.input_artifacts import _payload_path, _safe_file_bytes
     if table == "work_board_input_artifacts":
         path = _payload_path(SimpleNamespace(**row))
         if root is not None:
             path = Path(root) / row["typed_input_ref"][len("workspace-json:"):]
-        _safe_file_bytes(path, expected_digest=row["payload_sha256"], expected_size=row["size_bytes"])
+        _safe_file_bytes(path, expected_digest=row["payload_sha256"], expected_size=row["size_bytes"], header_budget=header_budget)
         yield row["typed_input_ref"], row["payload_sha256"], row["size_bytes"], "private_input"
         return
     if table != "workflow_run_states":
@@ -964,7 +1021,7 @@ def native_composition_files(table, row, *, root=None):
     if outputs is not None and outputs[-1]["checkpoint_id"] == OUTPUT_ID:
         payload = outputs[-1]["payload"]
         workspace = Path(root) if root is not None else canonical_workspace_root(settings.workspace_dir)
-        verify_output_envelope(read_output_bytes(workspace, payload), payload)
+        verify_output_envelope(read_output_bytes(workspace, payload, header_budget=header_budget), payload)
         yield payload["file_ref"], payload["content_sha256"], payload["size_bytes"], "private_inference_output"
     refs = json.loads(row["artifact_receipts_json"])
     for checkpoint in json.loads(row["checkpoint_receipts_json"]):
@@ -986,7 +1043,7 @@ def native_composition_files(table, row, *, root=None):
             or type(digest) is not str or len(digest) != 64 or type(size) is not int or not 0 <= size <= 1024 * 1024):
             raise ProductionWorkspaceReconciliationError("composition_artifact_extension_unsupported")
         _safe_file_bytes((Path(root) if root is not None else canonical_workspace_root(settings.workspace_dir)) / reference,
-                         expected_digest=digest, expected_size=size)
+                         expected_digest=digest, expected_size=size, header_budget=header_budget)
         yield reference, digest, size, "private_artifact"
 
 
@@ -1071,9 +1128,11 @@ class CompositionSessionGuard:
     Native owners opt into their complete atomic writer. Unmarked writes to
     retained leaves (including bulk SQL) fail before mutation/publication.
     """
-    def __init__(self, db, workspace, lock, witness_value, members):
+    def __init__(self, db, workspace, lock, witness_value, members, header_budget=None):
         self.db, self.workspace, self.lock = db, workspace, lock
         self.base, self.members = witness_value, members
+        self.header_budget = header_budget
+        self._pending_events = []
         self.touched = {}
         self.token = _HELD_COMPOSITION_WORKSPACE.set(workspace)
         self.listeners = []
@@ -1116,6 +1175,7 @@ class CompositionSessionGuard:
         return True
 
     def _touch(self, connection, table, key, *, creating=False):
+        key = _composition_address(table, key)
         if (table, key) in self.touched:
             return
         if len(self.touched) >= 128:
@@ -1248,6 +1308,7 @@ class CompositionSessionGuard:
             records = state.session.execute(lookup).scalars()
             connection = state.session.connection()
             for identity in records:
+                identity = _composition_address(name, identity)
                 if name == "sessions" and identity in self._legacy_continuity_metadata:
                     raise ProductionWorkspaceReconciliationError("composition_unhooked_bulk_sql")
                 if name == "workflow_run_states":
@@ -1289,6 +1350,10 @@ class CompositionSessionGuard:
                 if table not in RETAINED_FIELDS:
                     continue
                 key = getattr(value, COMPOSITION_KEYS[table])
+                if table == "work_board_events" and value in session.new and key is None:
+                    self._pending_events.append(value)
+                else:
+                    key = _composition_address(table, key)
                 related = (table, key) in self.members or table == "runtime_composition_states"
                 if table == "workflow_run_states":
                     if value not in session.new:
@@ -1332,7 +1397,8 @@ class CompositionSessionGuard:
                             encode_turn_float(value.confidence)
                             if value.subject_entity_id is not None or value.project_entity_id is not None:
                                 raise ProductionWorkspaceReconciliationError("composition_turn_episode_extension_unsupported")
-                        self._touch(connection, table, key, creating=value in session.new)
+                        if not (table == "work_board_events" and value in session.new and key is None):
+                            self._touch(connection, table, key, creating=value in session.new)
                     except ProductionWorkspaceReconciliationError as exc:
                         self.db.info["composition_sticky_failure"] = exc
                         raise
@@ -1348,7 +1414,11 @@ class CompositionSessionGuard:
             session.flush()
             if self.touched or session.info.get("composition_accounting_payload"):
                 raise ProductionWorkspaceReconciliationError("composition_unpublished_internal_commit")
-        for name, callback in (("do_orm_execute", before_execute), ("before_flush", before_flush),
+        def after_flush_postexec(session, context):
+            pending, self._pending_events = self._pending_events, []
+            for event in pending:
+                self._touch(session.connection(), "work_board_events", event.event_id, creating=True)
+        for name, callback in (("after_flush_postexec", after_flush_postexec), ("do_orm_execute", before_execute), ("before_flush", before_flush),
                                ("after_begin", connection_started), ("before_commit", before_commit)):
             guarded = poison(callback)
             event.listen(self.db.sync_session, name, guarded)
@@ -1362,7 +1432,14 @@ class CompositionSessionGuard:
         if self.db.info.get("composition_sticky_failure") is not None:
             raise self.db.info["composition_sticky_failure"]
         connection = await self.db.connection()
-        target, members = await connection.run_sync(lambda conn: composition_closure(conn, verify_files=native_composition_files))
+        def checked_snapshot(conn):
+            if self.header_budget is None:
+                return composition_closure(conn, verify_files=native_composition_files)
+            from src.memory.composition_headers import preflight_composition_superset, snapshot_reads
+            certificate = preflight_composition_superset(conn, self.header_budget)
+            with snapshot_reads(certificate):
+                return composition_closure(conn, verify_files=native_composition_files)
+        target, members = await connection.run_sync(checked_snapshot)
         changed_members = members.symmetric_difference(self.members)
         if changed_members and self.db.info.get("composition_writer_owner") not in {
                 "durable_jobs", "native_ingress", "composition_maintenance", "finite_service"}:
@@ -1389,8 +1466,14 @@ class CompositionSessionGuard:
             from src.db.models import InferenceAccountingOwner, InferenceCostReservation
             from src.workflows.inference_accounting import _witness, _ledger_digest
             from src.workspace.production import read_accounting_checkpoint
-            prior = read_accounting_checkpoint(self.workspace)
-            lifecycle = read_lifecycle_receipt(self.workspace) or {}
+            prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
+            lifecycle = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {}
+            if self.header_budget is not None:
+                from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
+                from src.memory.composition_headers import locate_exact_rows
+                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment", self.header_budget)
+                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids)
+                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"])
             account = await self.db.get(InferenceAccountingOwner, "deployment")
             rows = list((await self.db.execute(select(InferenceCostReservation))).scalars())
             if account is None:
@@ -1414,7 +1497,7 @@ class CompositionSessionGuard:
             raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
         checkpoint = {**accounting, "schema_version": 2, "composition_base": self.base,
             "composition_target": target, "composition_delta": delta, "secret_values_included": False}
-        receipt = read_lifecycle_receipt(self.workspace) or {"secret_values_included": False}
+        receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {"secret_values_included": False}
         receipt["runtime_composition"] = target
         if accounting.get("witness") is not None:
             receipt["inference_accounting"] = accounting["witness"]
@@ -1437,7 +1520,7 @@ class CompositionSessionGuard:
         self.lock.__exit__(None, None, None)
 
 
-async def prepare_composition_session(db, *, fresh=False):
+async def prepare_composition_session(db, *, fresh=False, header_budget=None):
     """Acquire external ownership BEFORE any native SQL writer starts."""
     from sqlalchemy import text
     from config.settings import settings
@@ -1448,24 +1531,33 @@ async def prepare_composition_session(db, *, fresh=False):
     await db.rollback()
     if not populated and not fresh:
         return None
-    lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve())
+    lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve(), header_budget=header_budget)
     workspace = lock.__enter__()
     try:
         connection = await db.connection()
-        base, members = await connection.run_sync(lambda conn: composition_closure(conn, verify_files=native_composition_files))
-        receipt = read_lifecycle_receipt(workspace) or {}
+        def checked_snapshot(conn):
+            if header_budget is None:
+                return composition_closure(conn, verify_files=native_composition_files)
+            from src.memory.composition_headers import preflight_composition_superset, snapshot_reads
+            if not conn.connection.driver_connection.in_transaction:
+                conn.exec_driver_sql("BEGIN")
+            certificate = preflight_composition_superset(conn, header_budget)
+            with snapshot_reads(certificate):
+                return composition_closure(conn, verify_files=native_composition_files)
+        base, members = await connection.run_sync(checked_snapshot)
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
         expected = receipt.get("runtime_composition")
         if base != expected or (fresh and (base is not None or expected is not None)):
             raise ProductionWorkspaceReconciliationError("composition_continuity_unavailable")
         from src.workspace.production import read_accounting_checkpoint
-        checkpoint = read_accounting_checkpoint(workspace)
+        checkpoint = read_accounting_checkpoint(workspace, header_budget=header_budget)
         if checkpoint and checkpoint.get("schema_version") == 2 and checkpoint.get("composition_target") != base:
             raise ProductionWorkspaceReconciliationError("composition_pending_checkpoint_requires_reconciliation")
         await db.rollback()
         read_guard = db.info.pop("composition_read_guard", None)
         if read_guard is not None:
             read_guard.close()
-        guard = CompositionSessionGuard(db, workspace, lock, base, members)
+        guard = CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
         db.info["composition_guard"] = guard
         db.info["composition_base_witness"] = base
         guard.install()
@@ -1504,12 +1596,12 @@ def unreviewed_overruns(account, rows):
         and (row["operation_id"], row["sequence"], row["revision"]) not in covered]
 
 
-def assert_deployment_binding(workspace):
+def assert_deployment_binding(workspace, *, header_budget=None):
     directory = workspace.lifecycle_directory
     if (not os.environ.get(LIFECYCLE_PATH_ENV) and workspace.lifecycle_path is None
         or not directory.is_absolute() or directory.resolve() != directory or directory.is_relative_to(workspace.host_root)):
         raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
-    receipt = read_lifecycle_receipt(workspace) or {}
+    receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
     binding = receipt.get("deployment_binding")
     expected = (os.environ.get(BIND_IDENTITY_ENV) if workspace.host_root == Path(CANONICAL_CONTAINER_WORKSPACE)
         else workspace.identity_digest)
@@ -1545,10 +1637,10 @@ def witness(account):
 
 
 @contextmanager
-def maintenance_accounting_lock(root, *, require_binding=True):
+def maintenance_accounting_lock(root, *, require_binding=True, header_budget=None):
     workspace = root if isinstance(root, ProductionWorkspace) else ProductionWorkspace(host_root=root)
     if require_binding:
-        assert_deployment_binding(workspace)
+        assert_deployment_binding(workspace, header_budget=header_budget)
     directory = workspace.lifecycle_directory
     if directory.is_symlink() or not directory.is_dir():
         raise ProductionWorkspaceReconciliationError("accounting continuity unavailable")

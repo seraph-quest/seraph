@@ -78,23 +78,109 @@ _DESCRIPTORS = (*MEMORY_DESCRIPTORS.values(), WRS_LEGACY_PARENT, WRS_BY_RUN,
                 WORK_BOARD_TASK, WORK_BOARD_ATTEMPT)
 
 
+_COMPOSITION_MODELS = {
+    'messages': _models.Message,
+    'work_board_tasks': _models.WorkBoardTask,
+    'work_board_input_artifacts': _models.WorkBoardInputArtifact,
+    'work_board_attempts': _models.WorkBoardAttempt,
+    'work_board_review_intents': _models.WorkBoardReviewIntent,
+    'work_board_links': _models.WorkBoardLink,
+    'work_board_events': _models.WorkBoardEvent,
+    'work_board_evidence_dependencies': _models.WorkBoardEvidenceDependency,
+    'work_board_handoffs': _models.WorkBoardHandoff,
+    'workflow_run_states': _models.WorkflowRunState,
+    'workflow_step_states': _models.WorkflowStepState,
+    'workflow_artifact_reviews': _models.WorkflowArtifactReview,
+    'production_workflow_authority_states': _models.ProductionWorkflowAuthorityState,
+    'production_workflow_fault_receipts': _models.ProductionWorkflowFaultReceipt,
+    'production_workflow_side_effect_receipts': _models.ProductionWorkflowSideEffectReceipt,
+    'runtime_composition_states': _models.RuntimeCompositionState,
+    'sessions': _models.Session,
+    'audit_events': _models.AuditEvent,
+    'memory_episodes': _models.MemoryEpisode,
+    'approval_requests': _models.ApprovalRequest,
+    'goals': _models.Goal,
+    'memories': _models.Memory,
+    'memory_edges': _models.MemoryEdge,
+    'memory_entities': _models.MemoryEntity,
+    'memory_proposals': _models.MemoryProposal,
+    'memory_sources': _models.MemorySource,
+    'memory_tombstones': _models.MemoryTombstone,
+    'work_board_decision_receipts': _models.WorkBoardDecisionReceipt,
+    'work_board_proposals': _models.WorkBoardProposal,
+    'inference_cost_reservations': _models.InferenceCostReservation,
+    'operator_sessions': _models.OperatorSession,
+    'secrets': _models.Secret,
+    'inference_accounting_owners': _models.InferenceAccountingOwner,
+}
+_COMPOSITION_KEYS = {'messages': 'id', 'work_board_tasks': 'task_id', 'work_board_input_artifacts': 'artifact_id', 'work_board_attempts': 'attempt_id', 'work_board_review_intents': 'intent_id', 'work_board_links': 'link_id', 'work_board_events': 'event_id', 'work_board_evidence_dependencies': 'dependency_id', 'work_board_handoffs': 'handoff_id', 'workflow_run_states': 'run_identity', 'workflow_step_states': 'id', 'workflow_artifact_reviews': 'id', 'production_workflow_authority_states': 'id', 'production_workflow_fault_receipts': 'id', 'production_workflow_side_effect_receipts': 'id', 'runtime_composition_states': 'runtime_domain', 'sessions': 'id', 'audit_events': 'id', 'memory_episodes': 'id', 'approval_requests': 'id', 'goals': 'id', 'memories': 'id', 'memory_edges': 'id', 'memory_entities': 'id', 'memory_proposals': 'proposal_id', 'memory_sources': 'id', 'memory_tombstones': 'id', 'work_board_decision_receipts': 'receipt_id', 'work_board_proposals': 'proposal_id', 'inference_cost_reservations': 'operation_id', 'operator_sessions': 'id', 'secrets': 'id', 'inference_accounting_owners': 'id'}
+COMPOSITION_DESCRIPTORS = MappingProxyType({name: next((d for d in _DESCRIPTORS if d.table == name and d.key == _COMPOSITION_KEYS[name]), _descriptor(model, _COMPOSITION_KEYS[name])) for name, model in _COMPOSITION_MODELS.items()})
+SESSION = COMPOSITION_DESCRIPTORS["sessions"]
+SECRET = COMPOSITION_DESCRIPTORS["secrets"]
+INPUT_ARTIFACT = COMPOSITION_DESCRIPTORS["work_board_input_artifacts"]
+RUNTIME_COMPOSITION = COMPOSITION_DESCRIPTORS["runtime_composition_states"]
+_DESCRIPTORS = tuple(dict.fromkeys((*_DESCRIPTORS, *COMPOSITION_DESCRIPTORS.values())))
+
+
 class HeaderReadBudget:
     """Shared byte evidence only; an original owner supplies all actual reads."""
     def __init__(self):
         self.remaining = MAX_BYTES
         self.references = set()
+        self.physical_references = set()
+        self.future_references = set()
 
     async def certify(self, db, descriptor, row_ids):
         if not any(descriptor is item for item in _DESCRIPTORS):
             raise HeaderBoundsError("header_descriptor_unavailable")
         refs = {(descriptor.table, descriptor.key, identity) for identity in row_ids}
-        if len(self.references | refs) > MAX_ROWS:
-            raise HeaderBoundsError("header_reference_bound")
         certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.remaining)
+        physical = {(descriptor.table, rowid) for rowid in certificate.rowids}
+        for identity,rowid in zip(certificate.row_ids,certificate.rowids):
+            self.resolve_future(descriptor,identity,rowid)
+        self.enroll(physical)
         self.references |= refs
-        self.remaining -= certificate.upper_bytes
+        self.debit(certificate.upper_bytes)
         await validate_certificate(db, certificate)
         return certificate
+
+    def debit(self, amount):
+        if type(amount) is not int or amount < 0 or amount > self.remaining:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        self.remaining -= amount
+
+    def enroll(self, physical):
+        physical = set(physical)
+        if len(self.physical_references | physical) + len(self.future_references) > MAX_ROWS:
+            raise HeaderBoundsError("header_reference_bound")
+        self.physical_references |= physical
+
+    def reserve_future_row(self, descriptor, identity, upper_bytes):
+        """Numeric capacity for an actual not-yet-attached constructor address."""
+        if not any(descriptor is item for item in _DESCRIPTORS):
+            raise HeaderBoundsError("header_descriptor_unavailable")
+        ref=(descriptor.table,descriptor.key,identity)
+        if type(identity) is not str or not identity or len(identity.encode("utf-8"))>512:
+            raise HeaderBoundsError("header_request_bound")
+        if ref in self.future_references or ref in self.references:
+            raise HeaderBoundsError("header_future_reference_duplicate")
+        if len(self.physical_references)+len(self.future_references)+1>MAX_ROWS:
+            raise HeaderBoundsError("header_reference_bound")
+        self.debit(upper_bytes)
+        self.future_references.add(ref)
+
+    def resolve_future(self, descriptor, identity, rowid):
+        ref=(descriptor.table,descriptor.key,identity)
+        if ref in self.future_references:
+            if type(rowid) is not int or rowid<=0:
+                raise HeaderBoundsError("header_rowid_unavailable")
+            self.future_references.remove(ref)
+            self.physical_references.add((descriptor.table,rowid))
+
+    async def certify_all(self, db, descriptor):
+        from src.memory.composition_headers import discover_rows
+        ids = await discover_rows(db, descriptor, self)
+        return await self.certify(db, descriptor, ids)
 
 
 @dataclass(frozen=True, eq=False)
@@ -155,6 +241,8 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
     if not valid_ids:
         raise HeaderBoundsError("header_request_bound")
     transaction, driver, changes = await _connection_state(db)
+    from src.memory.composition_headers import validate_descriptor_schema
+    schema_cost = await (await db.connection()).run_sync(lambda c: validate_descriptor_schema(c, descriptor))
     version = await db.scalar(text("SELECT sqlite_version()"))
     if tuple(map(int, version.split("."))) < (3, 43, 0):
         raise HeaderBoundsError("header_sqlite_version_unsupported")
@@ -164,17 +252,17 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
     schema = list(await db.execute(text(
         "SELECT CASE WHEN typeof(name)='text' THEN CASE WHEN octet_length(name)<=128 THEN name END END, "
         "CASE WHEN typeof(type)='text' THEN CASE WHEN octet_length(type)<=128 THEN type END END, "
-        "\"notnull\",pk "
-        "FROM pragma_table_info(:table) LIMIT :limit"),
+        "\"notnull\",pk,hidden "
+        "FROM pragma_table_xinfo(:table) LIMIT :limit"),
         {"table": descriptor.table, "limit": len(descriptor.columns)+1}))
     names = [row[0] for row in schema]
     if (len(schema) != len(descriptor.columns) or set(names) != set(descriptor.columns)
             or any(name in {"rowid", "_rowid_", "oid"} for name in names)):
         raise HeaderBoundsError("header_schema_changed")
     expected = dict(zip(descriptor.columns, zip(descriptor.sql_types, descriptor.nullable)))
-    for name, sql_type, notnull, pk in schema:
+    for name, sql_type, notnull, pk, hidden in schema:
         if (type(sql_type) is not str or type(notnull) is not int or type(pk) is not int
-                or sql_type.upper() != expected[name][0] or notnull != int(not expected[name][1])):
+                or hidden != 0 or sql_type.upper() != expected[name][0] or notnull != int(not expected[name][1])):
             raise HeaderBoundsError("header_schema_changed")
     query_fields = ["_rowid_"]
     for name in descriptor.columns:
@@ -184,7 +272,7 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
     statement = text("SELECT " + ",".join(query_fields) + " FROM " + _quoted(descriptor.table)
                      + " WHERE " + _quoted(descriptor.key) + " COLLATE BINARY=:key LIMIT 2")
     rowids, costs = [], []
-    total = 0
+    total = schema_cost
     for identity in exact_row_ids:
         rows = list(await db.execute(statement, {"key": identity}))
         if len(rows) != 1:

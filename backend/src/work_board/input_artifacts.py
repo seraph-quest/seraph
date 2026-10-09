@@ -171,7 +171,7 @@ def cleanup_retired_input(witness: RetiredInputCleanupWitness) -> RetiredInputCl
         if (not reference.startswith(f"workspace-json:{INPUT_ARTIFACT_ROOT}/")
             or any(part in {"", ".", ".."} for part in relative.split("/"))):
             raise _InputArtifactCleanupUnverified("cleanup_reference_invalid")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
         parent_fd = os.open(witness.workspace_path, flags | getattr(os, "O_DIRECTORY", 0))
         root_stat = os.fstat(parent_fd)
         if (root_stat.st_dev != identity["device"] or root_stat.st_ino != identity["inode"]
@@ -423,14 +423,21 @@ def _private_input_file_metadata(metadata: os.stat_result) -> bool:
     )
 
 
-def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) -> bytes:
+def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int, header_budget=None) -> bytes:
+    if type(expected_size) is not int or not 0 <= expected_size <= INPUT_ARTIFACT_MAX_BYTES:
+        raise BoardError("input_artifact_too_large", "The input artifact exceeds 64 KiB", status_code=409)
+    if header_budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        if type(header_budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        header_budget.debit(expected_size + 1)
     parent_fd = -1
     descriptor = -1
     try:
         parent_fd, filename = _open_input_artifact_parent(path, create=False)
         descriptor = os.open(
             filename,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
             dir_fd=parent_fd,
         )
     except OSError as exc:
@@ -447,7 +454,7 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) ->
         if stat_result.st_size > INPUT_ARTIFACT_MAX_BYTES:
             raise BoardError("input_artifact_too_large", "The input artifact exceeds 64 KiB", status_code=409)
         chunks: list[bytes] = []
-        remaining = stat_result.st_size
+        remaining = stat_result.st_size + 1
         while remaining:
             chunk = os.read(descriptor, min(64 * 1024, remaining))
             if not chunk:
@@ -455,6 +462,11 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) ->
             chunks.append(chunk)
             remaining -= len(chunk)
         payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(stat_result, field) != getattr(current, field) for current in (after, named) for field in fields):
+            raise BoardError("input_artifact_file_invalid", "The input artifact changed while reading", status_code=409)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -721,7 +733,7 @@ def _write_payload(path: Path, payload: bytes, *, _closure_owner: _PayloadClosur
             try:
                 existing_fd = os.open(
                     filename,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
                     dir_fd=parent_fd,
                 )
                 existing_metadata = os.fstat(existing_fd)
@@ -801,7 +813,7 @@ def _cleanup_private_input_file(
             parent_fd, filename = _open_input_artifact_parent(path, create=False)
             descriptor = os.open(
                 filename,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
                 dir_fd=parent_fd,
             )
         except FileNotFoundError as exc:
@@ -1101,6 +1113,7 @@ async def resolve_input_artifact_for_task(
     capability_id: str,
     expected_task_id: str | None = None,
     now: datetime | None = None,
+    header_budget=None,
 ) -> ResolvedInputArtifact:
     """Resolve and verify an owner-bound artifact for dispatcher execution."""
 
@@ -1134,7 +1147,7 @@ async def resolve_input_artifact_for_task(
         raise BoardError("input_artifact_task_conflict", "The input artifact is bound to another task", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:
         raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
-    payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
+    payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes, header_budget=header_budget)
     parsed = _decode_and_validate_payload(row, payload)
     await _verify_general_proposal(db, row, parsed)
     return ResolvedInputArtifact(row=row, input=parsed, payload=payload)
@@ -1178,6 +1191,7 @@ async def resolve_input_artifact_for_copy(
     goal_revision: int,
     allow_goal_change: bool = False,
     now: datetime | None = None,
+    header_budget=None,
 ) -> ResolvedInputArtifact:
     """Read an immutable prior input solely to materialize a fresh leaf.
 
@@ -1236,7 +1250,7 @@ async def resolve_input_artifact_for_copy(
         raise BoardError("input_artifact_capability_stale", "The input artifact capability version is stale", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:
         raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
-    payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
+    payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes, header_budget=header_budget)
     parsed = _decode_and_validate_payload(row, payload)
     return ResolvedInputArtifact(row=row, input=parsed, payload=payload)
 

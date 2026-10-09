@@ -1,6 +1,6 @@
 """Actual Memory/M5 owner transactions; not stock-host producer acceptance."""
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from src.db.models import AuditEvent, Memory, MemoryProposal, MemorySource, MemoryStatus, Secret
 from src.memory import m5
+from src.memory.header_bounds import HeaderReadBudget
 from src.runtime_plugins.memory_producer import (
     NativeMemoryMutationAdmission, perform_memory_mutation, source_binding,
 )
@@ -24,6 +25,12 @@ async def source(factory, monkeypatch):
     return goal, task, attempt
 
 
+def _owner_admission(candidate):
+    """Historical owner unit uses one real frame; this is no Source grant."""
+    return replace(NativeMemoryMutationAdmission.from_candidate(candidate),
+        header_budget=HeaderReadBudget())
+
+
 def common(method):
     return {"schema_version": 1, "method": method,
         "operator_principal_id": OWNER.principal_id, "operator_session_id": OWNER.session_id,
@@ -38,7 +45,7 @@ async def proposal_candidate(factory, task, attempt):
             session_id=OWNER.session_id, task_id=task.task_id, revision=task.task_revision,
             attempt_id=attempt.attempt_id)
         prepared = await m5.prepare_m5_text(db, m5._structured_source_candidate(proof))
-    return NativeMemoryMutationAdmission.from_candidate({**common("memory.propose"),
+    return _owner_admission({**common("memory.propose"),
         "source": binding, "prepared_text": asdict(prepared)})
 
 
@@ -69,7 +76,7 @@ async def test_actual_proposal_and_review_share_caller_writer(async_db, monkeypa
         assert (await db.get(AuditEvent, proposed.audit_event_id)).event_type == "memory_learning_proposed"
         assert not list((await db.execute(select(Memory))).scalars())
         prepared = await m5.prepare_m5_text(db, row.preview_text)
-        review = NativeMemoryMutationAdmission.from_candidate({**common("memory.applyReviewed"),
+        review = _owner_admission({**common("memory.applyReviewed"),
             "source": admission.candidate()["source"], "proposal_id": row.proposal_id,
             "proposal_schema": row.schema_version, "action": "accept", "expected_revision": row.revision,
             "expected_preview_text_digest": row.preview_text_digest,
@@ -121,7 +128,7 @@ async def test_original_candidate_races_deny_before_effect(async_db, monkeypatch
     if change == "expired":
         candidate = admission.candidate()
         candidate["original_deadline"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-        admission = NativeMemoryMutationAdmission.from_candidate(candidate)
+        admission = _owner_admission(candidate)
     with pytest.raises((ValueError, PermissionError, NativeServiceBlocked)):
         await effect(async_db, admission)
     async with async_db() as db:
@@ -136,7 +143,7 @@ async def test_actual_forget_and_audit_rollback_with_pending_native_result(async
     async with async_db() as db:
         db.add(Memory(id="original-record", source_session_id=OWNER.session_id,
             content="Original private record", summary="Original summary"))
-    admission = NativeMemoryMutationAdmission.from_candidate({**common("memory.forget"),
+    admission = _owner_admission({**common("memory.forget"),
         "record_ref": "original-record", "mode": mode, "privacy_boundary": "private",
         "reason": None, "prepared_reason": None})
     with pytest.raises(RuntimeError, match="after owner effect"):
@@ -206,7 +213,7 @@ async def test_forget_original_record_changes_deny_without_audit(async_db, monke
     async with async_db() as db:
         db.add(Memory(id="original-record", source_session_id=OWNER.session_id,
                       content="Original private record", summary="Original summary"))
-    admission = NativeMemoryMutationAdmission.from_candidate({**common("memory.forget"),
+    admission = _owner_admission({**common("memory.forget"),
         "record_ref": "original-record", "mode": "redact", "privacy_boundary": "private",
         "reason": None, "prepared_reason": None})
     async with async_db() as db:

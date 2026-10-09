@@ -81,7 +81,7 @@ class ActualLocalRead:
     (1, "delete_after_parent"), (1, "delete_before_step"), (1, "delete_after_intent"),
     (1, "missing_criterion"), (1, "malformed_metadata"), (1, "oversized_metadata"),
     (1, "expired_parent_lease"), (1, "delete_after_dispatch"), (1, "bridge_timeout"),
-    (1, "issuer_ends_after_admission")])
+    (1, "issuer_ends_after_admission"), (1, "oversized_step_address"), (1, "delete_before_lease")])
 async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkeypatch, tmp_path, schema, fault):
     monkeypatch.setattr("src.workflows.manager.get_session", async_db)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -94,8 +94,8 @@ async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkey
     snapshots = []
     from src.workflows import durable_state
     original_verify = durable_state._verify_legacy_child_in_session
-    async def observe_private(db, child):
-        snapshot = await original_verify(db, child)
+    async def observe_private(db, child, *, budget=None):
+        snapshot = await original_verify(db, child, budget=budget)
         if snapshot is not None:
             snapshots.append((db, child, snapshot))
             # Copying the exact private fields/seal is insufficient even while
@@ -108,6 +108,13 @@ async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkey
             object.__setattr__(child, "_legacy_recovery_verified_parent", snapshot)
         return snapshot
     monkeypatch.setattr(durable_state, "_verify_legacy_child_in_session", observe_private)
+    if fault == "delete_before_lease":
+        from src.goals.repository import goal_repository
+        original_lease = workflow_state_repository.acquire_or_renew_v2_lease
+        async def delete_then_acquire(**kwargs):
+            assert await goal_repository.delete("legacy-goal") is True
+            return await original_lease(**kwargs)
+        monkeypatch.setattr(workflow_state_repository, "acquire_or_renew_v2_lease", delete_then_acquire)
     app = FastAPI()
     app.add_middleware(OperatorAuthMiddleware)
     app.include_router(router, prefix="/api")
@@ -116,6 +123,13 @@ async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkey
         response = await client.post(f"/api/workflows/runs/{identity}/control", json={"action": "retry",
             "step_id": "read", "operator_context": {"workflow_run_identity": identity,
                 "goal_id": "legacy-goal", "criterion_id": "legacy-criterion", "goal_revision": 1, "plan_revision": 1}})
+    if fault == "delete_before_lease":
+        assert response.status_code == 409, response.text
+        async with get_session() as db:
+            row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity))).scalar_one()
+            assert "lease" not in json.loads(row.metadata_json or "{}").get("orchestration_v2", {})
+            assert not (await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == identity))).scalars().all()
+        return
     assert response.status_code == 200, response.text
     async with get_session() as db:
         parent = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity))).scalar_one()
@@ -138,6 +152,10 @@ async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkey
                 altered = json.loads(row.metadata_json)
                 altered["orchestration_v2"]["lease"]["expires_at"] = "2000-01-01T00:00:00+00:00"
                 row.metadata_json = json.dumps(altered)
+    if fault == "oversized_step_address":
+        async with get_session() as db:
+            await db.execute(text("UPDATE workflow_step_states SET id=:oversized WHERE run_identity=:identity"),
+                {"oversized": "x" * 1_048_577, "identity": identity})
     deleted = []
     if fault in {"delete_after_parent", "delete_before_step", "delete_after_intent", "delete_after_dispatch"}:
         from src.goals.repository import goal_repository
@@ -239,6 +257,13 @@ async def test_real_api_metadata_lease_then_original_goal_child(async_db, monkey
         if fault == "issuer_ends_after_admission":
             from src.workflows.job_runtime import durable_job_repository
             with pytest.raises(RuntimeError, match="workflow_legacy_original_producer_unavailable"):
+                await durable_job_repository.queue_job(child_identity)
+            async with get_session() as db:
+                row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == child_identity))).scalar_one()
+                assert row.status == "accepted" and row.attempt_count == 0
+                row.declared_authority_json = json.dumps({"oversized": "x" * 1_048_577})
+            from src.memory.header_bounds import HeaderBoundsError
+            with pytest.raises(HeaderBoundsError):
                 await durable_job_repository.queue_job(child_identity)
             async with get_session() as db:
                 row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == child_identity))).scalar_one()

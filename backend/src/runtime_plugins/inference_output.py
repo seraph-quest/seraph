@@ -76,18 +76,23 @@ def _parent(root, reference, *, create=False):
         raise
 
 
-def read_output_bytes(root, payload):
+def read_output_bytes(root, payload, *, header_budget=None):
     validate_payload(payload)
+    if header_budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        if type(header_budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        header_budget.debit(payload["size_bytes"] + 1)
     try:
         parent, name = _parent(root, payload["file_ref"])
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
             try:
                 before = os.fstat(fd)
                 if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600
                     or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size != payload["size_bytes"]):
                     _deny("native_inference_output_file_untrusted")
-                chunks, remaining = [], MAX_BYTES + 1
+                chunks, remaining = [], before.st_size + 1
                 while remaining:
                     chunk = os.read(fd, min(65536, remaining))
                     if not chunk:

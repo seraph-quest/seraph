@@ -688,22 +688,62 @@ def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Map
     return path
 
 
-def read_lifecycle_receipt(workspace: ProductionWorkspace) -> dict[str, Any] | None:
+def _read_bounded_private_file(path: Path, *, maximum: int, private_mode: bool, header_budget=None) -> bytes | None:
+    """Read the exact named regular file without blocking or following links."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ProductionWorkspaceError("workspace private receipt is unreadable") from exc
+    if (not stat.S_ISREG(before.st_mode) or before.st_size > maximum
+        or (private_mode and before.st_mode & 0o077)):
+        raise ProductionWorkspaceError("workspace private receipt is unsafe")
+    if header_budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        if type(header_budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        header_budget.debit(before.st_size + 1)
+    descriptor = -1
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        opened = os.fstat(descriptor)
+        if any(getattr(before, field) != getattr(opened, field) for field in fields):
+            raise ProductionWorkspaceError("workspace private receipt changed")
+        chunks, remaining = [], before.st_size + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        if (len(data) != before.st_size
+            or any(getattr(before, field) != getattr(current, field) for current in (after, named) for field in fields)):
+            raise ProductionWorkspaceError("workspace private receipt changed")
+        return data
+    except OSError as exc:
+        raise ProductionWorkspaceError("workspace private receipt is unreadable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_lifecycle_receipt(workspace: ProductionWorkspace, *, header_budget=None) -> dict[str, Any] | None:
     """Read the durable operator receipt, failing closed on tampering."""
     path = lifecycle_receipt_path(workspace)
     if workspace.lifecycle_directory.is_symlink():
         raise ProductionWorkspaceError("workspace lifecycle directory is unsafe")
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
+    raw = _read_bounded_private_file(path, maximum=MAX_LIFECYCLE_RECEIPT_BYTES,
+        private_mode=False, header_budget=header_budget)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise ProductionWorkspaceError("workspace lifecycle receipt is unreadable") from exc
-    if stat.S_ISLNK(metadata.st_mode) or metadata.st_size > MAX_LIFECYCLE_RECEIPT_BYTES:
-        raise ProductionWorkspaceError("workspace lifecycle receipt is invalid")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProductionWorkspaceError("workspace lifecycle receipt is invalid") from exc
     if not isinstance(value, dict) or value.get("secret_values_included") is not False:
         raise ProductionWorkspaceError("workspace lifecycle receipt is invalid")
@@ -747,21 +787,19 @@ def _write_private_checkpoint(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def read_accounting_checkpoint(workspace: ProductionWorkspace) -> dict[str, Any] | None:
+def read_accounting_checkpoint(workspace: ProductionWorkspace, *, header_budget=None) -> dict[str, Any] | None:
     path = workspace.lifecycle_directory / "accounting-checkpoint.json"
-    return _read_private_checkpoint(path)
+    return _read_private_checkpoint(path, header_budget=header_budget)
 
 
-def _read_private_checkpoint(path: Path) -> dict[str, Any] | None:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
+def _read_private_checkpoint(path: Path, *, header_budget=None) -> dict[str, Any] | None:
+    raw = _read_bounded_private_file(path, maximum=MAX_ACCOUNTING_CHECKPOINT_BYTES,
+        private_mode=True, header_budget=header_budget)
+    if raw is None:
         return None
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_ACCOUNTING_CHECKPOINT_BYTES or metadata.st_mode & 0o077:
-        raise ProductionWorkspaceError("accounting checkpoint is unsafe")
     try:
-        payload = json.loads(path.read_bytes())
-    except (OSError, ValueError) as exc:
+        payload = json.loads(raw)
+    except ValueError as exc:
         raise ProductionWorkspaceError("accounting checkpoint is invalid") from exc
     if not isinstance(payload, dict) or payload.get("secret_values_included") is not False:
         raise ProductionWorkspaceError("accounting checkpoint is invalid")

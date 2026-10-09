@@ -49,6 +49,7 @@ async def redact_secrets_in_text_readonly(
     *,
     fail_closed: bool = True,
     minimum_secret_length: int = _MIN_SECRET_LENGTH,
+    header_budget=None,
 ) -> str:
     """Redact through a caller-owned session without opening an audit writer.
 
@@ -80,6 +81,11 @@ async def redact_secrets_in_text_readonly(
         except (TypeError, ValueError):
             fernet = None
     else:
+        if header_budget is not None:
+            from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+            if type(header_budget) is not HeaderReadBudget:
+                raise HeaderBoundsError("canonical_bound_not_certified")
+            header_budget.debit(4097)
         key_fd: int | None = None
         try:
             nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -88,13 +94,19 @@ async def redact_secrets_in_text_readonly(
             key_path = canonical_workspace_root(settings.workspace_dir) / ".vault-key"
             key_fd = os.open(
                 key_path,
-                os.O_RDONLY | nofollow,
+                os.O_RDONLY | nofollow | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
             )
             metadata = os.fstat(key_fd)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
                 raise OSError("vault key is not a bounded regular file")
-            raw_key = os.read(key_fd, 4097).strip()
-            if len(raw_key) > 4096:
+            raw_bytes = os.read(key_fd, 4097)
+            after = os.fstat(key_fd)
+            named = os.stat(key_path, follow_symlinks=False)
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(metadata, field) != getattr(current, field) for current in (after, named) for field in fields):
+                raise OSError("vault key changed while reading")
+            raw_key = raw_bytes.strip()
+            if len(raw_bytes) > 4096:
                 raise OSError("vault key is too large")
             fernet = Fernet(raw_key)
         except (OSError, RuntimeError, TypeError, ValueError):

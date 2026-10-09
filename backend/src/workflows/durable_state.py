@@ -311,7 +311,12 @@ async def _read_legacy_parent_in_session(db, *, source, budget=None, require_lea
         # Preserve original bounded latest-500 semantics only when the entire
         # candidate evidence fits the canonical operation's reference budget.
         from src.memory.header_bounds import AUDIT_EVENT
-        ids = list((await db.execute(select(AuditEvent.id).order_by(AuditEvent.created_at.desc()).limit(500))).scalars())
+        ids = list((await db.execute(text(
+            "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=512 "
+            "THEN id ELSE NULL END FROM audit_events ORDER BY created_at DESC LIMIT 129"
+        ))).scalars())
+        if len(ids) > 128 or any(type(value) is not str for value in ids):
+            raise RuntimeError("workflow_candidate_unavailable")
         await budget.certify(db, AUDIT_EVENT, ids)
         events = (await db.execute(select(AuditEvent).where(AuditEvent.id.in_(ids)))).scalars().all()
         matches = []
@@ -363,7 +368,7 @@ async def _read_legacy_parent_in_session(db, *, source, budget=None, require_lea
     return verified
 
 
-async def _verify_legacy_child_in_session(db, child):
+async def _verify_legacy_child_in_session(db, child, *, budget=None):
     from src.memory.header_bounds import strict_json_loads
     preview = _loads(child.declared_authority_json, {})
     if type(preview) is not dict or _LEGACY_COMMITMENT not in preview:
@@ -378,7 +383,7 @@ async def _verify_legacy_child_in_session(db, child):
         or child.parent_job_id != source.parent_identity
         or child.owner_principal_id != source.principal.principal_id):
         raise RuntimeError("workflow_legacy_original_producer_unavailable")
-    snapshot = await _read_legacy_parent_in_session(db, source=source)
+    snapshot = await _read_legacy_parent_in_session(db, source=source, budget=budget)
     if any(getattr(child, key) != snapshot.contract[key] for key in ("goal_id", "goal_revision", "plan_revision", "candidate_id")):
         raise RuntimeError("workflow_legacy_child_goal_changed")
     object.__setattr__(child, "_legacy_recovery_verified_parent", snapshot)
@@ -445,12 +450,22 @@ async def _legacy_parent_projection(db, source, repository, *, require_lease=Fal
     budget = _LegacyHeaderBudget()
     verified = await _read_legacy_parent_in_session(db, source=source, budget=budget, require_lease=require_lease)
     parent = verified.parent
-    step_ids = tuple((await db.execute(select(WorkflowStepState.id).where(
-        WorkflowStepState.run_identity == parent.run_identity).limit(129))).scalars())
+    step_ids = tuple((await db.execute(text(
+        "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=512 "
+        "THEN id ELSE NULL END FROM workflow_step_states "
+        "WHERE run_identity COLLATE BINARY=:identity LIMIT 129"
+    ), {"identity": parent.run_identity})).scalars())
+    if len(step_ids) > 128 or any(type(value) is not str for value in step_ids):
+        raise RuntimeError("workflow_legacy_checkpoint_addresses_unavailable")
     await budget.certify(db, WORKFLOW_STEP, step_ids)
     steps = list((await db.execute(select(WorkflowStepState).where(WorkflowStepState.id.in_(step_ids)))).scalars())
-    review_ids = tuple((await db.execute(select(WorkflowArtifactReview.id).where(
-        WorkflowArtifactReview.run_identity == parent.run_identity).limit(129))).scalars())
+    review_ids = tuple((await db.execute(text(
+        "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=512 "
+        "THEN id ELSE NULL END FROM workflow_artifact_reviews "
+        "WHERE run_identity COLLATE BINARY=:identity LIMIT 129"
+    ), {"identity": parent.run_identity})).scalars())
+    if len(review_ids) > 128 or any(type(value) is not str for value in review_ids):
+        raise RuntimeError("workflow_legacy_checkpoint_addresses_unavailable")
     await budget.certify(db, WORKFLOW_ARTIFACT_REVIEW, review_ids)
     reviews = list((await db.execute(select(WorkflowArtifactReview).where(WorkflowArtifactReview.id.in_(review_ids)))).scalars())
     payload = repository._serialize_run(parent, steps)

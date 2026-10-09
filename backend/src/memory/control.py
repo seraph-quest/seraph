@@ -118,24 +118,33 @@ def _metadata(memory: Memory) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _memory_payload(memory: Memory) -> dict[str, Any]:
-    metadata = _metadata(memory)
+def _memory_payload(memory: Memory, *, _pending_changes: dict | None = None) -> dict[str, Any]:
+    def value(name):
+        return (_pending_changes[name] if _pending_changes is not None and name in _pending_changes
+            else getattr(memory, name))
+    if _pending_changes is not None and "metadata_json" in _pending_changes:
+        try:
+            metadata = json.loads(value("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+    else:
+        metadata = _metadata(memory)
     return {
-        "id": memory.id,
-        "content": memory.content,
-        "summary": memory.summary,
-        "kind": memory.kind.value,
-        "category": memory.category.value,
-        "status": memory.status.value,
-        "confidence": memory.confidence,
-        "importance": memory.importance,
-        "reinforcement": memory.reinforcement,
-        "source_session_id": memory.source_session_id,
-        "subject_entity_id": memory.subject_entity_id,
-        "project_entity_id": memory.project_entity_id,
-        "last_confirmed_at": memory.last_confirmed_at.isoformat() if memory.last_confirmed_at else None,
-        "created_at": memory.created_at.isoformat(),
-        "updated_at": memory.updated_at.isoformat(),
+        "id": value("id"),
+        "content": value("content"),
+        "summary": value("summary"),
+        "kind": value("kind").value,
+        "category": value("category").value,
+        "status": value("status").value,
+        "confidence": value("confidence"),
+        "importance": value("importance"),
+        "reinforcement": value("reinforcement"),
+        "source_session_id": value("source_session_id"),
+        "subject_entity_id": value("subject_entity_id"),
+        "project_entity_id": value("project_entity_id"),
+        "last_confirmed_at": value("last_confirmed_at").isoformat() if value("last_confirmed_at") else None,
+        "created_at": value("created_at").isoformat(),
+        "updated_at": value("updated_at").isoformat(),
         "metadata": metadata,
         "provenance": metadata.get("provenance") or {},
         "privacy_boundary": _safe_privacy_boundary(metadata.get("privacy_boundary")),
@@ -836,6 +845,13 @@ async def _forget_memory_in_session(
     )
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedMemoryForget:
+    update_plan: object
+    audit_event: object
+    result: dict
+
+
 async def _forget_memory_in_writer(
     db, *,
     memory_id: str,
@@ -846,6 +862,23 @@ async def _forget_memory_in_writer(
     composition_authority_check=None,
     expected_owner_session_id: str | None = None,
 ) -> dict[str, Any]:
+    prepared = await _prepare_forget_memory_in_writer(
+        db, memory_id=memory_id, actor=actor, reason=reason, mode=mode,
+        privacy_boundary=privacy_boundary, composition_authority_check=composition_authority_check,
+        expected_owner_session_id=expected_owner_session_id)
+    return await _apply_prepared_forget_memory_in_writer(db, prepared)
+
+
+async def _prepare_forget_memory_in_writer(
+    db, *,
+    memory_id: str,
+    actor: str = "operator",
+    reason: str | None = None,
+    mode: str = "archive",
+    privacy_boundary: str | None = None,
+    composition_authority_check=None,
+    expected_owner_session_id: str | None = None,
+) -> _PreparedMemoryForget:
     normalized_mode = "redact" if str(mode or "").strip().lower() == "redact" else "archive"
     boundary = _normalize_privacy_boundary(privacy_boundary)
     update_kwargs: dict[str, Any] = {
@@ -867,16 +900,12 @@ async def _forget_memory_in_writer(
     if normalized_mode == "redact":
         update_kwargs["content"] = "[forgotten by operator]"
         update_kwargs["summary"] = "[forgotten by operator]"
-    memory = await memory_repository._update_memory_control_metadata_in_session(
+    update_plan = await memory_repository._prepare_memory_control_metadata_in_session(
         db, memory_id, composition_authority_check=composition_authority_check,
         expected_owner_session_id=expected_owner_session_id, **update_kwargs
     )
-    if expected_owner_session_id is None:
-        # Legacy control calls preserve their existing Session-FK behavior.
-        # The strict caller-session entry point never creates an owner.
-        await ensure_sessions_exist(db, [memory.source_session_id])
-    audit_event = await audit_repository._log_event_in_session(
-        db,
+    memory = update_plan.memory
+    audit_event = audit_repository._prepare_event(
         actor=actor,
         event_type="memory_forgotten",
         tool_name="memory_control",
@@ -899,7 +928,7 @@ async def _forget_memory_in_writer(
         changed_memory=True,
         changed_decision=True,
         provenance="operator_forget",
-        confidence=memory.confidence,
+        confidence=dict(update_plan.changes)["confidence"],
         recency="suppressed_now",
         conflict_policy="operator_forget_removes_memory_from_active_retrieval",
         privacy_boundary=boundary,
@@ -908,12 +937,30 @@ async def _forget_memory_in_writer(
         capability_choice="guardian_canonical_memory",
         audit_event_type="memory_forgotten",
     )
-    return {
-        "memory": _memory_payload(memory),
+    result = {
+        "memory": _memory_payload(memory, _pending_changes=dict(update_plan.changes)),
         "receipt": receipt.as_payload(),
         "audit_event_id": audit_event.id,
         "policy": memory_operator_policy_payload(),
     }
+
+    return _PreparedMemoryForget(update_plan, audit_event, result)
+
+
+async def _apply_prepared_forget_memory_in_writer(db, prepared) -> dict[str, Any]:
+    if type(prepared) is not _PreparedMemoryForget:
+        raise ValueError("prepared_memory_forget_changed")
+    memory = await memory_repository._apply_prepared_memory_control_metadata_in_session(db, prepared.update_plan)
+    if prepared.update_plan.expected_owner_session_id is None:
+        await ensure_sessions_exist(db, [memory.source_session_id])
+    event = prepared.audit_event
+    await audit_repository._log_event_in_session(db, actor=event.actor,
+        event_type=event.event_type, tool_name=event.tool_name, risk_level=event.risk_level,
+        policy_mode=event.policy_mode, session_id=event.session_id,
+        summary=event.summary, details=json.loads(event.details_json), _prepared_event=event)
+    result = dict(prepared.result)
+    result["memory"] = _memory_payload(memory)
+    return result
 
 
 async def audit_memory(

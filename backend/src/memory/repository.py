@@ -3233,6 +3233,29 @@ class MemoryTombstoneWriteResult:
     created: bool
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedM5MemoryWrite:
+    """Original transient rows and exact pending target patches; no grant."""
+    db: object
+    transaction: object
+    memory: Memory
+    rows: tuple
+    target: Memory | None
+    target_before: tuple
+    target_changes: tuple
+
+
+@dataclass(frozen=True, eq=False)
+class _PreparedMemoryControlUpdate:
+    """Original existing row and guarded update values; carries no authority."""
+    db: object
+    transaction: object
+    memory: Memory
+    before: tuple
+    changes: tuple
+    expected_owner_session_id: str | None
+
+
 class MemoryRepository:
     def __init__(self) -> None:
         self._scoped_memory_locks: dict[str, asyncio.Lock] = {}
@@ -3403,6 +3426,27 @@ class MemoryRepository:
         proposal_id: str = "",
         _memory_id: str | None = None,
     ) -> Memory:
+        """Preserve the ordinary writer with actual original prepared rows."""
+        prepared = await self._prepare_m5_memory_in_session(db, content=content, kind=kind,
+            source_session_id=source_session_id, scope_key=scope_key, metadata_json=metadata_json,
+            confidence=confidence, corrects_memory_id=corrects_memory_id, proposal_id=proposal_id,
+            _memory_id=_memory_id)
+        return await self._apply_prepared_m5_memory_in_session(db, prepared)
+
+    async def _prepare_m5_memory_in_session(
+        self,
+        db,
+        *,
+        content: str,
+        kind: MemoryKind,
+        source_session_id: str,
+        scope_key: str,
+        metadata_json: str,
+        confidence: float,
+        corrects_memory_id: str | None = None,
+        proposal_id: str = "",
+        _memory_id: str | None = None,
+    ) -> _PreparedM5MemoryWrite:
         """Write one M5 memory through the canonical repository transaction.
 
         The caller owns ``BEGIN IMMEDIATE``.  This is the transaction-aware
@@ -3454,7 +3498,7 @@ class MemoryRepository:
                 or _canonical_memory_deletion_marker(existing) is not None
             ):
                 raise ValueError("canonical_write_conflict")
-            return existing
+            return _PreparedM5MemoryWrite(db, db.sync_session.get_transaction(), existing, (), None, (), ())
 
         memory = Memory(
             **({"id": _memory_id} if _memory_id is not None else {}),
@@ -3471,17 +3515,17 @@ class MemoryRepository:
             metadata_json=metadata_json,
             last_confirmed_at=_now(),
         )
-        db.add(memory)
-        await db.flush()
-        db.add(
-            MemorySource(
-                memory_id=memory.id,
-                source_type="work_board_m5",
-                source_session_id=source_session_id,
-                source_message_id=None,
-                snippet=None,
-            )
+        source = MemorySource(
+            memory_id=memory.id,
+            source_type="work_board_m5",
+            source_session_id=source_session_id,
+            source_message_id=None,
+            snippet=None,
         )
+        rows = [memory, source]
+        target = None
+        target_before = ()
+        target_changes = ()
         if corrects_memory_id:
             target = (
                 await db.execute(select(Memory).where(Memory.id == corrects_memory_id))
@@ -3495,28 +3539,39 @@ class MemoryRepository:
             ).scalars().first()
             if target_tombstone is not None or _canonical_memory_deletion_marker(target) is not None:
                 raise ValueError("correction_target_deleted")
-            target.status = MemoryStatus.superseded
-            target.updated_at = _now()
-            db.add(target)
+            target_before = tuple((name, getattr(target, name)) for name in Memory.__table__.columns.keys())
+            target_changes = (("status", MemoryStatus.superseded), ("updated_at", _now()))
             edge_metadata = json.dumps({"proposal_id": proposal_id}, sort_keys=True)
-            db.add(
-                MemoryEdge(
-                    from_memory_id=memory.id,
-                    to_memory_id=target.id,
-                    edge_type=MemoryEdgeType.supersedes,
-                    metadata_json=edge_metadata,
-                )
-            )
-            db.add(
-                MemoryEdge(
-                    from_memory_id=memory.id,
-                    to_memory_id=target.id,
-                    edge_type=MemoryEdgeType.contradicts,
-                    metadata_json=edge_metadata,
-                )
-            )
+            rows.extend((MemoryEdge(from_memory_id=memory.id, to_memory_id=target.id,
+                edge_type=MemoryEdgeType.supersedes, metadata_json=edge_metadata),
+                MemoryEdge(from_memory_id=memory.id, to_memory_id=target.id,
+                edge_type=MemoryEdgeType.contradicts, metadata_json=edge_metadata)))
+        return _PreparedM5MemoryWrite(db, db.sync_session.get_transaction(), memory,
+            tuple(rows), target, target_before, target_changes)
+
+    async def _apply_prepared_m5_memory_in_session(self, db, prepared) -> Memory:
+        """Apply the same original constructors after the caller reserves them."""
+        from sqlalchemy import inspect
+        if (type(prepared) is not _PreparedM5MemoryWrite or prepared.db is not db
+            or prepared.transaction is not db.sync_session.get_transaction()
+            or any(not inspect(row).transient for row in prepared.rows)):
+            raise ValueError("prepared_m5_memory_changed")
+        if prepared.target is not None and any(
+            getattr(prepared.target, name) != value for name, value in prepared.target_before
+        ):
+            raise ValueError("correction_target_changed_before_apply")
+        if not prepared.rows:
+            return prepared.memory
+        db.add(prepared.memory)
         await db.flush()
-        return memory
+        for row in prepared.rows[1:]:
+            db.add(row)
+        if prepared.target is not None:
+            for name, value in prepared.target_changes:
+                setattr(prepared.target, name, value)
+            db.add(prepared.target)
+        await db.flush()
+        return prepared.memory
 
     async def rollback_m5_memory_in_session(
         self,
@@ -7251,6 +7306,31 @@ class MemoryRepository:
         composition_authority_check=None,
         expected_owner_session_id: str | None = None,
     ) -> Memory:
+        """Use the original guarded writer with prepared exact pending values."""
+        prepared = await self._prepare_memory_control_metadata_in_session(
+            db, memory_id, status=status, content=content, summary=summary,
+            confidence=confidence, importance=importance, reinforcement=reinforcement,
+            metadata_updates=metadata_updates, last_confirmed_at=last_confirmed_at,
+            composition_authority_check=composition_authority_check,
+            expected_owner_session_id=expected_owner_session_id)
+        return await self._apply_prepared_memory_control_metadata_in_session(db, prepared)
+
+    async def _prepare_memory_control_metadata_in_session(
+        self,
+        db,
+        memory_id: str,
+        *,
+        status: MemoryStatus | str | None = None,
+        content: str | None = None,
+        summary: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        reinforcement: float | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        last_confirmed_at: datetime | None = None,
+        composition_authority_check=None,
+        expected_owner_session_id: str | None = None,
+    ) -> _PreparedMemoryControlUpdate:
         """Use the caller's already-started canonical writer; never commit it."""
         if not db.in_transaction():
             raise RuntimeError("memory control requires a caller-owned writer")
@@ -7299,37 +7379,27 @@ class MemoryRepository:
                 "cannot mutate canonical memory after operator delete/export redaction"
             )
 
-        expected_status = _coerce_enum(memory.status, MemoryStatus)
-        expected_metadata = memory.metadata_json
-        expected_updated_at = _normalize_timestamp(memory.updated_at)
-        expected_metadata_guard = (
-            Memory.metadata_json.is_(None)
-            if expected_metadata is None
-            else Memory.metadata_json == expected_metadata
-        )
-        expected_updated_at_guard = (
-            Memory.updated_at.is_(None)
-            if expected_updated_at is None
-            else Memory.updated_at == expected_updated_at
-        )
-
+        before = tuple((name, getattr(memory, name)) for name in Memory.__table__.columns.keys())
+        changes = {name: getattr(memory, name) for name in (
+            "status", "content", "summary", "confidence", "importance", "reinforcement",
+            "last_confirmed_at", "metadata_json", "updated_at")}
         if status is not None:
-            memory.status = requested_status
+            changes["status"] = requested_status
         if isinstance(content, str):
             normalized_content = content.strip()
             if not normalized_content:
                 raise ValueError("content must be non-empty")
-            memory.content = normalized_content
+            changes["content"] = normalized_content
         if isinstance(summary, str):
-            memory.summary = summary.strip() or None
+            changes["summary"] = summary.strip() or None
         if confidence is not None:
-            memory.confidence = max(0.0, min(1.0, float(confidence)))
+            changes["confidence"] = max(0.0, min(1.0, float(confidence)))
         if importance is not None:
-            memory.importance = max(0.0, min(1.0, float(importance)))
+            changes["importance"] = max(0.0, min(1.0, float(importance)))
         if reinforcement is not None:
-            memory.reinforcement = max(0.0, float(reinforcement))
+            changes["reinforcement"] = max(0.0, float(reinforcement))
         if last_confirmed_at is not None:
-            memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
+            changes["last_confirmed_at"] = _normalize_timestamp(last_confirmed_at)
 
         metadata: dict[str, Any]
         try:
@@ -7339,42 +7409,45 @@ class MemoryRepository:
         metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
         if metadata_updates:
             metadata.update(metadata_updates)
-            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+            changes["metadata_json"] = json.dumps(metadata, sort_keys=True)
 
-        memory.updated_at = _now()
+        changes["updated_at"] = _now()
+        return _PreparedMemoryControlUpdate(db, db.sync_session.get_transaction(), memory,
+            before, tuple(changes.items()), expected_owner_session_id)
+
+    async def _apply_prepared_memory_control_metadata_in_session(self, db, prepared) -> Memory:
+        if (type(prepared) is not _PreparedMemoryControlUpdate or prepared.db is not db
+            or prepared.transaction is not db.sync_session.get_transaction()
+            or any(getattr(prepared.memory, name) != value for name, value in prepared.before)):
+            raise ValueError("prepared_memory_control_changed")
+        memory = prepared.memory
+        normalized_memory_id = memory.id
+        expected_owner_session_id = prepared.expected_owner_session_id
+        expected_status = _coerce_enum(memory.status, MemoryStatus)
+        expected_metadata = memory.metadata_json
+        expected_updated_at = memory.updated_at
+        if expected_updated_at is not None:
+            expected_updated_at = (expected_updated_at.replace(tzinfo=timezone.utc)
+                if expected_updated_at.tzinfo is None else expected_updated_at.astimezone(timezone.utc))
+        expected_metadata_guard = (Memory.metadata_json.is_(None) if expected_metadata is None
+            else Memory.metadata_json == expected_metadata)
+        expected_updated_at_guard = (Memory.updated_at.is_(None) if expected_updated_at is None
+            else Memory.updated_at == expected_updated_at)
         db.expunge(memory)
         guarded_update = await db.execute(
-            update(Memory)
-            .where(
-                Memory.id == normalized_memory_id,
-                Memory.status == expected_status,
+            update(Memory).where(
+                Memory.id == normalized_memory_id, Memory.status == expected_status,
                 *([Memory.source_session_id == expected_owner_session_id]
-                  if expected_owner_session_id is not None else []),
-                expected_metadata_guard,
-                expected_updated_at_guard,
+                    if expected_owner_session_id is not None else []),
+                expected_metadata_guard, expected_updated_at_guard,
                 _canonical_memory_without_tombstone_clause(),
-            )
-            .values(
-                status=requested_status or expected_status,
-                content=memory.content,
-                summary=memory.summary,
-                confidence=memory.confidence,
-                importance=memory.importance,
-                reinforcement=memory.reinforcement,
-                last_confirmed_at=memory.last_confirmed_at,
-                metadata_json=memory.metadata_json,
-                updated_at=memory.updated_at,
-            )
+            ).values(**dict(prepared.changes))
         )
         if guarded_update.rowcount != 1:
             raise ValueError(
                 "memory changed before control update; canonical deletion or another memory control won"
             )
-        memory = (
-            await db.execute(
-                select(Memory).where(Memory.id == normalized_memory_id)
-            )
-        ).scalars().one()
+        memory = (await db.execute(select(Memory).where(Memory.id == normalized_memory_id))).scalars().one()
         db.expunge(memory)
         return memory
 

@@ -251,7 +251,12 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
     return tuple(sorted(f"seraph.{name}.v1" for name in names))
 
 
-async def inventory(db):
+async def inventory(db, *, header_budget=None):
+    if header_budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, RUNTIME_COMPOSITION
+        if type(header_budget) is not HeaderReadBudget:
+            raise CompositionBindingError("composition_header_budget_required")
+        await header_budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS))
     rows = list((await db.execute(select(RuntimeCompositionState))).scalars())
     if len(rows) != 14 or {row.runtime_domain for row in rows} != set(DOMAINS):
         raise CompositionBindingError("composition_inventory_incomplete")
@@ -264,14 +269,14 @@ async def inventory(db):
 
 
 async def bind_invocation(db, *, method, native_branch="base", goal_bound=False, programme_bound=False,
-                          reviewed_composition=None):
+                          reviewed_composition=None, header_budget=None):
     methods = method_closure(method, native_branch)
     domains = set(method_dependencies(method, native_branch=native_branch,
                                   goal_bound=goal_bound, programme_bound=programme_bound))
     for child in methods:
         domains.update(method_dependencies(child, goal_bound=goal_bound, programme_bound=programme_bound))
     domains = tuple(sorted(domains))
-    rows = await inventory(db)
+    rows = await inventory(db, header_budget=header_budget)
     if any(rows[domain].state != "ready" for domain in domains):
         raise CompositionBindingError("composition_dependency_unavailable")
     host_package_digest = host_composition_digest = None
@@ -353,10 +358,10 @@ async def inspect_invocation_availability(db, *, method, native_branch="base", r
     return InvocationAvailability(True, None)
 
 
-async def validate_invocation(db, binding):
+async def validate_invocation(db, binding, *, header_budget=None):
     if not isinstance(binding, RuntimeCompositionBinding):
         raise CompositionBindingError("composition_binding_required")
-    rows = await inventory(db)
+    rows = await inventory(db, header_budget=header_budget)
     for dependency in binding.dependency_vector:
         row = rows[dependency.runtime_domain]
         if row.state != "ready" or dependency != CompositionDependency(row.runtime_domain,
@@ -486,7 +491,7 @@ async def transition_owner(db, *, runtime_domain, expected: CompositionDependenc
         raise CompositionBindingError("composition_owner_changed")
 
 
-async def begin_native_writer(db, *, owner, fresh=False):
+async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
     """Private native ingress/maintenance seam, before any Message/row insert."""
     from sqlalchemy import text
     from src.workspace.accounting_witness import prepare_composition_session
@@ -494,10 +499,14 @@ async def begin_native_writer(db, *, owner, fresh=False):
         raise CompositionBindingError("composition_native_writer_required")
     guard = db.info.get("composition_guard")
     if guard is None:
-        guard = await prepare_composition_session(db, fresh=fresh)
+        guard = await prepare_composition_session(db, fresh=fresh, **(
+            {"header_budget": header_budget} if header_budget is not None else {}))
     if db.in_transaction():
         raise CompositionBindingError("composition_native_writer_not_fresh")
     await db.execute(text("BEGIN IMMEDIATE"))
+    if header_budget is not None:
+        from src.memory.composition_headers import certify_composition_superset
+        await certify_composition_superset(db, header_budget)
     db.info["native_writer_started"] = True
     db.info["composition_writer_owner"] = owner
     return guard

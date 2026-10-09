@@ -12,19 +12,42 @@ from src.db.session_refs import ensure_sessions_exist
 
 
 class AuditRepository:
-    async def _log_event_in_session(
-        self, db, *, event_type: str, summary: str, session_id: str | None = None,
+    def _prepare_event(
+        self, *, event_type: str, summary: str, session_id: str | None = None,
         actor: str = "agent", tool_name: str | None = None, risk_level: str = "low",
         policy_mode: str = "full", details: dict[str, Any] | None = None,
-        event_id: str | None = None, flush: bool = True,
+        event_id: str | None = None,
     ) -> AuditEvent:
-        """Caller owns authority, Session FK, one writer and operation receipt."""
-        event = AuditEvent(
+        """Construct the original complete transient row; confer no authority."""
+        return AuditEvent(
             session_id=session_id, actor=actor, event_type=event_type,
             tool_name=tool_name, risk_level=risk_level, policy_mode=policy_mode,
             summary=summary, details_json=json.dumps(details) if details is not None else None,
             **({"id": event_id} if event_id is not None else {}),
         )
+
+    async def _log_event_in_session(
+        self, db, *, event_type: str, summary: str, session_id: str | None = None,
+        actor: str = "agent", tool_name: str | None = None, risk_level: str = "low",
+        policy_mode: str = "full", details: dict[str, Any] | None = None,
+        event_id: str | None = None, flush: bool = True, _prepared_event: AuditEvent | None = None,
+    ) -> AuditEvent:
+        """Caller owns authority, Session FK, one writer and operation receipt."""
+        if _prepared_event is None:
+            event = self._prepare_event(event_type=event_type, summary=summary,
+                session_id=session_id, actor=actor, tool_name=tool_name,
+                risk_level=risk_level, policy_mode=policy_mode, details=details,
+                event_id=event_id)
+        else:
+            from sqlalchemy import inspect
+            expected = {"session_id": session_id, "actor": actor, "event_type": event_type,
+                "tool_name": tool_name, "risk_level": risk_level, "policy_mode": policy_mode,
+                "summary": summary, "details_json": json.dumps(details) if details is not None else None}
+            if (type(_prepared_event) is not AuditEvent or not inspect(_prepared_event).transient
+                or (event_id is not None and _prepared_event.id != event_id)
+                or any(getattr(_prepared_event, key) != value for key, value in expected.items())):
+                raise ValueError("prepared_audit_event_changed")
+            event = _prepared_event
         db.add(event)
         if flush:
             await db.flush()

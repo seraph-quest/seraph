@@ -260,7 +260,7 @@ async def _validate_memory_dispatch_source(db, run, scope):
     except HeaderBoundsError as error:
         raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
     await _current_root(db, source.operator)
-    await validate_invocation(db, claim.binding)
+    await validate_invocation(db, claim.binding, header_budget=budget)
     return source
 
 
@@ -276,13 +276,19 @@ class _MemoryOwnerSourceOperation:
     _seal: object = field(default=None, init=False, repr=False)
     _issued_id: int = field(default=0, init=False, repr=False)
     _effect: object = field(default=None, init=False, repr=False)
+    _prepared: object = field(default=None, init=False, repr=False)
 
 
-async def _begin_memory_owner_source(db, run, scope):
+async def _begin_memory_owner_source(db, run, scope, *, prepared=None):
     from src.memory.header_bounds import _connection_state
     source = await _validate_memory_dispatch_source(db, run, scope)
     transaction, driver, _changes = await _connection_state(db)
     operation = _MemoryOwnerSourceOperation(source, scope, db, transaction, driver, run)
+    if prepared is not None:
+        from src.memory.m5 import validate_native_memory_mutation_plan
+        await validate_native_memory_mutation_plan(prepared, db=db,
+            candidate_digest=source.admission.candidate_digest)
+        object.__setattr__(operation, "_prepared", prepared)
     object.__setattr__(operation, "_seal", _MEMORY_SOURCE_SEAL)
     object.__setattr__(operation, "_issued_id", id(operation))
     _MEMORY_OPERATIONS[id(operation)] = operation
@@ -321,6 +327,17 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
         # The preparatory phase needs a real read snapshot on this exact
         # connection. It remains separate from the later original writer.
         await db.execute(text("BEGIN"))
+    from src.memory.composition_headers import locate_exact_rows
+    # Certify the exact original source rows before even their bounded
+    # relationship projections. The later full-body appearance is charged
+    # separately below on this same frame.
+    try:
+        for descriptor, identity in ((WORK_BOARD_TASK, task_id), (WORK_BOARD_ATTEMPT, attempt_id)):
+            if not await locate_exact_rows(db, descriptor, identity, budget):
+                raise NativeServiceBlocked("native_memory_original_source_changed")
+            await budget.certify(db, descriptor, (identity,))
+    except HeaderBoundsError as error:
+        raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
     # Locators are selected without Task/Attempt JSON or free text. Every full
     # source row is certified before the first ORM body/proof reader.
     def bounded(column):
@@ -407,10 +424,13 @@ class _MemoryReportReadContext:
     authority_check: object
 
 
-async def _memory_report_rows(db, proof):
+async def _memory_report_rows(db, proof, *, header_budget):
     from src.db.models import WorkBoardInputArtifact, Goal
     from src.work_board.pipelines import row_token
     task, attempt, run = proof.task, proof.attempt, proof.run
+    from src.memory.header_bounds import INPUT_ARTIFACT, GOAL
+    await header_budget.certify(db, INPUT_ARTIFACT, (task.input_artifact_id,))
+    await header_budget.certify(db, GOAL, (task.goal_id,))
     artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
     goal = await db.get(Goal, task.goal_id, populate_existing=True)
     if artifact is None or goal is None:
@@ -450,10 +470,12 @@ async def stage_memory_report_source(db, admission):
         "parent_handoff_context": handoffs, "parent_handoff_digest": proof.attempt.parent_handoff_digest}
     if input_digest(safe_inputs) != metadata["input_digest"]:
         raise NativeServiceBlocked("native_memory_original_source_changed")
-    raw = read_output(invoked["output_reference"], invoked["output_sha256"], max_bytes=65536)
+    raw = read_output(invoked["output_reference"], invoked["output_sha256"], max_bytes=65536,
+                      header_budget=admission.header_budget)
     if len(raw) != invoked["size_bytes"]:
         raise NativeServiceBlocked("native_memory_original_source_changed")
-    source = NativeMemoryReportSourceWitness(admission.candidate_digest, await _memory_report_rows(db, proof),
+    source = NativeMemoryReportSourceWitness(admission.candidate_digest,
+        await _memory_report_rows(db, proof, header_budget=admission.header_budget),
         _canonical(proof.readback), invoked["output_reference"], invoked["output_sha256"], len(raw), _canonical(inputs))
     object.__setattr__(source, "_identity", _MemoryReportSourceIssuance(id(source), _memory_report_source_digest(source)))
     return replace(admission, report_source=source)
@@ -480,7 +502,8 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
         session_id=value["operator_session_id"], task_id=old["task_id"],
         revision=old["expected_task_revision"], attempt_id=old["attempt_id"],
         header_budget=context.admission.header_budget)
-    if (current != old or await _memory_report_rows(db, proof) != source.row_tokens
+    if (current != old or await _memory_report_rows(db, proof,
+            header_budget=context.admission.header_budget) != source.row_tokens
         or _canonical(proof.readback) != source.proof_json
         or datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"])):
         raise NativeServiceBlocked("native_memory_original_source_changed")
@@ -494,7 +517,8 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
         import time
         began = time.monotonic()
         try:
-            raw = read_output(source.output_reference, source.output_digest, max_bytes=65536)
+            raw = read_output(source.output_reference, source.output_digest, max_bytes=65536,
+                              header_budget=context.admission.header_budget)
         except (ValueError, OSError) as exc:
             raise NativeServiceBlocked("native_memory_report_readback_changed") from exc
         finally:
@@ -507,8 +531,26 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
     return dict(proof.readback)
 
 
+async def _prepare_original_memory_text(db, value, budget):
+    from src.memory import m5
+    from src.memory.header_bounds import SECRET
+    # The existing owner reads the complete Vault inventory before redaction,
+    # in readonly redaction, and again to bind the unchanged inventory.
+    for _ in range(3):
+        await budget.certify_all(db, SECRET)
+    return await m5.prepare_m5_text(db, value, header_budget=budget)
+
+
+async def _consume_original_memory_text(db, value, prepared, budget):
+    from src.memory import m5
+    from src.memory.header_bounds import SECRET
+    await budget.certify_all(db, SECRET)
+    return await m5._consume_prepared_m5_text(db, value, prepared)
+
+
 async def prepare_memory_admission(db, *, operator, method, request, idempotency_key,
-                                   host_boot_nonce, composition_binding_digest, original_deadline):
+                                   host_boot_nonce, composition_binding_digest, original_deadline,
+                                   header_budget=None):
     """Authenticated ingress stages only data before its original admission writer."""
     from src.auth.service import AuthenticatedOperator
     from src.auth.ownership import _current_root
@@ -519,7 +561,9 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
         or db.info.get("native_writer_started") or type(request) is not dict):
         raise NativeServiceBlocked("native_memory_original_ingress_required")
     from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION, MEMORY_DESCRIPTORS
-    budget = HeaderReadBudget()
+    budget = header_budget if header_budget is not None else HeaderReadBudget()
+    if type(budget) is not HeaderReadBudget:
+        raise NativeServiceBlocked("native_memory_source_budget_unavailable")
     connection = await db.connection()
     if not (await connection.get_raw_connection()).driver_connection.in_transaction:
         from sqlalchemy import text
@@ -541,7 +585,7 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
         reason = request["reason"]
         if reason is not None and (type(reason) is not str or len(reason) > 500):
             raise NativeServiceBlocked("native_memory_candidate_invalid")
-        prepared = None if reason is None else asdict(await m5.prepare_m5_text(db, reason))
+        prepared = None if reason is None else asdict(await _prepare_original_memory_text(db, reason, budget))
         admission = NativeMemoryMutationAdmission.from_candidate({**common, **request, "prepared_reason": prepared})
     else:
         if method == "memory.propose":
@@ -552,7 +596,7 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
             if source["capability_id"] != REPORT_SOURCE_CAPABILITY:
                 raise NativeServiceBlocked("native_memory_source_profile_unsupported")
             admission = NativeMemoryMutationAdmission.from_candidate({**common, "source": source,
-                "prepared_text": asdict(await m5.prepare_m5_text(db, m5._structured_source_candidate(proof)))})
+                "prepared_text": asdict(await _prepare_original_memory_text(db, m5._structured_source_candidate(proof), budget))})
         else:
             keys = {"proposal_id", "action", "expected_revision", "expected_preview_text_digest",
                 "expected_task_revision", "expected_goal_revision", "edited_text", "decision_effect",
@@ -577,7 +621,7 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
             values = {key: item for key, item in request.items() if key not in {"expected_task_revision", "expected_goal_revision"}}
             admission = NativeMemoryMutationAdmission.from_candidate({**common, **values, "source": source,
                 "proposal_schema": proposal.schema_version, "proposal_expires_at": expires.isoformat(),
-                "prepared_text": asdict(await m5.prepare_m5_text(db, text))})
+                "prepared_text": asdict(await _prepare_original_memory_text(db, text, budget))})
     admission = replace(admission, header_budget=budget)
     await validate_original_memory_owner(db, admission)
     return await stage_memory_report_source(db, admission)
@@ -590,7 +634,12 @@ async def validate_original_memory_owner(db, admission):
     from src.memory.repository import _canonical_memory_deletion_marker
     if type(admission) is not NativeMemoryMutationAdmission:
         raise NativeServiceBlocked("native_memory_original_candidate_required")
+    from src.memory.header_bounds import HeaderReadBudget, SESSION, MEMORY_DESCRIPTORS
+    budget = admission.header_budget
+    if type(budget) is not HeaderReadBudget:
+        raise NativeServiceBlocked("native_memory_source_budget_unavailable")
     value = admission.candidate()
+    await budget.certify(db, SESSION, (value["operator_session_id"],))
     await m5._require_original_m5_session(db, value["operator_principal_id"], value["operator_session_id"])
     if datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"]):
         raise NativeServiceBlocked("native_memory_original_cutoff_expired")
@@ -603,6 +652,7 @@ async def validate_original_memory_owner(db, admission):
             raise NativeServiceBlocked("native_memory_original_source_changed")
         original = m5._structured_source_candidate(proof)
         if value["method"] == "memory.applyReviewed":
+            await budget.certify(db, MEMORY_DESCRIPTORS["memory_proposals"], (value["proposal_id"],))
             proposal = await db.get(MemoryProposal, value["proposal_id"])
             if (proposal is None or proposal.owner_principal_id != value["operator_principal_id"]
                 or proposal.owner_session_id != value["operator_session_id"]
@@ -615,15 +665,23 @@ async def validate_original_memory_owner(db, admission):
                 or proposal.source_task_id != old["task_id"] or proposal.source_attempt_id != old["attempt_id"]):
                 raise NativeServiceBlocked("native_memory_original_review_changed")
             original = value["edited_text"] if value["edited_text"] is not None else proposal.preview_text or ""
-        await m5._consume_prepared_m5_text(db, original, m5.PreparedM5Text(**value["prepared_text"]))
+        await _consume_original_memory_text(db, original, m5.PreparedM5Text(**value["prepared_text"]), budget)
     else:
+        from src.memory.composition_headers import locate_exact_rows
+        if not await locate_exact_rows(db, MEMORY_DESCRIPTORS["memories"], value["record_ref"], budget):
+            raise NativeServiceBlocked("native_memory_original_record_changed")
+        await budget.certify(db, MEMORY_DESCRIPTORS["memories"], (value["record_ref"],))
         record = await db.get(Memory, value["record_ref"])
+        from src.memory.composition_headers import locate_tombstones
+        tombstone_ids = await locate_tombstones(db, value["record_ref"], budget)
+        if tombstone_ids:
+            await budget.certify(db, MEMORY_DESCRIPTORS["memory_tombstones"], tombstone_ids)
         if (record is None or record.source_session_id != value["operator_session_id"]
             or _canonical_memory_deletion_marker(record) is not None
             or await db.scalar(select(MemoryTombstone).where(MemoryTombstone.memory_id == record.id)) is not None):
             raise NativeServiceBlocked("native_memory_original_record_changed")
         if value["prepared_reason"] is not None:
-            await m5._consume_prepared_m5_text(db, value["reason"], m5.PreparedM5Text(**value["prepared_reason"]))
+            await _consume_original_memory_text(db, value["reason"], m5.PreparedM5Text(**value["prepared_reason"]), budget)
     return value
 
 
@@ -694,8 +752,8 @@ async def perform_memory_mutation(db, admission, *, authority_check, source_oper
             record_id = result["accepted_memory_id"]
             result_value = {"record_ref": record_id}
     else:
-        reason = None if value["prepared_reason"] is None else await m5._consume_prepared_m5_text(
-            db, value["reason"], m5.PreparedM5Text(**value["prepared_reason"]))
+        reason = None if value["prepared_reason"] is None else await _consume_original_memory_text(
+            db, value["reason"], m5.PreparedM5Text(**value["prepared_reason"]), admission.header_budget)
         result = await _forget_memory_in_session(db, owner_session_id=session, actor=principal,
             memory_id=value["record_ref"], mode=value["mode"], reason=reason,
             privacy_boundary=value["privacy_boundary"])
@@ -770,6 +828,7 @@ async def validate_memory_spec(db, spec, admission):
     from src.auth.service import authenticate_principal
     from .ownership import method_dependencies
     candidate = await validate_original_memory_owner(db, admission)
+    await certify_original_memory_principal(db, candidate["operator_principal_id"], admission.header_budget)
     principal = await authenticate_principal(candidate["operator_principal_id"], db=db)
     binding = spec.composition_binding
     goals = (candidate["source"]["goal_id"], candidate["source"]["goal_revision"]) if "source" in candidate else (None, None)
@@ -795,8 +854,11 @@ async def native_memory_spec(db, *, admission, operator, binding):
     from src.auth.ownership import _current_root
     from src.auth.service import authenticate_principal
     from src.workflows.job_runtime import DurableJobSpec, DurableJobIdentity
+    from src.memory.header_bounds import OPERATOR_SESSION
+    await admission.header_budget.certify(db, OPERATOR_SESSION, (operator.session_id,))
     await _current_root(db, operator)
     candidate = admission.candidate()
+    await certify_original_memory_principal(db, operator.principal.principal_id, admission.header_budget)
     principal = await authenticate_principal(operator.principal.principal_id, db=db)
     if (operator.principal.principal_id != candidate["operator_principal_id"]
         or operator.session_id != candidate["operator_session_id"] or principal.principal.grants != operator.principal.grants):
@@ -820,6 +882,24 @@ async def native_memory_spec(db, *, admission, operator, binding):
 def memory_job_id(operator, method, key):
     return "native-memory:" + _digest({"principal": operator.principal.principal_id,
         "session": operator.session_id, "method": method, "key": key})
+
+
+async def certify_original_memory_principal(db, principal_id, budget):
+    """Numeric cover for the original principal and reverse-link projections.
+
+    Conservative full OperatorSession inventory avoids a second authentication
+    selector or authority path. Original authenticate_principal still decides
+    which live root and ownership metadata qualify.
+    """
+    from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION
+    if (type(budget) is not HeaderReadBudget or type(principal_id) is not str
+            or not 1 <= len(principal_id.encode("utf-8")) <= 512):
+        raise NativeServiceBlocked("native_memory_source_budget_unavailable")
+    await budget.certify_all(db, OPERATOR_SESSION)
+    # _ownership_metadata retrieves at most two non-tombstone ids and one
+    # impossible tombstone id. Reserve their complete JSON string appearances
+    # independently of the full root projection certified above.
+    budget.debit(3 * (6 * 512 + 2) + 2)
 
 
 def original_request(candidate):
@@ -851,9 +931,21 @@ async def execute_native_memory(*, operator, method, request, idempotency_key):
         raise NativeServiceBlocked("native_memory_retention_unavailable")
     reviewed, boot = host.reviewed, host.boot_nonce
     job_id = memory_job_id(operator, method, idempotency_key)
+    from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION, WRS_BY_RUN
+    from src.memory.composition_headers import locate_exact_rows
+    budget = HeaderReadBudget()
     async with get_session() as db:
+        from sqlalchemy import text
+        connection = await db.connection()
+        if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+            await db.execute(text("BEGIN"))
+        await budget.certify(db, OPERATOR_SESSION, (operator.session_id,))
         await _current_root(db, operator)
-        prior = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+        prior_ids = await locate_exact_rows(db, WRS_BY_RUN, job_id, budget)
+        prior = None
+        if prior_ids:
+            await budget.certify(db, WRS_BY_RUN, prior_ids)
+            prior = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
         if prior is not None:
             context = memory_context(prior)
             if (context["candidate"]["operator_principal_id"] != operator.principal.principal_id
@@ -861,15 +953,16 @@ async def execute_native_memory(*, operator, method, request, idempotency_key):
                 or original_request(context["candidate"]) != request):
                 raise NativeServiceBlocked("native_memory_idempotency_input_changed")
             # Never private result release or another call from a fresh request.
-            return {"job": await jobs.get_job(job_id), "replayed": True, "memory_status": "no_learning"}
+            return {"job": await jobs.get_job(job_id, header_budget=budget), "replayed": True, "memory_status": "no_learning"}
         binding = await bind_invocation(db, method=method, native_branch="base",
-            goal_bound=method != "memory.forget", reviewed_composition=reviewed)
+            goal_bound=method != "memory.forget", reviewed_composition=reviewed, header_budget=budget)
         admission = await prepare_memory_admission(db, operator=operator, method=method, request=request,
             idempotency_key=idempotency_key, host_boot_nonce=boot, composition_binding_digest=binding.binding_digest,
-            original_deadline=datetime.now(timezone.utc) + timedelta(seconds=30))
+            original_deadline=datetime.now(timezone.utc) + timedelta(seconds=30), header_budget=budget)
         await db.rollback()  # Staged Vault I/O is complete before BEGIN.
-        await begin_native_writer(db, owner="durable_jobs")
+        await begin_native_writer(db, owner="durable_jobs", header_budget=budget)
         async def admission_check(writer, _run):
+            await admission.header_budget.certify(writer, OPERATOR_SESSION, (operator.session_id,))
             await _current_root(writer, operator)
             await validate_original_memory_owner(writer, admission)
         spec = await native_memory_spec(db, admission=admission, operator=operator, binding=binding)
@@ -881,12 +974,13 @@ async def execute_native_memory(*, operator, method, request, idempotency_key):
     claim = None
     scope = None
     try:
-        await jobs.transition_job(job_id, "queued", expected_revision=job["revision"])
+        await jobs.transition_job(job_id, "queued", expected_revision=job["revision"], header_budget=budget)
         claim = await jobs.claim_service_job(job_id, host=host, owner="native-memory:" + boot[:24],
-            lease_seconds=30, claim_authority_check=admission_check)
+            lease_seconds=30, claim_authority_check=admission_check, header_budget=budget,
+            native_memory_admission=admission)
         scope = _issue_memory_dispatch_source(claim, admission, operator, host)
         result = await host.request_service(method, admission.wire_inputs(), original_scope=scope)
-        completed = await jobs.complete_native_memory(claim, result=result)
+        completed = await jobs.complete_native_memory(claim, result=result, header_budget=budget)
         return {"job": completed, "result": result, "replayed": False, "memory_status": result["memory_status"]}
     except (NativeServiceBlocked, HostBlocked, DurableJobError) as exc:
         if claim is not None:
@@ -908,8 +1002,11 @@ async def native_memory_http(**kwargs):
     from src.auth.service import AuthFailure
     from src.work_board.repository import BoardError
     from .ownership import CompositionBindingError
+    from src.memory.header_bounds import HeaderBoundsError
     try:
         return await execute_native_memory(**kwargs)
+    except HeaderBoundsError as exc:
+        raise HTTPException(status_code=409, detail={"code": "canonical_bound_not_certified"}) from exc
     except (NativeServiceBlocked, DurableJobError, AuthFailure, BoardError, CompositionBindingError, ValueError, PermissionError) as exc:
         raise HTTPException(status_code=409, detail={"code": getattr(exc, "reason_code", "native_memory_original_unavailable")}) from exc
 
@@ -947,13 +1044,16 @@ async def dispatch_memory_mutation(dispatcher, db, run, witness, method, payload
             or _ms(run.deadline_at) <= int(datetime.now(timezone.utc).timestamp() * 1000)):
             raise NativeServiceBlocked("native_memory_original_claim_changed")
         dispatcher.jobs._assert_lease(run, owner=witness["lease_owner"], fencing_token=witness["fencing_token"])
-        await validate_invocation(writer, original_scope.binding)
+        await validate_invocation(writer, original_scope.binding, header_budget=admission.header_budget)
+        from src.memory.header_bounds import OPERATOR_SESSION
+        await admission.header_budget.certify(writer, OPERATOR_SESSION, (run.operator_session_id,))
         now = datetime.now(timezone.utc)
         root = await writer.scalar(select(OperatorSession).where(
             OperatorSession.id == run.operator_session_id, OperatorSession.principal_id == run.owner_principal_id,
             OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
             OperatorSession.is_bearer_tombstone.is_(False), OperatorSession.idle_expires_at > now,
             OperatorSession.absolute_expires_at > now).execution_options(populate_existing=True))
+        await certify_original_memory_principal(writer, run.owner_principal_id, admission.header_budget)
         current = await authenticate_principal(run.owner_principal_id, db=writer)
         if (root is None or context["candidate"]["host_boot_nonce"] != original_scope.host_boot_nonce
             or json.loads(run.declared_authority_json).get("grants") != sorted(

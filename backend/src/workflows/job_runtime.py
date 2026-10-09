@@ -78,6 +78,8 @@ class _NativeServiceClaimRequest:
     reviewed: Any
     host_boot_nonce: str
     native_report_candidate: Any = field(default=None, repr=False, compare=False)
+    header_budget: Any = field(default=None, repr=False, compare=False)
+    native_memory_admission: Any = field(default=None, repr=False, compare=False)
 
     def validate_host(self):
         if (not self.host.admitting or self.host.reviewed is not self.reviewed
@@ -111,7 +113,14 @@ async def _validate_native_service_claim(db, run, request):
             or binding.host_composition_digest != request.reviewed.composition_digest
             or binding.host_package_digest is None or run.deadline_at is None):
         raise DurableJobLeaseError("original reviewed native service binding unavailable")
-    await validate_invocation(db, binding)
+    memory_budget = request.header_budget if run.job_kind == "runtime_service_memory_v1" else None
+    if run.job_kind == "runtime_service_memory_v1":
+        from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION
+        if type(memory_budget) is not HeaderReadBudget:
+            raise DurableJobLeaseError("native_memory_source_budget_unavailable")
+        await memory_budget.certify(db, OPERATOR_SESSION, (run.operator_session_id,))
+    await validate_invocation(db, binding, **(
+        {"header_budget": memory_budget} if memory_budget is not None else {}))
     now = _utc_now()
     if run.owner_kind != "user" or run.operator_session_id != run.session_id:
         raise DurableJobLeaseError("native service original operator provenance unavailable")
@@ -124,6 +133,9 @@ async def _validate_native_service_claim(db, run, request):
     ).execution_options(populate_existing=True))
     if root is None:
         raise DurableJobLeaseError("native service original operator inactive")
+    if memory_budget is not None:
+        from src.runtime_plugins.memory_producer import certify_original_memory_principal
+        await certify_original_memory_principal(db, run.owner_principal_id, memory_budget)
     current_operator = await authenticate_principal(run.owner_principal_id, db=db)
     if run.job_kind == "work.local-evidence-report.v1":
         from src.runtime_plugins.task_capability import recheck_report_claim
@@ -144,7 +156,12 @@ async def _validate_native_service_claim(db, run, request):
                 str(getattr(grant, "value", grant)) for grant in current_operator.principal.grants)):
             raise DurableJobLeaseError("native_memory_original_policy_or_host_changed")
         if context["result"] is None:
-            await validate_original_memory_owner(db, NativeMemoryMutationAdmission.from_candidate(context["candidate"]))
+            admission = request.native_memory_admission
+            if (type(admission) is not NativeMemoryMutationAdmission
+                or admission.header_budget is not memory_budget
+                or admission.candidate() != context["candidate"]):
+                raise DurableJobLeaseError("native_memory_original_admission_unavailable")
+            await validate_original_memory_owner(db, admission)
     if run.job_kind == "conversation_turn_v1":
         from src.db.models import Session
         conversation = await db.get(Session, run.conversation_id, populate_existing=True)
@@ -2385,12 +2402,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     """Persistence operations for the one canonical workflow job record."""
 
     @asynccontextmanager
-    async def _writer_session(self):
+    async def _writer_session(self, *, header_budget=None):
         async with self._session() as db:
             if getattr(db, "info", {}).get("composition_read_guard") is not None:
                 from src.workspace.accounting_witness import prepare_composition_session
-                await prepare_composition_session(db)
+                await prepare_composition_session(db, **(
+                    {"header_budget": header_budget} if header_budget is not None else {}))
                 db.info["composition_writer_owner"] = "durable_jobs"
+            elif header_budget is not None:
+                from src.memory.composition_headers import certify_composition_superset
+                connection = await db.connection()
+                if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+                    await db.execute(text("BEGIN"))
+                await certify_composition_superset(db, header_budget)
             yield db
 
     async def reserve_native_physical_resource(
@@ -3128,6 +3152,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             from src.work_board.repository import BoardError
+            async def certify_native_memory_body(descriptor):
+                if native_memory_admission is not None:
+                    await native_memory_admission.header_budget.certify_all(db, descriptor)
+            if native_memory_admission is not None:
+                from src.memory.header_bounds import WRS_BY_RUN, GOAL, SESSION
+                await certify_native_memory_body(WRS_BY_RUN)
             # Existing immutable admission replay does not authorize new use.
             # Stage physical evidence only for a genuinely new invocation and
             # finish those reads before acquiring the canonical writer.
@@ -3176,6 +3206,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         .where(Goal.id == spec.goal_id)
                         .with_for_update()
                     )
+                if native_memory_admission is not None:
+                    await certify_native_memory_body(GOAL)
                 canonical_goal = await _assert_canonical_goal_fence(
                     db,
                     goal_id=spec.goal_id,
@@ -3192,7 +3224,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if dialect_name == "sqlite" and transaction_started and db.info.get("composition_guard") is not None:
                     db.info["native_writer_started"] = True
                 from src.runtime_plugins.ownership import validate_invocation
-                await validate_invocation(db, spec.composition_binding)
+                await validate_invocation(db, spec.composition_binding,
+                    **({"header_budget": native_memory_admission.header_budget}
+                        if native_memory_admission is not None else {}))
             if native_read_admission is not None:
                 from src.runtime_plugins.read_journal import validate_read_spec
                 await validate_read_spec(db, spec, native_read_admission)
@@ -3393,8 +3427,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 db.info["native_writer_started"] = True
+            if native_memory_admission is not None:
+                await certify_native_memory_body(SESSION)
             await ensure_sessions_exist(db, [spec.session_id], retained_native=(spec.composition_binding is not None
                 or db.info.get("composition_guard") is not None))
+            if native_memory_admission is not None:
+                await certify_native_memory_body(WRS_BY_RUN)
             existing = (
                 await db.execute(
                     select(WorkflowRunState).where(WorkflowRunState.idempotency_binding == binding)
@@ -3458,6 +3496,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         goal_id=spec.goal_id,
                     )
 
+            if native_memory_admission is not None:
+                await certify_native_memory_body(WRS_BY_RUN)
             by_id = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity.job_id))
             ).scalars().first()
@@ -3567,6 +3607,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     raise DurableJobAdmissionDenied("native_report_original_host_changed")
                 from src.runtime_plugins.task_capability import seal_report_admission
                 await seal_report_admission(db, run, native_task_admission, host_boot_nonce=native_task_host_boot_nonce)
+            if native_memory_admission is not None:
+                from src.workspace.accounting_witness import reserve_native_memory_admission_run
+                await reserve_native_memory_admission_run(db, run, native_memory_admission)
             db.add(run)
             try:
                 await db.flush()
@@ -3582,6 +3625,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     # can open a fresh database transaction.
                     from src.work_board.near_text_native import release_admission_scope_after_rollback
                     release_admission_scope_after_rollback(near_text_policy_scope, db=db)
+                if native_memory_admission is not None:
+                    from src.runtime_plugins.ownership import begin_native_writer
+                    await begin_native_writer(db, owner="durable_jobs",
+                        header_budget=native_memory_admission.header_budget)
+                    await certify_native_memory_body(WRS_BY_RUN)
                 existing = (
                     await db.execute(
                         select(WorkflowRunState).where(
@@ -3604,6 +3652,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         ) from exc
                     db.expunge(existing)
                     return _deduped_admission(existing, binding=binding)
+                if native_memory_admission is not None:
+                    await certify_native_memory_body(WRS_BY_RUN)
                 by_id = (
                     await db.execute(
                         select(WorkflowRunState).where(
@@ -3753,8 +3803,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import revise_operator_paused_parent
         return await revise_operator_paused_parent(self, parent_id, **bindings)
 
-    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+    async def get_job(self, job_id: str, *, header_budget=None) -> dict[str, Any] | None:
         async with self._session() as db:
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                from src.memory.composition_headers import locate_exact_rows
+                connection = await db.connection()
+                if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+                    await db.execute(text("BEGIN"))
+                ids = await locate_exact_rows(db, WRS_BY_RUN, job_id, header_budget)
+                if not ids:
+                    return None
+                await header_budget.certify(db, WRS_BY_RUN, ids)
             run = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
             ).scalars().first()
@@ -4089,16 +4149,21 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         near_text_policy_scope=None,
         _general_task_resume_witness=None,
         _native_report_terminal=None,
+        header_budget=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
-        async with self._writer_session() as db:
+        async with self._writer_session(**(
+            {"header_budget": header_budget} if header_budget is not None else {})) as db:
             # A capability-specific terminal guard must observe its owner,
             # consent, and artifact rows in the same serialized transaction as
             # the root CAS.  SQLite otherwise permits a stale read snapshot
             # between the caller's last preflight and this transition.
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             preflight_run = await self._fetch(db, job_id)
             report_terminal = (preflight_run.job_kind == "work.local-evidence-report.v1"
                 and preflight_run.composition_binding_json is not None
@@ -4153,7 +4218,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if report_terminal:
+            if header_budget is not None:
+                if preflight_run.job_kind != "runtime_service_memory_v1":
+                    raise DurableJobTransitionError("native_memory_resource_context_unexpected")
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="durable_jobs", header_budget=header_budget)
+            elif report_terminal:
                 from src.runtime_plugins.ownership import begin_native_writer
                 await begin_native_writer(db, owner="finite_service")
             elif (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
@@ -4163,6 +4233,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     await _begin_legacy_aware_writer(db)
                     near_writer_started = near_queue_guard
                     general_writer_started = general_resume_guard
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             run = await self._fetch(db, job_id)
             report_original = None
             if report_terminal:
@@ -4569,6 +4642,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             )
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("durable job changed or lease fencing token is stale")
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             refreshed = await self._fetch(db, job_id)
             receipt = {
                 "kind": "transition",
@@ -5339,7 +5415,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobLeaseError("original native read host changed before settlement")
             return _serialize(run, receipt={"kind": "native_read_completed", "no_learning": True})
 
-    async def complete_native_memory(self, original_claim: NativeServiceClaim, *, result) -> dict[str, Any]:
+    async def complete_native_memory(self, original_claim: NativeServiceClaim, *, result, header_budget=None) -> dict[str, Any]:
         """Complete only the same-writer actual Memory result and retained owners."""
         from src.runtime_plugins.memory_producer import memory_context
         from src.runtime_plugins.ownership import begin_native_writer
@@ -5347,8 +5423,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if type(original_claim) is not NativeServiceClaim or original_claim._host is None:
             raise DurableJobLeaseError("original native Memory claim required")
         host = original_claim._host
-        async with self._writer_session() as db:
-            await begin_native_writer(db, owner="durable_jobs")
+        async with self._writer_session(**(
+            {"header_budget": header_budget} if header_budget is not None else {})) as db:
+            await begin_native_writer(db, owner="durable_jobs", **(
+                {"header_budget": header_budget} if header_budget is not None else {}))
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (original_claim.job["job_id"],))
             run = await self._fetch(db, original_claim.job["job_id"])
             context = memory_context(run)
             sealed = context["result"]
@@ -5364,7 +5445,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobLeaseError("original native Memory completion changed")
             self._assert_lease(run, owner=payload["lease_owner"], fencing_token=payload["fencing_token"])
             await _validate_native_service_claim(db, run,
-                _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce))
+                _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce, header_budget=header_budget))
             await validate_native_memory_retention(db, run, sealed)
             now = _utc_now()
             run.status = "succeeded" if result["status"] == "succeeded" else "blocked"
@@ -5382,14 +5463,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def claim_service_job(self, job_id: str, *, host, owner: str,
                                 lease_seconds: int = 300, expected_revision: int | None = None,
                                 expected_fencing_token: int | None = None, claim_authority_check=None,
-                                native_report_candidate=None) -> NativeServiceClaim:
+                                native_report_candidate=None, header_budget=None,
+                                native_memory_admission=None) -> NativeServiceClaim:
         from src.runtime_plugins.bridge import CordisHost
         from src.runtime_plugins.composition import ReviewedComposition
         if (not isinstance(host, CordisHost) or not host.admitting
                 or not isinstance(host.reviewed, ReviewedComposition)
                 or type(host.boot_nonce) is not str or not re.fullmatch(r"[0-9a-f]{64}", host.boot_nonce)):
             raise DurableJobLeaseError("admitting original reviewed native service host required")
-        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce, native_report_candidate)
+        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce, native_report_candidate, header_budget, native_memory_admission)
         result = await self.claim_job(job_id, owner=owner, lease_seconds=lease_seconds,
             expected_revision=expected_revision, expected_fencing_token=expected_fencing_token,
             claim_authority_check=claim_authority_check, _runtime_service_claim=request)
@@ -5419,8 +5501,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         now = _utc_now()
         if expected_state != "queued":
             raise DurableJobTransitionError("durable job claims require the queued state")
-        async with self._writer_session() as db:
+        header_budget = _runtime_service_claim.header_budget if _runtime_service_claim is not None else None
+        async with self._writer_session(**(
+            {"header_budget": header_budget} if header_budget is not None else {})) as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             preflight_run = await self._fetch(db, job_id)
             if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
@@ -5440,9 +5527,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             if _runtime_service_claim is not None:
                 from src.runtime_plugins.ownership import begin_native_writer
-                await begin_native_writer(db, owner="durable_jobs")
+                await begin_native_writer(db, owner="durable_jobs", **(
+                    {"header_budget": header_budget} if header_budget is not None else {}))
             elif claim_authority_check is not None or dependency_guard or preference_guard:
                 await _begin_legacy_aware_writer(db)
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             run = await self._fetch(db, job_id)
             if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
                 if (_runtime_service_claim is None or continue_existing_attempt or run.attempt_count != 0):
@@ -5535,6 +5626,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
                 if not _rowcount_is_one(expired):
                     raise DurableJobLeaseError("job changed before deadline transition")
+                if header_budget is not None:
+                    from src.memory.header_bounds import WRS_BY_RUN
+                    await header_budget.certify(db, WRS_BY_RUN, (job_id,))
                 failed = await self._fetch(db, job_id)
                 db.expunge(failed)
                 return _serialize(
@@ -5579,6 +5673,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
                 if not _rowcount_is_one(malformed):
                     raise DurableJobLeaseError("job changed before malformed effect history was blocked")
+                if header_budget is not None:
+                    from src.memory.header_bounds import WRS_BY_RUN
+                    await header_budget.certify(db, WRS_BY_RUN, (job_id,))
                 blocked_job = await self._fetch(db, job_id)
                 db.expunge(blocked_job)
                 return _serialize(
@@ -5625,6 +5722,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
                 if not _rowcount_is_one(recovered):
                     raise DurableJobLeaseError("job changed before unresolved effect recovery")
+                if header_budget is not None:
+                    from src.memory.header_bounds import WRS_BY_RUN
+                    await header_budget.certify(db, WRS_BY_RUN, (job_id,))
                 recovered_job = await self._fetch(db, job_id)
                 receipt = {
                     "kind": "claim",
@@ -5670,6 +5770,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
                 if not _rowcount_is_one(failed):
                     raise DurableJobLeaseError("job changed before dependency failure transition")
+                if header_budget is not None:
+                    from src.memory.header_bounds import WRS_BY_RUN
+                    await header_budget.certify(db, WRS_BY_RUN, (job_id,))
                 failed_job = await self._fetch(db, job_id)
                 receipt = {
                     "kind": "claim",
@@ -5712,6 +5815,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
                 if not _rowcount_is_one(blocked):
                     raise DurableJobLeaseError("job changed before dependency recovery block")
+                if header_budget is not None:
+                    from src.memory.header_bounds import WRS_BY_RUN
+                    await header_budget.certify(db, WRS_BY_RUN, (job_id,))
                 blocked_job = await self._fetch(db, job_id)
                 receipt = {
                     "kind": "claim",
@@ -5814,6 +5920,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             )
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("job is currently owned by another active runner")
+            if header_budget is not None:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await header_budget.certify(db, WRS_BY_RUN, (job_id,))
             claimed = await self._fetch(db, job_id)
             if _runtime_service_claim is not None:
                 _runtime_service_claim.validate_host()
@@ -9344,6 +9453,26 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await _begin_legacy_aware_writer(db)
             from src.memory.header_bounds import WRS_BY_RUN
             await _legacy_writer_budget(db, source).certify(db, WRS_BY_RUN, (job_id,))
+        else:
+            # A restart has no private issuer. Inspect only scalar headers to
+            # identify the fixed null-fence parent shape before any body read;
+            # the bounded body is provenance, never a replacement issuer.
+            recovery_shape = (await db.execute(text(
+                "SELECT typeof(record_schema_version)='integer' AND record_schema_version>=2 "
+                "AND typeof(capability_version)='text' AND capability_version='workflow-v2' "
+                "AND typeof(parent_job_id)='text' AND length(CAST(parent_job_id AS BLOB))>0 "
+                "AND parent_fencing_token IS NULL FROM workflow_run_states "
+                "WHERE run_identity COLLATE BINARY=:identity LIMIT 2"
+            ), {"identity": job_id})).scalars().all()
+            if recovery_shape == [1]:
+                connection = await db.connection()
+                raw = await connection.get_raw_connection()
+                if not raw.driver_connection.in_transaction:
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                from src.memory.header_bounds import WRS_BY_RUN
+                from src.workflows.durable_state import _LegacyHeaderBudget
+                await _LegacyHeaderBudget().certify(db, WRS_BY_RUN, (job_id,))
+                raise DurableJobLeaseError("workflow_legacy_original_producer_unavailable")
         # Bulk CAS updates deliberately disable ORM session synchronization so
         # timezone-aware predicates are evaluated by the database. Refresh the
         # identity-map row on every read before serializing the receipt.

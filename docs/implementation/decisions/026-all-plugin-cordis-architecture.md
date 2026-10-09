@@ -128,6 +128,132 @@ verify any isolation boundary it needs; unsupported profiles remain blocked.
   platform profiles show their actual readiness/proof independently. Runtime
   traffic uses approved APIs; SSH remains administration only.
 
+### Bounded native Memory composition target
+
+The accepted **2026-10-09** refinement tracked in
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) defines bounded native
+Memory composition within the existing Seraph-owned storage contract. The fixed
+fourteen-service, thirty-four-method migration remains **Planned** until its
+complete governed execution, readback, recovery and lifecycle journey is proved.
+Accepting this target establishes no runtime migration or native Memory
+availability.
+
+Each native Memory operation has one original budget of at most **128 distinct
+canonical references and 1,048,576 bytes**. Schema metadata, complete row
+appearances, repeated reads, file bytes and prospective output/retention copies
+share that budget. Numeric spent and reserved capacity survives phase changes;
+there is no renewed allowance after staging, snapshot rollback or a later claim.
+The conservative SQL read set is the fixed **33-table superset** of existing
+Core15, inventory, native.v3, nine Memory tables and actual accounting,
+operator-session and Secret dependencies. All retained rows count regardless of
+owner, status or selected-graph membership. These bounds confer no authority and
+add no table, index, ledger or retained-field extension.
+
+Before snapshot row bodies, certify the complete superset on the original current
+SQLite connection under the existing maintenance lock. Bound all schema-object
+metadata to the source-derived ceiling of **1354 objects**, with unfiltered
+`LIMIT 1355` providing the overflow witness. This includes the existing supported
+automatic indexes, both principal operator triggers, and the fixed search
+metadata below. Bound complete column metadata with `table_xinfo`; the 33
+canonical body tables require exact mapped columns and `hidden = 0` before
+bodies. Unknown, generated, hidden, unsupported or overflowing canonical schema
+blocks this capability before private bodies. The ceiling is a certification
+limit, not a claim about the deployed object's exact count.
+
+The existing search owner's six FTS tables are auxiliary **metadata only**:
+`session_recall_fts`, `session_recall_fts_config`, `session_recall_fts_content`,
+`session_recall_fts_data`, `session_recall_fts_docsize` and
+`session_recall_fts_idx`. Its nine exact triggers are
+`session_recall_{sessions,messages,episodes}_{ai,au,ad}`. Validate their complete
+source-derived DDL, exact names/table associations and bounded supported-runtime
+`table_xinfo` and index metadata. The virtual table has six declared columns
+and exactly two expected hidden fields, `session_recall_fts` and `rank`, each
+with `hidden = 1`; its fixed metadata must match the reviewed layout. Shadow
+metadata is exact, with no wildcard prefix acceptance.
+Unrecognized layouts, triggers, extra FTS instances and statistics tables remain
+denied. FTS/shadow bodies are never read by composition preflight, confer no
+authority and add no canonical body reference. Metadata bytes spend the same
+original 128-reference/1 MiB operation frame. Ordinary search initialization and
+rebuild remain owned by the existing startup search owner; this target adds no model,
+index, table, ledger or grant.
+
+This search metadata allowance is the independently reviewed FTS amendment:
+target SHA-256
+`340704498684acfb69a77efb28a9663b2b99d0ec93145d62a4facac0c7add046`,
+review SHA-256
+`ca7cf2f297c21b1b733854fb1cfaf5d31454ec9d485b4a617106f134385eac24`,
+source-manifest SHA-256
+`139ff6fab666b26bacd425dc31432fcfd380dd71e118a984c85eb024a8863308`.
+Later implementation proof requires a genuine persistent full `init_db`, both
+principal triggers, all nine search triggers and six FTS tables, exact bounded
+metadata, unchanged search metadata and a populated mixed canonical closure.
+The search-only SQLite 3.47 fixture receipt is limited evidence, not full
+initialization or native Memory readiness.
+
+Earlier named source-owner reads are independently certified before their bodies
+under that same original budget: authenticated OperatorSession, actual replay
+run, the fourteen composition inventory rows, selected Task/attempt/Goal and
+proposal, Source InputArtifact, full Session and full Secret inventory. Secret
+inventory uses actual `Secret.id`, including ownerless and multiple-same-owner
+rows. Early Forget validates the selected Memory, full Session and matching
+Tombstone before the original owner reads; its bounded scalar tombstone lookup
+uses the existing validated unique locator and preserves genuine absence.
+Snapshot certification cannot stand in for those earlier reads.
+
+Immediately after every actual fresh `BEGIN IMMEDIATE`, the original native
+writer recertifies the whole 33-table superset before returning to any
+body-reading caller, including current Root and Memory-owner validation.
+Rollback, writes or schema changes invalidate certificates; a new transaction
+requires fresh certification without resetting the numeric budget. Current
+original Root, Goal, grants, fence, epoch and deadline remain independently
+required. Read headers and numeric frames supply no execution, adoption or
+learning permission.
+
+Only genuine SQLite int64 WorkBoard event identifiers receive canonical decimal
+**composition addresses**, consistently across enqueue, lookup, membership,
+sorting, touch and delta accounting. Persisted `event_id`, constructors, API
+cursors and original body/digest values remain integers. Existing supported
+string addresses and their digest codec remain unchanged. This narrow address
+adapter introduces no generic integer coercion or event rewrite.
+
+Each physical dependency is header-certified and debited before its bytes,
+including selected input/output/checkpoint files, report sources, deployment and
+accounting receipts, and the fixed 4097-byte Vault-key fallback read allowance.
+The fixed original readers use same-path nofollow, nonblocking descriptor opens,
+regular-file checks and bounded reads while retaining their original ownership,
+mode, link, size, hash and envelope validation. FIFO, symlink, incompatible
+identity or unbounded input fails closed. Repeated reads spend capacity again;
+a file header or SQL hash supplies no cleanup or effect receipt.
+
+Reserve real prospective constructor, output, audit and Original/Current/Unknown
+retention capacity before the first write, using original constructors and exact
+returned projections. If that capacity cannot be certified, deny the native
+mutation before its effect. Genuine producer begin/capture/validate, original
+returned Effect identity and readback remain mandatory. Preadmission overflow
+creates no job; failure after a genuinely committed queued admission preserves
+that original job, protected recovery bytes and unresolved liability. Unknown
+effects, suppressed Current output and debt retain their original recovery
+owners across restart; certificates cannot authorize replay or adoption.
+
+A small selected Memory graph can therefore be blocked by excessive unrelated
+retained history. This is an explicit native Memory capability limit. Ordinary
+Forget, full audit history and existing privacy-deletion semantics remain
+preserved; the bounded native path must not truncate those histories or weaken
+their owners to become eligible.
+
+All eleven findings from the independent target reviews were accepted in the
+exact R1G refinement. Decision provenance is target SHA-256
+`11a26a8182cfdd138f9af833e2b46631b918872aee2a4b479c32b54f7b242a17`,
+independent review SHA-256
+`ee9160423c3b3452bd9e94a9a6e15c5243c458c5e3eeac98c054c4a895bd67cf`,
+and contract source-manifest SHA-256
+`9b91f2563f13249caefcfb302816accabe80833ca6d7ee84b4920de0965402be`.
+These identify accepted target/source-review provenance; implementation requires
+actual populated-event, no-body overflow, current-writer ordering, bounded
+physical-reader, original effect/readback and recovery proof plus independent
+cumulative review. Historical receipts or module/service availability establish
+no native Memory permission or completion.
+
 ## Migration Boundaries And Open Decisions
 
 This documentation batch does not add dependencies, plugin packages, a runtime

@@ -101,11 +101,14 @@ def output_bytes(capability: str, inputs: Mapping[str, Any]) -> bytes:
     return result
 
 
-def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OUTPUT_BYTES) -> bytes:
+def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OUTPUT_BYTES, header_budget=None) -> bytes:
     from src.work_board.input_artifacts import _safe_file_bytes
     from src.browser.task_runner import read_browser_artifact_bytes
     root = canonical_workspace_root(settings.workspace_dir)
     if reference.startswith("artifacts/work-board/browser/"):
+        if header_budget is not None:
+            from src.memory.header_bounds import HeaderBoundsError
+            raise HeaderBoundsError("canonical_bound_not_certified")
         raw = read_browser_artifact_bytes(reference, workspace_root=root, max_bytes=max_bytes)
         if raw is None or hashlib.sha256(raw).hexdigest() != expected_digest:
             raise ValueError("browser source digest mismatch")
@@ -118,7 +121,7 @@ def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OU
     from src.work_board.input_artifacts import _open_input_artifact_parent
     fd, leaf = _open_input_artifact_parent(path, create=False)
     try:
-        descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+        descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK, dir_fd=fd)
         try:
             size = os.fstat(descriptor).st_size
         finally:
@@ -127,7 +130,7 @@ def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OU
         os.close(fd)
     if size < 1 or size > max_bytes:
         raise ValueError("evidence source size invalid")
-    return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
+    return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size, header_budget=header_budget)
 
 
 @dataclass(frozen=True)

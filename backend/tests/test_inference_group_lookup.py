@@ -1,4 +1,5 @@
 """Actual old SQLite migration, indexed reads and canonical writer invariants."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
@@ -251,7 +252,7 @@ async def test_real_canonical_writer_contact_unknown_settlement_and_snapshot_exc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("divergence", [False, True])
-async def test_actual_group_writer_and_append_keep_projection_or_rollback_before_contact(task_runtime, monkeypatch, divergence):
+async def test_actual_group_writer_and_append_keep_projection_or_rollback_before_contact(task_runtime, monkeypatch, divergence, native_admission_lifecycle):
     from tests.test_general_task_specialist_planning import specialist_fixture
     from src.workflows.job_runtime import DurableJobRepository
     from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path

@@ -19,40 +19,46 @@ from src.work_board.dispatcher import WorkBoardDispatcher
 from tests.test_general_task_adapters import mcp_registry
 from tests.test_general_task_planner import accounting_db, forbid_external_inference, prepare
 from tests.test_work_board_m6_provider_free_journey import _goal
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 
 
 @pytest_asyncio.fixture
-async def approval_journey(accounting_db, monkeypatch):
+async def approval_journey(accounting_db, monkeypatch, build_admission_lifecycle):
     from src.auth.service import authenticate_session
     from src.api import work_board as api
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    await build_admission_lifecycle.start()
     workspace, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     registry = ToolRegistry()
-    registry.start()
-    registry, manager, tool, _path, _declaration = mcp_registry.__wrapped__(workspace, registry)
-    service = GeneralTaskService(registry)
-    service.start()
-    dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
-    monkeypatch.setattr(api, "dispatcher", dispatcher)
-    goal = _goal("goal-approval", "Continue exact approved local MCP work")
-    goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
-    async with sessions() as db:
-        db.add(goal)
-    app = FastAPI()
-    @app.middleware("http")
-    async def current_operator(request, call_next):
-        request.state.operator = await authenticate_session(owner.session_id, touch=False)
-        return await call_next(request)
-    app.include_router(api.router, prefix="/api")
-    from src.api.approvals import router as approvals_router
-    app.include_router(approvals_router, prefix="/api")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
-        yield SimpleNamespace(jobs=jobs, owner=owner, workspace=workspace,
-            sessions=sessions, registry=registry, manager=manager, tool=tool,
-            service=service, dispatcher=dispatcher, client=client, goal=goal)
-    service.stop()
-    registry.stop()
+    service = None
+    try:
+        registry.start()
+        registry, manager, tool, _path, _declaration = mcp_registry.__wrapped__(workspace, registry)
+        service = GeneralTaskService(registry)
+        service.start()
+        dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+        monkeypatch.setattr(api, "dispatcher", dispatcher)
+        goal = _goal("goal-approval", "Continue exact approved local MCP work")
+        goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
+        async with sessions() as db:
+            db.add(goal)
+        app = FastAPI()
+        @app.middleware("http")
+        async def current_operator(request, call_next):
+            request.state.operator = await authenticate_session(owner.session_id, touch=False)
+            return await call_next(request)
+        app.include_router(api.router, prefix="/api")
+        from src.api.approvals import router as approvals_router
+        app.include_router(approvals_router, prefix="/api")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            yield SimpleNamespace(jobs=jobs, owner=owner, workspace=workspace,
+                sessions=sessions, registry=registry, manager=manager, tool=tool,
+                service=service, dispatcher=dispatcher, client=client, goal=goal)
+    finally:
+        if service is not None:
+            service.stop()
+        registry.stop()
 
 
 async def create_and_run(journey, *, steps=1):

@@ -1,6 +1,8 @@
 """Actual canonical review -> native registered-tool consumer, no inference."""
 import json
 import pytest
+import pytest_asyncio
+from tests.general_task_method_lifecycle import AdmissionSignerLifetime
 from sqlalchemy import select
 from src.memory import task_methods as methods
 from src.memory.task_lessons import create_task_lesson, LessonScope
@@ -14,6 +16,16 @@ from tests.test_task_lessons import failed_local_task, no_inference
 from tests.test_task_methods import review
 
 pytestmark = pytest.mark.parametrize('async_db', ['file'], indirect=True)
+
+
+@pytest_asyncio.fixture
+async def method_admission_lifecycle():
+    from src.work_board.historical_method import historical_method_service
+    lifetime = AdmissionSignerLifetime(historical_method_service)
+    try:
+        yield lifetime
+    finally:
+        await lifetime.close()
 
 
 async def setup_method(async_db, monkeypatch, tmp_path, *, correction=None):
@@ -46,7 +58,7 @@ def read_request(registry, key, path='selected.txt'):
 
 
 @pytest.mark.asyncio
-async def test_genuine_completed_native_source_review_next_task_and_future_rollback(async_db, monkeypatch, tmp_path, no_inference):
+async def test_genuine_completed_native_source_review_next_task_and_future_rollback(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     """No seeded Task, Attempt, run, StepState, receipt or source authority."""
     from config.settings import settings
     from src.auth.service import create_session
@@ -65,6 +77,7 @@ async def test_genuine_completed_native_source_review_next_task_and_future_rollb
         db.add(Goal(id='goal', title='Read the selected local source', revision=1, status='active',
             owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id))
         await db.commit()
+    await method_admission_lifecycle.start()
     current = methods.CurrentMethod()
     await current.start()
     monkeypatch.setattr(methods, 'current_method', current)
@@ -144,8 +157,9 @@ async def test_genuine_completed_native_source_review_next_task_and_future_rollb
 
 
 @pytest.mark.asyncio
-async def test_actual_next_native_task_uses_guard_pin_and_rollback_after_admission(async_db, monkeypatch, tmp_path, no_inference):
+async def test_actual_next_native_task_uses_guard_pin_and_rollback_after_admission(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    await method_admission_lifecycle.start()
     workspace = tmp_path/'workspace'
     (workspace/'selected.txt').write_text('Original physical selected content')
     async with async_db() as db:
@@ -181,9 +195,10 @@ async def test_actual_next_native_task_uses_guard_pin_and_rollback_after_admissi
 
 
 @pytest.mark.asyncio
-async def test_actual_verified_readback_guard_consumes_original_native_artifacts(async_db, monkeypatch, tmp_path, no_inference):
+async def test_actual_verified_readback_guard_consumes_original_native_artifacts(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     _operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path,
         correction='Verify readback before completion.')
+    await method_admission_lifecycle.start()
     (tmp_path/'workspace'/'selected.txt').write_text('Verified original file bytes')
     async with async_db() as db:
         await service.create(db, owner, read_request(registry, 'verified-readback-method'))
@@ -223,8 +238,9 @@ async def test_exact_tool_sequence_rejects_operator_plan_drift(async_db, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_actual_root_revocation_after_parent_claim_denies_before_callback(async_db, monkeypatch, tmp_path, no_inference):
+async def test_actual_root_revocation_after_parent_claim_denies_before_callback(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     _operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    await method_admission_lifecycle.start()
     (tmp_path/'workspace'/'selected.txt').write_text('Current original source')
     async with async_db() as db:
         await service.create(db, owner, read_request(registry, 'revoked-root-pin'))
@@ -248,8 +264,9 @@ async def test_actual_root_revocation_after_parent_claim_denies_before_callback(
 
 
 @pytest.mark.asyncio
-async def test_late_tombstone_after_physical_readback_blocks_protected_step_cas(async_db, monkeypatch, tmp_path, no_inference):
+async def test_late_tombstone_after_physical_readback_blocks_protected_step_cas(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     _operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    await method_admission_lifecycle.start()
     (tmp_path/'workspace'/'selected.txt').write_text('Actual readback before revocation')
     async with async_db() as db:
         await service.create(db, owner, read_request(registry, 'late-tombstone'))
@@ -278,8 +295,9 @@ async def test_late_tombstone_after_physical_readback_blocks_protected_step_cas(
 
 
 @pytest.mark.asyncio
-async def test_missing_source_guard_blocks_actual_native_task_before_callback(async_db, monkeypatch, tmp_path, no_inference):
+async def test_missing_source_guard_blocks_actual_native_task_before_callback(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     _operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    await method_admission_lifecycle.start()
     async with async_db() as db:
         created = await service.create(db, owner, read_request(registry, 'missing-source', 'absent.txt'))
     actual = registry.begin_invocation
@@ -299,8 +317,9 @@ async def test_missing_source_guard_blocks_actual_native_task_before_callback(as
 
 
 @pytest.mark.asyncio
-async def test_actual_tombstone_after_parent_claim_denies_before_tool(async_db, monkeypatch, tmp_path, no_inference):
+async def test_actual_tombstone_after_parent_claim_denies_before_tool(async_db, monkeypatch, tmp_path, no_inference, method_admission_lifecycle):
     _operator, current, owner, registry, service, dispatcher = await setup_method(async_db, monkeypatch, tmp_path)
+    await method_admission_lifecycle.start()
     (tmp_path/'workspace'/'selected.txt').write_text('Original selected source')
     async with async_db() as db:
         await service.create(db, owner, read_request(registry, 'revoked-pin'))

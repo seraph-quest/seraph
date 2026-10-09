@@ -1,4 +1,5 @@
 """Actual local evidence producer -> copied specialist tool input, no provider."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from dataclasses import replace
 import json
 import pytest
@@ -103,7 +104,7 @@ async def reserve_evidence_specialist(fixture):
 
 
 @pytest.mark.asyncio
-async def test_real_copied_evidence_is_consumed_by_specialist_tool(task_runtime, monkeypatch):
+async def test_real_copied_evidence_is_consumed_by_specialist_tool(task_runtime, monkeypatch, native_admission_lifecycle):
     from src.db.models import WorkBoardTask
     from src.auth.service import authenticate_session
     fixture = await copied_evidence_fixture(task_runtime,monkeypatch)

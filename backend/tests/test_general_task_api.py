@@ -16,6 +16,7 @@ from src.work_board.general_task import GeneralTaskService
 from src.work_board.repository import BoardError
 from tests.test_general_task_contract import Registry, descriptor, request, no_provider_contacts
 from tests.test_general_task_persistence import task_runtime
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
 
@@ -58,7 +59,7 @@ def intent_request():
 
 
 @pytest.mark.asyncio
-async def test_http_intent_proposal_replay_exact_plan_acceptance_and_work_readback(api):
+async def test_http_intent_proposal_replay_exact_plan_acceptance_and_work_readback(api, native_admission_lifecycle):
     app, service, planner, dispatcher, sessions = api
     async with sessions() as db:
         db.add(_goal("goal-1", "Ordinary intent"))

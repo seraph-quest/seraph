@@ -1,4 +1,5 @@
 """Actual original tool thread closure, without provider or model calls."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import asyncio
 from dataclasses import replace
 import threading
@@ -20,7 +21,7 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interruption", ["cancel", "timeout"])
-async def test_original_file_callback_must_exit_before_closure(interruption, task_runtime, monkeypatch):
+async def test_original_file_callback_must_exit_before_closure(interruption, task_runtime, monkeypatch, native_admission_lifecycle):
     registry = ToolRegistry()
     registry.start()
     entered, release = threading.Event(), threading.Event()

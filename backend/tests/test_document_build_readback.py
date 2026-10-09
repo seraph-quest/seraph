@@ -2,9 +2,12 @@
 import asyncio
 from dataclasses import replace
 import os
+import selectors
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
 
 import pytest
 
@@ -17,7 +20,7 @@ from src.work_board import document_pairs as sources
 from src.work_board.repository import BoardError
 
 
-async def test_private_fifo_open_is_bounded_before_decryption(accounting_db, monkeypatch):
+async def test_private_fifo_open_is_bounded_before_decryption(accounting_db, monkeypatch, record_property):
     from config.settings import settings
     _token, operator, owner, goal = await setup(accounting_db, monkeypatch)
     sessions = accounting_db[2].accounting_sessions
@@ -33,6 +36,10 @@ from pathlib import Path
 from config.settings import settings
 settings.workspace_dir=sys.argv[1]
 from src.work_board.document_pairs import read_private
+print('READY',flush=True)
+if sys.stdin.readline() != 'GO\\n':
+ raise AssertionError('FIFO command missing')
+print('READ_ENTERED',flush=True)
 try:
  read_private(Path(sys.argv[2]),json.loads(sys.argv[3]),maximum=65536)
 except ValueError:
@@ -41,9 +48,62 @@ else:
  raise AssertionError('FIFO unexpectedly read')
 """
     import json
-    result = await asyncio.to_thread(subprocess.run, [sys.executable, "-c", code,
-        str(settings.workspace_dir), str(path), json.dumps(receipt)], capture_output=True,
-        text=True, timeout=3, check=True)
+    def run_fifo_child():
+        argv = [sys.executable, "-c", code, str(settings.workspace_dir), str(path), json.dumps(receipt)]
+        with tempfile.TemporaryFile() as stderr:
+            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=stderr, bufsize=0)
+            try:
+                startup_started = time.monotonic()
+                ready = b""
+                os.set_blocking(child.stdout.fileno(), False)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(child.stdout, selectors.EVENT_READ)
+                    while b"\n" not in ready:
+                        remaining = 60 - (time.monotonic() - startup_started)
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise subprocess.TimeoutExpired(argv, 60)
+                        chunk = os.read(child.stdout.fileno(), 16)
+                        assert chunk, "FIFO child exited before readiness"
+                        ready += chunk
+                        assert len(ready) <= 16, "Unexpected FIFO readiness output"
+                assert ready == b"READY\n"
+                startup_seconds = time.monotonic() - startup_started
+                # One original three-second window includes GO, entry and exit.
+                operation_started = time.monotonic()
+                stdout, _ = child.communicate(b"GO\n", timeout=3 - (time.monotonic() - operation_started))
+                operation_seconds = time.monotonic() - operation_started
+                assert operation_seconds <= 3
+                assert stdout.splitlines() == [b"READ_ENTERED", b"regular-file-denied"]
+                assert child.returncode == 0
+                assert child.wait(timeout=1) == 0
+                return subprocess.CompletedProcess(argv, child.returncode,
+                    stdout.decode().removeprefix("READ_ENTERED\n")), {
+                    "pid": child.pid, "markers": ["READY", "READ_ENTERED", "regular-file-denied"],
+                    "startup_seconds": startup_seconds, "operation_seconds": operation_seconds,
+                    "operation_limit_seconds": 3, "returncode": child.returncode, "reaped": True,
+                }
+            except BaseException as error:
+                stderr.seek(0)
+                error.add_note("FIFO child stderr: " + stderr.read(65536).decode(errors="replace"))
+                raise
+            finally:
+                try:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=1)
+                    assert child.poll() is not None, "FIFO child cleanup did not prove exit"
+                finally:
+                    child.stdin.close()
+                    child.stdout.close()
+
+    result, physical_receipt = await asyncio.to_thread(run_fifo_child)
+    record_property("fifo_physical_readback", json.dumps(physical_receipt, sort_keys=True))
+    print("fifo_physical_readback=" + json.dumps(physical_receipt, sort_keys=True))
     assert result.stdout.strip() == "regular-file-denied"
     async with sessions() as db:
         with pytest.raises(BoardError):

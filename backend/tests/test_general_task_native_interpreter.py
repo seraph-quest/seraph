@@ -1,4 +1,5 @@
 """Canonical native execution/restart/revision mechanics, no inference."""
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 import pytest
 
 from src.auth.service import authenticate_session
@@ -14,7 +15,7 @@ from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["execute", "restart", "crash_before_assembly", "crash_before_claim", "crash_queued", "revision", "pause", "paused_revision"])
-async def test_native_execute_preserves_completed_step_across_restart_and_revision(task_runtime, operation):
+async def test_native_execute_preserves_completed_step_across_restart_and_revision(task_runtime, operation, native_admission_lifecycle):
     registry = Registry()
     descriptor = registry.entries[0]
     creation = request(registry)
@@ -92,7 +93,7 @@ async def test_native_execute_preserves_completed_step_across_restart_and_revisi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["restart", "exhausted", "unknown"])
-async def test_interpreter_governed_continuation_uses_real_result_and_never_egresses_private_bytes(task_runtime, monkeypatch, mode):
+async def test_interpreter_governed_continuation_uses_real_result_and_never_egresses_private_bytes(task_runtime, monkeypatch, mode, native_admission_lifecycle):
     import json
     from tests.general_task_test_transport import prepare_literal_planner
     from src.work_board import general_task_native as native

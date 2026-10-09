@@ -2812,7 +2812,7 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                         if dispatcher.general_tasks is None:
                             raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
                         await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
-                            body.expected_revision)
+                            body.expected_revision, document_build_review=body.document_build_review)
                 mutation = await repository.action_task(db, owner, task_id, body)
             latest_attempt = (
                 await db.execute(

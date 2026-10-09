@@ -90,6 +90,37 @@ OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
 
+**Document generation #1011: Planned target, feature-branch implementation.**
+[ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+also accepts explicit report/brief/workbook authoring, signed private review and
+the same original C1 native ToolStep producing editable DOCX/XLSX and direct PDF.
+The generation family reserves its own 24 MiB, preserves source32/pair16 MiB
+charges, shares durable process exclusion/queued priority with comparison, and
+retains output quota until explicit positively verified retirement. The target
+separates successful/degraded output retirement from protected fully-cancelled
+outputless retirement: blocked Task, ended cancelled Attempt, cancelled parent
+and complete settled original child/effect/cost set. Zero launch still requires
+the same full stop before Goal deletion/cutoff; later current authenticated
+cleanup only reduces capacity. Actual original stdin/EOF/supervisor wait issues
+the private persisted supervision proof; a parser witness alone or missing outer
+receipt after restart holds Unknown and charge. Capacity release never settles
+Task, effect or cost state.
+
+Source-private pending reservation and physical output readback precede final
+native writer adoption; its exact identity-sealed proof and current CAS are
+required without full output-file reads in that writer. Later output/download
+and retirement still perform physical validation because same-user post-read
+replacement remains a local race. Fixed cleanup tombstones before exact
+unlink/fsync/final CAS; partial or foreign inventory holds charge. Metadata
+headroom preserves the 24 MiB reservation within 8,192 bytes (1,781-byte fixed
+private supervision codec). A fresh bounded 4 KiB cleanup-witness read inside
+its writer still has filesystem-stall risk. The shared 4,096-row historical
+inventory ceiling fails closed; the sequential journey reaching a 4,097th
+historical row remains unexecuted and no eviction/recovery bypass is claimed. Actual CPU/Linux receipts
+do not claim shipped generation, native macOS proof, model composition or
+automatic iterative repair. Availability still requires independent full-journey
+review and the reviewed implementation merge; the owning issue/PR carries proof.
+
 ## Task conversation continuity
 
 **Shipped** within the bounded

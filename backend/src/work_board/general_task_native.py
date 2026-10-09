@@ -71,9 +71,12 @@ async def admit_native_step(jobs, parent_id, *, owner, fence, step, descriptor, 
         session_id=task.owner_session_id, operator_session_id=task.owner_session_id,
         parent_job_id=parent_id, parent_fencing_token=parent.fencing_token,
         goal_id=task.goal_id, goal_revision=task.goal_revision, plan_revision=previous.plan_revision,
+        priority=task.priority if descriptor.tool_id == "document_build" else 50,
         declared_authority={"principal": task.owner_principal_id, "owner_kind": "user",
             "session_id": task.owner_session_id, "capability_id": GENERAL_TASK_NATIVE_CHILD_CAPABILITY,
-            "general_task_child_binding": binding.model_dump(mode="json")},
+            "general_task_child_binding": binding.model_dump(mode="json"),
+            **({"document_build_priority": task.priority, "document_build_input_artifact_id": task.input_artifact_id}
+                if descriptor.tool_id == "document_build" else {})},
         deadline_at=parent.deadline_at, max_attempts=1)
     capacity_witness = None
     if service is not None:
@@ -143,7 +146,15 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
             await jobs.queue_job(binding.invocation_id)
         elif pending["status"] != "queued":
             raise DurableJobLeaseError("original accepted or queued native child required")
-        child = await jobs.claim_job(binding.invocation_id, owner=child_owner)
+        claim = None
+        async with jobs._session() as db:
+            candidate_row = await jobs._fetch(db, binding.invocation_id)
+            tool_id = json.loads(candidate_row.arguments_json).get("tool_id")
+        if tool_id == "document_build":
+            from src.work_board.document_build_native import stage_claim
+            claim = await stage_claim(service, jobs, binding)
+        child = await jobs.claim_job(binding.invocation_id, owner=child_owner,
+            **({"claim_authority_check": claim} if claim is not None else {}))
     fence = child["lease"]["fencing_token"]
     if not approved_resume:
         await publish_positive_claim(jobs, binding, child_owner=child_owner, child_fence=fence)
@@ -226,6 +237,10 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
                 await method_authority(db, run)
                 await document_invocation(db, replace(principal, job_id=binding.invocation_id),
                     binding.invocation_id, fence)
+        elif descriptor.tool_id == "document_build":
+            from src.work_board.document_build_native import settled_output_authority
+            async def document_authority(db, run):
+                await settled_output_authority(db, run, output)
         artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
             owner=child_owner, fence=fence, plan_digest=binding.plan_digest, step_id=binding.step_id,
             output=output, authority_check=document_authority)
@@ -266,7 +281,8 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
         await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
             child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
             expected_parent_revision=parent["revision"])
-        await jobs.transition_job(binding.invocation_id, "succeeded", owner=child_owner, fencing_token=fence,
+        terminal = "degraded" if descriptor.tool_id == "document_build" and output["pdf_artifact"] is None else "succeeded"
+        await jobs.transition_job(binding.invocation_id, terminal, owner=child_owner, fencing_token=fence,
             result={"verified": True, "artifact_refs": [reference.model_dump(mode="json")], "no_learning": True},
             result_summary="Native tool output physically read back")
         service.release_native_invocation(binding.invocation_id)
@@ -348,7 +364,12 @@ async def _execute_interpreter_child(service, jobs, binding, *, child_owner, pri
     try:
         return await run_native_step(service, jobs, binding, child_owner=child_owner,
             principal=principal, approved_resume=approved_resume)
-    except Exception:
+    except Exception as error:
+        from src.work_board.document_build_native import DocumentBuildPreclaimHeld, queued_wait_result
+        if type(error) is DocumentBuildPreclaimHeld:
+            waiting = await queued_wait_result(jobs, binding, error)
+            if waiting is not None:
+                return waiting, None, None
         await retain_native_failure(service, jobs, binding, child_owner=child_owner)
         return {"verified": False, "unknown_effect": True, "reason": "general_task_native_unknown",
             "no_learning": True, "native_execution": True}, None, None

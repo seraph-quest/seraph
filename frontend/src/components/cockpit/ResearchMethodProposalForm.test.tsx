@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
 import { TaskLessonReview } from "./TaskLessonReview";
@@ -28,6 +29,23 @@ function fields() {
   fireEvent.change(screen.getByLabelText("Stop condition 1"), { target: { value: strategy.stop_conditions[0] } });
   fireEvent.click(screen.getByLabelText(fieldAck));
 }
+
+it("completes POST and private GET with live AbortSignals after StrictMode's effect probe", async () => {
+  const signals: AbortSignal[] = [], candidate = vi.fn();
+  vi.mocked(apiFetch).mockImplementation((_url, init) => new Promise((resolve, reject) => {
+    const signal = init?.signal as AbortSignal;
+    signals.push(signal);
+    if (signal.aborted) { reject(new DOMException("Request aborted", "AbortError")); return; }
+    signal.addEventListener("abort", () => reject(new DOMException("Request aborted", "AbortError")), { once: true });
+    queueMicrotask(() => { if (!signal.aborted) resolve(response(lesson)); });
+  }));
+  const view = render(<StrictMode><ResearchMethodProposalForm task={task} source={source} owned onCandidate={candidate} onStale={vi.fn()} /></StrictMode>);
+  fields(); fireEvent.click(screen.getByRole("button", { name: "Prepare private research strategy" }));
+  await waitFor(() => expect(candidate).toHaveBeenCalledWith(lesson));
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+  expect(signals.every(signal => !signal.aborted)).toBe(true);
+  view.unmount(); expect(signals.every(signal => signal.aborted)).toBe(true);
+});
 
 it("connects verified dossier evidence through bounded fields, exact private candidate, canonical provenance and separate adoption/rollback", async () => {
   vi.mocked(apiFetch).mockImplementation(async (url, init) => {
@@ -112,6 +130,41 @@ it("retries only private readback after a known candidate was created", async ()
   fireEvent.click(await screen.findByRole("button", { name: "Inspect prepared research candidate" }));
   await waitFor(() => expect(candidate).toHaveBeenCalled());
   expect(vi.mocked(apiFetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each([401, 403, 409, "provenance"])("clears private fields and source after definitive known-candidate read denial %s", async status => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(lesson)).mockResolvedValueOnce(typeof status === "number" ? response({ detail: "denied" }, status) : response({ ...lesson, source_refs: ["artifact:changed"] }));
+  const candidate = vi.fn(), stale = vi.fn();
+  render(<ResearchMethodProposalForm task={task} source={source} owned onCandidate={candidate} onStale={stale} />);
+  fields(); fireEvent.click(screen.getByRole("button", { name: "Prepare private research strategy" }));
+  await waitFor(() => expect(stale).toHaveBeenCalledTimes(1));
+  expect(candidate).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("Query template 1")).toBeNull();
+  expect(screen.getByLabelText("Stop condition 1")).toHaveValue("");
+  expect(screen.queryByRole("button", { name: "Inspect prepared research candidate" })).toBeNull();
+  expect(screen.queryByText(/Fields are frozen/)).toBeNull();
+  expect(screen.getByRole("button", { name: "Prepare private research strategy" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});
+
+it.each(["unmount", "owner", "revision"])("aborts and fences late private GET after %s", async change => {
+  let resolve!: (r: Response) => void, signal!: AbortSignal;
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(lesson)).mockImplementationOnce((_url, init) => {
+    signal = init?.signal as AbortSignal;
+    return new Promise(r => { resolve = r; }); // Deliberately ignores abort to verify the late-result fence too.
+  });
+  const candidate = vi.fn(), stale = vi.fn();
+  const props = { task, source, owned: true, onCandidate: candidate, onStale: stale };
+  const view = render(<StrictMode><ResearchMethodProposalForm {...props} /></StrictMode>);
+  fields(); fireEvent.click(screen.getByRole("button", { name: "Prepare private research strategy" }));
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+  expect(signal.aborted).toBe(false);
+  if (change === "unmount") view.unmount();
+  else view.rerender(<StrictMode><ResearchMethodProposalForm {...props} task={change === "owner" ? { ...task, owner_session_id: "other" } : { ...task, task_revision: 4 }} /></StrictMode>);
+  expect(signal.aborted).toBe(true); await act(async () => { resolve(response(lesson)); });
+  expect(candidate).not.toHaveBeenCalled();
+  expect(stale).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Inspect prepared research candidate" })).toBeNull();
 });
 
 it("clears fields and fences a late POST when the original operator changes", async () => {

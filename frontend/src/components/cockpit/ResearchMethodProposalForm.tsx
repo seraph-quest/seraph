@@ -11,11 +11,20 @@ export function ResearchMethodProposalForm(props: Props) {
 function OwnedForm({ task, source, owned, onCandidate, onStale }: Props) {
   const [strategy, setStrategy] = useState<ResearchStrategy>(empty), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [ack, setAck] = useState(false), [uncertain, setUncertain] = useState(false), [createdId, setCreatedId] = useState<string | null>(null);
-  const alive = useRef(true), locked = useRef(false), abort = useRef(new AbortController()), pending = useRef<ResearchMethodRequest | null>(null);
+  const [stale, setStale] = useState(false);
+  const alive = useRef(false), locked = useRef(false), abort = useRef<AbortController | null>(null), pending = useRef<ResearchMethodRequest | null>(null);
+  const generation = useRef(0);
   const candidateId = useRef<string | null>(null);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; abort.current.abort(); }; }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    abort.current = controller; alive.current = true; ++generation.current;
+    return () => { controller.abort(); if (abort.current === controller) { alive.current = false; ++generation.current; } };
+  }, []);
   async function prepare() {
-    if (!owned || locked.current || !alive.current || (!pending.current && !ack)) return;
+    const controller = abort.current, version = generation.current;
+    if (!owned || stale || locked.current || !alive.current || !controller || controller.signal.aborted || (!pending.current && !ack)) return;
+    const current = () => alive.current && generation.current === version && abort.current === controller && !controller.signal.aborted;
+    let checkingReadback = false;
     locked.current = true; setBusy(true); setError(null);
     try {
       validateResearchSource(source, task);
@@ -25,35 +34,38 @@ function OwnedForm({ task, source, owned, onCandidate, onStale }: Props) {
       }
       let id = candidateId.current;
       if (!id) {
-        const receipt = await researchMethodRequest("/research-methods", pending.current, abort.current.signal);
+        const receipt = await researchMethodRequest("/research-methods", pending.current, controller.signal);
+        if (!current()) return;
         if (!object(receipt) || !identifier(receipt.proposal_id) || receipt.task_id !== source.task_id || receipt.attempt_id !== source.attempt_id || receipt.result !== "candidate_inert") throw Error("Research candidate receipt is unconfirmed. Reconcile this exact request before preparing another candidate.");
         id = receipt.proposal_id;
-        if (!alive.current) return;
         candidateId.current = id;
         setCreatedId(id);
       }
-      const candidate = await researchMethodRequest(`/task-lessons/${encodeURIComponent(id)}`, undefined, abort.current.signal);
+      const candidate = await researchMethodRequest(`/task-lessons/${encodeURIComponent(id)}`, undefined, controller.signal);
+      if (!current()) return;
+      checkingReadback = true;
       validateProvenance(candidate, task, source.attempt_id, source.source_refs);
       if (!object(candidate) || candidate.proposal_id !== id || candidate.schema_version !== "task_method_proposal.v1" || candidate.source_current !== true || candidate.behavior_changed !== false || candidate.result !== "candidate_inert"
         || !object(candidate.scope) || candidate.scope.goal_id !== source.scope.goal_id || candidate.scope.goal_revision !== source.scope.goal_revision || candidate.scope.family !== "research") throw Error("Prepared research candidate or current source is unconfirmed. Inspect this candidate before another proposal.");
       validateResearchStrategy(candidate.new_method);
       const candidateStrategy = candidate.new_method;
       if (!pending.current || (["query_templates", "source_preferences", "required_evidence_fields", "draft_sections", "stop_conditions"] as const).some(k => JSON.stringify(candidateStrategy[k]) !== JSON.stringify(pending.current!.strategy[k]))) throw Error("Prepared strategy differs from the exact reviewed fields. Inspect the existing candidate before another proposal.");
-      if (!alive.current) return;
+      if (!current()) return;
       pending.current = null; setUncertain(false); setAck(false); onCandidate(candidate);
-    } catch (e) { if (alive.current) {
-      if (e instanceof ResearchMethodError && [400, 401, 403, 409, 422].includes(e.status) && !candidateId.current) {
+    } catch (e) { if (current()) {
+      if (checkingReadback || e instanceof ResearchMethodError && [401, 403, 409].includes(e.status)) {
+        pending.current = null; candidateId.current = null; setCreatedId(null); setStrategy(empty()); setUncertain(false); setAck(false); setStale(true); onStale();
+      } else if (e instanceof ResearchMethodError && [400, 422].includes(e.status) && !candidateId.current) {
         pending.current = null; setUncertain(false); setAck(false);
-        if ([401, 403, 409].includes(e.status)) onStale();
       } else setUncertain(pending.current !== null);
       setError((e as Error).message);
-    } } finally { locked.current = false; if (alive.current) setBusy(false); }
+    } } finally { if (current()) { locked.current = false; setBusy(false); } }
   }
   function change(next: ResearchStrategy) { setStrategy(next); setAck(false); }
   return <section aria-label="Structured research method proposal" className="grid gap-2 mt-3">
     <h4>Prepare a research strategy</h4><p>Use this completed dossier's verified source references. Structured fields remain private and inert; adoption requires a separate canonical review. No model proposal or provider contact.</p>
     {error && <p role="alert">{error}</p>}{busy && <p role="status">Waiting for the authenticated candidate service…</p>}
-    <fieldset disabled={busy || !owned || uncertain || createdId !== null} className="grid gap-2">
+    <fieldset disabled={busy || !owned || stale || uncertain || createdId !== null} className="grid gap-2">
       {([ ["query_templates", "Query template", 3], ["draft_sections", "Draft section", 16], ["stop_conditions", "Stop condition", 8] ] as const).map(([field, label, cap]) => <fieldset key={field}><legend>{label}s · at most {cap}</legend>
         {strategy[field].map((text, i) => <div key={i}><label>{label} {i + 1}<textarea aria-label={`${label} ${i + 1}`} className="cockpit-input w-full" maxLength={2000} rows={2} value={text} onChange={e => change({ ...strategy, [field]: strategy[field].map((s, n) => n === i ? e.target.value : s) })} /></label><span>{[...text].length}/1000 characters</span><button type="button" disabled={field === "stop_conditions" && strategy[field].length === 1} onClick={() => change({ ...strategy, [field]: strategy[field].filter((_, n) => n !== i) })}>Remove {label.toLowerCase()} {i + 1}</button></div>)}
         <button type="button" disabled={strategy[field].length >= cap} onClick={() => change({ ...strategy, [field]: [...strategy[field], ""] })}>Add {label.toLowerCase()}</button>
@@ -63,6 +75,6 @@ function OwnedForm({ task, source, owned, onCandidate, onStale }: Props) {
       <label><input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed these exact structured fields against the verified dossier evidence.</label>
     </fieldset>
     {uncertain && <p role="status">The request or private readback is unconfirmed. Fields are frozen; explicitly reconcile the same request or inspect the known candidate. No automatic retry.</p>}
-    <button type="button" disabled={busy || !owned || (!pending.current && !ack)} onClick={() => void prepare()}>{createdId ? "Inspect prepared research candidate" : uncertain ? "Reconcile exact research request" : "Prepare private research strategy"}</button>
+    <button type="button" disabled={busy || !owned || stale || (!pending.current && !ack)} onClick={() => void prepare()}>{createdId ? "Inspect prepared research candidate" : uncertain ? "Reconcile exact research request" : "Prepare private research strategy"}</button>
   </section>;
 }

@@ -2292,6 +2292,7 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
                 _owner(operator),
                 body,
                 origin_session_id=operator.session_id,
+                priority_explicit="priority" in body.model_fields_set,
             )
             payload = {
                 "task": await _safe_task_payload(mutation.task, db=db),
@@ -2749,7 +2750,8 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
     operator = _operator(request)
     try:
         async with get_session() as db:
-            mutation = await repository.patch_task(db, _owner(operator), task_id, body)
+            mutation = await repository.patch_task(db, _owner(operator), task_id, body,
+                priority_explicit="priority" in body.model_fields_set)
             payload = {"task": await _safe_task_payload(mutation.task, db=db)}
         return payload
     except BoardError as exc:
@@ -2874,14 +2876,16 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                     expected_revision=body.expected_revision,
                 )
             else:
+                accepted_method_stage = None
                 if body.action.value == "promote":
                     promoted = await repository.get_task(db, owner, task_id)
                     if promoted.capability_id == "agent.task.v1":
                         if dispatcher.general_tasks is None:
                             raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
-                        await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
+                        accepted_method_stage = await dispatcher.general_tasks.validate_acceptance(db, owner, task_id,
                             body.expected_revision, document_build_review=body.document_build_review)
-                mutation = await repository.action_task(db, owner, task_id, body)
+                mutation = await repository.action_task(db, owner, task_id, body,
+                    accepted_method_stage=accepted_method_stage)
             latest_attempt = (
                 await db.execute(
                     select(WorkBoardAttempt)

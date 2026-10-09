@@ -298,16 +298,72 @@ class GeneralTaskService:
             raise BoardError("general_task_tool_identity_conflict", "Duplicate tool identity", status_code=409)
         return descriptors, digest([item.model_dump(mode="json") for item in descriptors])
 
-    async def strategy(self, owner, goal_ref):
+    async def strategy(self, owner, goal_ref, *, db=None):
         binding = TaskStrategyBinding(status="none", reason="baseline")
         if self.strategy_resolver is not None:
-            binding = self.strategy_resolver.resolve(owner, goal_ref, "work.general-task.v1")
+            if db is None:
+                resolver = self.strategy_resolver.resolve
+                binding = resolver(owner, goal_ref, "work.general-task.v1")
+            else:
+                resolver = getattr(self.strategy_resolver, "resolve_current_in_session", None)
+                if resolver is None:
+                    raise BoardError(
+                        "general_task_strategy_owner_unavailable",
+                        "Restore the current method owner before accepting this task",
+                        status_code=503,
+                    )
+                binding = resolver(db, owner, goal_ref, "work.general-task.v1")
             if inspect.isawaitable(binding):
                 binding = await binding
             binding = TaskStrategyBinding.model_validate(binding)
         if binding.status == "blocked":
             raise BoardError("general_task_strategy_blocked", binding.reason, status_code=409)
         return binding
+
+    async def validate_current_method_for_admission(self, db, owner, envelope, task, stage):
+        """Recheck the original strategy inside the accepted Task writer."""
+
+        from sqlalchemy.exc import SQLAlchemyError
+        from src.auth.service import AuthFailure
+
+        if (
+            task.owner_principal_id != owner.principal_id
+            or task.owner_session_id != owner.session_id
+            or task.goal_id != envelope.task_input.goal_ref
+            or task.goal_revision != stage.goal_revision
+        ):
+            raise BoardError("general_task_admission_binding_changed", "The accepted task owner or Goal changed")
+        try:
+            current = await self.strategy(owner, envelope.task_input.goal_ref, db=db)
+        except BoardError as exc:
+            if exc.code in {"general_task_strategy_blocked", "method_lifecycle_not_started",
+                            "method_signing_key_unavailable", "method_pointer_invalid",
+                            "method_pointer_missing", "method_pointer_owner_changed",
+                            "method_stable_identity_required"}:
+                raise BoardError("general_task_strategy_changed", "Review the current task method") from exc
+            raise
+        except (AuthFailure, ValueError, KeyError, TypeError) as exc:
+            raise BoardError("general_task_strategy_changed", "Review the current task method") from exc
+        except SQLAlchemyError as exc:
+            raise BoardError(
+                "general_task_strategy_unavailable",
+                "Restore canonical method storage before accepting this task",
+                status_code=503,
+            ) from exc
+        expected = TaskStrategyBinding.model_validate(envelope.strategy)
+        if current.status != expected.status:
+            raise BoardError("general_task_strategy_changed", "Review the current task method")
+        if current.status == "active":
+            if (current.method_id, current.version, current.digest) != (
+                expected.method_id, expected.version, expected.digest
+            ) or current != expected:
+                raise BoardError("general_task_strategy_changed", "Review the current task method")
+        if stage.strategy_status != current.status:
+            raise BoardError("general_task_strategy_changed", "Review the current task method")
+        if current.status == "active" and (
+            stage.method_id, stage.version, stage.method_digest
+        ) != (current.method_id, current.version, current.digest):
+            raise BoardError("general_task_strategy_changed", "Review the current task method")
 
     async def validate_pinned_strategy(self, db, owner, envelope):
         if self.strategy_resolver is None:
@@ -561,6 +617,23 @@ class GeneralTaskService:
             schema_version=1, capability_id=CAPABILITY, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision, input=envelope.model_dump(mode="json"),
             idempotency_key="general:" + request.idempotency_key), general_task_publication=publication)
+        accepted_method_stage = None
+        if request.accept and envelope.plan is not None and envelope.proposal_error is None:
+            # The source owner has already validated the exact strategy and
+            # envelope.  This stage is metadata only; the repository seals and
+            # publishes it after the actual Task/input-artifact bind.
+            from src.work_board.historical_method import stage_accepted_method
+            async def current_strategy_check(check_db, check_task, check_stage):
+                await self.validate_current_method_for_admission(
+                    check_db, owner, envelope, check_task, check_stage
+                )
+            accepted_method_stage = await stage_accepted_method(
+                db,
+                owner=owner,
+                envelope=envelope,
+                artifact=artifact,
+                current_strategy_check=current_strategy_check,
+            )
         # prepare_input_artifact reserves durably before filesystem I/O; task
         # publication binds that exact artifact under the repository writer CAS.
         from contextlib import AsyncExitStack
@@ -573,7 +646,8 @@ class GeneralTaskService:
                 capability_id=CAPABILITY, input_artifact_id=artifact.artifact_id,
                 status=WorkBoardStatus.todo if request.accept else WorkBoardStatus.triage,
                 idempotency_scope="general-task", idempotency_key=request.idempotency_key,
-                requires_review=True), publication_authority_check=publication_authority_check)
+                requires_review=True), publication_authority_check=publication_authority_check,
+                accepted_method_stage=accepted_method_stage)
             if publication_authority_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.
@@ -946,6 +1020,7 @@ class GeneralTaskService:
             expected_revision=request.expected_revision,
             values={"input_artifact_id": metadata.artifact_id,
                 "typed_input_ref": metadata.typed_input_ref, "typed_input_digest": metadata.typed_input_digest,
+                "admitted_method_json": None,
                 "task_revision": request.expected_revision + 1, "updated_at": datetime.now(timezone.utc)})
         await bind_input_artifact(db, owner, artifact=resolved,
             task_id=task_id, task_revision=current.task_revision)
@@ -995,6 +1070,19 @@ class GeneralTaskService:
         await self.recheck_authority(db, owner, envelope, require_current_strategy=True)
         from src.work_board.document_build_native import validate_acceptance
         await validate_acceptance(db, owner, task, envelope, document_build_review)
+        from src.work_board.historical_method import stage_accepted_method
+        async def current_strategy_check(check_db, check_task, check_stage):
+            await self.validate_current_method_for_admission(
+                check_db, owner, envelope, check_task, check_stage
+            )
+        return await stage_accepted_method(
+            db,
+            owner=owner,
+            envelope=envelope,
+            task=task,
+            admission_task_revision=expected_revision + 1,
+            current_strategy_check=current_strategy_check,
+        )
 
     async def recheck_authority(self, db, owner, envelope, *, require_current_strategy=False):
         self.recheck(envelope)

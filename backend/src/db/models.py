@@ -1278,6 +1278,10 @@ class WorkBoardTask(SQLModel, table=True):
     executor_id: Optional[str] = Field(default=None, index=True)
     assignee_id: Optional[str] = Field(default=None, index=True)
     priority: int = Field(default=50, index=True)
+    # Only authenticated public Task writers may mark an explicitly supplied priority.
+    priority_explicit: bool = Field(default=False)
+    # Historical admission metadata only; never an execution authority.
+    admitted_method_json: Optional[str] = Field(default=None)
     idempotency_scope: str = Field(default="task", index=True)
     idempotency_key: str = Field(index=True)
     idempotency_payload_digest: str = Field(default="", index=True)
@@ -1558,6 +1562,7 @@ class WorkBoardAttempt(SQLModel, table=True):
     task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
     workflow_run_id: Optional[str] = Field(default=None, index=True)
     task_revision_at_claim: int = Field(default=1, index=True)
+    admitted_method_json: Optional[str] = Field(default=None)
     lease_owner: Optional[str] = Field(default=None, index=True)
     lease_expires_at: Optional[datetime] = Field(default=None, index=True)
     heartbeat_at: Optional[datetime] = Field(default=None, index=True)

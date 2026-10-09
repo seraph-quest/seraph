@@ -9,6 +9,8 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import Response
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, Field
 
 from config.settings import settings
@@ -165,6 +167,36 @@ from src.workflows.post_dx_live_durable_orchestration import (
 )
 
 router = APIRouter()
+
+
+@router.get("/operator/continuation")
+async def home_continuation(request: Request, response: Response):
+    """One passive current-owner read; actions stay with their inspectors."""
+    from src.auth.service import AuthFailure
+    from src.operator.home_cursor import HomeCursorError
+    from src.operator.home_projection import home_projection
+    keys = list(request.query_params.keys())
+    if any(key not in {"cursor", "limit"} or len(request.query_params.getlist(key)) != 1 for key in keys):
+        raise HTTPException(status_code=400, detail={"code": "continuation_invalid"})
+    raw_limit = request.query_params.get("limit", "20")
+    if not re.fullmatch(r"[1-9]|1[0-9]|20", raw_limit) or request.query_params.get("cursor") == "":
+        raise HTTPException(status_code=400, detail={"code": "continuation_invalid"})
+    operator = _require_authenticated_capability_operator(request)
+    try:
+        body, cursor = await home_projection.page(operator, limit=int(raw_limit),
+            cursor=request.query_params.get("cursor"))
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+    except HomeCursorError as exc:
+        raise HTTPException(status_code=503 if exc.code == "continuation_unavailable" else 409
+            if exc.code in {"continuation_expired", "continuation_stale"} else 400,
+            detail={"code": exc.code}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "continuation_unavailable"}) from exc
+    response.headers["Cache-Control"] = "no-store"
+    if cursor:
+        response.headers["X-Continuation-Cursor"] = cursor
+    return body
 
 
 def _authenticated_guardian_scope(request: Request) -> tuple[str, str]:

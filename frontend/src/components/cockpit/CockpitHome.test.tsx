@@ -1,150 +1,24 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { CockpitHome } from "./CockpitHome";
-
-function response(payload: unknown, ok = true, status = ok ? 200 : 503) {
-  return { ok, status, json: async () => payload };
-}
-
-describe("CockpitHome", () => {
-  const fetchMock = vi.fn();
-  beforeEach(() => {
-    fetchMock.mockReset();
-    vi.stubGlobal("fetch", fetchMock);
-  });
+import { homeFixture, sourceAt } from "../../lib/homeContinuation.fixture";
+function response(payload: unknown, status = 200, cursor?: string) { return new Response(JSON.stringify(payload), { status, headers: cursor ? { "X-Continuation-Cursor": cursor } : {} }); }
+describe("single-source Home continuation", () => {
+  const fetch = vi.fn();
+  beforeEach(() => { fetch.mockReset(); vi.stubGlobal("fetch", fetch); fetch.mockResolvedValue(response(homeFixture())); });
   afterEach(() => vi.unstubAllGlobals());
+  it("loads once without programme/runtime/inbox fanout and presents pending work separately from outputs", async () => { render(<CockpitHome onOpenSection={vi.fn()} />); await screen.findByText(/Task task-1 · todo/); expect(fetch).toHaveBeenCalledTimes(1); expect(String(fetch.mock.calls[0][0])).toContain("/api/operator/continuation?limit=20"); expect(screen.getByRole("article", { name: "Prepared results" })).toHaveTextContent("result unknown"); expect(screen.getByText(/Historical method Unknown/)).toBeInTheDocument(); expect(screen.getByText(/rolled back metadata/)).toBeInTheDocument(); expect(screen.queryByText(/OpenRouter · governed/)).not.toBeInTheDocument(); });
+  it("opens exact Goal, programme, Task, output, approval and original method targets", async () => { const open = vi.fn(); render(<CockpitHome onOpenSection={vi.fn()} onOpenContinuation={open} />); await screen.findByText(/Task task-1 · todo/); for (const kind of ["goal", "programme", "task", "output", "approval"]) { fireEvent.click(screen.getAllByRole("button", { name: new RegExp(`Inspect ${kind}$`) })[0]); expect(open.mock.calls[open.mock.calls.length - 1][0].kind).toBe(kind); } fireEvent.click(screen.getByRole("button", { name: "Inspect original method and rollback controls" })); expect(open.mock.calls[open.mock.calls.length - 1][0]).toEqual({ kind: "method", proposal_id: "proposal-1", version: "version-1", digest: "b".repeat(64) }); });
+  it("retains the original rows and timestamp through failed refresh", async () => { render(<CockpitHome onOpenSection={vi.fn()} />); await screen.findByText(/Task task-1 · todo/); fetch.mockResolvedValue(response({ detail: { code: "source_unavailable" } }, 503)); fireEvent.click(screen.getByRole("button", { name: "Refresh Home" })); await screen.findByRole("status"); expect(screen.getByRole("status")).toHaveTextContent("Showing last confirmed metadata"); expect(screen.getByText(/Task task-1 · todo/)).toBeInTheDocument(); expect(screen.getByText(new RegExp(`Snapshot · ${sourceAt}`))).toHaveTextContent("last confirmed"); expect(fetch).toHaveBeenCalledTimes(2); });
+  it("retains prior view on a partial source failure instead of claiming empty", async () => { render(<CockpitHome onOpenSection={vi.fn()} />); await screen.findByText(/Task task-1 · todo/); const partial = homeFixture(); partial.task_next_actions = { items: [], state: "degraded", source_as_of: null }; fetch.mockResolvedValue(response(partial)); fireEvent.click(screen.getByRole("button", { name: "Refresh Home" })); await screen.findByRole("status"); expect(screen.getByText(/Task task-1 · todo/)).toBeInTheDocument(); expect(screen.getByRole("status")).toHaveTextContent("source metadata is unavailable"); });
+  it("keeps recovery and modules reachable on first-load failure without false zero counts", async () => { fetch.mockResolvedValue(response({ detail: { code: "home_unavailable" } }, 503)); const section = vi.fn(); render(<CockpitHome onOpenSection={section} />); await screen.findByRole("status"); expect(screen.getByRole("article", { name: "Next steps" })).toHaveTextContent("Metadata unavailable"); fireEvent.click(screen.getByRole("button", { name: "Open Connections" })); expect(section).toHaveBeenCalledWith("connections"); expect(screen.queryByText("No items on this page.")).not.toBeInTheDocument(); });
+  it("uses original pagination cursor and requires explicit restart after stale anchor", async () => { fetch.mockResolvedValue(response(homeFixture(), 200, "original-cursor")); render(<CockpitHome onOpenSection={vi.fn()} />); await screen.findByRole("button", { name: "Next Home page" }); fetch.mockResolvedValue(response({ detail: { code: "continuation_stale" } }, 409)); fireEvent.click(screen.getByRole("button", { name: "Next Home page" })); await screen.findByRole("button", { name: "Restart Home snapshot" }); expect(String(fetch.mock.calls[1][0])).toContain("cursor=original-cursor"); expect(screen.getByRole("button", { name: "Next Home page" })).toBeDisabled(); fetch.mockResolvedValue(response(homeFixture())); fireEvent.click(screen.getByRole("button", { name: "Restart Home snapshot" })); await screen.findByRole("button", { name: "Refresh Home" }); expect(String(fetch.mock.calls[2][0])).not.toContain("cursor="); });
+  it("returns keyboard focus to the exact row and retains snapshot when temporarily hidden", async () => { const props = { onOpenSection: vi.fn() }; const view = render(<CockpitHome {...props} />); await screen.findByText(/Task task-1 · todo/); view.rerender(<CockpitHome {...props} active={false} />); view.rerender(<CockpitHome {...props} active focusAttentionId="task_next_action:task-1:1" />); await waitFor(() => expect(screen.getByRole("button", { name: /Task task-1.*Inspect task/ })).toHaveFocus()); expect(fetch).toHaveBeenCalledTimes(1); });
+  it("clears old-owner rows and discards delayed prior-owner responses", async () => { let resolve!: (v: Response) => void; fetch.mockImplementationOnce(() => new Promise<Response>(r => { resolve = r; })); const props = { onOpenSection: vi.fn() }; const view = render(<CockpitHome {...props} owner={{ principalId: "old", sessionId: "old-root" }} />); await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1)); const current = homeFixture(); current.active_goals.items = []; current.active_goals.state = "empty"; fetch.mockResolvedValue(response(current)); view.rerender(<CockpitHome {...props} owner={{ principalId: "new", sessionId: "new-root" }} />); await screen.findByText(/Task task-1 · todo/); await act(async () => resolve(response(homeFixture()))); expect(within(screen.getByRole("article", { name: "Active goals" })).queryByText(/Goal goal-1/)).not.toBeInTheDocument(); expect(fetch).toHaveBeenCalledTimes(2); });
+  it("keeps the exact keyboard order supplied within next steps and traverses actionable rows", async () => { render(<CockpitHome onOpenSection={vi.fn()} />); const task = await screen.findByRole("button", { name: /Task task-1.*Inspect task/ }); task.focus(); fireEvent.keyDown(task, { key: "ArrowDown" }); expect(screen.getByRole("button", { name: /Approval approval-1.*Inspect approval/ })).toHaveFocus(); fireEvent.keyDown(document.activeElement!, { key: "End" }); expect(screen.getByRole("button", { name: /Task task-result.*Inspect output/ })).toHaveFocus(); fireEvent.keyDown(document.activeElement!, { key: "Home" }); expect(task).toHaveFocus(); });
+  it("rejects a continuation that changes its original as_of instead of silently renewing it", async () => { fetch.mockResolvedValue(response(homeFixture(), 200, "padded-cursor==")); render(<CockpitHome onOpenSection={vi.fn()} />); await screen.findByRole("button", { name: "Next Home page" }); const changed = homeFixture(); changed.as_of = "2026-10-09T10:03:00Z"; fetch.mockResolvedValue(response(changed, 200, "renewed==")); fireEvent.click(screen.getByRole("button", { name: "Next Home page" })); await screen.findByRole("button", { name: "Restart Home snapshot" }); expect(screen.getByText(new RegExp(`Snapshot · ${sourceAt}`))).toBeInTheDocument(); expect(String(fetch.mock.calls[1][0])).toContain("padded-cursor%3D%3D"); });
 
-  it("loads only the bounded Home projections and renders operator links", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/api/goals/dashboard")) return Promise.resolve(response({ active_count: 2, completed_count: 1, total_count: 3, domains: {} }));
-      if (url.includes("/api/work-board/tasks")) return Promise.resolve(response({ tasks: [
-        { id: "task-1", title: "Review packet", status: "triage" },
-        { id: "task-2", title: "Blocked task", status: "blocked" },
-        { id: "task-3", title: "Running task", status: "running" },
-        { id: "task-4", title: "Review task", status: "review" },
-      ], next_after: null }));
-      if (url.includes("/api/approvals/pending")) return Promise.resolve(response({ approvals: [{ id: "approval-1" }] }));
-      if (url.includes("/api/guardian/inbox?")) return Promise.resolve(response({ items: [{ id: "candidate-1", revision: 1, state: "pending", title: "Review candidate", summary: "summary", why_now: "now", goal_id: "goal-1", goal_revision: 1, watch_id: "watch-1", plan_revision: 1, source_kind: "source_packet", source_id: "source-1", expires_at: "2030-01-01T00:00:00Z", evidence_refs: [], allowed_actions: [] }], next_cursor: null }));
-      if (url.includes("/api/observer/continuity")) return Promise.resolve(response({ continuity_health: "ready" }));
-      if (url.includes("/api/runtime/status")) return Promise.resolve(response({ effective_runtime: { summary_label: "OpenRouter · governed" }, status: "ready" }));
-      return Promise.resolve(response({}));
-    });
-    render(<CockpitHome onOpenSection={vi.fn()} goalSummary={{ title: "Ship operator cockpit", status: "active", criterion: "A verified task receipt exists" }} />);
-    expect(await screen.findByText("OpenRouter · governed")).toBeInTheDocument();
-    expect(screen.getByText("Review candidate")).toBeInTheDocument();
-    expect(screen.getByText(/A verified task receipt exists/)).toBeInTheDocument();
-    expect(screen.getByText("1 / 1")).toBeInTheDocument();
-    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/operator/")).length).toBe(0);
-    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
-  });
+  it("keeps current Task metadata refresh usable while optional programme identity is confirmed blocked", async () => { const first = homeFixture(); first.programme_status = { items: [], state: "blocked", source_as_of: null }; fetch.mockResolvedValue(response(first)); const open = vi.fn(); render(<CockpitHome onOpenSection={vi.fn()} onOpenContinuation={open} />); await screen.findByText(/Task task-1 · todo/); const second = homeFixture(); second.programme_status = first.programme_status; const task = second.task_next_actions.items[0]; if (task.kind !== "task_next_action") throw Error(); task.task_revision = 2; task.target.task_revision = 2; fetch.mockResolvedValue(response(second)); fireEvent.click(screen.getByRole("button", { name: "Refresh Home" })); await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2)); await waitFor(() => expect(screen.getByRole("button", { name: "Refresh Home" })).toBeEnabled()); fireEvent.click(screen.getByRole("button", { name: /Task task-1.*Inspect task/ })); expect(open.mock.calls[0][0].task_revision).toBe(2); expect(screen.getByRole("article", { name: "Programme progress" })).toHaveTextContent("Metadata blocked"); });
 
-  it("keeps the Home surface usable when one projection is degraded", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/api/runtime/status")) return Promise.resolve(response({ status: "blocked" }, false));
-      if (url.includes("/api/guardian/inbox?")) return Promise.resolve(response({ items: [
-        { id: "accepted-1", revision: 1, state: "accepted", title: "Accepted", summary: "", why_now: "", goal_id: "goal-1", goal_revision: 1, watch_id: "watch-1", plan_revision: 1, source_kind: "source_packet", source_id: "source-1", expires_at: "2030-01-01T00:00:00Z", evidence_refs: [], allowed_actions: [] },
-      ], next_cursor: null }));
-      if (url.includes("/api/approvals/pending")) return Promise.resolve(response([]));
-      if (url.includes("/api/work-board/tasks")) return Promise.resolve(response({ tasks: [], next_after: null }));
-      if (url.includes("/api/goals/dashboard")) return Promise.resolve(response({ active_count: 0, total_count: 0, completed_count: 0, domains: {} }));
-      if (url.includes("/api/observer/continuity")) return Promise.resolve(response({}));
-      return Promise.resolve(response({}));
-    });
-    render(<CockpitHome onOpenSection={vi.fn()} />);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Some Home sections are unavailable"));
-    expect(screen.getByText("unavailable")).toBeInTheDocument();
-  });
-
-  it("does not present failed initial work, inbox, or approval reads as zero", async () => {
-    fetchMock.mockResolvedValue(response({ detail: { code: "home_unavailable" } }, false, 503));
-    render(<CockpitHome onOpenSection={vi.fn()} />);
-
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Some Home sections are unavailable"));
-    const workMetric = screen.getByText(/running \/ queued work on this page/).closest("button");
-    const inboxMetric = screen.getByText(/pending inbox items on this page/).closest("button");
-    const approvalsMetric = screen.getByText(/pending approvals on this page/).closest("button");
-    expect(workMetric).not.toBeNull();
-    expect(inboxMetric).not.toBeNull();
-    expect(approvalsMetric).not.toBeNull();
-    expect(within(workMetric as HTMLElement).getByText("—")).toBeInTheDocument();
-    expect(within(inboxMetric as HTMLElement).getByText("—")).toBeInTheDocument();
-    expect(within(approvalsMetric as HTMLElement).getByText("—")).toBeInTheDocument();
-    expect(screen.getByText(/Inbox data unavailable/)).toBeInTheDocument();
-    expect(screen.getByText("Work data unavailable.")).toBeInTheDocument();
-    expect(screen.getByText("last confirmed · unavailable")).toBeInTheDocument();
-  });
-
-  it("retains confirmed counts and labels them last confirmed after a partial refresh", async () => {
-    let phase = 0;
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (phase > 0 && (url.includes("/api/work-board/tasks") || url.includes("/api/approvals/pending") || url.includes("/api/guardian/inbox?"))) {
-        return Promise.resolve(response({ detail: { code: "projection_unavailable" } }, false, 503));
-      }
-      if (url.includes("/api/goals/dashboard")) return Promise.resolve(response({ active_count: 1, completed_count: 0, total_count: 1, domains: {} }));
-      if (url.includes("/api/work-board/tasks")) return Promise.resolve(response({ tasks: [
-        { id: "task-running", title: "Running", status: "running" },
-        { id: "task-ready", title: "Ready", status: "ready" },
-      ], next_after: null }));
-      if (url.includes("/api/approvals/pending")) return Promise.resolve(response({ approvals: [{ id: "approval-1" }] }));
-      if (url.includes("/api/guardian/inbox?")) return Promise.resolve(response({ items: [{ id: "candidate-1", revision: 1, state: "pending", title: "Review candidate", summary: "summary", why_now: "now", goal_id: "goal-1", goal_revision: 1, watch_id: "watch-1", plan_revision: 1, source_kind: "source_packet", source_id: "source-1", expires_at: "2030-01-01T00:00:00Z", evidence_refs: [], allowed_actions: [] }], next_cursor: null }));
-      if (url.includes("/api/observer/continuity")) return Promise.resolve(response({ continuity_health: "ready" }));
-      if (url.includes("/api/runtime/status")) return Promise.resolve(response({ effective_runtime: { summary_label: "OpenRouter · governed" }, status: "ready" }));
-      return Promise.resolve(response({}));
-    });
-    render(<CockpitHome onOpenSection={vi.fn()} />);
-    expect(await screen.findByText("OpenRouter · governed")).toBeInTheDocument();
-    phase = 1;
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Home" }));
-
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Showing last confirmed Home data"));
-    const workMetric = screen.getByText(/running \/ queued work on this page/).closest("button");
-    expect(within(workMetric as HTMLElement).getByText("1 / 1")).toBeInTheDocument();
-    expect(screen.getByText(/running \/ queued work on this page · last confirmed/)).toBeInTheDocument();
-    expect(screen.getByText(/pending inbox items on this page · last confirmed/)).toBeInTheDocument();
-    expect(screen.getByText(/pending approvals on this page · last confirmed/)).toBeInTheDocument();
-    expect(screen.getByText("Review candidate")).toBeInTheDocument();
-  });
-
-  it("bounds mount reads and refreshes only on explicit operator request", async () => {
-    const timeoutSpy = vi.spyOn(window, "setTimeout");
-    fetchMock.mockResolvedValue(response({}, false, 503));
-    render(<CockpitHome onOpenSection={vi.fn()} />);
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
-    fireEvent.click(await screen.findByRole("button", { name: "Refresh Home" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
-
-    const retryDelays = timeoutSpy.mock.calls
-      .map(([, delay]) => delay)
-      .filter((delay): delay is number => typeof delay === "number");
-    expect(retryDelays.filter((delay) => delay >= 30_000)).toEqual([]);
-    timeoutSpy.mockRestore();
-  });
-
-  it("clears prior-root metadata and rejects delayed old-root reads", async () => {
-    const pending: ((value: unknown) => void)[] = [];
-    fetchMock.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
-    const props = { onOpenSection: vi.fn() };
-    const view = render(<CockpitHome {...props} owner={{ principalId: "old", sessionId: "old-root" }} />);
-    await waitFor(() => expect(pending).toHaveLength(6));
-    fetchMock.mockResolvedValue(response({ effective_runtime: { summary_label: "Current root runtime" } }));
-    view.rerender(<CockpitHome {...props} owner={{ principalId: "new", sessionId: "new-root" }} />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
-    await act(async () => { pending.forEach((resolve) => resolve(response({ effective_runtime: { summary_label: "Private previous root" } }))); });
-    expect(screen.queryByText("Private previous root")).not.toBeInTheDocument();
-    expect(screen.getByText("Current root runtime")).toBeInTheDocument();
-  });
 });
-// Programme readbacks are tested separately from the six legacy Home resources.
-vi.mock("./programmeDigestApi", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./programmeDigestApi")>(),
-  programmeDigestRequest: vi.fn().mockResolvedValue({ digests: [], programmes: [], notifications: {
-    enabled: false, deadline_categories: [], digest_slots_remaining: 1, deadline_slots_remaining: 1,
-    quiet_hours_active: false, delivery_debt: false,
-  } }),
-}));

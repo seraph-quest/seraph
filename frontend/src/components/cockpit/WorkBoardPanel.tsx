@@ -1,3 +1,4 @@
+import type { HomeTarget } from "../../lib/homeContinuation";
 import { CommunicationPlanPanel } from "./CommunicationPlanPanel";
 import type { CommunicationSelection, CommunicationReplyInput, CommunicationRescheduleInput } from "../../lib/communications";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -144,6 +145,7 @@ export interface WorkBoardPanelProps {
   onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  continuationOutput?: Extract<HomeTarget, {kind: "output"}> | null;
   focusTaskId?: string | null;
   onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
@@ -803,6 +805,7 @@ function WorkBoardPanel({
   onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
+  continuationOutput,
   focusTaskId,
   onFocusTaskHandled,
   ownerPrincipalId,
@@ -1037,6 +1040,12 @@ function WorkBoardPanel({
   }
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  useEffect(() => {
+    if (!continuationOutput || selectedDetail?.task.task_id !== continuationOutput.task_id) return;
+    const exact = [...taskDetailPanelRef.current?.querySelectorAll<HTMLElement>("[data-output-attempt-id]") ?? []].find(node => node.dataset.outputAttemptId === continuationOutput.attempt_id);
+    exact?.focus();
+    exact?.scrollIntoView?.({ block: "nearest" });
+  }, [continuationOutput, selectedDetail]);
   const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
   const selectedPlanPreview = selectedDetail?.task.plan_preview ?? selectedDetail?.plan_preview;
   const selectedPlanProposalId = normalizeOpportunityPlanReference(selectedPlanReference)?.proposal_id;
@@ -1808,7 +1817,9 @@ function WorkBoardPanel({
 
   useEffect(() => {
     if (!focusTaskId) return;
-    openTask(focusTaskId);
+    // A metadata refresh changes openTask's tasks dependency. It must not
+    // reopen the same selected Task and erase its inspector edits/readback.
+    if (selectedTaskIdRef.current !== focusTaskId) openTask(focusTaskId);
     onFocusTaskHandled?.(focusTaskId);
   }, [focusTaskId, onFocusTaskHandled, openTask]);
 
@@ -4082,7 +4093,7 @@ function WorkBoardPanel({
                 {selectedTask.latest_attempt && <div className="mt-1">Latest attempt: {attemptLabel(selectedTask)} · readback {READBACK_LABELS[selectedTask.latest_attempt.readback_status]} · verification {VERIFICATION_LABELS[selectedTask.latest_attempt.verification_status]}</div>}
                 <div className="mt-2 grid gap-2">
                   {selectedDetail?.attempts.map((attempt) => (
-                    <div key={attempt.attempt_id} className="rounded bg-black/20 p-2">
+                    <div key={attempt.attempt_id} data-output-attempt-id={attempt.attempt_id} tabIndex={-1} aria-label={`Output Attempt ${attempt.attempt_id}`} className="rounded bg-black/20 p-2">
                       <div>Attempt {attempt.attempt_id} · {attempt.ended_at ? attempt.outcome ?? "ended" : "active"} · fence {attempt.fencing_token}</div>
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
                       <div>Readback {READBACK_LABELS[attempt.readback_status]} · verification {VERIFICATION_LABELS[attempt.verification_status]}</div>
@@ -4226,6 +4237,7 @@ function WorkBoardPanel({
                 key={`general-task:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onChanged={async () => { await refreshSnapshot(); await refreshSelectedTask(); }} />}
+              {continuationOutput?.task_id === selectedTask.task_id ? <section aria-label="Selected Home output"><h3>Selected output Attempt {continuationOutput.attempt_id}</h3><p>{selectedDetail?.attempts.some(attempt => attempt.attempt_id === continuationOutput.attempt_id) ? "Exact Attempt metadata found. Inspect its evidence below; physical availability and source authority remain owned by the reader." : "The exact original Attempt is unavailable. No replacement output was selected."}{selectedTask.task_revision !== continuationOutput.task_revision ? " Task revision changed since the Home snapshot." : ""}</p></section> : null}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
               <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 

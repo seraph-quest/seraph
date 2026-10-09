@@ -3,7 +3,7 @@ import type { GoalInfo } from "../../types";
 import { isGoalProgramme, isDiscoveryRun, ProgrammeError, programmeApi } from "./goalProgrammeApi";
 import type { GoalProgramme, ProgrammePreview, ProgrammeRequest, DiscoveryRun } from "./goalProgrammeApi";
 
-export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: GoalInfo; goalDraftChanged?: boolean }) {
+export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgrammeId }: { goal: GoalInfo; goalDraftChanged?: boolean; focusProgrammeId?: string | null }) {
   const [brief, setBrief] = useState("");
   const [days, setDays] = useState("7");
   const [ceiling, setCeiling] = useState("0");
@@ -40,7 +40,7 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [goal.id]);
   useEffect(() => { setReview(null); setAcks([false, false, false]); }, [signature]);
-  const canConfigure = !goalDraftChanged && Number.isInteger(goal.revision) && (goal.revision ?? 0) > 0 && grantRevision !== null && !busy;
+  const canConfigure = goal.ownership_access !== "recovered_read_only" && !goalDraftChanged && Number.isInteger(goal.revision) && (goal.revision ?? 0) > 0 && grantRevision !== null && !busy;
   const preview = async () => {
     const duration = Number(days), amount = Number(ceiling), cap = Number(notifications);
     if (!brief.trim() || brief.trim().length > 2000 || !Number.isInteger(duration) || duration < 1 || duration > 7
@@ -133,12 +133,13 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false }: { goal: G
         <label key={label} className="block"><input type="checkbox" checked={acks[index]} onChange={(e) => setAcks((old) => old.map((value, i) => i === index ? e.target.checked : value))} /> {label}</label>)}
       <button type="button" disabled={!canConfigure || !acks.every(Boolean)} onClick={() => void accept()} className="cockpit-action">Accept reviewed finite programme</button>
     </div>}
-    {programmes.map((programme) => <article key={programme.id} aria-label={`Programme ${programme.id}`}>
+    {focusProgrammeId && !programmes.some(programme => programme.id === focusProgrammeId) ? <p role="status">The exact Home programme is unavailable. No other programme was selected.</p> : null}
+    {programmes.filter(programme => !focusProgrammeId || programme.id === focusProgrammeId).map((programme) => <article key={programme.id} aria-label={`Programme ${programme.id}`}>
       <div>{programme.state} · goal revision {programme.goal_revision} · grant revision {programme.grant_revision} · expires {programme.expires_at}</div>
       <div>{programme.public_brief}</div><div>{programme.reason_code} {programme.recovery}</div>
       <div>History and existing liabilities remain retained.</div>
-      <button type="button" disabled={busy || programme.state === "revoked" || programme.state === "paused"} onClick={() => void control(programme, "pause")} className="cockpit-action">Pause programme {programme.grant_revision}</button>
-      <button type="button" disabled={busy || programme.state === "revoked"} onClick={() => void control(programme, "revoke")} className="cockpit-action">Revoke programme {programme.grant_revision}</button>
+      <button type="button" disabled={goal.ownership_access === "recovered_read_only" || busy || programme.state === "revoked" || programme.state === "paused"} onClick={() => void control(programme, "pause")} className="cockpit-action">Pause programme {programme.grant_revision}</button>
+      <button type="button" disabled={goal.ownership_access === "recovered_read_only" || busy || programme.state === "revoked"} onClick={() => void control(programme, "revoke")} className="cockpit-action">Revoke programme {programme.grant_revision}</button>
     </article>)}
     <button type="button" disabled={busy} onClick={() => void inspectDiscovery()} className="cockpit-action">Inspect discovery runs</button>
     {runs.map((run) => <article key={run.job_id} aria-label={`Discovery ${run.job_id}`}>

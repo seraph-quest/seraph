@@ -28,11 +28,11 @@ function preview(value: unknown, task: WorkBoardTask, proposalId: string, attemp
   validateProvenance(value, task, attemptId, sourceRefs);
   return value as unknown as Preview;
 }
-interface Props { task: WorkBoardTask; proposalId: string; owned: boolean; attemptId?: string; sourceRefs?: string[] }
+interface Props { task: WorkBoardTask; proposalId: string; owned: boolean; attemptId?: string; sourceRefs?: string[]; initialPreview?: unknown }
 export function TaskMethodReview(props: Props) {
   return <OwnedMethodReview key={`${props.task.task_id}:${props.task.task_revision}:${props.task.owner_principal_id}:${props.task.owner_session_id}:${props.proposalId}:${props.owned}`} {...props} />;
 }
-function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs }: Props) {
+function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs, initialPreview }: Props) {
   const [data, setData] = useState<Preview | null>(null), [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -40,6 +40,11 @@ function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs }: P
   const locked = useRef(false);
   const generation = useRef(0);
   useEffect(() => { ++generation.current; setData(null); setReason(""); setBusy(false); setError(null); setNotice(null); return () => { ++generation.current; }; }, [task.task_id, task.task_revision, task.owner_session_id, proposalId, owned]);
+  useEffect(() => {
+    if (initialPreview === undefined) return;
+    try { setData(preview(initialPreview, task, proposalId, attemptId, sourceRefs)); }
+    catch (cause) { setData(null); setError((cause as Error).message); }
+  }, [initialPreview, task, proposalId, attemptId, sourceRefs]);
   async function inspect() {
     if (busy || locked.current || !owned) return;
     locked.current = true; setAck(false);
@@ -78,12 +83,12 @@ function OwnedMethodReview({ task, proposalId, owned, attemptId, sourceRefs }: P
       <pre aria-label="Canonical proposed method">{JSON.stringify(data.new_method, null, 2)}</pre>
       <p>{data.active_binding ? `Active version ${data.active_binding.version} · ${data.active_binding.digest}` : data.configured_baseline ? "Future tasks use configured baseline." : "No method is selected."}</p>
       <p>Rollback selects baseline for future tasks. Already admitted tasks keep their immutable pin while current authority remains valid; revocation or tombstone blocks their next boundary.</p>
-      {data.adoption_requires_current_owner && <p role="status">Inspection only: current original ownership is required for adoption.</p>}
+      {(!owned || data.adoption_requires_current_owner) && <p role="status">Inspection only: current original ownership is required for adoption.</p>}
       <label>Review reason<textarea maxLength={500} value={reason} onChange={e => setReason(e.target.value)} /></label>
-      <label><input type="checkbox" disabled={busy || data.adoption_requires_current_owner} checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed this exact method and verified source evidence.</label>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner || !ack} onClick={() => void act("accept")}>Adopt reviewed method</button>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner} onClick={() => void act("reject")}>Reject method</button>
-      <button type="button" disabled={busy || data.adoption_requires_current_owner || !reason.trim()} onClick={() => void act("rollback")}>Rollback to baseline</button>
+      <label><input type="checkbox" disabled={!owned || busy || data.adoption_requires_current_owner} checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed this exact method and verified source evidence.</label>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner || !ack} onClick={() => void act("accept")}>Adopt reviewed method</button>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner} onClick={() => void act("reject")}>Reject method</button>
+      <button type="button" disabled={!owned || busy || data.adoption_requires_current_owner || !reason.trim()} onClick={() => void act("rollback")}>Rollback to baseline</button>
     </>}
   </section>;
 }

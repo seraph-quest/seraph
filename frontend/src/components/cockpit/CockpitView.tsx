@@ -1,3 +1,5 @@
+import { HomeMethodInspection } from "./HomeMethodInspection";
+import type { HomeTarget } from "../../lib/homeContinuation";
 import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
@@ -7910,6 +7912,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ? { principalId: operatorAuth.principalId, sessionId: operatorAuth.sessionId } : null;
   const attentionNavigation = useAttentionNavigation(attentionOwner);
   const attentionOwnerKey = attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : null;
+  const [homeInspection, setHomeInspection] = useState<{ ownerKey: string; target: HomeTarget; focusId: string } | null>(null);
+  const currentHomeInspection = homeInspection?.ownerKey === attentionOwnerKey ? homeInspection : null;
   const selectedGuardianCandidate = guardianSelection?.ownerKey === attentionOwnerKey ? guardianSelection.item : null;
   const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
     setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
@@ -16456,10 +16460,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <CockpitSectionNav activeSection={activeSection} onSelect={selectCockpitSection} />
         <main className="cockpit-section-content">
 
-      {activeSection === "home" ? (
+      {currentHomeInspection && activeSection !== "home" ? <button type="button" onClick={() => selectCockpitSection("home")}>Return to Home snapshot</button> : null}
+      <div hidden={activeSection !== "home"}>
         <CockpitHome
+          active={activeSection === "home"}
+          authenticated={Boolean(attentionOwner)}
           owner={attentionOwner}
-          focusAttentionId={attentionNavigation.homeFocusId}
+          focusAttentionId={currentHomeInspection?.focusId ?? attentionNavigation.homeFocusId}
+          onOpenContinuation={(target, item, focusId) => {
+            if (!attentionOwner || !attentionOwnerKey) return;
+            setHomeInspection({ ownerKey: attentionOwnerKey, target, focusId });
+            if (target.kind === "task" || target.kind === "output") {
+              attentionNavigation.fromHome({ id: focusId, kind: "task", taskId: target.task_id, title: target.task_id, reason: "Inspect owning metadata", updatedAt: item.source_at, goalId: "goal_id" in item ? item.goal_id : null, threadId: null, recoveryAction: null, readOnly: item.ownership_access === "recovered_read_only", metadataConfirmed: true, priority: 0 });
+              setFocusTaskId(target.task_id); selectCockpitSection("work");
+            } else if (target.kind === "approval") openApprovalsPane(target.approval_id);
+            else if (target.kind === "method") selectCockpitSection("library");
+            else { selectCockpitSection("goals"); appEventBus.emit("attention:inspect-goal", { ...attentionOwner, goalId: target.goal_id, goalRevision: target.goal_revision, programmeId: target.kind === "programme" ? target.programme_id : null }); }
+          }}
           onOpenAttention={(item) => {
             if (item.taskId && attentionNavigation.fromHome(item)) {
               setFocusTaskId(item.taskId);
@@ -16482,7 +16499,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             selectCockpitSection("work");
           }}
         />
-      ) : null}
+      </div>
 
       {activeSection === "inbox" ? (
         <section className="cockpit-section-surface cockpit-inbox-surface" data-testid="cockpit-inbox-section">
@@ -16541,6 +16558,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       {activeSection === "library" ? (
         <>
+          {currentHomeInspection?.target.kind === "method" && attentionOwner ? <HomeMethodInspection key={`${attentionOwnerKey}:${currentHomeInspection.target.proposal_id}`} target={currentHomeInspection.target} owner={attentionOwner} /> : null}
           <ProcedureV2Review
             active
             ownerPrincipalId={operatorAuth.principalId}
@@ -17549,6 +17567,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
             <WorkBoardPanel
               key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+              continuationOutput={currentHomeInspection?.target.kind === "output" ? currentHomeInspection.target : null}
               attentionContext={attentionNavigation.origin}
               onReturnAttention={() => {
                 const section = attentionNavigation.returnContext();

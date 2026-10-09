@@ -751,7 +751,8 @@ chat reports that it was blocked before provider contact and tells the operator
 which setup controls are missing. That state does not imply an uncertain
 provider outcome and does not trigger an automatic retry.
 
-Home also has a bounded **Your first verified result** journey: choose
+Home also has a bounded **Your first verified result** journey behind the explicit
+**Open first-result setup** control: choose
 a deterministic local snapshot or public-source baseline plus snapshot, review
 the $0 model cost and finite permissions, queue a typed task through the managed
 dispatcher, and explicitly open its independently verified result. Progress is
@@ -2381,12 +2382,46 @@ unverified.
 The bounded cockpit capability provides six persistent cockpit sections: **Home**,
 **Inbox**, **Work**, **Goals**, **Library**, and **Connections**. These select
 existing cockpit surfaces and retain the conversation, selected task, and
-window layout. Home is a bounded operational summary, not a second scheduler:
-page counts are labelled as such, failed refreshes preserve last-known data,
-and unavailable queue or spend evidence remains unavailable. Pending approvals
-open the existing approval surface.
+window layout. Home uses one authenticated local metadata snapshot with six
+sections: next steps, pending approvals, recovery and Unknown work, active Goals,
+programme progress, and prepared results. Each page contains at most 20 items in
+aggregate. Pending approvals are separate from prepared results. Exact Goal,
+Task, output Attempt, programme, approval and original-method identities open
+existing owning inspectors; the metadata snapshot releases no private bodies.
 
-Home's bounded **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
+Home preserves server order within each section. Explicit pagination retains the
+original as_of and opaque continuation, which expires after five minutes or
+the original operator-session cutoff. Changed or expired authority requires an
+explicit fresh snapshot. Failed or degraded refreshes retain confirmed rows and
+timestamps as historical metadata; a confirmed blocked source displays its
+current state. Missing metadata does not establish empty work or readiness.
+Current Root metadata remains available without stable-identity enrollment,
+while unsupported programme or method sources stay visibly blocked or Unknown.
+Recovered Task history grants no recovered Goal, programme or method access.
+
+An originally admitted method tuple is historical evidence. Canonical scalar
+lifecycle and pointer metadata can show active or rolled-back history, but do not
+establish current private-body authenticity, suppression parity, execution
+readiness, rollback permission or measured improvement. Known deletion,
+suppression or unavailable metadata removes the method navigation target; the
+owning inspector rechecks its full private-source predicate before release or
+control. Programme next-digest timing is a passive quote for the original
+snapshot and timezone, never a promised inference run or renewed standing work.
+
+Home and Inbox attention return keyboard focus to their originating context.
+Recovered history remains read only. Exact output inspection retains the selected
+original Attempt and reports its absence rather than substituting a newer one.
+Pending approval timestamps retain their UTC expiry instant. Verified GitHub
+readback converges the original latest attempt only while the original owner,
+Goal and connection authority remain valid; authority changes preserve settled
+effect truth and a specific blocked Task reason. Cost recovery links to Settings
+only after the owning API advertises the exact job/Goal control. See
+[Attention and Recovery](./attention-recovery.md).
+
+Focused component checks and retained authenticated public-API responses verify
+Home's local metadata bindings and native Task inspector routing. These controlled
+transport receipts do not establish a new rendered browser journey or live
+external usefulness.
 
 The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The bounded tested-publication profile separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
 

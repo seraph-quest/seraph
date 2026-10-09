@@ -649,9 +649,10 @@ describe("CockpitView", () => {
 
     expect(screen.getByTestId("cockpit-section-home")).toHaveAttribute("aria-current", "page");
     expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
-    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    expect(await screen.findByRole("heading", { name: "Continue your work" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(false);
     const homeUrls = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(homeUrls.some((url) => ["/api/audit/events", "/api/capabilities/overview", "/api/extensions", "/api/workflows/runs", "/api/operator/"].some((endpoint) => url.includes(endpoint)))).toBe(false);
+    expect(homeUrls.some((url) => ["/api/audit/events", "/api/capabilities/overview", "/api/extensions", "/api/workflows/runs"].some((endpoint) => url.includes(endpoint)) || url.includes("/api/operator/") && !url.includes("/api/operator/continuation?") )).toBe(false);
     fireEvent.click(screen.getByTestId("cockpit-section-inbox"));
     expect(await screen.findByRole("heading", { name: "Guardian decisions" })).toBeInTheDocument();
     expect(screen.getAllByTestId("guardian-inbox-panel")).toHaveLength(1);
@@ -1030,7 +1031,8 @@ describe("CockpitView", () => {
     useCockpitLayoutStore.setState({ activeSection: "home" });
     render(<CockpitView onSend={() => {}} />);
 
-    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    expect(await screen.findByRole("heading", { name: "Continue your work" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(false);
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(0);
 
     fireEvent.click(screen.getByTestId("cockpit-section-library"));

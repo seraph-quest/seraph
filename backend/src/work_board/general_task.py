@@ -161,11 +161,15 @@ def resolve_input(value, verified_outputs):
     return value
 
 
-async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output, authority_check=None):
+async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output, authority_check=None,
+                              _repository_completion_witness=None):
     """Task-specific checkpoint fields on the existing private artifact owner."""
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workspace import canonical_workspace_root
     from config.settings import settings
+    if _repository_completion_witness is not None:
+        from src.workflows.repo_repair_source import (
+            _expect_recovered_repository_final_writer, observe_recovered_repository_final_writer)
     if authority_check is not None:
         async with jobs._session() as db:
             run = await jobs._fetch(db, job_id)
@@ -178,21 +182,51 @@ async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_i
     binding = {"schema_version": 1, "producer_ref": job_id, "step_id": step_id,
         "plan_digest": plan_digest, "producer_fence": fence, "file_path": reference,
         "content_sha256": sha, "size_bytes": len(content), "no_learning": True}
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="checkpoint", job_id=job_id,
+            descriptor={"checkpoint_id": "general:artifact:" + step_id, "state": binding,
+                "safe": True, "checkpoint_payload": binding})
     await jobs.record_checkpoint(job_id, checkpoint_id="general:artifact:" + step_id,
-        state=binding, checkpoint_payload=binding, owner=owner, fencing_token=fence)
+        state=binding, checkpoint_payload=binding, owner=owner, fencing_token=fence,
+        _repository_completion_witness=_repository_completion_witness)
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="checkpoint")
     path = canonical_workspace_root(settings.workspace_dir) / reference
     _write_payload(path, content)
     actual = _safe_file_bytes(path, expected_digest=sha, expected_size=len(content))
     if actual != content:
         raise BoardError("general_task_artifact_changed", "Task output failed physical readback", status_code=409)
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="artifact", job_id=job_id,
+            descriptor={"file_path": reference, "artifact_type": "general_task_step", "content": actual})
     await jobs.record_artifact(job_id, file_path=reference, artifact_type="general_task_step",
-        content=actual, owner=owner, fencing_token=fence)
+        content=actual, owner=owner, fencing_token=fence,
+        _repository_completion_witness=_repository_completion_witness)
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="artifact")
+    verified_at = datetime.now(timezone.utc).isoformat()
+    readback_details = {"verified": True, "output_exists": True, "no_learning": True}
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="readback", job_id=job_id,
+            descriptor={"effect_type": "general_task_artifact_readback", "target_path": reference,
+                "target_digest": sha, "content_sha256": sha, "status": "succeeded",
+                "readback_id": "general-artifact:" + key[:32], "verified_at": verified_at,
+                "details": readback_details})
     await jobs.record_readback(job_id, effect_type="general_task_artifact_readback",
         target_path=reference, target_digest=sha, content_sha256=sha,
         status="succeeded", readback_id="general-artifact:" + key[:32],
-        verified_at=datetime.now(timezone.utc).isoformat(),
-        details={"verified": True, "output_exists": True, "no_learning": True},
-        owner=owner, fencing_token=fence, **({"readback_authority_check": authority_check} if authority_check is not None else {}))
+        verified_at=verified_at,
+        details=readback_details,
+        owner=owner, fencing_token=fence, _repository_completion_witness=_repository_completion_witness,
+        **({"readback_authority_check": authority_check} if authority_check is not None else {}))
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="readback")
     return binding, json.loads(actual)["output"]
 
 

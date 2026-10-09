@@ -685,6 +685,9 @@ def assert_repository_completion_witness(witness, *, service=None, jobs=None):
         raise RepositorySourceRecoveryError("original_repository_completion_witness_required")
     if data.get("knownpost_stage") is not None:
         assert_repository_knownpost_stage(data["knownpost_stage"], service=data["service"], jobs=data["jobs"])
+    if data.get("scoped_publication") is not None:
+        assert_repository_scoped_completion(witness, service=data["service"], jobs=data["jobs"],
+            job_id=data["job_id"], owner=data["owner"])
     result = data["result"]
     if (_source()._source_digest(result["original_producer_completion"]) != data["completion_digest"]
             or result["status"] != data["result_status"]
@@ -693,6 +696,165 @@ def assert_repository_completion_witness(witness, *, service=None, jobs=None):
             or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}
                 != data["output_digests"]):
         raise RepositorySourceRecoveryError("original_repository_completion_witness_changed")
+
+
+def assert_repository_scoped_completion(witness, *, service, jobs, job_id, owner, fence=None):
+    """Current private publication lifetime only; safe inside an SQL writer."""
+    import threading
+    from src.execution.repo_original_producer import assert_original_producer_completion_scope
+    data = _COMPLETIONS.get(witness) if type(witness) is _OriginalRepositoryProducerCompletionWitness else None
+    if (data is None or data.get("scoped_publication") is not _FENCE_SEAL
+            or data["service"] is not service or data["jobs"] is not jobs
+            or data["job_id"] != job_id or data["owner"] is not owner
+            or fence is not None and data["fence"] is not fence
+            or data["task"] is not asyncio.current_task() or data["thread"] != threading.get_ident()):
+        raise RepositorySourceRecoveryError("original_repository_scoped_completion_required")
+    assert_repository_recovery_fence(data["fence"], service=service, jobs=jobs, job_id=job_id, owner=owner)
+    try:
+        assert_original_producer_completion_scope(data["physical"])
+    except ValueError as exc:
+        raise RepositorySourceRecoveryError("original_repository_scoped_completion_required") from exc
+    from src.workflows.job_runtime import _canonical
+    result = data["result"]
+    if (result["status"] != data["result_status"]
+            or _canonical(result["manifest"]) != _canonical(result["original_producer_completion"]["manifest"])
+            or _canonical(result["readback"]) != _canonical(result["manifest"])
+            or _source()._source_digest(result["original_producer_completion"]) != data["completion_digest"]
+            or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}
+                != data["output_digests"]):
+        raise RepositorySourceRecoveryError("original_repository_completion_witness_changed")
+
+
+def repository_scoped_completion_fence(witness):
+    assert_repository_completion_witness(witness)
+    data = _COMPLETIONS[witness]
+    assert_repository_scoped_completion(witness, service=data["service"], jobs=data["jobs"],
+        job_id=data["job_id"], owner=data["owner"])
+    return data["fence"]
+
+
+def repository_scoped_completion_projection(witness):
+    """Verified eleven-field projection DATA, never a reconstructed witness."""
+    repository_scoped_completion_fence(witness)
+    return json.loads(_COMPLETIONS[witness]["physical_projection_json"])
+
+
+def repository_completion_scoped_binding(witness):
+    repository_scoped_completion_fence(witness)
+    data = _COMPLETIONS[witness]
+    return MappingProxyType({"owner": data["owner"], "fence": data["fence"],
+        "job_id": data["job_id"], "iteration_id": data["post_cas"]["iteration_id"],
+        "context": data["context"], "committed_rows": data["committed_rows"],
+        "registration": json.loads(data["registration_json"])})
+
+
+def repository_completion_physical_projection(witness):
+    return repository_scoped_completion_projection(witness)
+
+
+def repository_completion_finalizer_state(witness):
+    """Private Source-owned phase data in the existing active entry only.
+
+    The closed Source reader/writers derive and check this state from actual
+    SQL and original finite deltas. This accessor accepts no row/state DTO and
+    the returned data cannot independently authorize a write.
+    """
+    repository_scoped_completion_fence(witness)
+    return _COMPLETIONS[witness]["finalizer_state"]
+
+
+async def repository_completion_recovered_wait(witness):
+    """Create and retain the actual original wait before exposing its identity."""
+    repository_scoped_completion_fence(witness)
+    data = _COMPLETIONS[witness]
+    if data["wait_issued"]:
+        raise RepositorySourceRecoveryError("original_repository_completion_phase_changed")
+    data["wait_issued"] = True
+    registration = json.loads(data["registration_json"])
+    wait = await _source()._recover_repository_wait_witness_held(data["service"], data["jobs"],
+        job_id=data["job_id"], owner=data["owner"], iteration_index=registration["iteration_index"],
+        _resumed=True, _completion_witness=witness)
+    repository_scoped_completion_fence(witness)
+    from src.workflows.general_task_guard import _assert_repository_child_wait_witness_shape
+    _assert_repository_child_wait_witness_shape(wait)
+    if (wait.repository_job_id != data["job_id"]
+            or wait.iteration_id != registration["iteration_id"]
+            or wait.iteration_index != registration["iteration_index"]
+            or wait.repository_attempt_id != registration["repository_attempt_id"]
+            or wait.repository_fence != registration["root_fence"]
+            or wait.native_binding != data["context"]["binding"]):
+        raise RepositorySourceRecoveryError("original_repository_final_source_changed")
+    data["wait"] = wait
+    return wait
+
+
+async def repository_completion_recovered_final_source(witness):
+    """Read and construct the actual final Source; prebuilt objects are absent."""
+    repository_scoped_completion_fence(witness)
+    data = _COMPLETIONS[witness]
+    if data["wait"] is None or data["final_source_issued"]:
+        raise RepositorySourceRecoveryError("original_repository_completion_phase_changed")
+    data["final_source_issued"] = True
+    source = _source()
+    async with data["jobs"]._session() as db:
+        canonical = await source.stage_repository_canonical_source(data["service"], db,
+            repository_job_id=data["job_id"], native_invocation_id=data["context"]["binding"].invocation_id,
+            consent_id=data["wait"]._source_binding.consent_id)
+    repository_scoped_completion_fence(witness)
+    source.assert_repository_canonical_source(canonical)
+    from dataclasses import replace
+    canonical = replace(canonical, _seal=witness, _recovered_completion=witness)
+    data["final_source"] = canonical
+    # Registration precedes assertion, whose recovered-seal path checks this
+    # exact identity. A copy can neither occupy first binding nor fall back.
+    source.assert_repository_canonical_source(canonical)
+    return canonical
+
+
+async def repository_completion_recovered_child_final(witness, *, evidence):
+    """Derive actual evidence, then construct and register the final identity."""
+    repository_scoped_completion_fence(witness)
+    data = _COMPLETIONS[witness]
+    if data["wait"] is None or data["final_source"] is None or data["final_witness_issued"]:
+        raise RepositorySourceRecoveryError("original_repository_completion_phase_changed")
+    from src.workflows.job_runtime import _canonical
+    required = {"final_patch_digest", "final_manifest_digest", "final_readback_digest",
+        "final_command_receipt_digest", "final_cleanup_digest", "final_accounting_digest",
+        "final_artifact_id", "final_artifact_digest", "requested_check_exits_digest", "all_iteration_ids_digest"}
+    if type(evidence) is not dict or set(evidence) != required:
+        raise RepositorySourceRecoveryError("original_repository_final_evidence_changed")
+    evidence_json = _canonical(evidence)
+    data["final_witness_issued"] = True
+    source = _source()
+    derived = await source._validate_recovered_repository_final_evidence(data["service"], data["jobs"],
+        completion_witness=witness, evidence=json.loads(evidence_json))
+    repository_scoped_completion_fence(witness)
+    if type(derived) is not dict or set(derived) != required or _canonical(derived) != evidence_json:
+        raise RepositorySourceRecoveryError("original_repository_final_evidence_changed")
+    source.assert_repository_canonical_source(data["final_source"])
+    from dataclasses import replace
+    final_source = replace(data["wait"]._source_binding, _final_source=data["final_source"],
+        _final_evidence_json=_canonical(derived))
+    from src.workflows.general_task_guard import issue_repository_child_final_witness
+    final_witness = issue_repository_child_final_witness(wait_witness=data["wait"],
+        source_binding=final_source, **derived)
+    if (final_witness._source_binding._final_source is not data["final_source"]
+            or final_witness.wait_witness is not data["wait"]):
+        raise RepositorySourceRecoveryError("original_repository_final_source_changed")
+    data["final_witness"] = final_witness
+    return final_witness
+
+
+def assert_repository_completion_final_source(final_source, final_witness=None):
+    """A revoked recovered pointer can never fall back to ordinary authority."""
+    witness = getattr(final_source, "_recovered_completion", None)
+    if witness is None or getattr(final_source, "_seal", None) is not witness:
+        raise RepositorySourceRecoveryError("original_repository_scoped_completion_required")
+    repository_scoped_completion_fence(witness)
+    data = _COMPLETIONS[witness]
+    if (data["final_source"] is not final_source
+            or final_witness is not None and data["final_witness"] is not final_witness):
+        raise RepositorySourceRecoveryError("original_repository_final_source_changed")
 
 
 def repository_completion_context(witness):
@@ -1273,6 +1435,28 @@ async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner,
 
 async def publish_original_repository_completion(service, jobs, *, job_id, owner, iteration_index,
         producer_owner=None, actual_result=None, expected_job_revision=None):
+    """Keep the original live returned-witness publication behavior."""
+    async with _original_repository_completion_publication(service, jobs, job_id=job_id,
+            owner=owner, iteration_index=iteration_index, producer_owner=producer_owner,
+            actual_result=actual_result, expected_job_revision=expected_job_revision) as witness:
+        return witness
+
+
+@asynccontextmanager
+async def stage_original_repository_completion_publication(service, jobs, *, job_id, owner,
+        iteration_index, expected_job_revision):
+    """Original ownerless publication held through the private final consumer."""
+    if type(expected_job_revision) is not int or expected_job_revision < 0:
+        raise RepositorySourceRecoveryError("repository_source_recovery_request_invalid")
+    async with _original_repository_completion_publication(service, jobs, job_id=job_id,
+            owner=owner, iteration_index=iteration_index, expected_job_revision=expected_job_revision,
+            _scoped=True) as witness:
+        yield witness
+
+
+@asynccontextmanager
+async def _original_repository_completion_publication(service, jobs, *, job_id, owner, iteration_index,
+        producer_owner=None, actual_result=None, expected_job_revision=None, _scoped=False):
     """One Source-owned publication for live and authentic original restart.
 
     Physical storage/guard staging precedes the IMMEDIATE writer. Neither a
@@ -1503,6 +1687,19 @@ async def publish_original_repository_completion(service, jobs, *, job_id, owner
                 "result_status": result["status"],
                 "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in outputs.items()},
                 "readback": {"artifact_ref": readback_ref, "artifact_digest": readback_digest}}
-            if stop is not None:
-                await source.stage_repository_completion_post_context(service, jobs, witness=witness, owner=owner, fence=fence)
-            return witness
+            if _scoped:
+                import threading
+                _COMPLETIONS[witness].update(scoped_publication=_FENCE_SEAL, owner=owner,
+                    job_id=job_id, task=asyncio.current_task(), thread=threading.get_ident(),
+                    fence=fence, physical=physical, registration_json=_canonical(registration),
+                    physical_projection_json=_canonical(projection), wait=None, wait_issued=False,
+                    final_source=None, final_source_issued=False, final_witness=None, final_witness_issued=False,
+                    finalizer_state={"state": None})
+            try:
+                if stop is not None:
+                    await source.stage_repository_completion_post_context(service, jobs,
+                        witness=witness, owner=owner, fence=fence)
+                yield witness
+            finally:
+                if _scoped:
+                    _COMPLETIONS.pop(witness, None)

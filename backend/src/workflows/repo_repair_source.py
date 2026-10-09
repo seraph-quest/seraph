@@ -2134,6 +2134,13 @@ async def validate_repository_child_wait_witness(db, witness, *, parent, task,
 
 
 async def recover_repository_wait_witness(service, jobs, *, job_id, owner, iteration_index, _resumed=False):
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        return await _recover_repository_wait_witness_held(service, jobs, job_id=job_id,
+            owner=owner, iteration_index=iteration_index, _resumed=_resumed)
+
+
+async def _recover_repository_wait_witness_held(service, jobs, *, job_id, owner, iteration_index, _resumed=False, _completion_witness=None):
     """Reissue the original contacted wait after its exact durable successor.
 
     This reads the source owner's immutable private snapshot and canonical
@@ -2150,94 +2157,96 @@ async def recover_repository_wait_witness(service, jobs, *, job_id, owner, itera
     from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest
     from src.db.models import WorkBoardTask, WorkBoardAttempt, Goal
     from sqlalchemy import select
-    async with configuration_mutation_lock:
-        _assert_task_publication_configuration(service)
-        async with jobs._session() as db:
-            run = await jobs._fetch(db, job_id)
-            original, work, compiled, group, binding, task_source = read_repository_original(run)
-            _assert_repository_original_limits(run, await db.get(Goal, binding.goal_id), _repository_policy_limits())
-            if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
-                raise DurableJobLeaseError("original repository recovery owner changed")
-            if (type(iteration_index) is not int or not 1 <= iteration_index <= work.limits.max_iterations
-                    or run.status != "running" or _as_utc(run.deadline_at) <= _utc_now()):
-                raise DurableJobLeaseError("original repository recovery cutoff or state changed")
-            identity = iteration_identity(job_id, original["repository_attempt_id"],
-                _source_digest(original["original_input"]), iteration_index)
-            closure = _repository_record(run, "repository:proposal:" + identity)
-            prepared = _repository_record(run, "repository:prepared:" + identity)
-            response = _repository_record(run, "repository:response:" + identity)
-            if any(record is None for record in (closure, prepared, response)):
-                raise DurableJobLeaseError("actual original callback return is unavailable")
-            child = await jobs._fetch(db, binding.invocation_id)
-            parent = await jobs._fetch(db, binding.parent_job_id)
-            expected_status, expected_reason = ("running", None) if _resumed else ("paused", "repository_child_wait")
-            revision_delta = 2 if _resumed else 1
-            if (child.status != expected_status or child.failure_reason != expected_reason
-                    or parent.status != "paused" or parent.failure_reason != "general_task_native_wait"):
-                raise DurableJobLeaseError("original contacted-wait recovery phase required")
-            if (child.revision != closure["original_child_revision"] + revision_delta
-                    or parent.revision != closure["original_parent_revision"] + 1
-                    or _source_digest({k: v for k, v in parent.model_dump(mode="json").items()
-                        if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}) != closure["parent_static_digest"]
-                    or _source_digest({k: v for k, v in child.model_dump(mode="json").items()
-                        if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}) != closure["child_static_digest"]):
-                raise DurableJobLeaseError("original contacted-wait metadata changed before private read")
-            # Existing current native authority/Root/Goal checks precede any
-            # read of the private recovery snapshot.
-            await assert_general_task_child_phase_current(db, child)
-            snapshot = json.loads(service._read_private_artifact(closure["canonical_source_artifact_ref"],
-                expected_digest=closure["canonical_source_artifact_digest"]))
-            canonical = _CanonicalRepositorySource(**snapshot, _seal=_SEAL)
-            assert_repository_canonical_source(canonical)
-            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
-            attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
-            envelope = await verify_general_task_manifest(db, parent, task, attempt, read_manifest(parent))
-            if envelope.repository_source != task_source or envelope.proposal_group != group:
-                raise DurableJobLeaseError("original inspected Task recovery binding changed")
-            source_facts = json.loads(service._read_private_artifact(task_source.source_artifact_ref,
-                expected_digest=task_source.source_artifact_digest))
-            if service.recheck_task_source_snapshot(work, source_facts) != compiled:
-                raise DurableJobLeaseError("original physical repository source changed")
-            old_child, old_parent = json.loads(canonical.child_row_json), json.loads(canonical.parent_row_json)
-            current_child, current_parent = child.model_dump(mode="json"), parent.model_dump(mode="json")
-            child_changes = {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}
-            parent_changes = {"revision", "updated_at", "checkpoint_receipts_json"}
-            if (child.status != expected_status or child.failure_reason != expected_reason
-                    or child.revision != old_child["revision"] + revision_delta
-                    or parent.revision != old_parent["revision"] + 1
-                    or {k: v for k, v in current_child.items() if k not in child_changes} !=
-                        {k: v for k, v in old_child.items() if k not in child_changes}
-                    or {k: v for k, v in current_parent.items() if k not in parent_changes} !=
-                        {k: v for k, v in old_parent.items() if k not in parent_changes}
-                    or _as_utc(child.lease_expires_at) <= _utc_now()):
-                raise DurableJobLeaseError("only the exact original contacted-wait successor may recover")
-            witness = issue_repository_child_wait_witness(native_binding=binding, source_binding=canonical,
-                repository_job_id=job_id, repository_attempt_id=original["repository_attempt_id"],
-                repository_fence=run.fencing_token, iteration_index=iteration_index, iteration_id=identity,
-                source_checkpoint_digest=_digest(original), request_body_digest=prepared["request_body_digest"],
-                response_readback_digest=response["response_artifact_digest"],
-                callback_quiescence_digest=_source_digest(closure))
-            wait_id = repository_child_wait_checkpoint_id(binding, identity)
-            expected_wait = _repository_checkpoint_payload(witness, phase="contacted_wait", checkpoint_id=wait_id)
-            wait_record = _repository_record(parent, wait_id)
-            if wait_record != expected_wait:
-                raise DurableJobLeaseError("original canonical contacted wait changed")
-            old_history = json.loads(canonical.parent_checkpoint_json)
-            current_history = _history(parent)
-            if ([item for item in current_history if item["checkpoint_id"] not in {wait_id, GENERAL_TASK_MANIFEST_KEY}] !=
-                    [item for item in old_history if item["checkpoint_id"] != GENERAL_TASK_MANIFEST_KEY]):
-                raise DurableJobLeaseError("original contacted-wait retained history changed")
-            previous = read_manifest(SimpleNamespace(checkpoint_receipts_json=canonical.parent_checkpoint_json))
-            expected_manifest = previous.model_copy(update={"manifest_revision": previous.manifest_revision + 1,
-                "required_checkpoint_ids": sorted({item["checkpoint_id"] for item in current_history
-                    if item["checkpoint_id"].startswith(("general:", "repository:"))})})
-            if read_manifest(parent) != expected_manifest:
-                raise DurableJobLeaseError("original contacted-wait manifest successor changed")
-            def row_json(row):
-                return json.dumps(row.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-            recovered = replace(canonical, _contacted_wait_parent_json=row_json(parent),
-                _contacted_wait_child_json=row_json(child))
-            return replace(witness, _source_binding=recovered)
+    if _completion_witness is not None:
+        from src.workflows.repo_repair_source_recovery import assert_repository_scoped_completion
+        assert_repository_scoped_completion(_completion_witness, service=service, jobs=jobs, job_id=job_id, owner=owner)
+    _assert_task_publication_configuration(service)
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        original, work, compiled, group, binding, task_source = read_repository_original(run)
+        _assert_repository_original_limits(run, await db.get(Goal, binding.goal_id), _repository_policy_limits())
+        if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
+            raise DurableJobLeaseError("original repository recovery owner changed")
+        if (type(iteration_index) is not int or not 1 <= iteration_index <= work.limits.max_iterations
+                or run.status != "running" or _as_utc(run.deadline_at) <= _utc_now()):
+            raise DurableJobLeaseError("original repository recovery cutoff or state changed")
+        identity = iteration_identity(job_id, original["repository_attempt_id"],
+            _source_digest(original["original_input"]), iteration_index)
+        closure = _repository_record(run, "repository:proposal:" + identity)
+        prepared = _repository_record(run, "repository:prepared:" + identity)
+        response = _repository_record(run, "repository:response:" + identity)
+        if any(record is None for record in (closure, prepared, response)):
+            raise DurableJobLeaseError("actual original callback return is unavailable")
+        child = await jobs._fetch(db, binding.invocation_id)
+        parent = await jobs._fetch(db, binding.parent_job_id)
+        expected_status, expected_reason = ("running", None) if _resumed else ("paused", "repository_child_wait")
+        revision_delta = 2 if _resumed else 1
+        if (child.status != expected_status or child.failure_reason != expected_reason
+                or parent.status != "paused" or parent.failure_reason != "general_task_native_wait"):
+            raise DurableJobLeaseError("original contacted-wait recovery phase required")
+        if (child.revision != closure["original_child_revision"] + revision_delta
+                or parent.revision != closure["original_parent_revision"] + 1
+                or _source_digest({k: v for k, v in parent.model_dump(mode="json").items()
+                    if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}) != closure["parent_static_digest"]
+                or _source_digest({k: v for k, v in child.model_dump(mode="json").items()
+                    if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}) != closure["child_static_digest"]):
+            raise DurableJobLeaseError("original contacted-wait metadata changed before private read")
+        # Existing current native authority/Root/Goal checks precede any
+        # read of the private recovery snapshot.
+        await assert_general_task_child_phase_current(db, child)
+        snapshot = json.loads(service._read_private_artifact(closure["canonical_source_artifact_ref"],
+            expected_digest=closure["canonical_source_artifact_digest"]))
+        canonical = _CanonicalRepositorySource(**snapshot, _seal=_SEAL)
+        assert_repository_canonical_source(canonical)
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+        attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+        envelope = await verify_general_task_manifest(db, parent, task, attempt, read_manifest(parent))
+        if envelope.repository_source != task_source or envelope.proposal_group != group:
+            raise DurableJobLeaseError("original inspected Task recovery binding changed")
+        source_facts = json.loads(service._read_private_artifact(task_source.source_artifact_ref,
+            expected_digest=task_source.source_artifact_digest))
+        if service.recheck_task_source_snapshot(work, source_facts) != compiled:
+            raise DurableJobLeaseError("original physical repository source changed")
+        old_child, old_parent = json.loads(canonical.child_row_json), json.loads(canonical.parent_row_json)
+        current_child, current_parent = child.model_dump(mode="json"), parent.model_dump(mode="json")
+        child_changes = {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}
+        parent_changes = {"revision", "updated_at", "checkpoint_receipts_json"}
+        if (child.status != expected_status or child.failure_reason != expected_reason
+                or child.revision != old_child["revision"] + revision_delta
+                or parent.revision != old_parent["revision"] + 1
+                or {k: v for k, v in current_child.items() if k not in child_changes} !=
+                    {k: v for k, v in old_child.items() if k not in child_changes}
+                or {k: v for k, v in current_parent.items() if k not in parent_changes} !=
+                    {k: v for k, v in old_parent.items() if k not in parent_changes}
+                or _as_utc(child.lease_expires_at) <= _utc_now()):
+            raise DurableJobLeaseError("only the exact original contacted-wait successor may recover")
+        witness = issue_repository_child_wait_witness(native_binding=binding, source_binding=canonical,
+            repository_job_id=job_id, repository_attempt_id=original["repository_attempt_id"],
+            repository_fence=run.fencing_token, iteration_index=iteration_index, iteration_id=identity,
+            source_checkpoint_digest=_digest(original), request_body_digest=prepared["request_body_digest"],
+            response_readback_digest=response["response_artifact_digest"],
+            callback_quiescence_digest=_source_digest(closure))
+        wait_id = repository_child_wait_checkpoint_id(binding, identity)
+        expected_wait = _repository_checkpoint_payload(witness, phase="contacted_wait", checkpoint_id=wait_id)
+        wait_record = _repository_record(parent, wait_id)
+        if wait_record != expected_wait:
+            raise DurableJobLeaseError("original canonical contacted wait changed")
+        old_history = json.loads(canonical.parent_checkpoint_json)
+        current_history = _history(parent)
+        if ([item for item in current_history if item["checkpoint_id"] not in {wait_id, GENERAL_TASK_MANIFEST_KEY}] !=
+                [item for item in old_history if item["checkpoint_id"] != GENERAL_TASK_MANIFEST_KEY]):
+            raise DurableJobLeaseError("original contacted-wait retained history changed")
+        previous = read_manifest(SimpleNamespace(checkpoint_receipts_json=canonical.parent_checkpoint_json))
+        expected_manifest = previous.model_copy(update={"manifest_revision": previous.manifest_revision + 1,
+            "required_checkpoint_ids": sorted({item["checkpoint_id"] for item in current_history
+                if item["checkpoint_id"].startswith(("general:", "repository:"))})})
+        if read_manifest(parent) != expected_manifest:
+            raise DurableJobLeaseError("original contacted-wait manifest successor changed")
+        def row_json(row):
+            return json.dumps(row.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        recovered = replace(canonical, _contacted_wait_parent_json=row_json(parent),
+            _contacted_wait_child_json=row_json(child))
+        return replace(witness, _source_binding=recovered)
 
 
 async def execute_repository_iteration(service, jobs, *, job_id, owner, request, principal):
@@ -2511,9 +2520,463 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
     return outcome
 
 
+def _recovered_finalizer_slot(witness):
+    from src.workflows.repo_repair_source_recovery import repository_completion_finalizer_state
+    return repository_completion_finalizer_state(witness)
+
+
+def _recovered_descriptor(kind, value):
+    """Comparison data only; the existing completion supplies authority."""
+    if kind == "artifact":
+        raw = value["content"]
+        raw = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+        return {"file_path": value["file_path"], "artifact_type": value["artifact_type"],
+            "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
+    if kind == "publish":
+        return {"parent_id": value["parent_id"], "child_id": value["child_id"],
+            "expected_parent_revision": value["expected_parent_revision"],
+            "staged_artifact": value["staged_artifact"], "repository_final_witness": value["repository_final_witness"]}
+    return value
+
+
+async def _expect_recovered_repository_final_writer(jobs, *, completion_witness, kind, job_id, descriptor):
+    from src.workflows.repo_repair_source_recovery import repository_completion_scoped_binding
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    bound = repository_completion_scoped_binding(completion_witness)
+    slot = _recovered_finalizer_slot(completion_witness)
+    state = slot["state"]
+    if state is None:
+        rows = {}
+        for model, key, raw in bound["committed_rows"]:
+            identity = (model, key)
+            if identity in rows and rows[identity] != raw:
+                raise DurableJobLeaseError("recovered finalizer initial row ambiguity")
+            rows[identity] = raw
+        state = {"rows": rows, "phase": 0, "pending": None, "bound": bound}
+        slot["state"] = state
+    sequence = ("checkpoint", "artifact", "readback", "readback", "publish",
+        "artifact", "artifact", "artifact", "artifact", "readback", "terminal")
+    binding = bound["context"]["binding"]
+    targets = (binding.invocation_id,) * 5 + (bound["job_id"],) * 6
+    phase = state["phase"]
+    if (phase >= len(sequence) or sequence[phase] != kind or targets[phase] != job_id
+            or state["pending"] is not None):
+        raise DurableJobLeaseError("recovered finalizer write order changed")
+    pending = {"kind": kind, "job_id": job_id, "descriptor": _recovered_descriptor(kind, descriptor),
+        "entered": False, "after": None}
+    if kind == "artifact":
+        from src.artifacts.registry import build_artifact_record
+        target = next(json.loads(raw) for raw in state["rows"].values()
+            if json.loads(raw).get("run_identity") == job_id)
+        record = build_artifact_record(file_path=descriptor["file_path"], artifact_type=descriptor["artifact_type"],
+            content=descriptor["content"], producer=target["job_kind"], run_id=job_id, session_id=target["session_id"])
+        pending["artifact_receipt"] = {key: record[key] for key in (
+            "artifact_id", "artifact_type", "file_path", "producer", "content_sha256", "size_bytes", "exists")}
+    if kind == "publish":
+        from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
+        pending["publication_artifact"] = verify_staged_task_artifact(descriptor["staged_artifact"],
+            parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest)
+    state["pending"] = pending
+
+
+def _recovered_repository_publication_artifact(completion_witness, *, staged_artifact):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    state = _recovered_finalizer_slot(completion_witness)["state"]
+    pending = state["pending"] if state is not None else None
+    if (pending is None or pending["kind"] != "publish" or not pending["entered"]
+            or pending["descriptor"]["staged_artifact"] is not staged_artifact):
+        raise DurableJobLeaseError("recovered original publication stage required")
+    receipt, record = pending["publication_artifact"]
+    return receipt, dict(record)
+
+
+async def _recheck_recovered_finalizer_rows(db, jobs, state, witness):
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_scoped_completion, _repository_original_accounting_rows)
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
+    from src.db.models import WorkflowRunState, OperatorSession, WorkBoardInputArtifact, InferenceCostReservation
+    from src.workflows.general_task_accounting import validate_group_owner
+    bound = state["bound"]
+    assert_repository_scoped_completion(witness, service=bound["fence"].service,
+        jobs=jobs, job_id=bound["job_id"], owner=bound["owner"])
+    for (model, key), expected in state["rows"].items():
+        row = await db.get(model, key, populate_existing=True)
+        if row is None or _canonical(row.model_dump(mode="json")) != expected:
+            raise DurableJobLeaseError("recovered finalizer complete current rows changed")
+        if isinstance(row, OperatorSession) and (row.revoked_at is not None or row.replaced_by_id or row.is_bearer_tombstone
+                or _as_utc(row.idle_expires_at) <= _utc_now() or _as_utc(row.absolute_expires_at) <= _utc_now()):
+            raise DurableJobLeaseError("recovered finalizer original operator expired")
+        if isinstance(row, WorkBoardInputArtifact) and _as_utc(row.expires_at) <= _utc_now():
+            raise DurableJobLeaseError("recovered finalizer original input expired")
+    root = await jobs._fetch(db, bound["job_id"])
+    context = bound["context"]
+    if (root.status != "running" or _repository_record(root, "repository:stop-intent:v1") is not None
+            or root.cancel_requested_at is not None or _as_utc(root.deadline_at) <= _utc_now()
+            or _as_utc(root.lease_expires_at) is None or _as_utc(root.lease_expires_at) <= _utc_now()):
+        raise DurableJobLeaseError("recovered finalizer original Root is not current Running authority")
+    if _utc_now() >= context["binding"].native_deadline_at:
+        raise DurableJobLeaseError("recovered finalizer original native cutoff expired")
+    authority_attempt = context["authority"].attempt
+    current_attempt = await db.get(type(authority_attempt), authority_attempt.attempt_id, populate_existing=True)
+    if (current_attempt is None or current_attempt.cancel_requested_at is not None
+            or _as_utc(current_attempt.lease_expires_at) is None
+            or _as_utc(current_attempt.lease_expires_at) <= _utc_now()):
+        raise DurableJobLeaseError("recovered finalizer original attempt authority expired")
+    await validate_group_owner(db, context["group"])
+    accounting = await _repository_original_accounting_rows(db, context, job_id=bound["job_id"])
+    expected_accounting = {key: raw for (model, key), raw in state["rows"].items() if model is InferenceCostReservation}
+    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting} != expected_accounting:
+        raise DurableJobLeaseError("recovered finalizer reservation membership changed")
+    if any(row.job_id == bound["job_id"] and row.state != "settled" for row in accounting):
+        raise DurableJobLeaseError("recovered finalizer original liability is unsettled")
+
+
+async def verify_recovered_repository_final_writer(jobs, db, run, *, completion_witness, kind, descriptor):
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _utc_now
+    state = _recovered_finalizer_slot(completion_witness)["state"]
+    pending = state["pending"] if state is not None else None
+    if (pending is None or pending["entered"] or pending["kind"] != kind
+            or pending["job_id"] != run.run_identity):
+        raise DurableJobLeaseError("recovered finalizer pending original write required")
+    actual = _recovered_descriptor(kind, descriptor)
+    expected = pending["descriptor"]
+    if kind == "publish":
+        if (actual["repository_final_witness"] is not expected["repository_final_witness"]
+                or actual["staged_artifact"] is not expected["staged_artifact"]
+                or any(actual[k] != expected[k] for k in ("parent_id", "child_id", "expected_parent_revision"))):
+            raise DurableJobLeaseError("recovered finalizer publication descriptor changed")
+    elif _canonical(actual) != _canonical(expected):
+        raise DurableJobLeaseError("recovered finalizer original descriptor changed")
+    await _recheck_recovered_finalizer_rows(db, jobs, state, completion_witness)
+    if kind == "publish":
+        state["final_witness"] = descriptor["repository_final_witness"]
+    if state.get("final_witness") is not None:
+        from src.workflows.repo_repair_source_recovery import assert_repository_completion_final_source
+        final = state["final_witness"]
+        assert_repository_completion_final_source(final._source_binding._final_source, final_witness=final)
+    pending["entered"], pending["since"] = True, _utc_now()
+
+
+def _recovered_publish_delta(old, current, pending, timestamp, *, child_id, parent_id):
+    from src.workflows.job_runtime import _canonical, _digest
+    from src.workflows.general_task_guard import (
+        GENERAL_TASK_MANIFEST_KEY, GeneralTaskCurrentManifestV1, _repository_checkpoint_payload,
+        repository_child_final_checkpoint_id)
+    final = pending["descriptor"]["repository_final_witness"]
+    if current.get("run_identity") == child_id:
+        now = timestamp(current["updated_at"])
+        return {**old, "revision": old["revision"] + 1, "status": "succeeded", "failure_reason": None,
+            "lease_owner": None, "lease_expires_at": None, "finished_at": now,
+            "result_digest": final.final_artifact_digest,
+            "result_summary": "Repository cumulative repair physically verified", "updated_at": now, "heartbeat_at": now}
+    if current.get("run_identity") != parent_id:
+        return old
+    history = json.loads(old["checkpoint_receipts_json"] or "[]")
+    previous_payload = next(item["payload"] for item in history if item["checkpoint_id"] == GENERAL_TASK_MANIFEST_KEY)
+    previous = GeneralTaskCurrentManifestV1.model_validate(previous_payload)
+    staged = pending["descriptor"]["staged_artifact"]
+    final_id = repository_child_final_checkpoint_id(final.wait_witness.native_binding, final.wait_witness.iteration_id)
+    payload = _repository_checkpoint_payload(final, phase="final_verified", checkpoint_id=final_id)
+    actual_history = json.loads(current["checkpoint_receipts_json"] or "[]")
+    final_record = next(item for item in actual_history if item["checkpoint_id"] == final_id)
+    record = {"checkpoint_id": final_id, "safe": True, "payload": payload, "state_digest": _digest(payload),
+        "state_keys": sorted(payload), "fencing_token": previous.job_fence,
+        "recorded_at": timestamp(final_record["recorded_at"])}
+    retained = [item for item in history if item["checkpoint_id"] != final_id] + [record]
+    refs = dict(zip(previous.step_ids, zip(previous.step_receipt_artifact_ids,
+        previous.step_receipt_digests, previous.step_receipt_schemas)))
+    refs[final.wait_witness.native_binding.step_id] = (staged.reference.artifact_id, staged.reference.digest, "StepReceipt.v1")
+    steps = sorted(refs)
+    manifest = GeneralTaskCurrentManifestV1.model_validate({**previous_payload,
+        "manifest_revision": previous.manifest_revision + 1, "step_ids": steps,
+        "step_receipt_artifact_ids": [refs[key][0] for key in steps],
+        "step_receipt_digests": [refs[key][1] for key in steps], "step_receipt_schemas": [refs[key][2] for key in steps],
+        "required_checkpoint_ids": sorted({item["checkpoint_id"] for item in retained
+            if item["checkpoint_id"].startswith(("general:", "repository:"))})}).model_dump(mode="json")
+    observed = next(item for item in actual_history if item["checkpoint_id"] == GENERAL_TASK_MANIFEST_KEY)
+    manifest_record = {"checkpoint_id": GENERAL_TASK_MANIFEST_KEY, "state_digest": _digest(manifest),
+        "state_keys": sorted(manifest), "safe": True, "payload": manifest, "fencing_token": previous.job_fence,
+        "recorded_at": timestamp(observed["recorded_at"])}
+    expected_history = [item for item in retained if item["checkpoint_id"] != GENERAL_TASK_MANIFEST_KEY] + [manifest_record]
+    _, artifact_record = pending["publication_artifact"]
+    artifacts = json.loads(old["artifact_receipts_json"] or "[]")
+    observed_artifact = next(item for item in json.loads(current["artifact_receipts_json"] or "[]")
+        if item["artifact_id"] == artifact_record["artifact_id"])
+    expected_artifacts = [item for item in artifacts if item["artifact_id"] != artifact_record["artifact_id"]] + [
+        {**artifact_record, "recorded_at": timestamp(observed_artifact["recorded_at"])}]
+    return {**old, "revision": old["revision"] + 1, "updated_at": timestamp(current["updated_at"]),
+        "checkpoint_receipts_json": _canonical(expected_history), "artifact_receipts_json": _canonical(expected_artifacts)}
+
+
+def _recovered_terminal_delta(old, current, pending, timestamp, bound):
+    from src.workflows.job_runtime import _canonical, _digest, DurableJobLeaseError
+    original, descriptor = bound["context"]["original"], pending["descriptor"]
+    if current.get("run_identity") == bound["job_id"]:
+        history = json.loads(old["checkpoint_receipts_json"] or "[]")
+        actual = json.loads(current["checkpoint_receipts_json"] or "[]")
+        if len(actual) != len(history) + 2 or _canonical(actual[:-2]) != _canonical(history):
+            raise DurableJobLeaseError("recovered original terminal append sequence changed")
+        hold = next(item["payload"] for item in reversed(history)
+            if item["checkpoint_id"] == "repo-repair-execution-reservation")
+        release = {"kind": "repo_repair_execution_reservation", "status": "released", "job_id": bound["job_id"],
+            "attempt_id": original["repository_attempt_id"], "fence": old["fencing_token"],
+            "authority_digest": old["authority_digest"], "execution_deadline_at": hold["execution_deadline_at"],
+            "outcome_status": "succeeded", "cleanup_proven": True, "readback_verified": True,
+            "operator_visible": True, "recorded_at": timestamp(actual[-1]["payload"]["recorded_at"])}
+        records = []
+        for observed, identity, payload in ((actual[-2], "repository:terminal:v1", descriptor["terminal_payload"]),
+                (actual[-1], "repo-repair-execution-release", release)):
+            records.append({"checkpoint_id": identity, "safe": True, "payload": payload,
+                "state_digest": _digest(payload), "created_at": timestamp(observed["created_at"])})
+        return {**old, "revision": old["revision"] + 1, "updated_at": timestamp(current["updated_at"]),
+            "checkpoint_receipts_json": _canonical(history + records), "status": "succeeded",
+            "finished_at": timestamp(current["finished_at"]), "lease_owner": None, "lease_expires_at": None,
+            "result_digest": _source_digest(descriptor["result_payload"]),
+            "result_summary": "repository_cumulative_repair_verified"}
+    if current.get("task_id") == original["repository_task_id"] and "task_revision" in current:
+        now = timestamp(current["updated_at"])
+        return {**old, "status": "done", "task_revision": old["task_revision"] + 1,
+            "updated_at": now, "completed_at": now, "block_kind": None, "block_reason": None,
+            "block_source_status": None,
+            "result_refs_json": _canonical([{"job_id": bound["job_id"], "status": "succeeded", "no_learning": True}])}
+    if current.get("attempt_id") == original["repository_attempt_id"]:
+        now = timestamp(current["updated_at"])
+        return {**old, "outcome": "repository_cumulative_repair_verified", "ended_at": now,
+            "lease_owner": None, "lease_expires_at": None, "updated_at": now}
+    return old
+
+
+async def capture_recovered_repository_final_writer(jobs, db, run, *, completion_witness, kind):
+    """Freeze a verified finite SQL delta; publication is not yet observed."""
+    from types import SimpleNamespace
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest, _as_utc, _utc_now
+    state = _recovered_finalizer_slot(completion_witness)["state"]
+    pending = state["pending"] if state is not None else None
+    if pending is None or not pending["entered"] or pending["kind"] != kind or pending["after"] is not None:
+        raise DurableJobLeaseError("recovered finalizer write capture order changed")
+    if kind not in {"checkpoint", "artifact", "readback", "publish", "terminal"}:
+        raise DurableJobLeaseError("recovered finalizer finite publication delta is not integrated")
+    def timestamp(value):
+        parsed = _as_utc(datetime.fromisoformat(value))
+        if parsed is None or not pending["since"] <= parsed <= _utc_now():
+            raise DurableJobLeaseError("recovered finalizer writer timestamp changed")
+        return value
+    after = {}
+    for identity, raw in state["rows"].items():
+        model, key = identity
+        actual = await db.get(model, key, populate_existing=True)
+        if actual is None:
+            raise DurableJobLeaseError("recovered finalizer row disappeared")
+        current, old = actual.model_dump(mode="json"), json.loads(raw)
+        expected = old
+        if kind == "publish":
+            binding = state["bound"]["context"]["binding"]
+            expected = _recovered_publish_delta(old, current, pending, timestamp,
+                child_id=binding.invocation_id, parent_id=binding.parent_job_id)
+        elif kind == "terminal":
+            expected = _recovered_terminal_delta(old, current, pending, timestamp, state["bound"])
+        elif current.get("run_identity") == pending["job_id"]:
+            expected = {**old, "revision": old["revision"] + 1,
+                "updated_at": timestamp(current["updated_at"]), "heartbeat_at": current["updated_at"]}
+            descriptor = pending["descriptor"]
+            if kind == "checkpoint":
+                history = json.loads(old["checkpoint_receipts_json"] or "[]")
+                actual_history = json.loads(current["checkpoint_receipts_json"] or "[]")
+                record = {"checkpoint_id": descriptor["checkpoint_id"], "state_digest": _digest(descriptor["state"]),
+                    "state_keys": sorted(str(key) for key in descriptor["state"]), "safe": descriptor["safe"],
+                    "recorded_at": timestamp(actual_history[-1]["recorded_at"]), "fencing_token": old["fencing_token"],
+                    "payload": descriptor["checkpoint_payload"]}
+                expected["checkpoint_receipts_json"] = _canonical([item for item in history
+                    if item.get("checkpoint_id") != record["checkpoint_id"]] + [record])
+            elif kind == "artifact":
+                history = json.loads(old["artifact_receipts_json"] or "[]")
+                actual_history = json.loads(current["artifact_receipts_json"] or "[]")
+                record = {**pending["artifact_receipt"], "recorded_at": timestamp(actual_history[-1]["recorded_at"])}
+                expected["artifact_receipts_json"] = _canonical([item for item in history
+                    if item.get("artifact_id") != record["artifact_id"]] + [record])
+            else:
+                from src.workflows.job_runtime import _resolve_readback_observations, _job_effect_ledger, _safe_structure
+                history = json.loads(old["effect_receipts_json"] or "[]")
+                actual_history = json.loads(current["effect_receipts_json"] or "[]")
+                observed = actual_history[-1]
+                effect_id = "eff_" + _digest({"job_id": old["run_identity"], "receipt_kind": "readback",
+                    "effect_type": descriptor["effect_type"], "target_path": descriptor["target_path"] or "",
+                    "target_digest": descriptor["target_digest"] or "", "adapter_idempotency_key": ""})[:24]
+                record = {"effect_id": effect_id, "receipt_kind": "readback", "effect_type": descriptor["effect_type"],
+                    "target_path": descriptor["target_path"], "target_digest": descriptor["target_digest"],
+                    "approval_id": None, "adapter_idempotency_key": None, "status": descriptor["status"],
+                    "content_sha256": descriptor["content_sha256"], "details": _safe_structure(descriptor["details"]),
+                    "recorded_at": timestamp(observed["recorded_at"]), "fencing_token": old["fencing_token"],
+                    "readback_id": descriptor["readback_id"], "verified_at": descriptor["verified_at"],
+                    "reconciled": True, "reconciliation_status": "resolved"}
+                history = _resolve_readback_observations(history, record)
+                history = [item for item in history if item.get("effect_id") != effect_id] + [record]
+                expected["effect_receipts_json"] = _canonical(_job_effect_ledger(SimpleNamespace(**old), history))
+        if _canonical(current) != _canonical(expected):
+            raise DurableJobLeaseError("recovered finalizer exact original write delta changed")
+        after[identity] = _canonical(current)
+    from src.db.models import OperatorSession, WorkBoardInputArtifact
+    bound = state["bound"]
+    if (_utc_now() >= bound["context"]["binding"].native_deadline_at
+            or _utc_now() >= _as_utc(bound["context"]["run"].deadline_at)):
+        raise DurableJobLeaseError("recovered finalizer original cutoff expired before commit")
+    for (model, key), raw in after.items():
+        if model is OperatorSession:
+            value = json.loads(raw)
+            if (_utc_now() >= _as_utc(datetime.fromisoformat(value["idle_expires_at"]))
+                    or _utc_now() >= _as_utc(datetime.fromisoformat(value["absolute_expires_at"]))):
+                raise DurableJobLeaseError("recovered finalizer operator expired before commit")
+        elif model is WorkBoardInputArtifact:
+            if _utc_now() >= _as_utc(datetime.fromisoformat(json.loads(raw)["expires_at"])):
+                raise DurableJobLeaseError("recovered finalizer input expired before commit")
+    pending["after"] = after
+
+
+async def observe_recovered_repository_final_writer(jobs, *, completion_witness, kind):
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    state = _recovered_finalizer_slot(completion_witness)["state"]
+    pending = state["pending"] if state is not None else None
+    if pending is None or pending["kind"] != kind or pending["after"] is None:
+        raise DurableJobLeaseError("recovered finalizer committed write capture required")
+    async with jobs._session() as db:
+        for (model, key), expected in pending["after"].items():
+            row = await db.get(model, key, populate_existing=True)
+            if row is None or _canonical(row.model_dump(mode="json")) != expected:
+                raise DurableJobLeaseError("recovered finalizer committed readback changed")
+    state["rows"], state["phase"], state["pending"] = pending["after"], state["phase"] + 1, None
+
+
+async def _validate_recovered_repository_final_evidence(service, jobs, *, completion_witness, evidence):
+    """Derive the original finite final evidence from actual rows and bytes."""
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_scoped_completion, repository_completion_scoped_binding,
+        repository_completion_result, repository_completion_physical_projection)
+    from src.workflows.repo_repair import RepoIteration, RepoWorkVerifiedResult, _repair_test_args
+    from src.work_board.general_task import canonical, digest
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical
+    bound = repository_completion_scoped_binding(completion_witness)
+    job_id, owner = bound["job_id"], bound["owner"]
+    assert_repository_scoped_completion(completion_witness, service=service, jobs=jobs,
+        job_id=job_id, owner=owner)
+    context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
+    run, original, binding = context["run"], context["original"], context["binding"]
+    result = repository_completion_result(completion_witness)
+    projection = repository_completion_physical_projection(completion_witness)
+    index = bound["registration"]["iteration_index"]
+    iterations, identities = [], []
+    for ordinal in range(1, index + 1):
+        identity = iteration_identity(job_id, original["repository_attempt_id"],
+            _source_digest(original["original_input"]), ordinal)
+        prepared = _repository_record(run, "repository:prepared:" + identity)
+        execution = _repository_record(run, "repository:execution:" + identity)
+        cleanup = _repository_record(run, "repository:cleanup:" + identity)
+        readback = _repository_record(run, "repository:readback:" + identity)
+        if (any(item is None for item in (prepared, execution, cleanup, readback))
+                or cleanup.get("cleanup_proven") is not True
+                or readback["status"] != ("succeeded" if ordinal == index else "failed")):
+            raise DurableJobLeaseError("recovered final evidence requires the exact complete chain")
+        identities.append(identity)
+        iterations.append(RepoIteration(index=ordinal, input_tree_digest=prepared["input_tree_digest"],
+            patch_digest=execution["patch_sha256"], command_refs=["repository:execution:" + identity],
+            result_artifacts=["repository:cleanup:" + identity, "repository:readback:" + identity]))
+    identity = identities[-1]
+    readback = _repository_record(run, "repository:readback:" + identity)
+    cleanup = _repository_record(run, "repository:cleanup:" + identity)
+    execution = _repository_record(run, "repository:execution:" + identity)
+    patch = _repository_record(run, "repository:patch:" + identity)
+    manifest_bytes = service._read_private_artifact(readback["artifact_ref"], expected_digest=readback["artifact_digest"])
+    manifest = json.loads(manifest_bytes)
+    if (result["status"] != "succeeded" or _canonical(result["manifest"]) != _canonical(manifest)
+            or manifest_bytes != result["outputs"]["readback.json"]
+            or _source_digest(manifest) != readback["manifest_digest"]
+            or projection["artifact_digests"].get("readback.json") != readback["artifact_digest"]):
+        raise DurableJobLeaseError("recovered final evidence signed readback changed")
+    output = RepoWorkVerifiedResult(iterations=iterations, patch_artifact_ref=patch["patch_artifact_ref"],
+        final_readback_ref=readback["artifact_ref"]).model_dump(mode="json")
+    raw = canonical({"step_id": binding.step_id, "output": output})
+    sha = hashlib.sha256(raw).hexdigest()
+    key = digest([binding.invocation_id, binding.plan_digest, binding.step_id])
+    path = f"artifacts/work-board/general-tasks/{key}-{sha}.json"
+    actual = service._read_private_artifact("workspace-json:" + path, expected_digest=sha)
+    child = await jobs.get_job(binding.invocation_id)
+    matches = [item for item in child["artifacts"] if item["file_path"] == path and item["content_sha256"] == sha]
+    if actual != raw or len(matches) != 1:
+        raise DurableJobLeaseError("recovered final evidence requires literal original child output")
+    args = list(_repair_test_args(tuple(context["compiled"].test_args), context["compiled"].allowed_paths))
+    if context["work"].language_profile == "test_node":
+        commands = manifest.get("commands", [])
+        scripts = [item["script"] for item in manifest["execution_plan"]["commands"]]
+        passed = ([item.get("script") for item in commands] == scripts
+            and list(manifest["execution_plan"]["selection"]) == args
+            and all(item.get("exit_code") == 0 and item.get("timed_out") is False
+                and item.get("cancelled") is False and item.get("leftover_descendant") is False
+                and item.get("stdout_truncated") is False
+                and item.get("cleanup", {}).get("cleanup_proven") is True for item in commands))
+    else:
+        passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
+            and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
+            and manifest.get("test_args") == args)
+    if (not passed or result["original_producer_completion"]["outcome"] != "completed_requested_checks"):
+        raise DurableJobLeaseError("recovered final evidence requires every original successful check")
+    diagnostics = json.loads(service._read_private_artifact(readback["diagnostics_artifact_ref"],
+        expected_digest=readback["diagnostics_artifact_digest"]))
+    diff_sha = hashlib.sha256(diagnostics["cumulative_diff"].encode("utf-8")).hexdigest()
+    approved = service._read_private_artifact(patch["patch_artifact_ref"], expected_digest=patch["patch_sha256"])
+    if (diff_sha != projection["artifact_digests"].get("diff.patch")
+            or diff_sha != manifest.get("diff_sha256") or diff_sha != diagnostics.get("cumulative_diff_sha256")
+            or hashlib.sha256(approved).hexdigest() != execution["patch_sha256"]):
+        raise DurableJobLeaseError("recovered final evidence cumulative or approved patch changed")
+    exits = {"test_args": args, "commands": manifest["commands"]} if context["work"].language_profile == "test_node" else {
+        "test_args": args, "exit_code": manifest["exit_code"]}
+    async with jobs._session() as db:
+        costs = list((await db.scalars(select(InferenceCostReservation))).all())
+        await _repository_remaining(db, context, allow_exhausted_readback=True)
+    derived = {"final_patch_digest": execution["patch_sha256"], "final_manifest_digest": readback["manifest_digest"],
+        "final_readback_digest": readback["artifact_digest"], "final_command_receipt_digest": _source_digest(execution),
+        "final_cleanup_digest": cleanup["artifact_digest"],
+        "final_accounting_digest": _source_digest([row.model_dump(mode="json") for row in costs if row.job_id == job_id]),
+        "final_artifact_id": matches[0]["artifact_id"], "final_artifact_digest": sha,
+        "requested_check_exits_digest": _source_digest(exits), "all_iteration_ids_digest": _source_digest(identities)}
+    if _canonical(derived) != _canonical(evidence):
+        raise DurableJobLeaseError("recovered original final evidence changed")
+    return derived
+
+
 async def finalize_repository_iteration(service, jobs, *, job_id, owner, iteration_index,
         actual_cleanup, actual_job, completion_witness=None):
     """Adopt only the actual supervised final readback into the original child."""
+    from src.execution.repo_sandbox import assert_repo_iteration_cleanup_witness
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    assert_repo_iteration_cleanup_witness(actual_cleanup, actual_job)
+    wait = await recover_repository_wait_witness(service, jobs, job_id=job_id, owner=owner,
+        iteration_index=iteration_index, _resumed=True)
+    async with configuration_mutation_lock:
+        return await _finalize_repository_iteration_held(service, jobs, job_id=job_id, owner=owner,
+            iteration_index=iteration_index, actual_cleanup=actual_cleanup, actual_job=actual_job,
+            completion_witness=completion_witness, wait=wait)
+
+
+async def finalize_recovered_repository_iteration(service, jobs, *, job_id, owner,
+        iteration_index, completion_witness):
+    """Consume only a scoped signed completion under its original Source fence."""
+    from src.workflows.repo_repair_source_recovery import (
+        assert_repository_scoped_completion, repository_completion_scoped_binding,
+        repository_completion_recovered_wait)
+    assert_repository_scoped_completion(completion_witness, service=service, jobs=jobs, job_id=job_id, owner=owner)
+    binding = repository_completion_scoped_binding(completion_witness)
+    if binding["job_id"] != job_id or binding["registration"]["iteration_index"] != iteration_index:
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError("recovered original finalizer identity changed")
+    wait = await repository_completion_recovered_wait(completion_witness)
+    return await _finalize_repository_iteration_held(service, jobs, job_id=job_id, owner=owner,
+        iteration_index=iteration_index, actual_cleanup=None, actual_job=None,
+        completion_witness=completion_witness, wait=wait, _recovered_completion=completion_witness)
+
+
+async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, iteration_index,
+        actual_cleanup, actual_job, completion_witness, wait, _recovered_completion=None):
     from dataclasses import replace
     from sqlalchemy import select
     from src.db.models import InferenceCostReservation
@@ -2525,257 +2988,315 @@ async def finalize_repository_iteration(service, jobs, *, job_id, owner, iterati
     from src.workflows.job_runtime import _canonical, _as_utc, DurableJobLeaseError
     from src.model_fabric.effective_policy import configuration_mutation_lock
     from src.execution.repo_sandbox import assert_repo_iteration_cleanup_witness
-    assert_repo_iteration_cleanup_witness(actual_cleanup, actual_job)
-    wait = await recover_repository_wait_witness(service, jobs, job_id=job_id, owner=owner,
-        iteration_index=iteration_index, _resumed=True)
-    async with configuration_mutation_lock:
-        context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
-        run, original, work = context["run"], context["original"], context["work"]
-        iterations, identities = [], []
-        for index in range(1, iteration_index + 1):
-            identity = iteration_identity(job_id, original["repository_attempt_id"],
-                _source_digest(original["original_input"]), index)
-            identities.append(identity)
-            prepared = _repository_record(run, "repository:prepared:" + identity)
-            executed = _repository_record(run, "repository:execution:" + identity)
-            cleanup = _repository_record(run, "repository:cleanup:" + identity)
-            readback = _repository_record(run, "repository:readback:" + identity)
-            if (any(item is None for item in (prepared, executed, cleanup, readback))
-                    or cleanup.get("cleanup_proven") is not True
-                    or readback["status"] != ("succeeded" if index == iteration_index else "failed")):
-                raise DurableJobLeaseError("complete actual original iteration chain required")
-            iterations.append(RepoIteration(index=index, input_tree_digest=prepared["input_tree_digest"],
-                patch_digest=executed["patch_sha256"], command_refs=["repository:execution:" + identity],
-                result_artifacts=["repository:cleanup:" + identity, "repository:readback:" + identity]))
-        identity = identities[-1]
+    if _recovered_completion is not None:
+        from src.workflows.repo_repair_source_recovery import (
+            assert_repository_scoped_completion, repository_completion_physical_projection)
+        assert_repository_scoped_completion(_recovered_completion, service=service, jobs=jobs, job_id=job_id, owner=owner)
+        actual_projection = repository_completion_physical_projection(_recovered_completion)
+    else:
+        assert_repo_iteration_cleanup_witness(actual_cleanup, actual_job)
+        actual_projection = actual_cleanup.projection()
+    context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
+    run, original, work = context["run"], context["original"], context["work"]
+    iterations, identities = [], []
+    for index in range(1, iteration_index + 1):
+        identity = iteration_identity(job_id, original["repository_attempt_id"],
+            _source_digest(original["original_input"]), index)
+        identities.append(identity)
+        prepared = _repository_record(run, "repository:prepared:" + identity)
+        executed = _repository_record(run, "repository:execution:" + identity)
+        cleanup = _repository_record(run, "repository:cleanup:" + identity)
         readback = _repository_record(run, "repository:readback:" + identity)
-        cleanup_record = _repository_record(run, "repository:cleanup:" + identity)
-        execution = _repository_record(run, "repository:execution:" + identity)
-        patch = _repository_record(run, "repository:patch:" + identity)
-        response = _repository_record(run, "repository:response:" + identity)
-        manifest = json.loads(service._read_private_artifact(readback["artifact_ref"],
-            expected_digest=readback["artifact_digest"]))
-        cleanup_bytes = service._read_private_artifact(cleanup_record["artifact_ref"],
-            expected_digest=cleanup_record["artifact_digest"])
-        check_args = list(_repair_test_args(tuple(context["compiled"].test_args), context["compiled"].allowed_paths))
-        check_exits = {"test_args": check_args, "exit_code": manifest.get("exit_code")}
-        if work.language_profile == "test_node":
-            commands = manifest.get("commands", [])
-            expected_scripts = [entry["script"] for entry in manifest["execution_plan"]["commands"]]
-            checks_passed = ([entry.get("script") for entry in commands] == expected_scripts
-                and all(entry.get("exit_code") == 0 and entry.get("timed_out") is False
-                    and entry.get("cancelled") is False and entry.get("leftover_descendant") is False
-                    and entry.get("stdout_truncated") is False
-                    and entry.get("cleanup", {}).get("cleanup_proven") is True for entry in commands)
-                and list(manifest["execution_plan"]["selection"]) == check_args)
-            check_exits = {"test_args": check_args, "commands": commands}
-        else:
-            checks_passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
-                and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
-                and manifest.get("test_args") == check_args)
-        if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
-            from src.workflows.repo_repair_source_recovery import (
-                assert_repository_completion_witness, repository_completion_result,
-                repository_completion_post_cas, repository_completion_cleanup_envelope)
-            assert_repository_completion_witness(completion_witness, service=service, jobs=jobs)
-            actual_result = repository_completion_result(completion_witness)
-            cas = repository_completion_post_cas(completion_witness)
-            actual_projection = actual_cleanup.projection()
-            recorded_projection = json.loads(cleanup_bytes)
-            actual_envelope = repository_completion_cleanup_envelope(completion_witness)
-            from src.workflows.general_task_guard import _history
-            from src.workflows.job_runtime import _digest
-            metadata = actual_envelope.get("source_append_metadata", [])
-            expected_ids = ["repository:cleanup:" + identity, "repository:readback:" + identity]
-            expected_wrappers = [{**item, "payload": payload, "state_digest": _digest(payload)}
-                for item, payload in zip(metadata, (cleanup_record, readback))]
-            actual_wrappers = [item for item in _history(run) if item.get("checkpoint_id") in expected_ids]
-            cleanup_matches = (cas["iteration_id"] == identity and cas["post_revision"] == run.revision
-                and cleanup_record.get("source_completion_cas") == cas
-                and readback.get("source_completion_cas") == cas
-                and actual_result["manifest"] == manifest
-                and _canonical(recorded_projection) == _canonical(actual_envelope)
-                and set(actual_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
-                and _canonical(actual_envelope["physical_projection"]) == _canonical(actual_projection)
-                and actual_envelope["source_completion_cas"] == cas
-                and len(metadata) == 2 and [item.get("checkpoint_id") for item in metadata] == expected_ids
-                and actual_wrappers == expected_wrappers)
-        else:
-            cleanup_matches = json.loads(cleanup_bytes) == actual_cleanup.projection()
-        if (not cleanup_matches or not checks_passed
-                or _source_digest(manifest) != readback["manifest_digest"]):
-            raise DurableJobLeaseError("all requested original checks and actual cleanup must pass")
-        output = RepoWorkVerifiedResult(iterations=iterations, patch_artifact_ref=patch["patch_artifact_ref"],
-            final_readback_ref=readback["artifact_ref"]).model_dump(mode="json")
-        binding = context["binding"]
-        child_owner, child_fence = context["child"].lease_owner, context["child"].fencing_token
-        async def output_authority(db, child):
-            # The existing artifact writer publishes three known journals.
-            # All ownership, status, lease, input and authority columns stay
-            # exactly pinned while those journals advance.
-            mutable = {"revision", "updated_at", "heartbeat_at", "checkpoint_receipts_json",
-                "artifact_receipts_json", "readback_receipts_json"}
-            rows = []
-            for model, key, expected in context["rows"]:
-                original_row = json.loads(expected)
-                if original_row.get("run_identity") == binding.invocation_id:
-                    actual_row = child.model_dump(mode="json")
-                    if ({k: v for k, v in original_row.items() if k not in mutable} !=
-                            {k: v for k, v in actual_row.items() if k not in mutable}):
-                        raise DurableJobLeaseError("original final output child authority changed")
-                    expected = _canonical(actual_row)
-                rows.append((model, key, expected))
-            await _recheck_repository_sql(db, {**context, "rows": rows})
-        artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
-            owner=child_owner, fence=child_fence, plan_digest=binding.plan_digest,
-            step_id=binding.step_id, output=output, authority_check=output_authority)
-        output_context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
-        async def readback_authority(db, child):
-            await _recheck_repository_sql(db, output_context)
-        from src.workflows.job_runtime import _utc_now
-        await jobs.record_readback(binding.invocation_id, effect_type="general_tool_call", status="succeeded",
-            target_path=artifact["file_path"], content_sha256=artifact["content_sha256"],
-            readback_id="repository-child-output:" + identity, verified_at=_utc_now().isoformat(),
-            details={"step_id": binding.step_id, "tool_id": "repository_work", "verified": True,
-                "output_exists": True, "file_path": artifact["file_path"], "no_learning": True,
-                "actual_process_cleanup_digest": cleanup_record["artifact_digest"]},
-            owner=child_owner, fencing_token=child_fence, readback_authority_check=readback_authority)
-        child = await jobs.get_job(binding.invocation_id)
-        matches = [item for item in child["artifacts"] if item["file_path"] == artifact["file_path"]
-            and item["content_sha256"] == artifact["content_sha256"]]
-        if len(matches) != 1 or verified != output:
-            raise DurableJobLeaseError("literal original child output readback required")
-        reference = GeneralTaskArtifactRef(artifact_id=matches[0]["artifact_id"],
-            digest=artifact["content_sha256"], schema_version="GeneralTaskOutput.v1")
-        async with jobs._session() as db:
+        if (any(item is None for item in (prepared, executed, cleanup, readback))
+                or cleanup.get("cleanup_proven") is not True
+                or readback["status"] != ("succeeded" if index == iteration_index else "failed")):
+            raise DurableJobLeaseError("complete actual original iteration chain required")
+        iterations.append(RepoIteration(index=index, input_tree_digest=prepared["input_tree_digest"],
+            patch_digest=executed["patch_sha256"], command_refs=["repository:execution:" + identity],
+            result_artifacts=["repository:cleanup:" + identity, "repository:readback:" + identity]))
+    identity = identities[-1]
+    readback = _repository_record(run, "repository:readback:" + identity)
+    cleanup_record = _repository_record(run, "repository:cleanup:" + identity)
+    execution = _repository_record(run, "repository:execution:" + identity)
+    patch = _repository_record(run, "repository:patch:" + identity)
+    response = _repository_record(run, "repository:response:" + identity)
+    manifest = json.loads(service._read_private_artifact(readback["artifact_ref"],
+        expected_digest=readback["artifact_digest"]))
+    cleanup_bytes = service._read_private_artifact(cleanup_record["artifact_ref"],
+        expected_digest=cleanup_record["artifact_digest"])
+    check_args = list(_repair_test_args(tuple(context["compiled"].test_args), context["compiled"].allowed_paths))
+    check_exits = {"test_args": check_args, "exit_code": manifest.get("exit_code")}
+    if work.language_profile == "test_node":
+        commands = manifest.get("commands", [])
+        expected_scripts = [entry["script"] for entry in manifest["execution_plan"]["commands"]]
+        checks_passed = ([entry.get("script") for entry in commands] == expected_scripts
+            and all(entry.get("exit_code") == 0 and entry.get("timed_out") is False
+                and entry.get("cancelled") is False and entry.get("leftover_descendant") is False
+                and entry.get("stdout_truncated") is False
+                and entry.get("cleanup", {}).get("cleanup_proven") is True for entry in commands)
+            and list(manifest["execution_plan"]["selection"]) == check_args)
+        check_exits = {"test_args": check_args, "commands": commands}
+    else:
+        checks_passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
+            and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
+            and manifest.get("test_args") == check_args)
+    if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+        from src.workflows.repo_repair_source_recovery import (
+            assert_repository_completion_witness, repository_completion_result,
+            repository_completion_post_cas, repository_completion_cleanup_envelope)
+        assert_repository_completion_witness(completion_witness, service=service, jobs=jobs)
+        actual_result = repository_completion_result(completion_witness)
+        cas = repository_completion_post_cas(completion_witness)
+        recorded_projection = json.loads(cleanup_bytes)
+        actual_envelope = repository_completion_cleanup_envelope(completion_witness)
+        from src.workflows.general_task_guard import _history
+        from src.workflows.job_runtime import _digest
+        metadata = actual_envelope.get("source_append_metadata", [])
+        expected_ids = ["repository:cleanup:" + identity, "repository:readback:" + identity]
+        expected_wrappers = [{**item, "payload": payload, "state_digest": _digest(payload)}
+            for item, payload in zip(metadata, (cleanup_record, readback))]
+        actual_wrappers = [item for item in _history(run) if item.get("checkpoint_id") in expected_ids]
+        cleanup_matches = (cas["iteration_id"] == identity and cas["post_revision"] == run.revision
+            and cleanup_record.get("source_completion_cas") == cas
+            and readback.get("source_completion_cas") == cas
+            and actual_result["manifest"] == manifest
+            and _canonical(recorded_projection) == _canonical(actual_envelope)
+            and set(actual_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
+            and _canonical(actual_envelope["physical_projection"]) == _canonical(actual_projection)
+            and actual_envelope["source_completion_cas"] == cas
+            and len(metadata) == 2 and [item.get("checkpoint_id") for item in metadata] == expected_ids
+            and actual_wrappers == expected_wrappers)
+    else:
+        cleanup_matches = json.loads(cleanup_bytes) == actual_projection
+    if (not cleanup_matches or not checks_passed
+            or _source_digest(manifest) != readback["manifest_digest"]):
+        raise DurableJobLeaseError("all requested original checks and actual cleanup must pass")
+    output = RepoWorkVerifiedResult(iterations=iterations, patch_artifact_ref=patch["patch_artifact_ref"],
+        final_readback_ref=readback["artifact_ref"]).model_dump(mode="json")
+    binding = context["binding"]
+    child_owner, child_fence = context["child"].lease_owner, context["child"].fencing_token
+    async def output_authority(db, child):
+        # The existing artifact writer publishes three known journals.
+        # All ownership, status, lease, input and authority columns stay
+        # exactly pinned while those journals advance.
+        mutable = {"revision", "updated_at", "heartbeat_at", "checkpoint_receipts_json",
+            "artifact_receipts_json", "readback_receipts_json"}
+        rows = []
+        for model, key, expected in context["rows"]:
+            original_row = json.loads(expected)
+            if original_row.get("run_identity") == binding.invocation_id:
+                actual_row = child.model_dump(mode="json")
+                if ({k: v for k, v in original_row.items() if k not in mutable} !=
+                        {k: v for k, v in actual_row.items() if k not in mutable}):
+                    raise DurableJobLeaseError("original final output child authority changed")
+                expected = _canonical(actual_row)
+            rows.append((model, key, expected))
+        await _recheck_repository_sql(db, {**context, "rows": rows})
+    artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
+        owner=child_owner, fence=child_fence, plan_digest=binding.plan_digest,
+        step_id=binding.step_id, output=output, authority_check=output_authority,
+        **({"_repository_completion_witness": _recovered_completion} if _recovered_completion is not None else {}))
+    output_context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
+    async def readback_authority(db, child):
+        await _recheck_repository_sql(db, output_context)
+    from src.workflows.job_runtime import _utc_now
+    child_readback = {"effect_type": "general_tool_call", "status": "succeeded", "target_path": artifact["file_path"],
+        "target_digest": None, "content_sha256": artifact["content_sha256"],
+        "readback_id": "repository-child-output:" + identity, "verified_at": _utc_now().isoformat(),
+        "details": {"step_id": binding.step_id, "tool_id": "repository_work", "verified": True,
+            "output_exists": True, "file_path": artifact["file_path"], "no_learning": True,
+            "actual_process_cleanup_digest": cleanup_record["artifact_digest"]}}
+    if _recovered_completion is not None:
+        await _expect_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion,
+            kind="readback", job_id=binding.invocation_id, descriptor=child_readback)
+    await jobs.record_readback(binding.invocation_id, **child_readback,
+        owner=child_owner, fencing_token=child_fence, readback_authority_check=readback_authority,
+        **({"_repository_completion_witness": _recovered_completion} if _recovered_completion is not None else {}))
+    if _recovered_completion is not None:
+        await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="readback")
+    child = await jobs.get_job(binding.invocation_id)
+    matches = [item for item in child["artifacts"] if item["file_path"] == artifact["file_path"]
+        and item["content_sha256"] == artifact["content_sha256"]]
+    if len(matches) != 1 or verified != output:
+        raise DurableJobLeaseError("literal original child output readback required")
+    reference = GeneralTaskArtifactRef(artifact_id=matches[0]["artifact_id"],
+        digest=artifact["content_sha256"], schema_version="GeneralTaskOutput.v1")
+    async with jobs._session() as db:
+        if _recovered_completion is None:
             canonical = await stage_repository_canonical_source(service, db, repository_job_id=job_id,
                 native_invocation_id=binding.invocation_id, consent_id=wait._source_binding.consent_id)
-            costs = list((await db.scalars(select(InferenceCostReservation))).all())
-            await _repository_remaining(db, await _repository_precontact(service, jobs, job_id=job_id, owner=owner),
-                allow_exhausted_readback=True)
-        evidence = {"final_patch_digest": execution["patch_sha256"],
-            "final_manifest_digest": readback["manifest_digest"], "final_readback_digest": readback["artifact_digest"],
-            "final_command_receipt_digest": _source_digest(execution), "final_cleanup_digest": cleanup_record["artifact_digest"],
-            "final_accounting_digest": _source_digest([row.model_dump(mode="json") for row in costs
-                if row.job_id == job_id]), "final_artifact_id": reference.artifact_id,
-            "final_artifact_digest": reference.digest, "requested_check_exits_digest": _source_digest(check_exits),
-            "all_iteration_ids_digest": _source_digest(identities)}
+        else:
+            from src.workflows.repo_repair_source_recovery import repository_completion_recovered_final_source
+            canonical = await repository_completion_recovered_final_source(_recovered_completion)
+        costs = list((await db.scalars(select(InferenceCostReservation))).all())
+        await _repository_remaining(db, await _repository_precontact(service, jobs, job_id=job_id, owner=owner),
+            allow_exhausted_readback=True)
+    evidence = {"final_patch_digest": execution["patch_sha256"],
+        "final_manifest_digest": readback["manifest_digest"], "final_readback_digest": readback["artifact_digest"],
+        "final_command_receipt_digest": _source_digest(execution), "final_cleanup_digest": cleanup_record["artifact_digest"],
+        "final_accounting_digest": _source_digest([row.model_dump(mode="json") for row in costs
+            if row.job_id == job_id]), "final_artifact_id": reference.artifact_id,
+        "final_artifact_digest": reference.digest, "requested_check_exits_digest": _source_digest(check_exits),
+        "all_iteration_ids_digest": _source_digest(identities)}
+    if _recovered_completion is None:
         final_source = replace(wait._source_binding, _final_source=canonical,
             _final_evidence_json=_canonical(evidence))
         final = issue_repository_child_final_witness(wait_witness=wait, source_binding=final_source, **evidence)
-        staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
-            payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
-                invocation_id=binding.invocation_id, input_digest=binding.input_digest, contact_state="settled", status="verified",
-                descriptor_digest=binding.descriptor_digest, selected_grant_digest=binding.selected_grant_digest,
-                task_id=binding.task_id, attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
-                child_attempt_count=1, child_fence=child_fence, parent_creation_digest=binding.creation_digest,
-                phase_digest=binding.phase_digest, artifact_refs=[reference],
-                effect_receipt_digest=_source_digest(child["effects"]),
-                cleanup_receipt_digest=evidence["final_cleanup_digest"]))
-        parent = await jobs.get_job(binding.parent_job_id)
-        published = await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
-            child_id=binding.invocation_id, owner=child_owner, fencing_token=child_fence,
-            expected_parent_revision=parent["revision"], repository_final_witness=final)
-        # The original root keeps its physical capacity until both canonical
-        # child adoption and the root's actual readback are durably terminal.
-        manifest_bytes = service._read_private_artifact(readback["artifact_ref"],
-            expected_digest=readback["artifact_digest"])
-        root_owner, root_fence = run.lease_owner, run.fencing_token
-        manifest_path = readback["artifact_ref"].removeprefix("workspace-json:")
-        await jobs.record_artifact(job_id, file_path=manifest_path, artifact_type="repo_repair_manifest",
-            content=manifest_bytes, owner=root_owner, fencing_token=root_fence)
-        publication_artifacts = {}
-        approved_patch_bytes = service._read_private_artifact(patch["patch_artifact_ref"],
-            expected_digest=patch["patch_sha256"])
-        diagnostics = json.loads(service._read_private_artifact(readback["diagnostics_artifact_ref"],
-            expected_digest=readback["diagnostics_artifact_digest"]))
-        patch_bytes = diagnostics["cumulative_diff"].encode("utf-8")
-        tested_diff_digest = hashlib.sha256(patch_bytes).hexdigest()
-        if (tested_diff_digest != manifest.get("diff_sha256")
-                or tested_diff_digest != diagnostics.get("cumulative_diff_sha256")
-                or tested_diff_digest != actual_cleanup.projection()["artifact_digests"].get("diff.patch")
-                or hashlib.sha256(approved_patch_bytes).hexdigest() != execution["patch_sha256"]
-                or work.language_profile == "test_python" and (
-                    manifest.get("patch_sha256") != execution["patch_sha256"]
-                    or manifest["publication_test_input"].get("patch_sha256") != execution["patch_sha256"])):
-            raise DurableJobLeaseError("actual final cumulative publication patch changed")
-        for filename, literal in (("manifest.json", manifest_bytes), ("readback.json", manifest_bytes),
-                ("diff.patch", patch_bytes)):
-            path = "artifacts/repo-repair/" + job_id + "/" + filename
-            ref, digest = service._write_private_artifact(path, literal)
-            if service._read_private_artifact(ref, expected_digest=digest) != literal:
-                raise DurableJobLeaseError("literal final publication artifact readback changed")
-            await jobs.record_artifact(job_id, file_path=path, artifact_type="repo_repair_" + filename,
-                content=literal, owner=root_owner, fencing_token=root_fence)
-            publication_artifacts[filename] = {"path": path, "sha256": digest}
-        from src.workflows.job_runtime import _utc_now
-        root_readback = await jobs.record_readback(job_id, target_path=publication_artifacts["readback.json"]["path"], status="succeeded",
-            effect_type="repository_iteration_verified", content_sha256=readback["artifact_digest"],
-            readback_id="repository-final:" + identity, verified_at=_utc_now().isoformat(),
-            details={"verified": True, "output_exists": True, "no_learning": True,
-                "iteration_id": identity, "original_child_id": binding.invocation_id},
-            owner=root_owner, fencing_token=root_fence)
-        from src.work_board.repository import _begin_sqlite_immediate
-        from src.workflows.general_task_guard import _cancel_cas_job
-        from src.workflows.repo_repair_stop import _cas_repository_stop_board_row
-        from src.work_board.repository import WorkBoardRepository
-        from src.db.models import WorkBoardTask, WorkBoardAttempt
-        async with jobs._session() as db:
-            await _begin_sqlite_immediate(db)
-            current = await jobs._fetch(db, job_id)
-            closed_child = await jobs._fetch(db, binding.invocation_id)
-            if (closed_child.status != "succeeded" or closed_child.result_digest != reference.digest
-                    or closed_child.fencing_token != child_fence or closed_child.lease_owner
-                    or current.status != "running" or current.fencing_token != root_fence):
-                raise DurableJobLeaseError("actual original final adoption must precede root closure")
-            original_journal = current.checkpoint_receipts_json
-            _append_repository_record(current, "repository:terminal:v1",
-                {"schema": "repository.final_verified.v1", "iteration_id": identity,
-                    "original_child_id": binding.invocation_id, "final_witness_digest": _source_digest(final.projection()),
-                    "manifest_artifact_digest": readback["artifact_digest"],
-                    "publication_artifacts": publication_artifacts,
-                    "approved_input_patch_digest": execution["patch_sha256"],
-                    "approved_input_patch_artifact_ref": patch["patch_artifact_ref"],
-                    "tested_cumulative_diff_digest": tested_diff_digest, "no_learning": True},
-                inventory=repository_checkpoint_inventory(current, work))
-            await append_repository_release_in_writer(db, jobs, current,
-                original=original, work=work, witness=final, outcome_status="succeeded")
-            updated_journal = current.checkpoint_receipts_json
-            current.checkpoint_receipts_json = original_journal
-            result_payload = {"verified": True, "no_learning": True,
-                "iteration_count": iteration_index, "manifest_artifact_ref": readback["artifact_ref"],
-                "patch_artifact_ref": patch["patch_artifact_ref"], "original_child_id": binding.invocation_id}
-            await _cancel_cas_job(db, current, {"checkpoint_receipts_json": updated_journal,
-                "status": "succeeded", "finished_at": _utc_now(), "lease_owner": None,
-                "lease_expires_at": None, "result_digest": _source_digest(result_payload),
-                "result_summary": "repository_cumulative_repair_verified"})
-            authority = context["authority"]
-            repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
-            repo_attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
-            if (repo_task is None or repo_attempt is None
-                    or _canonical(repo_task.model_dump(mode="json")) != _canonical(authority.task.model_dump(mode="json"))
-                    or _canonical(repo_attempt.model_dump(mode="json")) != _canonical(authority.attempt.model_dump(mode="json"))):
-                raise DurableJobLeaseError("original repository final board epoch changed")
-            now = _utc_now()
-            await _cas_repository_stop_board_row(db, repo_task, {"status": "done",
-                "task_revision": repo_task.task_revision + 1, "updated_at": now, "completed_at": now,
-                "block_kind": None, "block_reason": None, "block_source_status": None,
-                "result_refs_json": _canonical([{"job_id": job_id, "status": "succeeded", "no_learning": True}])})
-            await _cas_repository_stop_board_row(db, repo_attempt, {
-                "outcome": "repository_cumulative_repair_verified", "ended_at": now,
-                "lease_owner": None, "lease_expires_at": None, "updated_at": now})
-            await WorkBoardRepository._event(db, repo_task, owner, kind="attempt.repository_verified",
-                metadata={"attempt_id": repo_attempt.attempt_id, "workflow_run_id": job_id,
-                    "readback_id": "repository-final:" + identity, "no_learning": True})
-            await db.commit()
-        terminal = await jobs.get_job(job_id)
+    else:
+        from src.workflows.repo_repair_source_recovery import repository_completion_recovered_child_final
+        final = await repository_completion_recovered_child_final(_recovered_completion, evidence=evidence)
+    staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
+        payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
+            invocation_id=binding.invocation_id, input_digest=binding.input_digest, contact_state="settled", status="verified",
+            descriptor_digest=binding.descriptor_digest, selected_grant_digest=binding.selected_grant_digest,
+            task_id=binding.task_id, attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
+            child_attempt_count=1, child_fence=child_fence, parent_creation_digest=binding.creation_digest,
+            phase_digest=binding.phase_digest, artifact_refs=[reference],
+            effect_receipt_digest=_source_digest(child["effects"]),
+            cleanup_receipt_digest=evidence["final_cleanup_digest"]))
+    parent = await jobs.get_job(binding.parent_job_id)
+    publication_descriptor = {"parent_id": binding.parent_job_id, "child_id": binding.invocation_id,
+        "staged_artifact": staged, "repository_final_witness": final, "expected_parent_revision": parent["revision"]}
+    if _recovered_completion is not None:
+        await _expect_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion,
+            kind="publish", job_id=binding.invocation_id, descriptor=publication_descriptor)
+    published = await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
+        child_id=binding.invocation_id, owner=child_owner, fencing_token=child_fence,
+        expected_parent_revision=parent["revision"], repository_final_witness=final,
+        **({"_repository_completion_witness": _recovered_completion} if _recovered_completion is not None else {}))
+    if _recovered_completion is not None:
+        await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="publish")
+    # The original root keeps its physical capacity until both canonical
+    # child adoption and the root's actual readback are durably terminal.
+    manifest_bytes = service._read_private_artifact(readback["artifact_ref"],
+        expected_digest=readback["artifact_digest"])
+    root_owner, root_fence = run.lease_owner, run.fencing_token
+    manifest_path = readback["artifact_ref"].removeprefix("workspace-json:")
+    async def record_final_artifact(*, file_path, artifact_type, content):
+        if _recovered_completion is not None:
+            await _expect_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion,
+                kind="artifact", job_id=job_id, descriptor={"file_path": file_path,
+                    "artifact_type": artifact_type, "content": content})
+        await jobs.record_artifact(job_id, file_path=file_path, artifact_type=artifact_type,
+            content=content, owner=root_owner, fencing_token=root_fence,
+            **({"_repository_completion_witness": _recovered_completion} if _recovered_completion is not None else {}))
+        if _recovered_completion is not None:
+            await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="artifact")
+    await record_final_artifact(file_path=manifest_path, artifact_type="repo_repair_manifest", content=manifest_bytes)
+    publication_artifacts = {}
+    approved_patch_bytes = service._read_private_artifact(patch["patch_artifact_ref"],
+        expected_digest=patch["patch_sha256"])
+    diagnostics = json.loads(service._read_private_artifact(readback["diagnostics_artifact_ref"],
+        expected_digest=readback["diagnostics_artifact_digest"]))
+    patch_bytes = diagnostics["cumulative_diff"].encode("utf-8")
+    tested_diff_digest = hashlib.sha256(patch_bytes).hexdigest()
+    if (tested_diff_digest != manifest.get("diff_sha256")
+            or tested_diff_digest != diagnostics.get("cumulative_diff_sha256")
+            or tested_diff_digest != actual_projection["artifact_digests"].get("diff.patch")
+            or hashlib.sha256(approved_patch_bytes).hexdigest() != execution["patch_sha256"]
+            or work.language_profile == "test_python" and (
+                manifest.get("patch_sha256") != execution["patch_sha256"]
+                or manifest["publication_test_input"].get("patch_sha256") != execution["patch_sha256"])):
+        raise DurableJobLeaseError("actual final cumulative publication patch changed")
+    for filename, literal in (("manifest.json", manifest_bytes), ("readback.json", manifest_bytes),
+            ("diff.patch", patch_bytes)):
+        path = "artifacts/repo-repair/" + job_id + "/" + filename
+        ref, digest = service._write_private_artifact(path, literal)
+        if service._read_private_artifact(ref, expected_digest=digest) != literal:
+            raise DurableJobLeaseError("literal final publication artifact readback changed")
+        await record_final_artifact(file_path=path, artifact_type="repo_repair_" + filename, content=literal)
+        publication_artifacts[filename] = {"path": path, "sha256": digest}
+    from src.workflows.job_runtime import _utc_now
+    root_readback_descriptor = {"target_path": publication_artifacts["readback.json"]["path"], "status": "succeeded",
+        "effect_type": "repository_iteration_verified", "target_digest": None,
+        "content_sha256": readback["artifact_digest"], "readback_id": "repository-final:" + identity,
+        "verified_at": _utc_now().isoformat(), "details": {"verified": True, "output_exists": True, "no_learning": True,
+            "iteration_id": identity, "original_child_id": binding.invocation_id}}
+    if _recovered_completion is not None:
+        await _expect_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion,
+            kind="readback", job_id=job_id, descriptor=root_readback_descriptor)
+    root_readback = await jobs.record_readback(job_id, **root_readback_descriptor,
+        owner=root_owner, fencing_token=root_fence,
+        **({"_repository_completion_witness": _recovered_completion} if _recovered_completion is not None else {}))
+    if _recovered_completion is not None:
+        await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="readback")
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.workflows.general_task_guard import _cancel_cas_job
+    from src.workflows.repo_repair_stop import _cas_repository_stop_board_row
+    from src.work_board.repository import WorkBoardRepository
+    from src.db.models import WorkBoardTask, WorkBoardAttempt
+    terminal_payload = {"schema": "repository.final_verified.v1", "iteration_id": identity,
+        "original_child_id": binding.invocation_id, "final_witness_digest": _source_digest(final.projection()),
+        "manifest_artifact_digest": readback["artifact_digest"], "publication_artifacts": publication_artifacts,
+        "approved_input_patch_digest": execution["patch_sha256"],
+        "approved_input_patch_artifact_ref": patch["patch_artifact_ref"],
+        "tested_cumulative_diff_digest": tested_diff_digest, "no_learning": True}
+    result_payload = {"verified": True, "no_learning": True, "iteration_count": iteration_index,
+        "manifest_artifact_ref": readback["artifact_ref"], "patch_artifact_ref": patch["patch_artifact_ref"],
+        "original_child_id": binding.invocation_id}
+    terminal_descriptor = {"terminal_payload": terminal_payload, "result_payload": result_payload}
+    if _recovered_completion is not None:
+        await _expect_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion,
+            kind="terminal", job_id=job_id, descriptor=terminal_descriptor)
+    async with jobs._session() as db:
+        await _begin_sqlite_immediate(db)
+        current = await jobs._fetch(db, job_id)
+        closed_child = await jobs._fetch(db, binding.invocation_id)
+        if _recovered_completion is not None:
+            await verify_recovered_repository_final_writer(jobs, db, current,
+                completion_witness=_recovered_completion, kind="terminal", descriptor=terminal_descriptor)
+        if (closed_child.status != "succeeded" or closed_child.result_digest != reference.digest
+                or closed_child.fencing_token != child_fence or closed_child.lease_owner
+                or current.status != "running" or current.fencing_token != root_fence):
+            raise DurableJobLeaseError("actual original final adoption must precede root closure")
+        original_journal = current.checkpoint_receipts_json
+        _append_repository_record(current, "repository:terminal:v1", terminal_payload,
+            inventory=repository_checkpoint_inventory(current, work))
+        await append_repository_release_in_writer(db, jobs, current,
+            original=original, work=work, witness=final, outcome_status="succeeded")
+        updated_journal = current.checkpoint_receipts_json
+        current.checkpoint_receipts_json = original_journal
+        await _cancel_cas_job(db, current, {"checkpoint_receipts_json": updated_journal,
+            "status": "succeeded", "finished_at": _utc_now(), "lease_owner": None,
+            "lease_expires_at": None, "result_digest": _source_digest(result_payload),
+            "result_summary": "repository_cumulative_repair_verified"})
+        authority = context["authority"]
+        repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
+        repo_attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
+        if (repo_task is None or repo_attempt is None
+                or _canonical(repo_task.model_dump(mode="json")) != _canonical(authority.task.model_dump(mode="json"))
+                or _canonical(repo_attempt.model_dump(mode="json")) != _canonical(authority.attempt.model_dump(mode="json"))):
+            raise DurableJobLeaseError("original repository final board epoch changed")
+        now = _utc_now()
+        await _cas_repository_stop_board_row(db, repo_task, {"status": "done",
+            "task_revision": repo_task.task_revision + 1, "updated_at": now, "completed_at": now,
+            "block_kind": None, "block_reason": None, "block_source_status": None,
+            "result_refs_json": _canonical([{"job_id": job_id, "status": "succeeded", "no_learning": True}])})
+        await _cas_repository_stop_board_row(db, repo_attempt, {
+            "outcome": "repository_cumulative_repair_verified", "ended_at": now,
+            "lease_owner": None, "lease_expires_at": None, "updated_at": now})
+        await WorkBoardRepository._event(db, repo_task, owner, kind="attempt.repository_verified",
+            metadata={"attempt_id": repo_attempt.attempt_id, "workflow_run_id": job_id,
+                "readback_id": "repository-final:" + identity, "no_learning": True})
+        if _recovered_completion is not None:
+            await capture_recovered_repository_final_writer(jobs, db, await jobs._fetch(db, job_id),
+                completion_witness=_recovered_completion, kind="terminal")
+        await db.commit()
+    if _recovered_completion is not None:
+        await observe_recovered_repository_final_writer(jobs, completion_witness=_recovered_completion, kind="terminal")
+    terminal = await jobs.get_job(job_id)
+    if _recovered_completion is None:
         lane = service._iterative_lanes.pop(job_id, None)
         if lane is None:
             raise DurableJobLeaseError("original physical root capacity owner disappeared")
         lane.clear_quarantine()
-        published["repository_root"] = terminal
-        published["repository_task_status"] = "done"
-        return published
+    else:
+        assert_repository_scoped_completion(_recovered_completion, service=service, jobs=jobs, job_id=job_id, owner=owner)
+        if terminal["status"] != "succeeded" or terminal["fencing_token"] != root_fence:
+            raise DurableJobLeaseError("recovered original terminal readback changed")
+    published["repository_root"] = terminal
+    published["repository_task_status"] = "done"
+    return published
 
 
 async def validate_repository_child_final_witness(db, witness, *, parent, task, attempt,
@@ -2789,6 +3310,9 @@ async def validate_repository_child_final_witness(db, witness, *, parent, task, 
     source = witness._source_binding
     current_source = source._final_source
     assert_repository_canonical_source(current_source)
+    if current_source._recovered_completion is not None:
+        from src.workflows.repo_repair_source_recovery import assert_repository_completion_final_source
+        assert_repository_completion_final_source(current_source, final_witness=witness)
     if phase != "final" or source._final_evidence_json is None:
         raise DurableJobLeaseError("actual original final source owner required")
     evidence = json.loads(source._final_evidence_json)
@@ -3285,6 +3809,7 @@ class _CanonicalRepositorySource:
     _contacted_wait_child_json: str | None = field(default=None, repr=False, compare=False)
     _final_source: Any = field(default=None, repr=False, compare=False)
     _final_evidence_json: str | None = field(default=None, repr=False, compare=False)
+    _recovered_completion: Any = field(default=None, repr=False, compare=False)
     _seal: object = field(default=None, repr=False, compare=False)
 
     def projection(self) -> dict[str, Any]:
@@ -3296,8 +3821,16 @@ class _CanonicalRepositorySource:
 def assert_repository_canonical_source(source) -> None:
     """Only the actual source owner can stamp a staged SQL/physical binding."""
     from src.workflows.job_runtime import DurableJobLeaseError
-    if (type(source) is not _CanonicalRepositorySource or source._seal is not _SEAL
-            or any(not getattr(source, name) for name in (
+    if type(source) is not _CanonicalRepositorySource:
+        raise DurableJobLeaseError("original producer-sealed repository canonical source required")
+    if source._seal is not _SEAL:
+        if source._recovered_completion is None or source._seal is not source._recovered_completion:
+            raise DurableJobLeaseError("recovered canonical source seal changed")
+        from src.workflows.repo_repair_source_recovery import assert_repository_completion_final_source
+        assert_repository_completion_final_source(source)
+    elif source._recovered_completion is not None:
+        raise DurableJobLeaseError("recovered canonical source cannot use the live seal")
+    if (any(not getattr(source, name) for name in (
                 "parent_row_json", "task_row_json", "parent_attempt_row_json",
                 "parent_envelope_json",
                 "repository_attempt_row_json", "child_row_json", "repository_task_row_json",

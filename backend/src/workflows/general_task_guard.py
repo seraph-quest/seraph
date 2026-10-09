@@ -1231,7 +1231,7 @@ def _next_manifest(parent, previous, proposed, *, task, attempt):
         raise DurableJobLeaseError("general task native phase revision changed")
 
 
-def _publish(parent, manifest, *, staged_records=()):
+def _publish(parent, manifest, *, staged_records=(), _repository_completion_witness=None):
     from src.workflows.job_runtime import _canonical, _digest, _github_recovery_history, _utc_now
     from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
     # The fixed writer derives protection; no proposed list can grant retention
@@ -1244,8 +1244,13 @@ def _publish(parent, manifest, *, staged_records=()):
         manifest.model_dump(mode="json") | {"required_checkpoint_ids": required})
     artifacts = json.loads(parent.artifact_receipts_json or "[]")
     for staged in staged_records:
-        _payload, record = verify_staged_task_artifact(staged,
-            parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)
+        if _repository_completion_witness is not None:
+            from src.workflows.repo_repair_source import _recovered_repository_publication_artifact
+            _payload, record = _recovered_repository_publication_artifact(
+                _repository_completion_witness, staged_artifact=staged)
+        else:
+            _payload, record = verify_staged_task_artifact(staged,
+                parent_job_id=parent.run_identity, creation_digest=manifest.creation_digest)
         artifacts = [item for item in artifacts if item.get("artifact_id") != record["artifact_id"]]
         artifacts.append({**record, "recorded_at": _utc_now().isoformat()})
     payload = manifest.model_dump(mode="json")
@@ -1258,7 +1263,7 @@ def _publish(parent, manifest, *, staged_records=()):
     return manifest
 
 
-def _validate_staged_refs(previous, manifest, staged):
+def _validate_staged_refs(previous, manifest, staged, *, _repository_completion_witness=None):
     from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
     from src.workflows.job_runtime import DurableJobLeaseError
     def refs(value):
@@ -1269,18 +1274,24 @@ def _validate_staged_refs(previous, manifest, staged):
     added = refs(manifest) - refs(previous)
     supplied = set()
     for item in staged:
-        verify_staged_task_artifact(item, parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
+        if _repository_completion_witness is not None:
+            from src.workflows.repo_repair_source import _recovered_repository_publication_artifact
+            _recovered_repository_publication_artifact(
+                _repository_completion_witness, staged_artifact=item)
+        else:
+            verify_staged_task_artifact(item, parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
         supplied.add((item.reference.artifact_id, item.reference.digest, item.reference.schema_version))
     if added != supplied:
         raise DurableJobLeaseError("new native references require exact sealed staged artifacts")
 
 
-def _published_values(parent, manifest, staged):
+def _published_values(parent, manifest, staged, *, _repository_completion_witness=None):
     from types import SimpleNamespace
     staged_parent = SimpleNamespace(run_identity=parent.run_identity, job_kind=parent.job_kind,
         checkpoint_receipts_json=parent.checkpoint_receipts_json,
         artifact_receipts_json=parent.artifact_receipts_json)
-    manifest = _publish(staged_parent, manifest, staged_records=staged)
+    manifest = _publish(staged_parent, manifest, staged_records=staged,
+        _repository_completion_witness=_repository_completion_witness)
     return manifest, {"checkpoint_receipts_json": staged_parent.checkpoint_receipts_json,
         "artifact_receipts_json": staged_parent.artifact_receipts_json}
 
@@ -1427,7 +1438,7 @@ async def _validate_repository_source_witness(db, witness, *, phase, parent,
 
 
 def _publish_repository_checkpoint(parent, manifest, *, checkpoint_id, payload,
-    staged_artifacts=()):
+    staged_artifacts=(), _repository_completion_witness=None):
     """Stage one source-owned repository proof through the native manifest writer."""
     from types import SimpleNamespace
     from src.workflows.job_runtime import DurableJobTransitionError, _canonical, _digest, _utc_now
@@ -1445,7 +1456,8 @@ def _publish_repository_checkpoint(parent, manifest, *, checkpoint_id, payload,
     _check_reserved_capacity(history)
     staged_parent = SimpleNamespace(run_identity=parent.run_identity, job_kind=parent.job_kind,
         checkpoint_receipts_json=_canonical(history), artifact_receipts_json=parent.artifact_receipts_json)
-    return _published_values(staged_parent, manifest, staged_artifacts)
+    return _published_values(staged_parent, manifest, staged_artifacts,
+        _repository_completion_witness=_repository_completion_witness)
 
 
 async def publish_repository_child_wait(jobs, child_id, *, owner, fencing_token,
@@ -1590,7 +1602,7 @@ async def resume_repository_child_wait(jobs, child_id, *, owner,
 async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
     child_id, owner, fencing_token, expected_parent_revision,
     repository_final_witness, repository_final_authority_check=None,
-    repository_final_authority_scope=None):
+    repository_final_authority_scope=None, _repository_completion_witness=None):
     """Adopt one source-verified cumulative repair and close the same child.
 
     The source witness owns physical/process/accounting evidence.  This
@@ -1603,12 +1615,28 @@ async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
     from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact
     from src.work_board.contracts import GeneralTaskStepReceiptV1
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _serialize, _utc_now
+    if _repository_completion_witness is not None:
+        from src.workflows.repo_repair_source import (
+            verify_recovered_repository_final_writer, capture_recovered_repository_final_writer,
+            _recovered_repository_publication_artifact)
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
         child = await jobs._fetch(db, child_id)
         jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
+        if _repository_completion_witness is not None:
+            await verify_recovered_repository_final_writer(jobs, db, child,
+                completion_witness=_repository_completion_witness, kind="publish",
+                descriptor={"parent_id": parent_id, "child_id": child_id,
+                    "staged_artifact": staged_artifact, "repository_final_witness": repository_final_witness,
+                    "expected_parent_revision": expected_parent_revision})
         binding = child_binding(child)
         _assert_repository_child_final_witness_shape(repository_final_witness)
+        recovered_completion = getattr(
+            getattr(repository_final_witness._source_binding, "_final_source", None),
+            "_recovered_completion", None)
+        if (recovered_completion is not None
+            and recovered_completion is not _repository_completion_witness):
+            raise DurableJobLeaseError("recovered repository final publication requires its original completion")
         parent, task, attempt, previous, _envelope = await _repository_current_pure(
             jobs, db, parent_id,
             source_binding=repository_final_witness._source_binding)
@@ -1625,8 +1653,12 @@ async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
         if (wait_witness.native_binding != binding
             or wait_witness.repository_fence < 1):
             raise DurableJobLeaseError("repository final witness child binding changed")
-        receipt, _record = verify_staged_task_artifact(staged_artifact,
-            parent_job_id=parent_id, creation_digest=previous.creation_digest)
+        if _repository_completion_witness is not None:
+            receipt, _record = _recovered_repository_publication_artifact(
+                _repository_completion_witness, staged_artifact=staged_artifact)
+        else:
+            receipt, _record = verify_staged_task_artifact(staged_artifact,
+                parent_job_id=parent_id, creation_digest=previous.creation_digest)
         if (type(receipt) is not GeneralTaskStepReceiptV1
             or receipt.status != "verified" or receipt.contact_state != "settled"
             or receipt.child_job_id != child_id or receipt.invocation_id != child_id
@@ -1686,7 +1718,8 @@ async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
             "step_receipt_digests": [refs[key][1] for key in steps],
             "step_receipt_schemas": [refs[key][2] for key in steps]})
         _next_manifest(parent, previous, proposed, task=task, attempt=attempt)
-        _validate_staged_refs(previous, proposed, (staged_artifact,))
+        _validate_staged_refs(previous, proposed, (staged_artifact,),
+            _repository_completion_witness=_repository_completion_witness)
         if repository_final_authority_scope is not None:
             scopes = AsyncExitStack()
             await scopes.__aenter__()
@@ -1704,7 +1737,8 @@ async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
                     await result
             published, values = _publish_repository_checkpoint(parent, proposed,
                 checkpoint_id=final_id, payload=final_payload,
-                staged_artifacts=(staged_artifact,))
+                staged_artifacts=(staged_artifact,),
+                _repository_completion_witness=_repository_completion_witness)
             now = _utc_now()
             child_update = await db.execute(update(WorkflowRunState).where(
                 WorkflowRunState.run_identity == child.run_identity,
@@ -1723,6 +1757,9 @@ async def publish_repository_child_final(jobs, parent_id, *, staged_artifact,
             if child_update.rowcount != 1:
                 raise DurableJobLeaseError("repository final child CAS changed")
             await _cas_parent(db, parent, values)
+            if _repository_completion_witness is not None:
+                await capture_recovered_repository_final_writer(jobs, db, await jobs._fetch(db, child_id),
+                    completion_witness=_repository_completion_witness, kind="publish")
             # The source authority scope is released only after the durable
             # parent/child CAS has committed, as required by the C1 contract.
             await db.commit()
@@ -2708,7 +2745,8 @@ async def admit_child(jobs, spec, *, manifest, owner, fencing_token, expected_re
 
 async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, owner,
     fencing_token, expected_parent_revision, repository_final_witness=None,
-    repository_final_authority_check=None, repository_final_authority_scope=None):
+    repository_final_authority_check=None, repository_final_authority_scope=None,
+    _repository_completion_witness=None):
     if repository_final_witness is not None:
         return await publish_repository_child_final(jobs, parent_id,
             staged_artifact=staged_artifact, child_id=child_id, owner=owner,
@@ -2716,7 +2754,11 @@ async def publish_step_receipt(jobs, parent_id, *, staged_artifact, child_id, ow
             expected_parent_revision=expected_parent_revision,
             repository_final_witness=repository_final_witness,
             repository_final_authority_check=repository_final_authority_check,
-            repository_final_authority_scope=repository_final_authority_scope)
+            repository_final_authority_scope=repository_final_authority_scope,
+            _repository_completion_witness=_repository_completion_witness)
+    if _repository_completion_witness is not None:
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError("repository completion requires its fixed final publication")
     from src.work_board.repository import _begin_sqlite_immediate
     from src.work_board.general_task_runtime_artifacts import verify_staged_task_artifact, compile_phase_digest
     from src.work_board.contracts import GeneralTaskStepReceiptV1

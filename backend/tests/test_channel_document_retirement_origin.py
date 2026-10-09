@@ -14,6 +14,7 @@ from src.work_board.channel_capture import (
 )
 from src.work_board.repository import BoardError, _begin_sqlite_immediate
 from tests.test_telegram_document_ingest import prepare, setup_workspace, authenticated_setup_operator  # noqa: F401
+from tests.general_task_method_lifecycle import AdmissionSignerLifetime
 
 pytestmark = pytest.mark.parametrize("async_db", ["file"], indirect=True)
 
@@ -212,6 +213,8 @@ async def test_actual_original_capture_native_claim_checks_source_before_attempt
     adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db, 'csv')
     dispatcher = WorkBoardDispatcher(session_provider=async_db, general_tasks=board_api.dispatcher.general_tasks)
     monkeypatch.setattr(board_api, 'dispatcher', dispatcher)
+    from src.work_board.historical_method import historical_method_service
+    signer_lifetime = AdmissionSignerLifetime(historical_method_service)
     manager = None
     try:
         if retire_before_claim == 'approval_callback':
@@ -222,6 +225,8 @@ async def test_actual_original_capture_native_claim_checks_source_before_attempt
         captured = await client.post('/api/telegram/updates', json=event)
         assert captured.status_code == 200, captured.text
         task_id = captured.json()['channel_task_capture']['task_id']
+        await signer_lifetime.start()
+        assert historical_method_service.signing_key is not None
         descriptors, _ = dispatcher.general_tasks.snapshot()
         tool_id = 'mcp:local:read_owned' if retire_before_claim == 'approval_callback' else 'read_file'
         read = next(item for item in descriptors if item.tool_id == tool_id)
@@ -393,6 +398,7 @@ async def test_actual_original_capture_native_claim_checks_source_before_attempt
             assert resume.json()['detail']['code'] == 'channel_document_source_unsealed', resume.text
         assert contacts == ['POST','GET'] and raw
     finally:
+        await signer_lifetime.close()
         if manager is not None:
             await asyncio.to_thread(manager.disconnect, 'local')
         await service.stop()

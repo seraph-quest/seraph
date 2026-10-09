@@ -1258,6 +1258,7 @@ class GeneralTaskService:
             goal_revision=current.goal_revision, capability_id=CAPABILITY,
             input_artifact_id=metadata.artifact_id, idempotency_key=request.idempotency_key)
         resolved = await recheck_staged_input(db, owner, binding_request, witness=staged)
+        await check_current_captured_task_source(db, owner, current)
         # Reuse the existing input-retirement CAS. Old bytes remain private,
         # immutable historical evidence and the revoked row cannot execute.
         await _revoke_input_artifact_locked(db, owner, witness=retirement)

@@ -148,6 +148,19 @@ async def assert_preparation_run_current(db, run):
     await verify_preparation_binding(db, binding, source_run=run)
 
 
+def assert_current_preparation_policy(binding):
+    """Physical policy staging outside canonical SQL writers."""
+    from src.model_fabric.effective_policy import current_inference_policy
+    if type(binding) is not CommunicationPreparationBinding or binding._seal is not _PREPARATION_SEAL:
+        raise BoardError("communication_preparation_seal_required", "Original source producer required", status_code=409)
+    try:
+        current = current_inference_policy()[1]
+    except (PermissionError, ValueError) as error:
+        raise BoardError("communication_preparation_policy_changed", "Review original source policy", status_code=409) from error
+    if current != binding.policy_digest:
+        raise BoardError("communication_preparation_policy_changed", "Original source policy changed", status_code=409)
+
+
 @dataclass(frozen=True)
 class _SourcePublication:
     principal: object
@@ -214,7 +227,8 @@ def check_envelope(envelope):
         raise BoardError("communication_selection_changed", "The original selection digest is required", status_code=422)
     for value in [*selection.reply_inputs, *selection.meeting_inputs, *selection.reschedule_inputs]:
         revision = value.get("expected_goal_revision", value.get("goal_revision"))
-        if value["goal_id"] != envelope.task_input.goal_ref or revision is None:
+        if (value["goal_id"] != envelope.task_input.goal_ref or revision is None
+            or (envelope.proposal_group is not None and revision != envelope.proposal_group.goal_revision)):
             raise BoardError("communication_goal_changed", "All sources must use the original task Goal", status_code=422)
 
 
@@ -376,10 +390,37 @@ def verify_source_projection(binding, task, attempt, projection):
         raise BoardError("communication_source_projection_changed", "Exact original source native projection required", status_code=409)
 
 
+async def _assert_source_capacity(db, group, bound, *, source_job_id=None):
+    """Observe the original all-period ledger before any source contact."""
+    from src.db.models import InferenceCostReservation
+    from src.workflows.general_task_accounting import entry_for
+    members = []
+    for row in (await db.execute(select(InferenceCostReservation))).scalars():
+        entry = entry_for(row)
+        if entry is not None and entry["group_digest"] == digest(group.model_dump(mode="json")):
+            members.append(row)
+    own = [row for row in members if row.job_id == source_job_id]
+    if len(own) > 1 or any(row.state == "unknown" for row in members):
+        raise BoardError("communication_source_unknown", "Original source accounting requires governed recovery", status_code=409)
+    if len(members) + (0 if own else 1) > group.max_inference_calls:
+        raise BoardError("general_task_group_call_limit", "Original source call allowance exhausted", status_code=409)
+    liability = 0
+    for row in members:
+        if row.state in {"reserved", "contact_started"}:
+            liability += row.bound_microusd
+        elif row.state == "settled" and type(row.actual_cost_microusd) is int and row.actual_cost_microusd >= 0:
+            liability += row.actual_cost_microusd
+        elif row.state != "released":
+            raise BoardError("communication_source_unknown", "Original source accounting requires governed recovery", status_code=409)
+    if liability + (0 if own else bound) > group.max_cost_microusd:
+        raise BoardError("general_task_group_cost_limit", "Original source cost allowance exhausted", status_code=409)
+
+
 async def verify_preparation_binding(db, binding, source_run=None, *, allow_succeeded=False):
     from src.db.models import WorkflowRunState, WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact
     if type(binding) is not CommunicationPreparationBinding or binding._seal is not _PREPARATION_SEAL:
         raise BoardError("communication_preparation_seal_required", "Original source preparation issuer required", status_code=409)
+    await _assert_source_capacity(db, binding.group, binding.budget_microusd, source_job_id=binding.source_job_id)
     child, native, envelope = await _verify_native_sql(db, binding._physical_witness, binding.child_fence)
     if native != binding.native or child.lease_owner != binding.child_owner:
         raise BoardError("communication_preparation_fence_changed", "Original source producer fence required", status_code=409)
@@ -441,14 +482,15 @@ async def verify_preparation_binding(db, binding, source_run=None, *, allow_succ
 async def issue_preparation_binding(db, *, native, child_owner, child_fence, group, ordinal,
         capability_id, source_choice_digest, source_task_id, source_attempt_id,
         input_artifact_id, input_artifact_digest, source_job_id, source_deadline_at,
-        budget_microusd, physical_witness):
+        budget_microusd, policy_digest, physical_witness):
     """Issue only against a previously persisted exact original reservation."""
     binding = CommunicationPreparationBinding(native=native, child_owner=child_owner,
         child_fence=child_fence, group=group, ordinal=ordinal, capability_id=capability_id,
         source_choice_digest=source_choice_digest, source_task_id=source_task_id,
         source_attempt_id=source_attempt_id, input_artifact_id=input_artifact_id,
         input_artifact_digest=input_artifact_digest, source_job_id=source_job_id,
-        source_deadline_at=source_deadline_at, budget_microusd=budget_microusd, _seal=_PREPARATION_SEAL,
+        source_deadline_at=source_deadline_at, budget_microusd=budget_microusd,
+        policy_digest=policy_digest, _seal=_PREPARATION_SEAL,
         _physical_witness=physical_witness)
     return await verify_preparation_binding(db, binding)
 
@@ -531,7 +573,10 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
     from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardTaskCreate
     from src.work_board.input_artifacts import prepare_input_artifact, stage_input_artifact
     from src.work_board.repository import stage_safe_task_text
-    from src.model_fabric.configuration import effective_workload_policy
+    from src.model_fabric.configuration import (openrouter_policy_for_setup,
+        OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class)
+    from src.model_fabric.caller_context import canonical_route_spec
+    from src.model_fabric.effective_policy import current_inference_policy
     from src.workflows.mail_reply_draft import reply_job_id
     from src.integrations.google_calendar import calendar_job_id
     async with dispatcher.session_provider() as db:
@@ -542,6 +587,21 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         capability, source_input = choices[ordinal]
         owner = WorkBoardOwner(principal_id=native.owner_principal_id, session_id=native.original_root_id)
         await assert_source_current(db, owner, capability, source_input)
+        # Stage the actual reviewed route before the SQL writer. The governed
+        # accounting writer compares this exact policy digest before reserving.
+        configured, source_policy_digest = current_inference_policy()
+        setup = configured.openrouter_setup
+        if setup is None or configured.status != "ready" or configured.egress_revoked:
+            raise BoardError("communication_source_budget_unavailable", "Review source inference policy", status_code=409)
+        policy = openrouter_policy_for_setup(setup, "strategist_agent")
+        route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class))
+            if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup)
+        if route is None or getattr(route, "enabled", True) is not True:
+            raise BoardError("communication_source_budget_unavailable", "Current source route required", status_code=409)
+        route_bound = getattr(route, "request_cost_bound_microusd", None) or setup.spend_ceiling_microusd
+        ceiling = getattr(policy, "max_cost_microusd", None)
+        if type(route_bound) is not int or route_bound <= 0 or type(ceiling) is not int or ceiling <= 0:
+            raise BoardError("communication_source_budget_unavailable", "Reviewed finite source route bound required", status_code=409)
         key = "communication:" + digest([child_id, native.creation_digest, ordinal])
         metadata = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=capability, goal_id=envelope.task_input.goal_ref,
@@ -566,6 +626,9 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         records = checkpoint.setdefault("communication_preparations", {})
         if str(ordinal) in records or any(record.get("phase") in {"reserved", "admitted", "running", "unknown"} for record in records.values()):
             raise BoardError("communication_original_source_pending", "Inspect original source work; do not replay", status_code=409)
+        group = current_envelope.proposal_group
+        source_budget = min(route_bound, ceiling, group.max_cost_microusd)
+        await _assert_source_capacity(db, group, source_budget)
         mutation = await dispatcher.repository._create_task(db, owner, request,
             staged_text=staged_text, staged_input=staged,
             publication_authority_check=lambda writer: verify_source_publication(writer, witness))
@@ -580,10 +643,7 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
             lease_seconds=120, _communication_publication=witness)
         if claim is None:
             raise BoardError("communication_source_claim_failed", "Review the affected original source", status_code=409)
-        group = current_envelope.proposal_group
-        policy = effective_workload_policy("strategist_agent")
-        ceiling = getattr(policy, "max_cost_microusd", None)
-        if type(ceiling) is not int or ceiling <= 0 or group.max_cost_microusd <= 0:
+        if group.max_cost_microusd <= 0:
             raise BoardError("communication_source_budget_unavailable", "Review original source inference allowance", status_code=409)
         deadline = min(datetime.now(timezone.utc) + timedelta(seconds=120),
             native.native_deadline_at, group.original_deadline_at)
@@ -592,7 +652,7 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         binding = CommunicationPreparationBinding(current_native, child.lease_owner, fence, group,
             ordinal, capability, digest(source_input), claim.task.task_id, claim.attempt.attempt_id,
             metadata.artifact_id, metadata.typed_input_digest, job_id, deadline,
-            min(ceiling, group.max_cost_microusd), _PREPARATION_SEAL, physical)
+            source_budget, source_policy_digest, _PREPARATION_SEAL, physical)
         records[str(ordinal)] = {"phase": "reserved", "binding": binding_payload(binding),
             "binding_digest": digest(binding_payload(binding)), "producer_closed": False}
         await _write_child_context(db, child, checkpoint, physical)
@@ -603,6 +663,7 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
 
 async def _source_output(dispatcher, binding, source_input):
     """Use actual source-native receipts and literal physical owner readback."""
+    assert_current_preparation_policy(binding)
     import asyncio
     import hashlib
     from src.work_board.communication_contracts import CommunicationSourceRef
@@ -650,10 +711,9 @@ async def _source_output(dispatcher, binding, source_input):
     return reference, value, projection
 
 
-async def _run_source(principal, child_id, fence, ordinal, dispatcher):
+async def _produce_source(claim, inputs, binding, dispatcher):
     """The original callback awaits admission, execution and physical readback."""
     from src.db.models import WorkBoardStatus
-    claim, inputs, binding = await _publish_source(principal, child_id, fence, ordinal, dispatcher)
     with preparation_scope(binding):
         await dispatcher._execute_direct_adapter(claim.task, claim.attempt, inputs,
             runtime_seconds=120, admission_only=True, communication_binding=binding)
@@ -680,6 +740,91 @@ async def _run_source(principal, child_id, fence, ordinal, dispatcher):
             status=WorkBoardStatus.review, outcome="verified", proof=proof,
             artifact_refs=projection["artifacts"], result_refs=[{"job_id": binding.source_job_id,
                 "status": "succeeded", "verified": True}], communication_binding=binding)
+    return reference, value
+
+
+class _ClosedSourceFailure(BoardError):
+    def __init__(self, reason, job_id):
+        super().__init__(reason, "Review the affected original source preparation", status_code=409)
+        self.source_job_id = job_id
+
+
+async def _run_source(principal, child_id, fence, ordinal, dispatcher):
+    """Retain the exact original producer through cancellation and closure."""
+    import asyncio
+    claim, inputs, binding = await _publish_source(principal, child_id, fence, ordinal, dispatcher)
+    producer = asyncio.create_task(_produce_source(claim, inputs, binding, dispatcher))
+    try:
+        try:
+            reference, value = await asyncio.shield(producer)
+        except asyncio.CancelledError:
+            while not producer.done():
+                try:
+                    await asyncio.shield(producer)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not producer.cancelled():
+                producer.exception()
+            raise
+    except BaseException as error:
+        # Only this retained original Task's actual terminal result is closure.
+        # Ledger liabilities are observed, never released or reconstructed here.
+        if not producer.done() or producer.cancelled():
+            raise
+        from src.db.models import InferenceCostReservation
+        from sqlalchemy import text
+        reason = str(getattr(error, "code", "communication_source_failed"))
+        import re
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason):
+            reason = "communication_source_failed"
+        async with dispatcher.session_provider() as db:
+            rows = list((await db.execute(select(InferenceCostReservation).where(
+                InferenceCostReservation.job_id == binding.source_job_id))).scalars())
+            held = any(row.state not in {"settled", "released"}
+                or (row.state == "settled" and row.actual_cost_microusd is None) for row in rows)
+        if not held and not isinstance(error, asyncio.CancelledError):
+            from src.db.models import WorkBoardAttempt, WorkBoardStatus
+            with preparation_scope(binding):
+                projection = await dispatcher.jobs.get_job(binding.source_job_id)
+                if projection is not None and projection["status"] in {"accepted", "queued", "running"}:
+                    lease = projection.get("lease") or {}
+                    await dispatcher.jobs.transition_job(binding.source_job_id, "failed",
+                        owner=lease.get("owner"), fencing_token=lease.get("fencing_token"),
+                        expected_state=projection["status"], expected_revision=projection["revision"], reason=reason)
+                    projection = await dispatcher.jobs.get_job(binding.source_job_id)
+                async with dispatcher.session_provider() as db:
+                    source_task = await dispatcher.repository.get_task(db,
+                        WorkBoardOwner(principal_id=binding.group.owner_principal_id,
+                            session_id=binding.group.owner_session_id), binding.source_task_id)
+                    source_attempt = await _row(db, WorkBoardAttempt, "attempt_id", binding.source_attempt_id)
+                await dispatcher._project(source_task, source_attempt, board_revision=source_task.task_revision,
+                    status=WorkBoardStatus.blocked, outcome="source_preparation_failed",
+                    block_kind="source_preparation_failed", block_reason=reason,
+                    result_refs=([{"job_id": binding.source_job_id, "status": projection["status"], "verified": False}]
+                        if projection is not None else [{"failure_code": reason, "producer_closed": True}]),
+                    communication_binding=binding)
+        async with dispatcher.session_provider() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            child, _native, _envelope = await _verify_native_sql(db, binding._physical_witness, fence)
+            checkpoint = json.loads(child.checkpoint_context_json or "{}")
+            record = checkpoint["communication_preparations"][str(ordinal)]
+            if record["binding"] != binding_payload(binding):
+                raise BoardError("communication_source_reservation_changed", "Original source reservation required", status_code=409)
+            rows = list((await db.execute(select(InferenceCostReservation).where(
+                InferenceCostReservation.job_id == binding.source_job_id))).scalars())
+            held = any(row.state not in {"settled", "released"}
+                or (row.state == "settled" and row.actual_cost_microusd is None)
+                for row in rows)
+            record.update(phase="unknown" if held else "blocked", producer_closed=True,
+                failure_code=reason, accounting_liability="held" if held else "known")
+            await _write_child_context(db, child, checkpoint, binding._physical_witness)
+        if held or isinstance(error, asyncio.CancelledError):
+            raise BoardError("communication_source_unknown", "Original source accounting requires governed recovery",
+                status_code=409, extra={"source_job_id": binding.source_job_id}) from error
+        raise _ClosedSourceFailure(reason, binding.source_job_id) from error
     async with dispatcher.session_provider() as db:
         from sqlalchemy import text
         if db.get_bind().dialect.name == "sqlite":
@@ -736,7 +881,19 @@ async def invoke(principal, job_id, fencing_token, inputs, *, dispatcher):
             questions.append(CommunicationQuestion(source_id=source_id,
                 reason=error.code, recovery="review_source"))
             continue
-        reference, value = await _run_source(principal, job_id, fencing_token, ordinal, dispatcher)
+        try:
+            reference, value = await _run_source(principal, job_id, fencing_token, ordinal, dispatcher)
+        except _ClosedSourceFailure as error:
+            questions.append(CommunicationQuestion(source_id=source_id, reason=error.code,
+                job_id=error.source_job_id, recovery="review_source"))
+            continue
+        except BoardError as error:
+            if error.code not in {"general_task_group_cost_limit", "general_task_group_call_limit",
+                "communication_source_budget_unavailable"}:
+                raise
+            questions.append(CommunicationQuestion(source_id=source_id, reason=error.code,
+                recovery="review_source"))
+            continue
         refs.append(reference)
         if capability == "work.mail-reply-draft.v1":
             replies.append(CommunicationReply(source_ref=reference, **value))
@@ -825,8 +982,10 @@ async def read_plan(db, owner, task_id, *, service):
     original Root/Goal and each selected source determine private visibility.
     """
     import asyncio
+    import hashlib
     from src.db.models import WorkflowRunState, WorkBoardAttempt
     from src.api.mail import _assert_live_session
+    from src.integrations.gmail_read import GmailReadError
     from src.workflows.job_runtime import _assert_canonical_goal_fence
     from src.workflows.general_task_guard import child_binding
     from src.work_board.general_task_runtime_artifacts import verify_readonly_native_projection
@@ -837,7 +996,12 @@ async def read_plan(db, owner, task_id, *, service):
     task = await service.repository.get_task(db, owner, task_id)
     if task.capability_id != "agent.task.v1":
         raise BoardError("communication_plan_unavailable", "Private communications plan unavailable", status_code=404)
-    await _assert_live_session(db, owner)
+    async def assert_owner_current():
+        try:
+            await _assert_live_session(db, owner)
+        except GmailReadError as error:
+            raise BoardError(error.code, str(error), status_code=error.status_code) from error
+    await assert_owner_current()
     await _assert_canonical_goal_fence(db, goal_id=task.goal_id, goal_revision=task.goal_revision,
         owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
     attempt = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
@@ -877,8 +1041,38 @@ async def read_plan(db, owner, task_id, *, service):
             and item.get("content_sha256") == intent["content_sha256"] and item.get("details", {}).get("verified") is True
             for item in effects)):
         raise BoardError("communication_plan_not_verified", "Original private physical readback required", status_code=409)
-    plan = CommunicationPlan.model_validate(await asyncio.to_thread(read_private_draft,
-        intent["file_path"], intent["content_sha256"]))
+    def snapshot(task_row, attempt_row, parent_row, child_row):
+        return (task_row.task_revision, task_row.status, task_row.typed_input_digest,
+            task_row.input_artifact_id, attempt_row.attempt_id, attempt_row.workflow_run_id,
+            attempt_row.fencing_token, attempt_row.ended_at, attempt_row.cancel_requested_at,
+            parent_row.fencing_token, parent_row.status, parent_row.declared_authority_json,
+            parent_row.checkpoint_context_json, child_row.run_identity, child_row.fencing_token,
+            child_row.status, child_row.declared_authority_json, child_row.checkpoint_context_json,
+            child_row.artifact_receipts_json, child_row.effect_receipts_json)
+    observed = snapshot(task, attempt, parent, child)
+    attempt_id, parent_id, child_id = attempt.attempt_id, parent.run_identity, child.run_identity
+    # Drop the old read transaction before physical I/O. Retained rows cannot
+    # authorize bytes after a concurrent logout, Goal change or producer write.
+    await db.rollback()
+    try:
+        private_value = await asyncio.to_thread(read_private_draft, intent["file_path"], intent["content_sha256"])
+    except (OSError, ValueError) as error:
+        raise BoardError("communication_plan_artifact_unavailable", "Original private plan is unavailable", status_code=409) from error
+    encoded = json.dumps(private_value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    if hashlib.sha256(encoded).hexdigest() != intent["plaintext_sha256"]:
+        raise BoardError("communication_plan_readback_changed", "Original private plan changed", status_code=409)
+    plan = CommunicationPlan.model_validate(private_value)
+    task = await service.repository.get_task(db, owner, task_id)
+    attempt = await _row(db, WorkBoardAttempt, "attempt_id", attempt_id)
+    parent = await _row(db, WorkflowRunState, "run_identity", parent_id)
+    child = await _row(db, WorkflowRunState, "run_identity", child_id)
+    if (attempt is None or parent is None or child is None
+        or snapshot(task, attempt, parent, child) != observed
+        or binding.live_root_digest != digest(root_binding())):
+        raise BoardError("communication_plan_readback_changed", "Original private plan changed", status_code=409)
+    await assert_owner_current()
+    await _assert_canonical_goal_fence(db, goal_id=task.goal_id, goal_revision=task.goal_revision,
+        owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
     selection = envelope.task_input.communication_selection
     sources = [("work.mail-reply-draft.v1", value) for value in selection.reply_inputs]
     sources += [("calendar.meeting-prep.v1", value) for value in selection.meeting_inputs]
@@ -907,6 +1101,116 @@ async def read_plan(db, owner, task_id, *, service):
         meeting_preparations=[value for value in plan.meeting_preparations if value.source_ref.source_input_digest in allowed],
         reschedule_proposals=[value for value in plan.reschedule_proposals if value.source_ref.source_input_digest in allowed],
         unresolved_questions=questions)
+
+
+async def cleanup_plan(db, owner, task_id, expected_revision, *, service):
+    """Deliberate owner cleanup of the original, positively closed plan only."""
+    import asyncio
+    from sqlalchemy import text
+    from src.db.models import WorkflowRunState, InferenceCostReservation, WorkBoardAttempt
+    from src.api.mail import _assert_live_session
+    from src.integrations.gmail_read import GmailReadError
+    from src.workflows.job_runtime import _assert_canonical_goal_fence
+    from src.workflows.general_task_guard import child_binding
+    from src.work_board.pipelines import root_binding
+    from src.workflows.mail_reply_draft import delete_private_draft
+    original_root = dict(root_binding())
+
+    async def current():
+        task = await service.repository.get_task(db, owner, task_id)
+        if task.task_revision != expected_revision or task.capability_id != "agent.task.v1":
+            raise BoardError("communication_cleanup_task_changed", "Refresh the original task", status_code=409)
+        try:
+            await _assert_live_session(db, owner)
+        except GmailReadError as error:
+            raise BoardError(error.code, str(error), status_code=error.status_code) from error
+        await _assert_canonical_goal_fence(db, goal_id=task.goal_id, goal_revision=task.goal_revision,
+            owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
+        rows = list((await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "general_task_native_tool_v1",
+            WorkflowRunState.owner_principal_id == owner.principal_id,
+            WorkflowRunState.session_id == owner.session_id).execution_options(populate_existing=True))).scalars())
+        matches = [(row, child_binding(row)) for row in rows
+            if json.loads(row.checkpoint_context_json or "{}").get("communication_private_plan")]
+        matches = [(row, binding) for row, binding in matches
+            if binding.task_id == task_id and binding.original_envelope_digest == task.typed_input_digest]
+        if len(matches) != 1:
+            raise BoardError("communication_plan_not_verified", "Original closed private plan required", status_code=409)
+        row, binding = matches[0]
+        checkpoint = json.loads(row.checkpoint_context_json or "{}")
+        intent = checkpoint["communication_private_plan"]
+        attempt = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+            .order_by(WorkBoardAttempt.created_at.desc()).execution_options(populate_existing=True))).scalars().first()
+        artifacts, effects = json.loads(row.artifact_receipts_json or "[]"), json.loads(row.effect_receipts_json or "[]")
+        if (attempt is None or attempt.attempt_id != binding.attempt_id
+            or attempt.workflow_run_id != binding.parent_job_id
+            or not any(item.get("artifact_type") == "communication_private_plan"
+                and item.get("file_path") == intent.get("file_path")
+                and item.get("content_sha256") == intent.get("content_sha256")
+                and item.get("exists") is True for item in artifacts)
+            or not any(item.get("effect_type") == "communication_private_plan"
+                and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
+                and item.get("target_path") == intent.get("file_path")
+                and item.get("content_sha256") == intent.get("content_sha256")
+                and item.get("details", {}).get("verified") is True for item in effects)):
+            raise BoardError("communication_plan_not_verified", "Original exact artifact and readback slot required", status_code=409)
+        if (binding.live_root_digest != digest(original_root) or row.status != "succeeded"
+            or row.lease_owner is not None or row.lease_expires_at is not None):
+            raise BoardError("communication_cleanup_producer_not_closed", "Original closed producer required", status_code=409)
+        records = checkpoint.get("communication_preparations", {})
+        for record in records.values():
+            if record.get("producer_closed") is not True or record.get("phase") not in {"verified", "blocked"}:
+                raise BoardError("communication_cleanup_producer_not_closed", "Resolve original source recovery first", status_code=409)
+            source_id = record.get("binding", {}).get("source_job_id")
+            costs = list((await db.execute(select(InferenceCostReservation).where(
+                InferenceCostReservation.job_id == source_id))).scalars())
+            if any(cost.state not in {"settled", "released"}
+                or (cost.state == "settled" and cost.actual_cost_microusd is None) for cost in costs):
+                raise BoardError("communication_source_unknown", "Resolve original source accounting first", status_code=409)
+        return row, checkpoint, intent
+
+    row, checkpoint, intent = await current()
+    existing = checkpoint.get("communication_plan_cleanup")
+    if not existing:
+        # Actual original private artifact and readback are staged outside the writer.
+        await read_plan(db, owner, task_id, service=service)
+    await db.rollback()
+    if dict(root_binding()) != original_root:
+        raise BoardError("communication_root_changed", "Original private workspace Root required", status_code=409)
+    if db.get_bind().dialect.name == "sqlite":
+        await db.execute(text("BEGIN IMMEDIATE"))
+    row, checkpoint, intent = await current()
+    cleanup = checkpoint.get("communication_plan_cleanup")
+    reservation = {"phase": "reserved", "file_path": intent["file_path"],
+        "content_sha256": intent["content_sha256"], "task_revision": expected_revision}
+    if cleanup and cleanup.get("phase") == "verified" and cleanup.get("absent") is True:
+        await db.rollback()
+        return {"status": "cleanup_verified", "absent": True, "no_learning": True}
+    if cleanup and cleanup != reservation and not (cleanup.get("phase") == "unresolved"
+        and all(cleanup.get(key) == value for key, value in reservation.items() if key != "phase")):
+        raise BoardError("communication_cleanup_changed", "Original cleanup reservation required", status_code=409)
+    checkpoint["communication_plan_cleanup"] = reservation
+    row.checkpoint_context_json = json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
+    await db.commit()
+    failure = False
+    try:
+        result = await asyncio.to_thread(delete_private_draft, intent["file_path"],
+            intent["content_sha256"], expected_root=original_root)
+    except OSError:
+        failure, result = True, {"absent": False, "deleted_now": False}
+    if dict(root_binding()) != original_root:
+        raise BoardError("communication_root_changed", "Inspect original cleanup recovery", status_code=409)
+    if db.get_bind().dialect.name == "sqlite":
+        await db.execute(text("BEGIN IMMEDIATE"))
+    row, checkpoint, current_intent = await current()
+    if current_intent != intent or checkpoint.get("communication_plan_cleanup") != reservation:
+        raise BoardError("communication_cleanup_changed", "Inspect original cleanup recovery", status_code=409)
+    checkpoint["communication_plan_cleanup"] = {**reservation,
+        "phase": "unresolved" if failure else "verified", **result}
+    row.checkpoint_context_json = json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
+    await db.commit()
+    return {"status": "cleanup_unresolved" if failure else "cleanup_verified",
+        "absent": result["absent"], "no_learning": True}
 
 
 async def review_bundle(db, owner, operator, task_id, bundle, *, service):

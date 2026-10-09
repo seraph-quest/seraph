@@ -26,6 +26,7 @@ class CommunicationPreparationEvidenceV1(ClosedTaskModel):
     source_job_id: NativeInvocationIdentity
     source_deadline_at: datetime
     budget_microusd: int = Field(ge=1)
+    policy_digest: TaskDigest
 
     _utc_timestamp = field_validator("source_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
 
@@ -126,7 +127,7 @@ async def validate_group(db, run, group):
         raise InferenceAccountingError("general_task_group_authority_invalid")
 
 
-async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path, deadline_at=None):
+async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path, deadline_at=None, policy_digest=None):
     from src.work_board.general_task import digest
     if not isinstance(binding, dict) or not isinstance(binding.get("group"), TaskProposalGroupV1):
         raise InferenceAccountingError("general_task_group_binding_invalid")
@@ -170,6 +171,8 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         await validate_continuation(db, group, binding, initial)
     else:
         preparation = await validate_preparation(db, run, group, binding, bound=bound)
+        if policy_digest != binding["preparation_binding"].policy_digest:
+            raise InferenceAccountingError("communication_preparation_policy_changed")
         if deadline_at is not None and _utc(deadline_at) > binding["preparation_binding"].source_deadline_at:
             raise InferenceAccountingError("general_task_group_authority_invalid")
         if any(entry_for(member).get("role") == "communication_preparation"

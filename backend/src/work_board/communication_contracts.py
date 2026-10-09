@@ -25,6 +25,10 @@ class CommunicationCreate(ClosedTaskModel):
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
+class CommunicationCleanup(ClosedTaskModel):
+    expected_task_revision: int = Field(ge=1)
+
+
 class CommunicationPreparationMarker(ClosedTaskModel):
     schema_version: Literal["communication.source_preparation.v1"] = "communication.source_preparation.v1"
     binding_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -162,5 +166,6 @@ class CommunicationPreparationBinding:
     source_job_id: str
     source_deadline_at: datetime
     budget_microusd: int
+    policy_digest: str
     _seal: object
     _physical_witness: object | None = None

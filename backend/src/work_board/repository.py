@@ -2630,6 +2630,9 @@ class WorkBoardRepository:
             await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
+        if task.idempotency_scope == "communication-source":
+            raise BoardError("communication_original_source_publication_required",
+                "Inspect the original preparation; generic source promotion is unavailable", status_code=409)
         if task.status is not WorkBoardStatus.todo:
             return None
         if task.task_revision != int(expected_revision):

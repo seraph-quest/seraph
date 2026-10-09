@@ -515,7 +515,8 @@ class InferenceAccountingRepositoryMixin:
                     if general_task_binding is not None:
                         from src.workflows.general_task_accounting import reserve_entry
                         task_group_entry = await reserve_entry(db, run, rows, general_task_binding,
-                            operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline)
+                            operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline,
+                            policy_digest=policy_digest)
                     period = period_id(observed)
                     from src.workspace.accounting_witness import period_state, unreviewed_overruns
                     owner_data, operations = account.model_dump(mode="json"), [_operation_payload(item) for item in rows]

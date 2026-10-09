@@ -2308,7 +2308,10 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 
 
 from src.work_board.contracts import GeneralTaskCreate, GeneralTaskPlanUpdate, GeneralTaskResume
-from src.work_board.communication_contracts import CommunicationCreate, ActionBundle
+from src.work_board.communication_contracts import CommunicationCreate, CommunicationCleanup, ActionBundle
+from src.integrations.gmail_read import GmailReadError
+from src.integrations.google_calendar import CalendarIntegrationError
+from src.workflows.job_runtime import DurableJobNotFound
 
 
 @router.post("/general-tasks/communications")
@@ -2395,6 +2398,26 @@ async def review_communication_selection(request: Request, task_id: str, body: A
         async with get_session() as db:
             reviewed = await review_bundle(db, owner, operator, task_id, body, service=dispatcher.general_tasks)
             return {"task_id": task_id, "bundle": reviewed.model_dump(mode="json"), "no_learning": True}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except DurableJobNotFound as exc:
+        raise HTTPException(status_code=409, detail={"code": "communication_action_unavailable",
+            "recovery": "Inspect the affected original action and its exact current approval"}) from exc
+    except (GmailReadError, CalendarIntegrationError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code,
+            "recovery": "Inspect the affected original action and its exact current approval"}) from exc
+
+
+@router.post("/tasks/{task_id}/communications/cleanup")
+async def cleanup_private_communication_plan(request: Request, task_id: str, body: CommunicationCleanup):
+    owner = _owner(_operator(request))
+    try:
+        if dispatcher.general_tasks is None:
+            raise BoardError("general_task_inactive", "Task service inactive", status_code=503)
+        from src.work_board.communication_preparation import cleanup_plan
+        async with get_session() as db:
+            return await cleanup_plan(db, owner, task_id, body.expected_task_revision,
+                service=dispatcher.general_tasks)
     except BoardError as exc:
         _raise_board_error(exc)
 

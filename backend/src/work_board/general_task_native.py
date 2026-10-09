@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from src.db.models import WorkBoardTask, WorkBoardAttempt
 from src.work_board.contracts import (GeneralTaskCurrentManifestV1, GeneralTaskToolInputV1,
-    GeneralTaskPlanRevisionV1, GeneralTaskArtifactRef, PlanSpec,
+    GeneralTaskPlanRevisionV1, GeneralTaskArtifactRef, PlanSpec, WorkBoardOwner,
     GENERAL_TASK_NATIVE_CHILD_KIND, GENERAL_TASK_NATIVE_CHILD_CAPABILITY)
 from src.work_board.general_task_runtime_artifacts import (initial_native_manifest,
     read_current_native_envelope, compile_native_child_binding, compile_phase_digest,
@@ -160,6 +160,10 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
     descriptor = descriptors.get(private.tool_id)
     if descriptor is None or digest(descriptor.model_dump(mode="json")) != binding.descriptor_digest:
         raise BoardError("general_task_tool_contract_changed", "Original registered descriptor required", status_code=409)
+    async with jobs._session() as db:
+        await service.recheck_authority(db, WorkBoardOwner(principal_id=principal.principal_id,
+            session_id=principal.operator_session_id), envelope)
+    service.check_method_source(envelope, step, private.inputs)
     deadline = min(binding.native_deadline_at, binding.original_deadline_at)
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
     if remaining <= 0:
@@ -212,10 +216,14 @@ async def run_native_step(service, jobs, binding, *, child_owner, principal, app
                 "child_id": binding.invocation_id}, None, None
         validate_schema(descriptor.output_schema, output)
         validate_schema(step.output_contract, output)
-        document_authority = None
+        async def method_authority(db, run):
+            await service.validate_pinned_strategy(db, WorkBoardOwner(principal_id=principal.principal_id,
+                session_id=principal.operator_session_id), envelope)
+        document_authority = method_authority
         if descriptor.tool_id == "document_prepare":
             from src.work_board.document_preparation import invocation as document_invocation
             async def document_authority(db, run):
+                await method_authority(db, run)
                 await document_invocation(db, replace(principal, job_id=binding.invocation_id),
                     binding.invocation_id, fence)
         artifact, verified = await write_step_artifact(jobs, job_id=binding.invocation_id,
@@ -454,6 +462,7 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         async with jobs._session() as db:
             inputs = await resolve_current_native_step_inputs(db, parent, task, attempt,
                 manifest, envelope, ready)
+        service.check_method_source(envelope, ready, inputs)
         binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
             step=ready, descriptor=descriptor, inputs=inputs, service=service)
         output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
@@ -468,6 +477,7 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         owner, fence = resumed["job"]["lease"]["owner"], resumed["job"]["lease"]["fencing_token"]
     # Assembly consumes original successful child readbacks; no tool replay.
     active_envelope = envelope.model_copy(update={"plan": plan})
+    guard_results = service.check_method_output(active_envelope, outputs)
     projection = await jobs.get_job(job_id)
     recovered, artifacts = service.recovered_outputs(projection, active_envelope)
     for step in plan.steps:
@@ -475,11 +485,15 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
             if recovered[step.step_id] != outputs[step.step_id]:
                 raise BoardError("general_task_artifact_changed", "Original native output changed", status_code=409)
             continue
-        document_authority = None
+        async def method_authority(db, run):
+            await service.validate_pinned_strategy(db, WorkBoardOwner(principal_id=principal.principal_id,
+                session_id=principal.operator_session_id), active_envelope)
+        document_authority = method_authority
         if step.tool_id == "document_prepare":
             from src.work_board.document_preparation import invocation
             async def document_authority(db, run):
                 from dataclasses import replace
+                await method_authority(db, run)
                 await invocation(db, replace(principal, job_id=job_id), job_id, fence)
         artifact, _verified = await write_step_artifact(jobs, job_id=job_id, owner=owner, fence=fence,
             plan_digest=digest(active_envelope.model_dump(mode="json")), step_id=step.step_id,
@@ -498,6 +512,8 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
     validate_schema(envelope.task_input.requested_output, final)
     artifact = artifacts[plan.steps[-1].step_id]
     return {"verified": True, "native_execution": True, "output_digest": digest(final),
+        "method_binding": envelope.strategy.model_dump(mode="json", exclude={"typed_data"}),
+        "method_guard_results": guard_results,
         "step_count": len(outputs), "learning": "no_learning", "no_learning": True,
         "content_sha256": artifact["content_sha256"],
         "readback_id": "general-readback:" + digest([job_id, artifact])[:32],

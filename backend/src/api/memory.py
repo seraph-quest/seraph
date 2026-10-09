@@ -38,10 +38,42 @@ from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
 from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
 from src.memory.task_lessons import LessonRequest, LessonAutoPolicyRequest, create_task_lesson, inspect_task_lesson, eligible_lesson_source, set_automatic_lesson_policy
+from src.memory.task_methods import TaskMethodReview, inspect_method, review_method
+from src.memory.task_lessons import ResearchMethodRequest, create_research_method
 from src.guardian.opportunity_preferences import OpportunityPreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
+
+
+@router.post("/memory/research-methods", status_code=201)
+async def post_research_method(http_request: Request, request: ResearchMethodRequest):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await create_research_method(http_request.state.operator, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.get("/memory/task-methods/{proposal_id}")
+async def get_task_method(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_method(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/task-methods/actions")
+async def post_task_method_action(http_request: Request, request: TaskMethodReview):
+    authenticated_memory_context(http_request)
+    from src.work_board.repository import BoardError
+    try:
+        return await review_method(http_request.state.operator, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @router.post("/memory/task-lessons", status_code=201)

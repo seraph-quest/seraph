@@ -6,6 +6,7 @@ import type { GoalInfo, WorkBoardTask } from "../../types";
 import { canResumeGeneralTask, createGeneralTask, GeneralTaskError, generalTaskRequest, validateGeneralTaskPlan } from "../../lib/generalTask";
 import type { GeneralTaskCreateRequest, GeneralTaskPlanRead, TaskPlan } from "../../lib/generalTask";
 import { parseDocumentPreparationView, type DocumentPreparationView } from "../../lib/documentPreparation";
+import { DocumentBuildEditor } from "./DocumentBuildEditor";
 
 interface Props {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
@@ -39,6 +40,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [cost, setCost] = useState(String(pending?.input.limits.max_cost_microusd ?? 0));
   const [egress, setEgress] = useState(pending?.input.inference_egress_acknowledged ?? false);
   const [read, setRead] = useState<GeneralTaskPlanRead | null>(null);
+  const [localDocument, setLocalDocument] = useState(false);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [preparationView, setPreparationView] = useState<DocumentPreparationView | null>(null);
   const [ack, setAck] = useState(false);
@@ -237,11 +239,14 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   }
   const documentBinding = read?.task_input.document_source;
   const documentPreparation = Boolean(documentBinding && read?.plan?.steps.length === 1 && read.plan.steps[0]?.tool_id === "document_prepare");
-  return <section className="rounded border border-white/15 bg-slate-950 p-4 text-slate-100" aria-label={task ? (documentPreparation ? "Local document preparation plan" : "Ordinary task plan") : "Describe a task"}>
-    <div className="flex justify-between gap-2"><h2 className="font-semibold">{task ? (documentPreparation ? "Review local document preparation plan" : "Review ordinary task plan") : "Describe a task"}</h2>{onClose && <button type="button" disabled={busy || Boolean(pending)} onClick={onClose}>Close</button>}</div>
+  const documentBuild = Boolean(read?.task_input.document_build);
+  return <section className="rounded border border-white/15 bg-slate-950 p-4 text-slate-100" aria-label={task ? (documentBuild ? "Local document build task" : documentPreparation ? "Local document preparation plan" : "Ordinary task plan") : "Describe a task"}>
+    <div className="flex justify-between gap-2"><h2 className="font-semibold">{task ? (documentBuild ? "Review local document build task" : documentPreparation ? "Review local document preparation plan" : "Review ordinary task plan") : "Describe a task"}</h2>{onClose && <button type="button" disabled={busy || Boolean(pending)} onClick={onClose}>Close</button>}</div>
     {!owned && <p role="status">Blocked: current task ownership is required. Recover through Work before changing the task.</p>}
     {error && <p role="alert" className="text-amber-200">{error}</p>}
-    {!task && <>
+    {!task && <label><input type="checkbox" checked={localDocument} disabled={busy || Boolean(pending)} onChange={e => setLocalDocument(e.target.checked)} />Build a local editable document and PDF</label>}
+    {!task && localDocument && ownerPrincipalId && ownerSessionId && <DocumentBuildEditor ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={goals} onCreated={onCreated} onChanged={onChanged} />}
+    {!task && !localDocument && <>
       <p className="text-xs">Describe the outcome in ordinary language. Seraph proposes a persisted typed plan from registered tools; creation does not accept or execute it.</p>
       {pending && <p role="status">An exact request has an unconfirmed receipt. Retry with the same owner, input and idempotency key; inspect Work before starting another task.</p>}
       <fieldset disabled={busy || Boolean(pending) || !owned} className="grid gap-3 mt-3">
@@ -294,6 +299,8 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
           <p>Review the existing approval on this Work card, then refresh the current task plan. Continuing retains this run and deadline.</p>
           <button type="button" disabled={busy || !owned || !canResumeGeneralTask(read, task)} onClick={() => void resume()}>Continue approved task run</button>
         </section>}
+        {documentBuild && ownerPrincipalId && ownerSessionId && <DocumentBuildEditor ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={goals} task={task} read={read} onChanged={onChanged} />}
+        {!documentBuild && <>
         {!read.plan && <p role="status">Proposal blocked: {read.proposal_error}. The intent is retained on this Triage card. Edit a typed plan with registered tools, save a valid revision, then review again.</p>}
         {!read.plan && <details><summary>Current registered tools for plan recovery</summary><pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(read.descriptors.map(d => ({ tool_id: d.tool_id, version: d.version, input_schema: d.input_schema, output_schema: d.output_schema, effects: d.effects, permissions: d.permissions, deadline: d.deadline, verifier: d.verifier })), null, 2)}</pre></details>}
         <p className="whitespace-pre-wrap">{read.task_input.intent}</p>
@@ -333,6 +340,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
           </details>}
           {!documentPreparation && pendingEdit && <p role="status">The exact edit has an unconfirmed receipt. Reconcile it before refreshing or accepting.</p>}
           <label className="mt-3 flex gap-2"><input type="checkbox" checked={ack} disabled={busy || !owned || !read.plan || Boolean(pendingEdit) || planDraft !== JSON.stringify(read.plan?.steps ?? [], null, 2)} onChange={e => setAck(e.target.checked)} />I reviewed this exact plan, effects, permissions and limits.</label><button type="button" className="cockpit-feedback-button" disabled={busy || !owned || !read.plan || !ack || Boolean(pendingEdit) || planDraft !== JSON.stringify(read.plan?.steps ?? [], null, 2)} onClick={() => void accept()}>Accept reviewed task plan</button>
+        </>}
         </>}
       </>}
       <p className="mt-2 text-xs">Input, approval, artifact and recovery receipts remain on this Work card. If a revision or authority changes, refresh and review again; uncertain effects must be reconciled before retry.</p>

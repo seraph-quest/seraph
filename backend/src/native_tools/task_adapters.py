@@ -271,7 +271,7 @@ class ToolRegistry:
             and closure is _STOCK_CLOSURE_PRODUCER and closure.__code__ is _STOCK_CLOSURE_CODE):
             if entry[1] is None:
                 possible = True
-                if (descriptor.tool_id == "document_prepare"
+                if (descriptor.tool_id in {"document_prepare", "document_build"}
                     and getattr(self._invoke_document_with_closure, "__func__", None) is _STOCK_DOCUMENT_PRODUCER
                     and self._invoke_document_with_closure.__func__.__code__ is _STOCK_DOCUMENT_CODE):
                     possible = False
@@ -320,6 +320,10 @@ class ToolRegistry:
             communication = communication_descriptor()
             if is_tool_allowed(communication.tool_id, mode):
                 entries[communication.tool_id] = (communication, None, False)
+        from src.work_board.document_build_native import descriptor as build_descriptor
+        local_build = build_descriptor()
+        if is_tool_allowed(local_build.tool_id, mode):
+            entries[local_build.tool_id] = (local_build, None, False)
         for tool in (read_file, write_file, web_search, browse_webpage):
             if not is_tool_allowed(tool.name, mode):
                 continue
@@ -413,7 +417,7 @@ class ToolRegistry:
         validate_schema(descriptor.input_schema, inputs)
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
-        if descriptor.tool_id == "document_prepare":
+        if descriptor.tool_id in {"document_prepare", "document_build"}:
             from src.security.trust_contract import AuthorityGrant
             if AuthorityGrant.CAPABILITY_EXECUTE not in principal.grants:
                 raise PermissionError("current capability execution permission is required")
@@ -459,16 +463,20 @@ class ToolRegistry:
             return _InvocationCompletion(None, error, witness)
 
     async def _invoke_document(self, descriptor, inputs, principal, job_id, fencing_token):
-        from src.work_board.document_preparation import invoke
+        if descriptor.tool_id == "document_build":
+            from src.work_board.document_build_native import invoke
+        else:
+            from src.work_board.document_preparation import invoke
         from src.audit.repository import audit_repository
         # This one async native owner accepts only a hexadecimal digest,
         # has no credential fields and uses task-bound local consent. Keep
         # the existing audit owner without moving async SQL to a thread.
         async def audit(event_type, details):
             await audit_repository.log_event(session_id=principal.session_id,
-                actor="agent", event_type=event_type, tool_name="document_prepare",
+                actor="agent", event_type=event_type, tool_name=descriptor.tool_id,
                 risk_level="low", policy_mode=get_task_policy_snapshot()["tool_mode"],
-                summary="Local document preparation " + event_type,
+                summary=("Local document build " if descriptor.tool_id == "document_build"
+                    else "Local document preparation ") + event_type,
                 details={"job_id": job_id, "fencing_token": fencing_token, "no_learning": True, **details})
         from src.tools.policy import get_task_policy_snapshot
         await audit("tool_call", {"input_digest": _digest(inputs)})

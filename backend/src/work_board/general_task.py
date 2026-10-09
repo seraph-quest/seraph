@@ -454,6 +454,8 @@ class GeneralTaskService:
         check_communication(envelope)
         if any(step.tool_id == "communication_prepare" for step in request.plan.steps) and request.input.communication_selection is None:
             raise BoardError("communication_source_selection_required", "Explicit source selection is required", status_code=422)
+        from src.work_board.document_build_native import check_envelope as check_build_envelope
+        check_build_envelope(envelope)
         if any(step.tool_id == "document_prepare" for step in request.plan.steps) and request.input.document_source is None:
             raise BoardError("document_local_consent_required", "Explicit source selection is required", status_code=422)
         return envelope
@@ -462,7 +464,7 @@ class GeneralTaskService:
                      publication_authority_scope=None):
         if request.input.communication_selection is not None and request.plan is None:
             raise BoardError("communication_fixed_plan_required", "Communications preparation requires its fixed source-only plan", status_code=422)
-        if request.input.document_source is not None and request.plan is None:
+        if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
         from src.work_board.input_artifacts import prepare_input_artifact
         from sqlalchemy import select
@@ -981,7 +983,7 @@ class GeneralTaskService:
         except Exception as exc:
             raise BoardError("general_task_plan_invalid", "Plan violates the exact registered tool schema", status_code=422) from exc
 
-    async def validate_acceptance(self, db, owner, task_id, expected_revision):
+    async def validate_acceptance(self, db, owner, task_id, expected_revision, *, document_build_review=None):
         from src.work_board.dispatcher import _parse_typed_input
         from src.work_board.repository import BoardRevisionConflict
         task = await self.repository.get_task(db, owner, task_id)
@@ -991,6 +993,8 @@ class GeneralTaskService:
             raise BoardError("general_task_acceptance_state", "Accept the exact inert Triage proposal", status_code=409)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         await self.recheck_authority(db, owner, envelope, require_current_strategy=True)
+        from src.work_board.document_build_native import validate_acceptance
+        await validate_acceptance(db, owner, task, envelope, document_build_review)
 
     async def recheck_authority(self, db, owner, envelope, *, require_current_strategy=False):
         self.recheck(envelope)
@@ -998,6 +1002,15 @@ class GeneralTaskService:
         check_communication(envelope)
         from src.work_board.document_preparation import check_envelope, resolve
         check_envelope(envelope)
+        from src.work_board.document_build_native import check_envelope as check_build_envelope
+        check_build_envelope(envelope)
+        if envelope.task_input.document_build is not None:
+            from src.work_board import document_build_storage as storage
+            selected = envelope.task_input.document_build
+            row, value = await storage.owned(db, owner, selected.build_ref.split(":", 1)[1])
+            await storage.authority(db, owner, row, value, metadata_only=True)
+            if storage.build_binding(row, value) != selected.model_dump(mode="json"):
+                raise BoardError("document_build_binding_changed", "The immutable original build changed", status_code=409)
         if envelope.task_input.document_source is not None:
             await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
         if require_current_strategy:

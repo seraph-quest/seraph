@@ -266,3 +266,48 @@ it("rejects a document Task readback that introduces inference behind the privat
   expect(await screen.findByRole("alert")).toHaveTextContent("fixed zero-inference");
   expect(screen.queryByRole("button", { name: "Open current signed document review" })).toBeNull();
 });
+
+
+it("retires the exact original outputless fully-cancelled blocked task after inspecting current build metadata", async () => {
+  const stopped = { ...task, status: "blocked", block_reason: "general_task_native_cancel_fully_cancelled", task_revision: 7,
+    latest_attempt: { attempt_id: "original-cancelled-attempt", ended_at: "2026-10-09T12:00:00Z", outcome: "cancelled" } } as WorkBoardTask;
+  const currentBuild = { ...projection, task_id: task.task_id, state: "bound", revision: 5 };
+  vi.mocked(apiFetch).mockImplementation(async (_url, init) => response(init?.method === "DELETE"
+    ? { ...currentBuild, state: "deleted", quota_reserved_bytes: 0 } : currentBuild));
+  render(<DocumentBuildEditor {...owner} goals={[goal]} task={stopped} read={{ ...plan, task_revision: 7, accepted: true }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect original charged build state" }));
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByLabelText("Retire the original private build and outputs after verified terminal cleanup."));
+  const retire = screen.getByRole("button", { name: "Retire private document build" });
+  await waitFor(() => expect(retire).toBeEnabled());
+  fireEvent.click(retire);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+  expect(String(vi.mocked(apiFetch).mock.calls[1][0])).toContain(`/builds/${id}`);
+  expect(vi.mocked(apiFetch).mock.calls[1][1]?.method).toBe("DELETE");
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[1][1]?.body))).toMatchObject({
+    expected_revision: 5, expected_task_revision: 7, attempt_id: "original-cancelled-attempt" });
+});
+
+it.each(["unknown_stop", "missing_ended", "different_reason"])("does not send retirement for blocked %s", async denial => {
+  const stopped = { ...task, status: "blocked", task_revision: 7,
+    block_reason: denial === "unknown_stop" ? "general_task_native_cancel_unknown" : denial === "different_reason" ? "another_block_reason" : "general_task_native_cancel_fully_cancelled",
+    latest_attempt: { attempt_id: "original-attempt", ended_at: denial === "missing_ended" ? null : "2026-10-09T12:00:00Z" } } as WorkBoardTask;
+  vi.mocked(apiFetch).mockResolvedValue(response({ ...projection, task_id: task.task_id, state: "bound", revision: 5 }));
+  render(<DocumentBuildEditor {...owner} goals={[goal]} task={stopped} read={{ ...plan, task_revision: 7, accepted: true }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect original charged build state" }));
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByLabelText("Retire the original private build and outputs after verified terminal cleanup."));
+  const retire = screen.getByRole("button", { name: "Retire private document build" });
+  expect(retire).toBeDisabled(); fireEvent.click(retire);
+  expect(vi.mocked(apiFetch).mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
+});
+
+
+it("matches the closed output warning count and character limits without rejecting the exact boundary", () => {
+  const warnings = Array.from({ length: 16 }, () => "w".repeat(200));
+  const value = { ...output, output: { ...output.output, warnings } };
+  expect(parseBuildOutputs(value).output.warnings).toEqual(warnings);
+  expect(parseBuildOutputs({ ...output, output: { ...output.output, warnings: ["🦉".repeat(200)] } }).output.warnings).toHaveLength(1);
+  expect(() => parseBuildOutputs({ ...value, output: { ...value.output, warnings: [...warnings, "extra"] } })).toThrow();
+  expect(() => parseBuildOutputs({ ...output, output: { ...output.output, warnings: ["w".repeat(201)] } })).toThrow();
+});

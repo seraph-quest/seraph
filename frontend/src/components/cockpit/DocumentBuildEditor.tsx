@@ -31,6 +31,7 @@ function OwnedEditor({ ownerPrincipalId, ownerSessionId, goals, task, read, onCr
   const ownedGoals = goals.filter(g => g.status === "active" && g.owner_session_id === ownerSessionId && g.ownership_access !== "recovered_read_only" && g.revision);
   const goal = ownedGoals.find(g => g.id === goalId);
   const owned = !task || task.owner_principal_id === ownerPrincipalId && task.owner_session_id === ownerSessionId && task.ownership_access !== "recovered_read_only";
+  const terminalForRetirement = !!task?.latest_attempt?.ended_at && (["done", "cancelled"].includes(task.status) || task.status === "blocked" && task.block_reason === "general_task_native_cancel_fully_cancelled");
   const requestScope = `${task?.task_revision ?? 0}:${read?.task_revision ?? 0}:${owned}`;
   const currentScope = useRef(requestScope); currentScope.current = requestScope;
   const current = () => alive.current && currentScope.current === requestScope;
@@ -153,7 +154,7 @@ function OwnedEditor({ ownerPrincipalId, ownerSessionId, goals, task, read, onCr
   }); }
   async function retire() { await run(async () => {
     if (pending.current && (pending.current.method !== "DELETE" || pending.current.path !== `/builds/${projection?.build_id}`)) throw Error("Reconcile the original outstanding action first.");
-    if (!projection || !retireAck || (task && (!task.latest_attempt?.attempt_id || !task.latest_attempt.ended_at || !["done", "cancelled"].includes(task.status)))) throw Error("Bound build retirement requires the original terminal task and positively closed native output.");
+    if (!projection || !retireAck || (task && (!task.latest_attempt?.attempt_id || !terminalForRetirement))) throw Error("Bound build retirement requires the original ended task and verified native cleanup.");
     pending.current ??= { path: `/builds/${projection.build_id}`, method: "DELETE", body: { expected_revision: projection.revision, ...(task ? { expected_task_revision: task.task_revision, attempt_id: task.latest_attempt!.attempt_id } : {}), idempotency_key: crypto.randomUUID() } };
     const req = pending.current; const p = parseBuildProjection(await documentRequest(req.path, req.body, req.method, abort.current.signal));
     if (current()) { pending.current = null; setProjection(p); setPreview(null); setOutputs(null); setRetireAck(false); await onChanged?.(); }
@@ -213,7 +214,7 @@ function OwnedEditor({ ownerPrincipalId, ownerSessionId, goals, task, read, onCr
       {(task ? !read?.accepted : preview.task_id === null) && <><label><input type="checkbox" disabled={busy || Date.parse(preview.review.binding.expires_at) <= Date.now()} checked={ack} onChange={e => setAck(e.target.checked)} />I reviewed this exact private content, sources, formats and local rendering limits.</label><button type="button" disabled={busy || !owned || !ack || Date.parse(preview.review.binding.expires_at) <= Date.now() || !!pending.current && pending.current.path !== `/builds/${preview.build_id}/prepare`} onClick={() => void (task ? accept() : prepare())}>{task ? "Accept reviewed document task" : pending.current ? "Reconcile exact preparation" : "Prepare inert document task"}</button></>}
     </section>}
     {task && buildId && <><button type="button" disabled={busy || !owned} onClick={() => void loadOutputs()}>Read verified document outputs</button>{outputs && <section aria-label="Verified document outputs"><p role="status">{outputs.state} · original task {outputs.task_id} · private source references {outputs.output.source_refs.join(", ") || "none"}</p>{outputs.output.warnings.map((w, i) => <p role="status" key={i}>{w}</p>)}{!outputs.output.pdf_artifact && <p role="status">PDF unavailable. The editable document remains retained and downloadable; inspect the warning before creating a fresh reviewed build.</p>}<button type="button" disabled={busy} onClick={() => void download("editable")}>Download editable document</button><button type="button" disabled={busy || !outputs.output.pdf_artifact} onClick={() => void download("pdf")}>Download PDF</button></section>}
-      <label><input type="checkbox" checked={retireAck} disabled={busy} onChange={e => setRetireAck(e.target.checked)} />Retire the original private build and outputs after verified terminal cleanup.</label><button type="button" disabled={busy || !owned || !retireAck || !projection || !task.latest_attempt?.ended_at || !["done", "cancelled"].includes(task.status)} onClick={() => void retire()}>Retire private document build</button>
+      <label><input type="checkbox" checked={retireAck} disabled={busy} onChange={e => setRetireAck(e.target.checked)} />Retire the original private build and outputs after verified terminal cleanup.</label><button type="button" disabled={busy || !owned || !retireAck || !projection || !terminalForRetirement} onClick={() => void retire()}>Retire private document build</button>
     </>}
   </section>;
 }

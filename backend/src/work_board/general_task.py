@@ -452,8 +452,9 @@ class GeneralTaskService:
         from src.db.models import WorkBoardTask, WorkBoardEvent
         from src.work_board.repository import BoardMutation
         from src.work_board.dispatcher import _parse_typed_input
-        from src.work_board.channel_capture import check_capture_publication
+        from src.work_board.channel_capture import check_capture_publication, current_workspace_digest
         reservation = await check_capture_publication(db, owner, request, capture)
+        staged_workspace = current_workspace_digest()
         existing = await db.scalar(select(WorkBoardTask).where(
             WorkBoardTask.owner_principal_id == owner.principal_id,
             WorkBoardTask.owner_session_id == owner.session_id,
@@ -473,6 +474,9 @@ class GeneralTaskService:
                     .execution_options(populate_existing=True))
                 if existing is None:
                     raise BoardError("channel_capture_task_changed", "Original capture Task is unavailable", status_code=409)
+                from src.work_board.channel_capture import check_capture_origin
+                await check_capture_origin(db, owner, existing, expected_reservation=reservation,
+                    _workspace_digest=staged_workspace)
                 original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
                 if (original.task_input != reservation.task_input
                     or original.proposal_group != reservation.proposal_group
@@ -498,12 +502,12 @@ class GeneralTaskService:
         return await self._publish_envelope(db, owner, request, envelope,
             publication_authority_check=source_check,
             publication_authority_scope=capture.source_scope,
-            origin_session_id=reservation.conversation_session_id)
+            origin_session_id=reservation.conversation_session_id, capture_origin=capture)
 
     async def _publish_envelope(self, db, owner, request, envelope, *,
                                 publication_authority_check=None,
                                 publication_authority_scope=None,
-                                origin_session_id=None):
+                                origin_session_id=None, capture_origin=None):
         """Publish the exact sealed input through the original artifact/Task owners."""
         from src.work_board.input_artifacts import prepare_input_artifact
         from src.work_board.general_task_proposal import seal_proposal_publication
@@ -526,6 +530,9 @@ class GeneralTaskService:
                 idempotency_scope="general-task", idempotency_key=request.idempotency_key,
                 requires_review=True), origin_session_id=origin_session_id,
                 publication_authority_check=publication_authority_check)
+            if capture_origin is not None:
+                from src.work_board.channel_capture import publish_capture_origin
+                await publish_capture_origin(db, owner, request, mutation, capture_origin)
             if publication_authority_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.
@@ -539,6 +546,10 @@ class GeneralTaskService:
         task = await self.repository.get_task(db, owner, task_id)
         if task.capability_id != CAPABILITY:
             raise BoardError("general_task_unavailable", "General task unavailable", status_code=404)
+        from src.work_board.channel_capture import check_capture_origin, current_workspace_digest
+        if await check_capture_origin(db, owner, task, _classify_only=True):
+            staged_workspace = current_workspace_digest()
+            await check_capture_origin(db, owner, task, _workspace_digest=staged_workspace)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         acceptance_events = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == owner.principal_id,

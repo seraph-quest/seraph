@@ -1803,7 +1803,7 @@ def _phase_successor(previous, *, phase, task_revision, job_fence, board_fence):
     return value.model_copy(update={"phase_digest": compile_phase_digest(value)})
 
 
-async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revision, expected_revision, expected_manifest_revision):
+async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revision, expected_revision, expected_manifest_revision, authority_check=None):
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _serialize, _job_has_unsafe_effects, _verified_readback_exists
@@ -1811,6 +1811,8 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
         raise DurableJobLeaseError("current typed operator owner required")
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
+        if authority_check is not None:
+            await authority_check(db)
         parent, task, attempt, previous, _envelope = await _current(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         if (operator_owner.principal_id != task.owner_principal_id or operator_owner.session_id != task.owner_session_id
@@ -1842,6 +1844,8 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
                     raise DurableJobLeaseError("native child closure requires original verified readback")
             if child.attempt_count > 0:
                 assert_child_closed(parent, child, _step_receipt(previous, binding.step_id))
+        if authority_check is not None:
+            await authority_check(db)
         proposed = _phase_successor(previous, phase="operator_paused", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)
         published, values = _published_values(parent, proposed, ())
@@ -1991,11 +1995,13 @@ async def revise_operator_paused_parent(jobs, parent_id, *, operator_owner, requ
         return {"job": _serialize(await jobs._fetch(db, parent_id)), "manifest": published.model_dump(mode="json")}
 
 
-async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_manifest_revision):
+async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_manifest_revision, authority_check=None):
     from src.work_board.repository import _begin_sqlite_immediate
     from src.workflows.job_runtime import DurableJobLeaseError, _as_utc, _job_has_unsafe_effects, _serialize, _utc_now, _verified_readback_exists
     async with jobs._session() as db:
         await _begin_sqlite_immediate(db)
+        if authority_check is not None:
+            await authority_check(db)
         parent, task, attempt, previous, _envelope = await _current(jobs, db, parent_id)
         _assert_joint_manifest(parent, task, attempt, previous)
         expected_reason = {"native_wait": "general_task_native_wait", "operator_paused": "general_task_operator_paused"}.get(previous.phase)
@@ -2022,6 +2028,8 @@ async def resume_parent(jobs, parent_id, *, owner, expected_revision, expected_m
                     raise DurableJobLeaseError("general task successful child lacks original verified readback")
             if child.attempt_count > 0:
                 assert_child_closed(parent, child, _step_receipt(previous, binding.step_id))
+        if authority_check is not None:
+            await authority_check(db)
         expiry = min(previous.original_deadline_at, _as_utc(parent.deadline_at), _utc_now() + timedelta(seconds=30))
         proposed = _phase_successor(previous, phase="assembly", task_revision=task.task_revision + 1,
             job_fence=parent.fencing_token + 1, board_fence=attempt.fencing_token + 1)

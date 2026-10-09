@@ -140,6 +140,12 @@ async def test_authenticated_audio_api_separate_fresh_goal_task_action_and_exact
     first = await client.post(f"/api/audio/ptt/{audio.request_id}/task", json=payload, headers=origin)
     assert first.status_code == 200, first.text
     assert first.json()["audio_budget_transferred"] is False
+    source_read = await client.get(f"/api/audio/ptt/{audio.request_id}", headers=origin)
+    assert source_read.status_code == 200, source_read.text
+    from pathlib import Path
+    import json
+    Path("/home/pawel/repos/seraph/.agent-evidence/986/c7/channel-audio-task-wire-r1.json").write_text(
+        json.dumps({"source": source_read.json(), "request": payload, "receipt": first.json()}, sort_keys=True, indent=2) + "\n")
     repeated = await client.post(f"/api/audio/ptt/{audio.request_id}/task", json=payload, headers=origin)
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["idempotent_replay"] is True

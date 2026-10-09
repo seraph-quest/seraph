@@ -50,10 +50,22 @@ interface PttAudioControlProps {
   ownerSessionId?: string | null;
   goals?: GoalInfo[];
   onTaskCreated?: (taskId: string) => void;
+  taskRecovery?: { current: PttTaskRecovery | null };
+}
+
+/** Only opaque source IDs and original request options survive a pane remount.
+ * Canonical private intent is reread through the current authenticated source.
+ */
+export interface PttTaskRecovery {
+  scope: string;
+  requestId: string;
+  confirmedDigest: string;
+  task: Omit<GeneralTaskCreateRequest, "input"> & { input: Omit<GeneralTaskCreateRequest["input"], "intent"> };
+  createdTaskId: string | null;
 }
 
 export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/audio/ptt",
-  ownerPrincipalId, ownerSessionId, goals = [], onTaskCreated }: PttAudioControlProps) {
+  ownerPrincipalId, ownerSessionId, goals = [], onTaskCreated, taskRecovery }: PttAudioControlProps) {
   const [state, setState] = useState<PttAudioState>("idle");
   const [captureConsent, setCaptureConsent] = useState(false);
   const [modelConsent, setModelConsent] = useState(false);
@@ -74,7 +86,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
   const taskPendingRef = useRef<{ digest: string; requestId: string; task: GeneralTaskCreateRequest } | null>(null);
-  const taskScope = `${ownerPrincipalId ?? ""}:${ownerSessionId ?? ""}:${sessionId ?? ""}`;
+  const taskScope = JSON.stringify([ownerPrincipalId, ownerSessionId, sessionId]);
   const taskScopeRef = useRef(taskScope);
   taskScopeRef.current = taskScope;
   const ownedGoals = goals.filter(goal => goal.status === "active" && goal.revision
@@ -207,12 +219,53 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   useEffect(() => () => stopCaptureResources(), []);
 
   useEffect(() => {
+    if (taskRecovery?.current && taskRecovery.current.scope !== taskScope) taskRecovery.current = null;
     taskPendingRef.current = null;
     audioExecutionRef.current = null;
     setConfirmedIntent(""); setTaskGoalId(""); setTaskBudget("0"); setTaskCalls("1");
     setTaskEgress(false); setTaskBusy(false); setTaskNotice(null); setCreatedTaskId(null);
     return () => { actionRef.current?.controller.abort(); actionRef.current = null; };
   }, [taskScope]);
+
+  useEffect(() => {
+    const retained = taskRecovery?.current;
+    const controller = new AbortController();
+    const current = () => !controller.signal.aborted && taskScopeRef.current === taskScope;
+    if (!retained || retained.scope !== taskScope || !ownerPrincipalId || !ownerSessionId) return () => controller.abort();
+    setTaskNotice("Checking the original confirmed source and Task request.");
+    void fetch(`${endpoint}/${encodeURIComponent(retained.requestId)}`, { signal: controller.signal })
+      .then(async response => {
+        if (!current()) return;
+        if (!response.ok) {
+          if ([401, 403, 409].includes(response.status) && taskRecovery) taskRecovery.current = null;
+          throw new Error("Original confirmed source is unavailable. Inspect Work.");
+        }
+        const payload = await response.json() as AudioSnapshot;
+        if (!current()) return;
+        const goal = currentGoalsRef.current.find(row => row.id === retained.task.input.goal_ref);
+        const text = payload.transcript?.text;
+        if (payload.request_id !== retained.requestId || payload.status !== "confirmed"
+          || payload.transcript?.confirmed_digest !== retained.confirmedDigest
+          || typeof text !== "string" || !text || text.length > 20000
+          || goal?.revision !== retained.task.goal_revision) {
+          throw new Error("Original source or Goal changed. Inspect the original Task request in Work.");
+        }
+        setSnapshot(payload); setState("confirmed"); setConfirmedIntent(text);
+        setTaskGoalId(retained.task.input.goal_ref);
+        setTaskBudget(String(retained.task.input.limits?.max_cost_microusd ?? 0));
+        setTaskCalls(String(retained.task.input.limits?.max_inference_calls ?? 0));
+        setTaskEgress(retained.task.input.inference_egress_acknowledged === true);
+        setCreatedTaskId(retained.createdTaskId);
+        if (!retained.createdTaskId) taskPendingRef.current = { requestId: retained.requestId,
+          digest: retained.confirmedDigest, task: { ...retained.task, input: { ...retained.task.input, intent: text } } };
+        setTaskNotice(retained.createdTaskId ? "Original review-only Task remains in Work." : "Check the same original Task request; its Goal and allowance are retained.");
+      }).catch(() => {
+        if (!current()) return;
+        setConfirmedIntent(""); taskPendingRef.current = null; setState("review_unavailable");
+        setTaskNotice("Original source or Goal is unavailable. Inspect Work; no replacement request was sent.");
+      });
+    return () => controller.abort();
+  }, [taskScope, taskRecovery, endpoint, ownerPrincipalId, ownerSessionId]);
 
   useEffect(() => {
     const sessionChanged = mountedSessionRef.current !== sessionId;
@@ -487,6 +540,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       if ([401, 403, 409].includes(response.status) && isCurrentAction(action.sequence)) {
         setConfirmedIntent("");
         taskPendingRef.current = null;
+        if (taskRecovery) taskRecovery.current = null;
       }
       if (!response.ok) throw new Error(payload.detail?.code || "audio_reload_failed");
       if (!isCurrentAction(action.sequence)) return;
@@ -563,10 +617,16 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
             depth: 0, max_outstanding_children: 2, max_cost_microusd: budget },
         },
       } };
+      if (taskRecovery) {
+        const { intent: _privateIntent, ...options } = taskPendingRef.current.task.input;
+        taskRecovery.current = { scope: taskScope, requestId: snapshot.request_id, confirmedDigest: digest,
+          task: { ...taskPendingRef.current.task, input: options }, createdTaskId: null };
+      }
     }
     const pending = taskPendingRef.current;
     const currentGoal = ownedGoals.find(goal => goal.id === pending.task.input.goal_ref);
     if (pending.digest !== digest || pending.requestId !== snapshot.request_id || currentGoal?.revision !== pending.task.goal_revision) {
+      setConfirmedIntent(""); taskPendingRef.current = null;
       setTaskNotice("The confirmed source or Goal changed. Inspect the original request in Work."); return;
     }
     const action = beginAction(); setTaskBusy(true); setTaskNotice(null);
@@ -579,6 +639,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       if (!response.ok) {
         if ([401, 403, 409].includes(response.status)) {
           setConfirmedIntent(""); taskPendingRef.current = null;
+          if (taskRecovery) taskRecovery.current = null;
           setTaskNotice("Current source or Goal authority is unavailable. Refresh the confirmed source and inspect Work."); return;
         }
         throw new Error("Task capture was not confirmed. Inspect Work or check this exact request.");
@@ -586,7 +647,8 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       const value: unknown = await response.json();
       if (!isCurrentAction(action.sequence) || capturedScope !== taskScopeRef.current) return;
       if (currentGoalsRef.current.find(goal => goal.id === pending.task.input.goal_ref)?.revision !== pending.task.goal_revision) {
-        setConfirmedIntent(""); setTaskNotice("Goal authority changed. Inspect the original Task request in Work."); return;
+        setConfirmedIntent(""); taskPendingRef.current = null;
+        setTaskNotice("Goal authority changed. Inspect the original Task request in Work."); return;
       }
       const receipt = value as { task?: Record<string, unknown>; audio_budget_transferred?: unknown };
       const task = receipt?.task;
@@ -598,6 +660,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         throw new Error("Task receipt is unconfirmed. Inspect Work or check this exact request.");
       }
       taskPendingRef.current = null;
+      if (taskRecovery?.current?.scope === capturedScope) taskRecovery.current.createdTaskId = task.task_id;
       setCreatedTaskId(task.task_id);
       setTaskNotice("Review-only Task prepared. Audio accounting remains separate. Review the plan in Work before execution.");
       onTaskCreated?.(task.task_id);

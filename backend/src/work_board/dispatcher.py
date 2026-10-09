@@ -10479,6 +10479,14 @@ class WorkBoardDispatcher:
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
             )
+        try:
+            if (projected.task.capability_id == "agent.task.v1"
+                and projected.attempt.ended_at is not None and projected.attempt.outcome == "verified"
+                and projected.task.status in {WorkBoardStatus.review, WorkBoardStatus.done}):
+                from src.work_board.channel_capture import maybe_publish_channel_output
+                await maybe_publish_channel_output(projected.task, projected.attempt.attempt_id)
+        except Exception as exc:
+            logger.info("channel output unavailable for %s: %s", projected.task.task_id, type(exc).__name__)
         if projected.task.status is WorkBoardStatus.done:
             if projected.task.capability_id == "memory.opportunity-preference.v1":
                 from src.work_board.opportunity_preference_native import finalize_done
@@ -10615,7 +10623,7 @@ class WorkBoardDispatcher:
         task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
         return task, attempt
 
-    async def control_general_task(self, owner, task_id, *, expected_revision, action):
+    async def control_general_task(self, owner, task_id, *, expected_revision, action, authority_check=None):
         """Operator controls derive every native execution binding server-side."""
         from src.workflows.general_task_guard import _current, _assert_joint_manifest
         from src.work_board.repository import _begin_sqlite_immediate
@@ -10623,6 +10631,8 @@ class WorkBoardDispatcher:
             raise BoardError("general_task_control_unavailable", "Restore the original native task service", status_code=409)
         async with self.session_provider() as db:
             await _begin_sqlite_immediate(db)
+            if authority_check is not None:
+                await authority_check(db)
             selected = await self.repository.get_task(db, owner, task_id)
             if selected.capability_id != "agent.task.v1":
                 raise BoardError("unsupported_action", "Pause and resume apply only to a native general task", status_code=422)
@@ -10642,12 +10652,12 @@ class WorkBoardDispatcher:
         if action == "pause":
             await self.jobs.pause_general_task_native_parent(parent_id, operator_owner=owner,
                 expected_task_revision=expected_revision, expected_revision=parent_revision,
-                expected_manifest_revision=manifest_revision)
+                expected_manifest_revision=manifest_revision, authority_check=authority_check)
             task, attempt, _owner, _fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
             return task, attempt
         await self.jobs.resume_general_task_native_parent(parent_id,
             owner=f"{self.runner_id}:{attempt.attempt_id}", expected_revision=parent_revision,
-            expected_manifest_revision=manifest_revision)
+            expected_manifest_revision=manifest_revision, authority_check=authority_check)
         task, attempt, parent_owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, parent_id)
         outcome = await self._execute_registered(task, attempt, _parse_typed_input(task), job_id=parent_id,
             parent_runtime_owner=parent_owner, parent_fence=parent_fence,

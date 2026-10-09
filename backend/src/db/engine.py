@@ -1660,6 +1660,7 @@ async def _ensure_work_board_columns(conn) -> None:
     task_columns = {row[1] for row in task_result.fetchall()}
     task_additions = {
         "input_artifact_id": "VARCHAR",
+        "channel_capture_origin_json": "VARCHAR",
         "pipeline_operation_id": "VARCHAR",
         "pipeline_slot": "VARCHAR",
         "review_expires_at": "DATETIME",

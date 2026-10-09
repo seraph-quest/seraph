@@ -1276,6 +1276,8 @@ class WorkBoardTask(SQLModel, table=True):
     # authority for state/digest; this opaque pointer makes owner-scoped task
     # projections and the task/artifact CAS cheap without exposing input bytes.
     input_artifact_id: Optional[str] = Field(default=None, index=True)
+    # Private server-issued channel provenance. Never accepted by Task DTOs.
+    channel_capture_origin_json: Optional[str] = Field(default=None)
     # Metadata-only reviewed proposal binding; the task and durable native
     # job remain execution authority, never the proposal itself.
     pipeline_operation_id: Optional[str] = Field(default=None, index=True)

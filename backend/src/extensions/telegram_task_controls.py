@@ -174,6 +174,40 @@ class TelegramTaskControls:
     def __init__(self, adapter):
         self.adapter = adapter
 
+    async def action(self, action, *, owner_principal_id, operator_session_id):
+        """Closed captured-task controls delegate to the original native owner."""
+        from src.work_board.channel_capture import ChannelAction, check_captured_task_control, current_workspace_digest
+        from src.api.work_board import dispatcher
+        if type(action) is not ChannelAction:
+            fail("telegram_channel_action_required")
+        owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=operator_session_id)
+        workspace_digest = current_workspace_digest()
+        async def guard(db, *_):
+            return await check_captured_task_control(db, owner, action, adapter=self.adapter,
+                _workspace_digest=workspace_digest)
+        async with self.adapter._lock:
+            async with db_engine.get_session() as db:
+                await _begin_sqlite_immediate(db)
+                task, _reservation = await guard(db)
+                await db.commit()
+        if action.action in {"inspect", "open_exact_review"}:
+            return {"task_id": task.task_id, "task_revision": task.task_revision,
+                "task_status": task.status.value, "action": action.action,
+                "no_learning": True, "review_required": True}
+        # Native owners recheck the source inside their canonical writer. Do
+        # not hold the adapter lock across their post-commit output hook.
+        if action.action == "cancel":
+            observed = await dispatcher.cancel_task(owner, task.task_id,
+                expected_revision=action.expected_revision, intent_guard=guard)
+            task = observed.task
+        else:
+            task, _attempt = await dispatcher.control_general_task(owner, task.task_id,
+                expected_revision=action.expected_revision, action=action.action,
+                authority_check=guard)
+        return {"task_id": task.task_id, "task_revision": task.task_revision,
+            "task_status": task.status.value, "action": action.action,
+            "no_learning": True, "review_required": True}
+
     async def _mint(self, db, pairing, task, outbox, effect, *, approval=None, attempt=None):
         wire = PREFIX + secrets.token_urlsafe(32)
         expiry = now() + timedelta(seconds=TTL_SECONDS)

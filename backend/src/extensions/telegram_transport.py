@@ -1245,6 +1245,7 @@ class TelegramTransportAdapter:
         session_id: str | None = None,
         kind: str = "text",
         attachment_refs: object = None,
+        _channel_output=None,
     ) -> dict[str, Any]:
         owner = _owner(owner_principal_id)
         operator_session = _session(operator_session_id)
@@ -1252,6 +1253,15 @@ class TelegramTransportAdapter:
             raise TelegramTransportError("invalid_text", "Telegram outbound text is invalid")
         if kind not in {"text", "voice"}:
             raise TelegramTransportError("invalid_kind", "Telegram outbound kind is invalid")
+        output_metadata = None
+        if _channel_output is not None:
+            from src.work_board.channel_capture import issue_output_handle, current_workspace_digest
+            from src.work_board.contracts import WorkBoardOwner
+            output_owner = WorkBoardOwner(principal_id=owner, session_id=operator_session)
+            staged_workspace = current_workspace_digest()
+            handle = issue_output_handle(output_owner, _channel_output)
+            output_metadata = {"handle": handle, "relative_path": "/?channel_output=" + handle,
+                "task_id": _channel_output.task_id, "attempt_id": _channel_output.attempt_id}
         async with self._lock:
             async with db_engine.get_session() as db:
                 row = await self._state(db)
@@ -1259,6 +1269,10 @@ class TelegramTransportAdapter:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 current = _now()
                 await self._assert_active_row(row, current=current)
+                if _channel_output is not None:
+                    from src.work_board.channel_capture import check_channel_output_publication
+                    await check_channel_output_publication(db, output_owner, _channel_output,
+                        adapter=self, staged_workspace=staged_workspace)
                 target_chat_id = chat_id if chat_id is not None else row.chat_id
                 if target_chat_id != row.chat_id:
                     raise TelegramTransportError("telegram_identity_not_allowlisted", "Telegram chat is not paired")
@@ -1298,6 +1312,7 @@ class TelegramTransportAdapter:
                     uuid.NAMESPACE_URL,
                     f"seraph-telegram-outbox:{owner}:{key}",
                 ).hex
+                correlation = f"channel-output:{digest[:20]}" if output_metadata else f"telegram-outbox:{digest[:20]}"
                 identity = build_conversation_identity(
                     conversation_id=canonical_session.id,
                     thread_id=canonical_session.id,
@@ -1306,7 +1321,7 @@ class TelegramTransportAdapter:
                     device_id=f"telegram-chat:{target_chat_id}",
                     channel="telegram",
                     transport="telegram",
-                    correlation_id=f"telegram-outbox:{digest[:20]}",
+                    correlation_id=correlation,
                 )
                 metadata = {
                     "lineage": build_lineage(
@@ -1320,6 +1335,12 @@ class TelegramTransportAdapter:
                         "payload_digest": digest,
                     },
                 }
+                if output_metadata is not None:
+                    metadata["channel_output.v1"] = output_metadata
+                # The original canonical Message producer commits separately.
+                # No read transaction may hold a SQLite writer across it.
+                if _channel_output is not None:
+                    await db.rollback()
                 try:
                     await session_manager.add_message(
                         canonical_session.id,
@@ -1331,6 +1352,11 @@ class TelegramTransportAdapter:
                     )
                 except MessageIngressConflictError as exc:
                     raise TelegramTransportError("canonical_message_identity_conflict", str(exc)) from exc
+                if _channel_output is not None:
+                    from src.work_board.repository import _begin_sqlite_immediate
+                    await _begin_sqlite_immediate(db)
+                    await check_channel_output_publication(db, output_owner, _channel_output,
+                        adapter=self, staged_workspace=staged_workspace)
                 db.add(TelegramTransportOutbox(
                     idempotency_key=key,
                     payload_digest=digest,
@@ -1341,7 +1367,7 @@ class TelegramTransportAdapter:
                     conversation_id=canonical_session.id,
                     thread_id=canonical_session.id,
                     message_id=canonical_message_id,
-                    correlation_id=f"telegram-outbox:{digest[:20]}",
+                    correlation_id=correlation,
                     content=content,
                     content_digest=hashlib.sha256(content.encode()).hexdigest(),
                     kind=kind,
@@ -1350,7 +1376,9 @@ class TelegramTransportAdapter:
                     attempt_count=0,
                     max_attempts=self.max_attempts,
                     next_attempt_at=current,
-                    deadline_at=current + timedelta(seconds=self.delivery_deadline_seconds),
+                    deadline_at=min(_channel_output.original_deadline_at,
+                        _channel_output.completed_at + timedelta(seconds=300)) if _channel_output is not None
+                        else current + timedelta(seconds=self.delivery_deadline_seconds),
                     created_at=current,
                     updated_at=current,
                 ))
@@ -1491,6 +1519,26 @@ class TelegramTransportAdapter:
                 if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 await self._assert_active_row(state, current=current)
+                channel_output_proof = None
+                if (row.correlation_id or "").startswith("channel-output:"):
+                    from src.work_board.channel_capture import read_channel_outbox_output, check_channel_output_publication
+                    from src.work_board.repository import _begin_sqlite_immediate, BoardError
+                    try:
+                        channel_output_proof = await read_channel_outbox_output(db, row, adapter=self)
+                    except BoardError as exc:
+                        raise TelegramTransportError(exc.code, str(exc)) from exc
+                    await _begin_sqlite_immediate(db)
+                    row = await db.get(TelegramTransportOutbox, outbox_key, populate_existing=True)
+                    if row is None:
+                        raise TelegramTransportError("telegram_outbox_not_found", "Original outbox is unavailable")
+                    if row.status != "queued":
+                        return self._outbox_payload(row)
+                    output_owner, source_output, staged_workspace = channel_output_proof
+                    try:
+                        await check_channel_output_publication(db, output_owner, source_output,
+                            adapter=self, staged_workspace=staged_workspace)
+                    except BoardError as exc:
+                        raise TelegramTransportError(exc.code, str(exc)) from exc
                 if row.task_control_markup_json or (row.correlation_id or "").startswith("telegram-control:"):
                     from src.extensions.telegram_task_controls import TelegramTaskControls
                     await TelegramTaskControls(self).validate_delivery(db, row)
@@ -1583,6 +1631,9 @@ class TelegramTransportAdapter:
 
         async with self._lock:
             async with db_engine.get_session() as db:
+                if channel_output_proof is not None:
+                    from src.work_board.repository import _begin_sqlite_immediate
+                    await _begin_sqlite_immediate(db)
                 current = _now()
                 state = await self._state(db)
                 result = await db.execute(select(TelegramTransportOutbox).where(TelegramTransportOutbox.id == outbox_key))
@@ -1610,6 +1661,15 @@ class TelegramTransportAdapter:
                     or not _aware(state.transit_consent_expires_at)
                     or (_aware(state.transit_consent_expires_at) or current) <= current
                 )
+                if channel_output_proof is not None:
+                    from src.work_board.channel_capture import check_channel_output_publication
+                    from src.work_board.repository import BoardError
+                    output_owner, source_output, staged_workspace = channel_output_proof
+                    try:
+                        await check_channel_output_publication(db, output_owner, source_output,
+                            adapter=self, staged_workspace=staged_workspace)
+                    except (BoardError, TelegramTransportError):
+                        revoked = True
                 if revoked:
                     fresh.status = "unknown"
                     fresh.last_error = "telegram_authority_revoked_during_delivery"
@@ -1730,6 +1790,14 @@ class TelegramTransportAdapter:
             )
             payload = self._outbox_payload(row)
             payload["attempts"] = [self._attempt_payload(item) for item in attempts_result.scalars().all()]
+            if (row.correlation_id or "").startswith("channel-output:"):
+                from src.work_board.channel_capture import read_channel_outbox_output, issue_output_handle
+                from src.work_board.repository import BoardError
+                try:
+                    output_owner, source_output, _workspace = await read_channel_outbox_output(db, row, adapter=self)
+                except BoardError as exc:
+                    raise TelegramTransportError(exc.code, str(exc)) from exc
+                payload["channel_output_review_path"] = "/?channel_output=" + issue_output_handle(output_owner, source_output)
             return payload
 
     async def reconcile_outbox(
@@ -1773,6 +1841,8 @@ class TelegramTransportAdapter:
                     return self._outbox_payload(row)
                 if row.status != "unknown":
                     raise TelegramTransportError("telegram_reconciliation_not_required", "Telegram delivery is not ambiguous")
+                if resolution == "retry" and (row.correlation_id or "").startswith("channel-output:"):
+                    raise TelegramTransportError("channel_output_unknown_no_resend", "Unknown completion delivery requires readback; it cannot be resent")
                 current = _now()
                 if resolution == "retry":
                     state = await self._state(db)

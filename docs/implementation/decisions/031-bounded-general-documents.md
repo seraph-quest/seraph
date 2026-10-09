@@ -184,11 +184,54 @@ existing global256/owner64 MiB and active16/owner2 generation bounds. Fixed
 encrypted slots are spec64 KiB, optional selection16 KiB, editable4 MiB,
 optional PDF4 MiB and output manifest16 KiB. Missing PDF preserves the actual
 editable output and an explicit warning. Completed outputs retain their charge.
-Explicit retirement on the original terminal positively reaped Task first
-tombstones reads/effects, then verifies no-follow names/inodes/hashes, unlinks,
-fsyncs and returns quota only after final original-row CAS. Foreign files,
-partial cleanup, missing positive closure and Unknown writers remain charged.
-Cleanup under Goal drift does not renew preview, download or execution authority.
+Successful/degraded output retirement requires the original terminal Task,
+positive original supervision and current physical output predicates. A separate
+outputless path requires the existing protected `fully_cancelled` witness: the
+Task remains blocked with its native-cancel reason, its original Attempt has
+ended cancelled, the parent is cancelled, and the complete original child,
+effect and cost set is positively settled with no adopted output or manifest.
+Never-launched builds also require that same full stop, established before Goal
+deletion or the original cutoff, with original attempt/fence zero and no launch,
+contact, effect, capacity or writer/reap binding. Open Attempts, Unknown debt or
+process closure alone cannot qualify. Later authenticated cleanup under Goal
+drift/expiry may reduce retained capacity only; it renews no preview, download,
+deadline, callback or execution authority.
+
+Reserve the exact maximum supervision receipt headroom within the existing
+8,192-byte build metadata limit before claim or launch; the fixed private codec
+has a 1,781-byte maximum and preserves the 24 MiB charge. Only the retained
+original invocation can issue its source-private supervision seal after positive
+stdin/pipe closure, complete bounded stdout EOF and wait on its actual original
+supervisor. Persist it in the same build metadata using original revision/digest
+CAS and exact build/capacity/Task/Attempt/child/claim nonce/PID/parser-witness
+binding. A parser witness, copied JSON, finally wait or missing outer receipt
+after restart cannot reconstruct that producer. Missing proof retains markers,
+charge and Unknown; releasing physical capacity never settles Task, callback,
+effect or cost state. Cancellation-fenced native rows remain unchanged.
+
+The authenticated retirement path tombstones reads first, verifies only exact
+fixed encrypted slots and source-owned pending/witness names with no-follow
+inode/permission/link/size/hash checks, then unlinks and fsyncs before the final
+unchanged original owner/revision CAS. Foreign, missing or changed fragments and
+partial unlink remain charged; no wildcard deletion or automatic recovery is
+introduced. Cleanup reconciliation still performs one fresh bounded 4 KiB
+original parser-witness read inside its writer. The byte bound does not bound
+filesystem latency; a stalled filesystem can stall that writer.
+
+Output publication reserves exact source-private pending inventory before
+filesystem work. Physical encrypted/plaintext readback occurs outside final
+adoption SQL. Only the actual staged object can issue the identity-sealed
+readback proof bound to original build/owner/reservation revision/digest,
+pending inventory and editable/PDF/manifest facts. The final native writer
+requires that exact proof and all current authority/Task/Attempt/fence/reap and
+row/pending CAS predicates, consuming pending and adopting output atomically
+without opening, reading or decrypting output files. Missing, copied, stale or
+cross-build proofs retain charge; restart cannot invent a new seal or adopt an
+unknown callback. Physical readback and SQL are not atomic: same-user file
+replacement after read remains a local race. Later authorized output/download
+and retirement reads must still validate exact physical files and reject tamper.
+Fixed private-file reads use nonblocking no-follow opens before exact regular-file,
+UID/permission/link/size/hash checks; a FIFO cannot stall opening before validation.
 
 Source readers, comparisons and builds share one durable SQLite process gate.
 Build reservation uses its same original ToolStep row and charged artifact row
@@ -200,6 +243,11 @@ block all three families through restart. Exact positive supervisor wait/reap
 and current native CAS release capacity; age, PID absence, a semaphore or lease
 expiry cannot establish release. Slot denial leaves the original native child
 queued with zero claim/contact and its parent at native_wait.
+The shared historical inventory has a finite 4,096-row ceiling; a bounded
+`LIMIT 4097` scan rejects overflow. This fails closed without eviction, deletion
+or a recovery bypass. Structural overflow and bounded admission/retirement
+receipts do not prove the sequential journey reaching a 4,097th historical row;
+that journey remains unexecuted.
 
 The fixed native boundary is `owner_private_read`, `local_compute` and
 `owner_private_artifact_write`, with `capability_execute`, `document_local_use`

@@ -493,14 +493,45 @@ only separately declared supported formulas are calculated in the generated file
 Imported formulas remain inert evidence.
 
 Outputs appear on the same Work task only after original native success, positive
-reap and current-owner physical readback. Authenticated downloads use fixed MIME
+original supervisor closure and current-owner physical readback. The original
+invocation must positively close stdin, consume complete bounded stdout EOF and
+wait on its supervisor before issuing its private persisted supervision proof.
+A parser witness alone or missing outer receipt after restart retains Unknown
+and capacity; cleanup cannot reconstruct a callback from status or PID absence.
+Physical capacity release does not settle Task, effect or cost state.
+Authenticated downloads use fixed MIME
 types and server basenames, with no-store/nosniff responses. Missing PDF retains
-the verified editable output and a bounded warning. **Retire generated files**
-on the original terminal task tombstones reads first, checks exact private
-files and positive writer closure, then returns quota after verified unlink/fsync
-and final canonical CAS. Partial cleanup or foreign files keeps the charge and
-shows recovery. Goal drift permits cleanup only; it does not restore preview,
-download or execution rights. The separate source and Task audit remain retained.
+the verified editable output and a bounded warning. Output publication reserves
+exact pending inventory before filesystem work and verifies actual private bytes
+outside the final native writer. That writer consumes the source-issued private
+readback proof and exact current authority/revision bindings without opening or
+decrypting output files. A missing or changed proof retains the charge. Readback
+and SQL are not filesystem-atomic: same-user replacement after the read remains
+a local race, so later downloads and retirement revalidate physical bytes.
+
+**Retire generated files** preserves separate retirement predicates. Successful
+or degraded output requires the original terminal Task, positive supervision and
+verified physical output. Outputless retirement instead requires the protected
+`fully_cancelled` stop: blocked Task with native-cancel reason, ended cancelled
+Attempt, cancelled parent and complete settled original child/effect/cost set,
+with no adopted output. A never-launched build still needs that same protected
+full stop before Goal deletion or the original cutoff; zero contact alone is
+insufficient. Later current authenticated cleanup under Goal drift or expiry can
+only reduce retained capacity. It grants no preview, download, renewed execution
+or automatic replay.
+
+Retirement tombstones reads before checking the exact fixed encrypted and pending
+fragments, unlinking and fsyncing, then returns quota only after the unchanged
+original owner/revision CAS. Missing/foreign files, partial unlink and Unknown
+closure keep the charge and show recovery. The original source and Task audit
+remain retained. One cleanup reconciliation reread is bounded to 4 KiB inside
+its writer; a stalled filesystem can still stall that writer. Build metadata
+reserves finite supervision headroom before launch (1,781-byte private codec
+inside the 8,192-byte metadata ceiling). The shared historical inventory blocks
+at its 4,096-row ceiling without eviction or a recovery bypass. The sequential
+journey reaching a 4,097th historical row remains unexecuted; finite overflow
+checks are not that proof.
+Actual CPU/Linux receipts do not establish native macOS execution.
 
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path

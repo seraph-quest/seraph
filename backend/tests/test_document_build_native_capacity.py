@@ -89,7 +89,7 @@ async def test_original_late_cancel_supervision_preserves_frozen_native_rows(acc
         service.stop(); registry.stop()
 
 
-@pytest.mark.parametrize("case",["restart_missing_outer","witness_tamper","physical_release"])
+@pytest.mark.parametrize("case",["restart_missing_outer","witness_tamper","witness_fifo","physical_release"])
 async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounting_db,monkeypatch,
         forbid_external_inference,case):
     from src.db.models import Goal
@@ -126,9 +126,13 @@ async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounti
                 body = native._supervision(value)
                 assert body["stdin_closed"] and body["stdout_eof"] and body["supervisor_wait_reaped"]
                 assert body["stdout_size"] > 12 and body["supervisor_exit"] == 0
-                if case == "witness_tamper":
+                if case in {"witness_tamper","witness_fifo"}:
                     witness = storage.sources.source_path(row,value,"spec").with_name(body["parser_witness_name"])
-                    raw = witness.read_bytes(); witness.write_bytes(raw[:-1]+b" ")
+                    if case == "witness_tamper":
+                        raw = witness.read_bytes(); witness.write_bytes(raw[:-1]+b" ")
+                    else:
+                        import os
+                        witness.unlink(); os.mkfifo(witness,0o600)
             else:
                 assert "supervision" not in value
             if case == "physical_release":
@@ -139,9 +143,13 @@ async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounti
                 expected_revision=revision,expected_metadata_digest=metadata_digest)
             assert result["cleanup_proven"] and result["build_revision"] == revision+1
         else:
+            from time import monotonic
+            started = monotonic()
             with pytest.raises((BoardError,ValueError)):
                 await native.reconcile_reap(restarted_jobs,owner,identifier,operator,
                     expected_revision=revision,expected_metadata_digest=metadata_digest)
+            if case == "witness_fifo":
+                assert monotonic()-started < 2, "FIFO must be rejected before any blocking read"
         assert await restarted_jobs.get_job(binding.invocation_id) == child_before
         assert await restarted_jobs.get_job(binding.parent_job_id) == parent_before
         async with sessions() as db:

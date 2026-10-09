@@ -33,6 +33,7 @@ SLOTS = {"spec": SPEC_LIMIT, "selection": SELECTION_LIMIT, "editable": OUTPUT_LI
     "pdf": OUTPUT_LIMIT, "output-manifest": MANIFEST_LIMIT}
 _OUTPUT_SEAL = object()
 _PENDING_SEAL = object()
+_READBACK_SEAL = object()
 PROFILE_DIGEST = sources.sha256(sources.canonical({"profile": "document-build-renderer.v1",
     "address_space": 512*1024*1024, "cpu_seconds": 10, "fd_limit": 64,
     "wall_seconds": 30, "reap_seconds": 5, "spec_bytes": SPEC_LIMIT,
@@ -597,15 +598,45 @@ async def reserve_publications(db, row, value, staged):
     return _issue_private_packet(replace(staged, revision=row.revision, original_metadata_digest=row.metadata_digest, publication=publication))
 
 
+@dataclass(frozen=True)
+class BuildOutputReadback:
+    staged: StagedBuildOutput = field(repr=False)
+    binding_digest: str
+    _seal: object = field(default=None, repr=False, compare=False)
+    _issued_id: int = field(default=0, repr=False, compare=False)
+
+
+def _readback_binding(row, value, staged):
+    return _digest({"build_id": row.artifact_id, "owner_principal_id": row.owner_principal_id,
+        "owner_session_id": row.owner_session_id, "revision": row.revision,
+        "metadata_digest": row.metadata_digest, "pending": value.get("pending"),
+        "slots": staged.slots_json, "output_digest": _digest(staged.output_json.encode()),
+        "manifest_digest": _digest(staged.manifest_json.encode())})
+
+
 def publish_publications(row, value, staged):
     if type(staged) is not StagedBuildOutput or staged._seal is not _OUTPUT_SEAL or staged._issued_id != id(staged):
         raise BoardError("document_build_publication_changed", "The original output producer is required", status_code=409)
     receipts = _publish_private_publication(row, value, staged.publication)
     if receipts != json.loads(staged.slots_json):
         raise BoardError("document_build_publication_changed", "The exact reserved ciphertext changed", status_code=409)
+    output = json.loads(staged.output_json)
+    expected_slots = {"editable", "output-manifest"} | ({"pdf"} if output["pdf_artifact"] is not None else set())
+    if set(receipts) != expected_slots:
+        raise BoardError("document_build_output_readback_changed", "The original fixed output set changed", status_code=409)
+    for slot, receipt in receipts.items():
+        raw = sources.read_private(sources.source_path(row, value, slot), receipt, maximum=SLOTS[slot])
+        if slot == "output-manifest":
+            matches = raw == staged.manifest_json.encode()
+        else:
+            artifact = output[slot + "_artifact"]
+            matches = len(raw) == artifact["size_bytes"] and _digest(raw) == artifact["sha256"]
+        if not matches:
+            raise BoardError("document_build_output_readback_changed", "The actual original output bytes changed", status_code=409)
+    return _issue_private_packet(BuildOutputReadback(staged, _readback_binding(row, value, staged), _READBACK_SEAL))
 
 
-def adopt_outputs(row, value, staged, *, native_binding, reap):
+def adopt_outputs(row, value, staged, *, readback, native_binding, reap):
     """Called only by original native owner inside its current final writer."""
     if (type(staged) is not StagedBuildOutput or staged._seal is not _OUTPUT_SEAL
         or staged._issued_id != id(staged)
@@ -618,8 +649,10 @@ def adopt_outputs(row, value, staged, *, native_binding, reap):
     pending = _publication_current(row, value, staged.publication)
     if value.get("pending") != pending:
         raise BoardError("document_build_adoption_changed", "The source-owned reserved output inventory changed", status_code=409)
-    for slot, receipt in pending.items():
-        sources.read_private(sources.source_path(row, value, slot), receipt, maximum=SLOTS[slot])
+    if (type(readback) is not BuildOutputReadback or readback._seal is not _READBACK_SEAL
+        or readback._issued_id != id(readback) or readback.staged is not staged
+        or readback.binding_digest != _readback_binding(row, value, staged)):
+        raise BoardError("document_build_output_readback_required", "The exact original physical output readback is required", status_code=409)
     output = json.loads(staged.output_json)
     value.pop("pending")
     value["sources"].update(json.loads(staged.slots_json))

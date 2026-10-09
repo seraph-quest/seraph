@@ -735,7 +735,7 @@ def _reap_witness(row, value, capacity, child_binding, *, details=False):
     parent, leaf = _open_input_artifact_parent(path, create=False)
     fd = -1
     try:
-        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         facts = os.fstat(fd)
         import stat
         if not _private_input_file_metadata(facts) or facts.st_mode != stat.S_IFREG | 0o600 or not 1 <= facts.st_size <= 4096:
@@ -981,14 +981,15 @@ async def invoke(principal, job_id, fencing_token, inputs):
             _child, _binding, row, value, fresh, _envelope = await invocation_scope(db, principal, job_id, fencing_token, inputs, staged_envelope=envelope)
             staged = await storage.reserve_publications(db, row, value, staged)
             await db.commit()
-        storage.publish_publications(row, value, staged)
+        readback = storage.publish_publications(row, value, staged)
         async with jobs._session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
             child, _binding, row, value, fresh, _envelope = await invocation_scope(db, principal, job_id, fencing_token, inputs, staged_envelope=envelope)
             if fresh != capacity or _records(child).get("document-child") != child_binding:
                 raise BoardError("document_build_reap_changed", "The original renderer delivery changed", status_code=409)
             witness, reap = _fresh_supervised_reap(row, value, capacity, child_binding)
-            output = storage.adopt_outputs(row, value, staged, native_binding=capacity, reap=reap)
+            output = storage.adopt_outputs(row, value, staged, readback=readback,
+                native_binding=capacity, reap=reap)
             history = json.loads(child.checkpoint_receipts_json)
             history.append({"checkpoint_id": "document-reaped", "payload": {"binding": child_binding,
                 "witness_sha256": reap["witness_sha256"], "wait_reaped": True, "parser_exit": witness["parser_exit"]}, "safe": True})

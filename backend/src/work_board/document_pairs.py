@@ -271,7 +271,7 @@ def read_private(path, receipt, *, maximum):
     parent, leaf = _open_input_artifact_parent(path, create=False)
     fd = -1
     try:
-        fd = os.open(leaf, os.O_RDONLY|getattr(os,"O_NOFOLLOW",0), dir_fd=parent)
+        fd = os.open(leaf, os.O_RDONLY|os.O_NONBLOCK|getattr(os,"O_NOFOLLOW",0), dir_fd=parent)
         stat = os.fstat(fd)
         if not _private_input_file_metadata(stat) or stat.st_size != receipt["cipher_size"] or stat.st_size > (maximum+1024)*2:
             raise ValueError("private document ciphertext metadata changed")

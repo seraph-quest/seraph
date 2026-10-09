@@ -135,6 +135,23 @@ async def test_actual_private_build_task_download_and_retire(accounting_db, monk
             "attempt_id": retirement["attempt_id"]})
         assert completed.status_code == 200, completed.text
         retirement["expected_task_revision"] = completed.json()["task"]["task_revision"]
+        # Readback seal and SQL adoption do not make the filesystem atomic.
+        # A later same-user replacement still denies download and retirement.
+        from src.work_board import document_build_storage as storage, document_pairs as sources
+        async with sessions() as db:
+            private_row, private_value = await storage.owned(db, owner, identifier)
+            private_editable = sources.source_path(private_row, private_value, "editable")
+            original_cipher = private_editable.read_bytes()
+        private_editable.write_bytes(original_cipher[:-1]+bytes([original_cipher[-1]^1]))
+        assert (await client.get(f"/api/documents/builds/{identifier}/outputs/editable")).status_code == 409
+        held_retirement = await client.request("DELETE", f"/api/documents/builds/{identifier}", json=retirement)
+        assert held_retirement.status_code == 409, held_retirement.text
+        async with sessions() as db:
+            private_row, private_value = await storage.owned(db, owner, identifier)
+            assert private_row.document_reserved_bytes == 24*1024*1024
+            assert private_value["phase"] == "cleanup_tombstone"
+            retirement["expected_revision"] = private_row.revision
+        private_editable.write_bytes(original_cipher)
         retired = await client.request("DELETE", f"/api/documents/builds/{identifier}", json=retirement)
         assert retired.status_code == 200, retired.text
         assert retired.json()["state"] == "deleted" and retired.json()["quota_reserved_bytes"] == 0

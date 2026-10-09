@@ -73,10 +73,37 @@ async def validate_handoff_publication(db, owner, envelope):
     from sqlalchemy import select
     from src.db.models import WorkflowRunState
     from src.workflows.specialist_delegation import read_reservation, current_delegation
-    candidates = (await db.execute(select(WorkflowRunState).where(
-        WorkflowRunState.owner_principal_id == owner.principal_id,
-        WorkflowRunState.operator_session_id == owner.session_id,
-        WorkflowRunState.job_kind == "general_task_native_tool_v1"))).scalars().all()
+    from src.workflows.inference_group_lookup import group_reservation_rows
+    from src.workflows.general_task_accounting import entry_for
+    from src.workflows.inference_accounting import InferenceAccountingError
+    from src.work_board.general_task import digest
+    group = envelope.proposal_group
+    if group is None:
+        raise BoardError("specialist_handoff_denied", "Original specialist group required", status_code=409)
+    try:
+        rows = await group_reservation_rows(db, owner_id=owner.principal_id,
+            group_id=group.group_id, group_digest=digest(group.model_dump(mode="json")),
+            original_root_id=owner.session_id, original_deadline_at=group.original_deadline_at,
+            group=group)
+    except InferenceAccountingError as exc:
+        raise BoardError("specialist_handoff_denied", "Original specialist group changed", status_code=409) from exc
+    invocation_ids = set()
+    for row in rows:
+        entry = entry_for(row)
+        if entry["role"] == "specialist":
+            invocation_id = entry.get("delegation_invocation_id")
+            if not invocation_id:
+                raise BoardError("specialist_handoff_denied", "Original specialist invocation required", status_code=409)
+            invocation_ids.add(invocation_id)
+    candidates = []
+    for invocation_id in sorted(invocation_ids):
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == invocation_id).limit(1))).scalar_one_or_none()
+        if (run is None or run.owner_principal_id != owner.principal_id
+            or run.operator_session_id != owner.session_id
+            or run.job_kind != "general_task_native_tool_v1"):
+            raise BoardError("specialist_handoff_denied", "Original specialist invocation changed", status_code=409)
+        candidates.append(run)
     matched = [run for run in candidates if (reservation := read_reservation(run)) is not None
         and reservation.handoff_ref == envelope.specialist_handoff]
     if len(matched) != 1:

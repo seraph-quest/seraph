@@ -54,8 +54,8 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
     import inspect
     from dataclasses import replace
     from sqlalchemy import select
-    from src.db.models import InferenceCostReservation as Row, WorkBoardTask, OperatorSession
-    from src.work_board.contracts import GeneralTaskEnvelope
+    from src.db.models import InferenceCostReservation as Row, WorkBoardTask, WorkBoardAttempt, OperatorSession, WorkflowRunState
+    from src.work_board.contracts import GeneralTaskEnvelope, GeneralTaskCreate, GeneralTaskInput, PlanSpec, TaskLimits
     from src.work_board.dispatcher import _parse_typed_input
     from src.work_board.general_task_proposal import seal_proposal_publication, recheck_proposal_publication
     from src.workflows.inference_accounting import InferenceAccountingError
@@ -64,6 +64,44 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
     from tests.test_specialist_parent_synthesis import genuine_mcp_registry, charged_parent
 
     async with genuine_mcp_registry(task_runtime[1], monkeypatch) as (registry, descriptor, received, protocol):
+        from src.work_board.general_task import GeneralTaskService
+        from src.work_board.dispatcher import WorkBoardDispatcher
+        from tests.test_work_board_m6_provider_free_journey import OWNER, SESSION, _goal
+        sessions, workspace = task_runtime
+        owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
+        history_service = GeneralTaskService(registry)
+        history_service.start()
+        history_dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=history_service)
+        read = next(item for item in registry.descriptors() if item.tool_id == "read_file")
+        (workspace / "native-history.txt").write_text("actual unrelated native history")
+        async with sessions() as db:
+            db.add(_goal("native-history-goal", "Retained unrelated native history"))
+        for ordinal in range(4):
+            async with sessions() as db:
+                historical = (await history_service.create(db, owner, GeneralTaskCreate(goal_revision=1,
+                    idempotency_key="native-publication-history-" + str(ordinal), accept=True,
+                    expected_plan_revision=1, input=GeneralTaskInput(goal_ref="native-history-goal",
+                        intent="Read an unrelated local file", requested_output=read.output_schema,
+                        tool_set_digest=history_service.snapshot()[1],
+                        limits=TaskLimits(max_steps=1, max_inference_calls=0, max_cost_microusd=0, wall_seconds=300)),
+                    plan=PlanSpec(revision=1, steps=[{"step_id":"read", "tool_id":"read_file",
+                        "input":{"file_path":"native-history.txt"}, "output_contract":read.output_schema}])))).task
+                historical_id = historical.task_id
+            assert (await history_dispatcher.run_pass())["completed"] == 1
+            async with sessions() as db:
+                from src.work_board.review import complete_review
+                historical = await history_service.repository.get_task(db, owner, historical_id)
+                attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == historical_id))
+                await complete_review(db, owner, historical_id, expected_revision=historical.task_revision,
+                    attempt_id=attempt.attempt_id, repository=history_service.repository)
+        async with sessions() as db:
+            retained = list((await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.job_kind == "general_task_native_tool_v1"))).scalars())
+            assert len(retained) == 4 and all(row.status == "succeeded" for row in retained)
+            assert all(row.owner_principal_id == owner.principal_id and row.operator_session_id == owner.session_id for row in retained)
+        history_service.stop()
+        registry.stop()
+        registry.start()
         sessions, workspace, owner, service, dispatcher, planner, transport, creation, task_id = await charged_parent(
             task_runtime, monkeypatch, registry, descriptor)
         # Genuine unrelated ledger history uses the canonical broker and final
@@ -82,8 +120,18 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
         async with sessions() as db:
             adapter = type(db)
         execute = adapter.execute
+        scalar = adapter.scalar
         observed = []
+        native_reads = []
+        def native_lookup(statement):
+            if any(frame.function == "validate_handoff_publication" for frame in inspect.stack()):
+                sql = str(statement)
+                if sql.startswith("SELECT") and "workflow_run_states" in sql:
+                    predicates = " ".join(map(str, statement._where_criteria))
+                    assert "run_identity" in predicates and (" = " in predicates or " IN " in predicates), sql
+                    native_reads.append((sql, statement._limit_clause.value if statement._limit_clause is not None else None))
         async def bounded_publication(db, statement, *args, **kwargs):
+            native_lookup(statement)
             if any(frame.function == "recheck_proposal_publication" for frame in inspect.stack()):
                 sql = str(statement)
                 if sql.startswith("SELECT") and "inference_cost_reservations" in sql:
@@ -93,13 +141,20 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
                     assert "owner_id" in sql, predicates
                     observed.append((sql, statement._limit_clause.value))
             return await execute(db, statement, *args, **kwargs)
+        async def bounded_native_scalar(db, statement, *args, **kwargs):
+            native_lookup(statement)
+            return await scalar(db, statement, *args, **kwargs)
         monkeypatch.setattr(adapter, "execute", bounded_publication)
+        monkeypatch.setattr(adapter, "scalar", bounded_native_scalar)
         await dispatcher.run_pass()
         async with sessions() as db:
             children = list((await db.execute(select(WorkBoardTask).where(
                 WorkBoardTask.idempotency_key.like("specialist:%")))).scalars())
             assert len(children) == 1
             child = GeneralTaskEnvelope.model_validate(_parse_typed_input(children[0]))
+            from src.workflows.specialist_evidence import validate_handoff_publication
+            context = await validate_handoff_publication(db, owner, child)
+            await service.recheck_authority(db, owner, child)
             parent = await service.repository.get_task(db, owner, task_id)
             envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(parent))
             assert child.proposal_group == envelope.proposal_group
@@ -114,6 +169,39 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
             # every denial rolls them back and preserves actual financial bytes.
             class RollbackFixture(Exception):
                 pass
+            # Both publication and subsequent child readback validate exact
+            # indexed invocation membership, never owner-wide native history.
+            changed_ref = child.specialist_handoff.model_copy(update={"digest":"f" * 64})
+            for changed in (child.model_copy(update={"specialist_handoff":changed_ref}),
+                            child.model_copy(update={"proposal_group":None})):
+                with pytest.raises(BoardError) as rejected:
+                    await validate_handoff_publication(db, owner, changed)
+                assert rejected.value.code == "specialist_handoff_denied"
+            import json
+            for mutation in ("missing", "foreign_root", "foreign_owner", "duplicate", "unknown"):
+                with pytest.raises(RollbackFixture):
+                    async with db.begin_nested():
+                        callback = await db.scalar(select(WorkflowRunState).where(
+                            WorkflowRunState.run_identity == context.callback.run_identity))
+                        if mutation == "missing":
+                            callback.run_identity = "missing-original-callback"
+                        elif mutation == "foreign_root":
+                            callback.operator_session_id = "foreign-original-root"
+                        elif mutation == "foreign_owner":
+                            callback.owner_principal_id = "operator:foreign"
+                        elif mutation == "unknown":
+                            callback.status = "unknown_external_effect"
+                        else:
+                            from src.workflows.specialist_delegation import DELEGATION_KEY
+                            checkpoints = json.loads(callback.checkpoint_receipts_json)
+                            checkpoints.append(next(item for item in checkpoints if item["checkpoint_id"] == DELEGATION_KEY))
+                            callback.checkpoint_receipts_json = json.dumps(checkpoints)
+                        await db.flush()
+                        from src.workflows.job_runtime import DurableJobLeaseError
+                        denial = DurableJobLeaseError if mutation == "unknown" else BoardError
+                        with pytest.raises(denial):
+                            await validate_handoff_publication(db, owner, child)
+                        raise RollbackFixture()
             for key in (None, "invalid"):
                 with pytest.raises(RollbackFixture):
                     async with db.begin_nested():
@@ -161,3 +249,4 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
             assert await recheck_proposal_publication(db, owner, witness) == envelope
         assert any(limit == 13 for _, limit in observed)
         assert all(limit in (1, 13) for _, limit in observed)
+        assert any(limit == 1 for _, limit in native_reads)

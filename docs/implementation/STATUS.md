@@ -229,6 +229,12 @@ workspace backup/restore accepts the sole added hint column; restored NULL hints
 require canonical startup migration before accounting readiness. This does not
 bound the existing global `_accounting_rows` deployment-ledger baseline.
 
+Private handoff publication derives at most twelve specialist callback identities
+from validated original-group reservations and uses exact unique run-identity
+lookups with the original owner, Root, reservation and current-delegation gates.
+The existing full Vault fingerprint still scales with secret rows and bytes;
+the entire publication path is not claimed independent of global workspace size.
+
 Original-root cancel and held pause fence further work while retaining Unknown
 callbacks, effects and contacted cost liabilities. A failed sibling does not
 discard an already verified output. The current authenticated owner can inspect

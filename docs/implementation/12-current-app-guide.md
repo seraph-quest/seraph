@@ -1222,6 +1222,14 @@ is ready. Other unexpected columns still fail closed. These bounded specialist
 reads do not bound the existing global `_accounting_rows` baseline, which still
 loads the deployment ledger.
 
+Private handoff publication discovers at most twelve distinct specialist
+callback identities from validated original-group reservations, then checks each
+through an exact unique run-identity lookup. Original owner, Root, callback kind,
+reservation, current delegation and narrowed envelope checks remain mandatory;
+unrelated same-Root job history is not scanned. The existing full Vault
+fingerprint still scales with all secret rows and bytes. These bounded lookups
+do not make the entire publication path independent of global workspace size.
+
 The parent enters a durable wait rather than holding an active callback while
 the child works. Reconciliation uses the original protected reservation and
 actual child execution/readback. Restart can continue that retained wait or

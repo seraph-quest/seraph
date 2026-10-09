@@ -90,6 +90,16 @@ OCR, protected/macro/external-linked sources and general question
 answering are outside this profile; Linux mechanics do not establish native
 macOS execution or model quality.
 
+**Document generation #1011: Planned target, feature-branch implementation.**
+[ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+also accepts explicit report/brief/workbook authoring, signed private review and
+the same original C1 native ToolStep producing editable DOCX/XLSX and direct PDF.
+The generation family reserves its own 24 MiB, preserves source32/pair16 MiB
+charges, shares durable process exclusion/queued priority with comparison, and
+retains output quota until explicit positively verified retirement. The target
+does not claim shipped generation, native macOS proof, model composition or
+automatic iterative repair. The owning issue/PR carries implementation receipts.
+
 ## Task conversation continuity
 
 **Shipped** within the bounded

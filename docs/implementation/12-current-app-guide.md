@@ -465,6 +465,43 @@ unavailable resource or network confinement visibly blocks this optional profile
 while the CPU core stays usable. This profile establishes literal extraction,
 not OCR, malware certification, model understanding or general usefulness.
 
+### Explicit local document builds
+
+**Status:** Planned target with #1011 feature-branch implementation; installation
+and independent full-journey review determine availability. The generation
+subsection of [ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+owns this contract separately from literal source extraction.
+
+In Work → Describe a task, select **Build a local editable document and PDF**.
+The editor authors report, brief or workbook fields and
+validates their finite specification. Optional citations choose exact adopted
+source leaves; private discovery and selection reuse the original evidence.
+Create a private immutable build, review its signed specification/source/limits,
+prepare its inert one-step task, then reload the task-bound review and explicitly
+accept it through Work. Edits require a fresh immutable build and review. This
+path does not compose with a model or automatically repair content. The retained
+private-build list restores the original charged build and Task after reload;
+discarding an unbound staged build requires an explicit retirement request.
+
+One original C1 native child renders editable DOCX/XLSX and direct PDF from the
+same validated specification. Its encrypted private build reserves 24 MiB in
+addition to any source charge. Genuine queued comparisons/builds share priority
+ordering and the source/comparison/build families share durable process capacity;
+Unknown or unreaped writers block new launch. A denied build retains its original
+queued child without claim/contact. Workbook literal strings remain strings;
+only separately declared supported formulas are calculated in the generated file.
+Imported formulas remain inert evidence.
+
+Outputs appear on the same Work task only after original native success, positive
+reap and current-owner physical readback. Authenticated downloads use fixed MIME
+types and server basenames, with no-store/nosniff responses. Missing PDF retains
+the verified editable output and a bounded warning. **Retire generated files**
+on the original terminal task tombstones reads first, checks exact private
+files and positive writer closure, then returns quota after verified unlink/fsync
+and final canonical CAS. Partial cleanup or foreign files keeps the charge and
+shows recovery. Goal drift permits cleanup only; it does not restore preview,
+download or execution rights. The separate source and Task audit remain retained.
+
 > **OpenRouter inference contract:** the integrated #736/#775 foundation
 > routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU

@@ -458,6 +458,8 @@ def _bounded_checkpoint_receipts(
     items = list(history) if isinstance(history, Iterable) else []
     from src.workflows.general_task_guard import protected_checkpoint_ids
     protected_ids = protected_checkpoint_ids(items)
+    protected_ids |= {item.get("checkpoint_id") for item in items if isinstance(item, Mapping)
+        and item.get("checkpoint_id") in {"document-capacity", "document-reaped"}}
     latest_special: dict[str, tuple[int, Any]] = {}
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
@@ -4395,12 +4397,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if continue_existing_attempt or run.attempt_count != 0 or run.fencing_token != 0:
                     raise DurableJobLeaseError("the original general task native claim is exhausted")
                 await assert_general_task_child_phase_current(db, run)
+                if json.loads(run.arguments_json).get("tool_id") == "document_build":
+                    from src.work_board.document_build_native import validate_claim
+                    validate_claim(self, run, claim_authority_check)
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
+                elif run.job_kind == "general_task_native_tool_v1":
+                    from src.work_board.document_build_native import validate_claim
+                    validate_claim(self, run, claim_authority_check)
                 elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
@@ -4988,6 +4996,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("native transition and callback closure require their fixed writer")
         if checkpoint_id == "native-physical-resource-cleanup":
             raise DurableJobTransitionError("native cleanup requires its fixed resource owner")
+        if checkpoint_id in {"document-capacity", "document-reaped"}:
+            raise DurableJobTransitionError("document process reservation/reap requires its fixed native owner")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         async with self._session() as db:

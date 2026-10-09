@@ -31,6 +31,9 @@ PREFIX = "artifacts/work-board/document-pairs"
 CHARGE = 16 * 1024 * 1024
 SOURCE_CAPABILITY = "document.read.v1"
 SOURCE_PREFIX = "artifacts/work-board/document-sources"
+BUILD_CAPABILITY = "document.build.v1"
+BUILD_PREFIX = "artifacts/work-board/document-builds"
+BUILD_CHARGE = 24 * 1024 * 1024
 
 
 async def probe_upload_profile():
@@ -113,12 +116,39 @@ def validate_upload_profile(profile):
 def metadata(row):
     try:
         value = json.loads(row.document_metadata_json)
-        expected = {CAPABILITY: "document-pair.v1", SOURCE_CAPABILITY: "document-source.v1"}.get(row.capability_id)
+        expected = {CAPABILITY: "document-pair.v1", SOURCE_CAPABILITY: "document-source.v1",
+            BUILD_CAPABILITY: "document-build.v1"}.get(row.capability_id)
         if expected is None or value["schema"] != expected or len(row.document_metadata_json) > 8192:
             raise ValueError()
         return value
     except (TypeError, ValueError, KeyError):
         raise BoardError("document_pair_metadata_invalid", "The private pair needs reconciliation", status_code=409) from None
+
+
+def active_generation(row):
+    value = metadata(row)
+    if row.capability_id == BUILD_CAPABILITY:
+        if value["phase"] == "deleted":
+            return False
+        return (value["phase"] not in {"completed", "degraded"} or bool(value.get("live_writer"))
+            or (value.get("reap") or {}).get("wait_reaped") is not True or not value.get("output"))
+    return value["phase"] != "sealed"
+
+
+async def check_quota(db, owner, charge):
+    rows = list((await db.scalars(select(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.document_reserved_bytes > 0))).all())
+    own = [row for row in rows if row.owner_principal_id == owner.principal_id]
+    # Validate every charged family before summing; unknown charge is never free.
+    charges = {CAPABILITY: CHARGE, SOURCE_CAPABILITY: 32*1024*1024, BUILD_CAPABILITY: BUILD_CHARGE}
+    if any(row.document_reserved_bytes != charges.get(row.capability_id) for row in rows):
+        raise BoardError("document_pair_quota_invalid", "Reconcile the unknown private document charge", status_code=409)
+    active = [row for row in rows if active_generation(row)]
+    if (sum(row.document_reserved_bytes for row in rows)+charge > 256*1024*1024
+        or sum(row.document_reserved_bytes for row in own)+charge > 64*1024*1024
+        or len(active) >= 16
+        or sum(row.owner_principal_id == owner.principal_id for row in active) >= 2):
+        raise BoardError("document_pair_quota_full", "Reconcile retained private documents before reserving more", status_code=409)
 
 
 def projection(row):
@@ -200,19 +230,17 @@ async def reserve(db, owner, request):
     deadlines = [row.expires_at, stamp+timedelta(seconds=300)] + [utc(v) for v in (goal.due_date, budget.period_expires_at) if v is not None]
     value["ingest_deadline"] = min(deadlines).isoformat()
     row.expires_at = min([row.expires_at] + [utc(v) for v in (goal.due_date, budget.period_expires_at) if v is not None])
-    rows = list((await db.scalars(select(WorkBoardInputArtifact).where(WorkBoardInputArtifact.document_reserved_bytes > 0))).all())
-    own = [r for r in rows if r.owner_principal_id == owner.principal_id]
-    if (sum(r.document_reserved_bytes for r in rows)+charge > 256*1024*1024
-        or sum(r.document_reserved_bytes for r in own)+charge > 64*1024*1024
-        or sum(metadata(r)["phase"] != "sealed" for r in rows) >= 16
-        or sum(metadata(r)["phase"] != "sealed" for r in own) >= 2):
-        raise BoardError("document_pair_quota_full", "Reconcile retained private pairs before reserving more", status_code=409)
+    await check_quota(db, owner, charge)
     row.document_metadata_json = canonical(value).decode(); db.add(row)
     await db.flush(); await db.commit()
     return projection(row)
 
 
 def source_path(row, value, slot):
+    if row.capability_id == BUILD_CAPABILITY:
+        if slot not in {"spec", "selection", "editable", "pdf", "output-manifest"}:
+            raise ValueError("fixed build slot required")
+        return canonical_workspace_root(settings.workspace_dir) / BUILD_PREFIX / row.artifact_id / f"g{value['generation']}-{slot}.fernet"
     general = row.capability_id == SOURCE_CAPABILITY
     if slot not in ({"source", "evidence"} if general else {"pdf", "csv"}): raise ValueError("fixed document slot required")
     return canonical_workspace_root(settings.workspace_dir) / (SOURCE_PREFIX if general else PREFIX) / row.artifact_id / f"g{value['generation']}-{slot}.fernet"

@@ -85,6 +85,11 @@ def canonical_tool_name(tool_name: str) -> str:
 
 
 TOOL_METADATA: dict[str, dict] = {
+    "document_build": {
+        "description": "Render the exact reviewed private document locally",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["owner_private_read", "local_compute", "owner_private_artifact_write"],
+    },
     "document_prepare": {
         "description": "Prepare exact owner-selected document citations locally",
         "policy_modes": ["safe", "balanced", "full"],

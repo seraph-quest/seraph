@@ -8,7 +8,8 @@ title: "ADR-031: Bounded General Documents"
 
 **Decision class:** Target architecture
 
-**Tracked work:** [#1010](https://github.com/seraph-quest/seraph/issues/1010)
+**Tracked work:** [#1010](https://github.com/seraph-quest/seraph/issues/1010),
+[generation #1011](https://github.com/seraph-quest/seraph/issues/1011)
 
 ## Decision
 
@@ -153,6 +154,68 @@ automatically accepts a task. Any later model route separately requires exact
 source-and-model egress consent, existing authority, budgets and the shared
 inference broker. Selection grants
 neither provider consent nor instruction authority. Every result says no_learning.
+
+## Explicit operator-authored generation
+
+The accepted #1011 target adds a distinct `document.build.v1` family on the
+existing `WorkBoardInputArtifact` owner. It preserves extraction and invoice
+semantics. This subsection records the generation target; its feature-branch
+implementation and receipts do not establish shipped `develop` truth.
+
+Operators author report, brief or workbook fields in the existing Work surface.
+One closed six-key specification contains kind, title, sections, tables,
+citations and style_preset. Optional citations select at most sixteen exact
+current adopted leaves from one private source. Discovery and selection read
+the adopted evidence without another extraction or preparation task. Corrections
+are explicit edits and create a new immutable specification/review. This local
+journey performs no model composition or automatic iterative repair; optional
+model step 3 remains subject to separate authorization, consent and budgets.
+
+The original Goal/Root, source, specification, descriptor, policy, renderer
+profile, output formats, limits and original deadline are bound into a private
+five-minute signed review. The signature is not a read grant. Preparation creates
+one inert C1 plan and its original native ToolStep; promotion requires fresh
+private task-bound review. Generic intent, input artifacts and events contain
+fixed intent, opaque handles and digests rather than document content. Current
+canonical authority and physical readback govern previews and every download.
+
+Builds reserve 24 MiB upfront, separately from pair16/source32 MiB, within the
+existing global256/owner64 MiB and active16/owner2 generation bounds. Fixed
+encrypted slots are spec64 KiB, optional selection16 KiB, editable4 MiB,
+optional PDF4 MiB and output manifest16 KiB. Missing PDF preserves the actual
+editable output and an explicit warning. Completed outputs retain their charge.
+Explicit retirement on the original terminal positively reaped Task first
+tombstones reads/effects, then verifies no-follow names/inodes/hashes, unlinks,
+fsyncs and returns quota only after final original-row CAS. Foreign files,
+partial cleanup, missing positive closure and Unknown writers remain charged.
+Cleanup under Goal drift does not renew preview, download or execution authority.
+
+Source readers, comparisons and builds share one durable SQLite process gate.
+Build reservation uses its same original ToolStep row and charged artifact row
+in the preclaim writer, with no second queue or job. Among genuine current queued
+comparisons/builds, `(priority, started_at, run_identity)` chooses the next free
+slot; each family checks the other. Source extraction keeps its immediate API
+behavior and shares mutual exclusion. Unknown or unreaped persisted writers
+block all three families through restart. Exact positive supervisor wait/reap
+and current native CAS release capacity; age, PID absence, a semaphore or lease
+expiry cannot establish release. Slot denial leaves the original native child
+queued with zero claim/contact and its parent at native_wait.
+
+The fixed native boundary is `owner_private_read`, `local_compute` and
+`owner_private_artifact_write`, with `capability_execute`, `document_local_use`
+and `document_private_artifact_write` permissions bound into original policy
+and review. It never grants generic workspace write or an arbitrary path.
+Rendering is one fixed CPU child with 512 MiB address space, ten CPU seconds,
+64 FDs, no core, a thirty-second original window and five-second positive reap.
+Platform confinement remains separately proven; no confidentiality claim follows
+from dependency injection or the renderer package alone.
+
+DOCX/XLSX and direct PDF consume the same validated content. XLSX literal strings
+use explicit string writes with formula/URL conversion disabled. Only separately
+declared formulas passing the fixed allowlisted parser, same-workbook references,
+DAG and finite calculation use formula writes with server-computed cached values.
+Imported extraction formulas remain inert evidence. No macro, external workbook,
+URL/DDE, dynamic function, authored executable or provider route is introduced.
 
 ## Verification and limits
 

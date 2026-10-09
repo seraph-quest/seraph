@@ -69,10 +69,32 @@ WRS_BY_RUN = _descriptor(_models.WorkflowRunState, "run_identity")
 WORKFLOW_STEP = _descriptor(_models.WorkflowStepState, "id")
 WORKFLOW_ARTIFACT_REVIEW = _descriptor(_models.WorkflowArtifactReview, "id")
 OPERATOR_SESSION = _descriptor(_models.OperatorSession, "id")
+WORK_BOARD_TASK = _descriptor(_models.WorkBoardTask, "task_id")
+WORK_BOARD_ATTEMPT = _descriptor(_models.WorkBoardAttempt, "attempt_id")
 GOAL = MEMORY_DESCRIPTORS["goals"]
 AUDIT_EVENT = _descriptor(_models.AuditEvent, "id")
 _DESCRIPTORS = (*MEMORY_DESCRIPTORS.values(), WRS_LEGACY_PARENT, WRS_BY_RUN,
-                WORKFLOW_STEP, WORKFLOW_ARTIFACT_REVIEW, OPERATOR_SESSION, AUDIT_EVENT)
+                WORKFLOW_STEP, WORKFLOW_ARTIFACT_REVIEW, OPERATOR_SESSION, AUDIT_EVENT,
+                WORK_BOARD_TASK, WORK_BOARD_ATTEMPT)
+
+
+class HeaderReadBudget:
+    """Shared byte evidence only; an original owner supplies all actual reads."""
+    def __init__(self):
+        self.remaining = MAX_BYTES
+        self.references = set()
+
+    async def certify(self, db, descriptor, row_ids):
+        if not any(descriptor is item for item in _DESCRIPTORS):
+            raise HeaderBoundsError("header_descriptor_unavailable")
+        refs = {(descriptor.table, descriptor.key, identity) for identity in row_ids}
+        if len(self.references | refs) > MAX_ROWS:
+            raise HeaderBoundsError("header_reference_bound")
+        certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.remaining)
+        self.references |= refs
+        self.remaining -= certificate.upper_bytes
+        await validate_certificate(db, certificate)
+        return certificate
 
 
 @dataclass(frozen=True, eq=False)

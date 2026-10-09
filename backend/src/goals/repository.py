@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, update, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import select, col
 
@@ -19,7 +19,6 @@ from src.db.models import (
     NativeNotificationOutbox,
     QueuedInsight,
     StrategyDelta,
-    WorkflowRunState,
 )
 from src.goals.contracts import GoalAdmissionBudget, GoalSuccessCriterion
 
@@ -392,6 +391,7 @@ class GoalRepository:
     ) -> bool:
         """Delete a goal and all its descendants with an owner/revision CAS."""
         async with get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
             result = await db.execute(select(Goal).where(Goal.id == goal_id))
             goal = result.scalars().first()
             if not goal:
@@ -423,6 +423,9 @@ class GoalRepository:
             for descendant in descendant_rows:
                 if _owner_pair(descendant) != root_owner:
                     raise GoalOwnershipConflict("goal_descendant_owner_mismatch")
+
+            from src.goals.source_closure import assert_goal_job_privacy_current
+            await assert_goal_job_privacy_current(db, goal_ids)
 
             now = datetime.now(timezone.utc)
             # Cancel durable effects before deleting the canonical goal. A
@@ -458,37 +461,9 @@ class GoalRepository:
                     updated_at=now,
                 )
             )
-            await db.execute(
-                update(WorkflowRunState)
-                .where(
-                    WorkflowRunState.goal_id.in_(goal_ids),
-                    WorkflowRunState.status.in_({
-                        "accepted",
-                        "queued",
-                        "awaiting_approval",
-                        "paused",
-                        "blocked",
-                        # Deletion is an authority revocation.  These states
-                        # must be fenced as well; otherwise a stale runner or
-                        # recovery request could resurrect work after the
-                        # canonical goal row is gone.
-                        "running",
-                        "failed",
-                        "unknown_external_effect",
-                        "cost_liability",
-                    }),
-                )
-                .values(
-                    status="cancelled",
-                    failure_reason="goal_deleted",
-                    lease_owner=None,
-                    lease_expires_at=None,
-                    finished_at=now,
-                    fencing_token=WorkflowRunState.fencing_token + 1,
-                    revision=WorkflowRunState.revision + 1,
-                    updated_at=now,
-                )
-            )
+            # Original jobs retain their journals, leases, fences and debt.
+            # Their actual source owners reject later admissions/publication
+            # against the missing canonical Goal. Deletion is not process reap.
             for d in descendant_rows:
                 await db.delete(d)
                 await db.flush()

@@ -11,7 +11,7 @@ interface Props {
   onOpenInbox?: () => void;
   onOpenTask?: (id: string) => void;
 }
-const time = (value: string | null) => value ? new Date(value).toLocaleString() : "No actual run recorded";
+const time = (value: string | null) => value ? new Date(value).toLocaleString() : "No completed source run recorded";
 
 export function ProgrammeDigestContent(props: Props) {
   return <ProgrammeDigestOwned key={props.ownerKey} {...props} />;
@@ -114,7 +114,8 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
     {!snapshot ? <p>{busy ? "Loading programme receipts…" : "Programme receipts unavailable."}</p> : <>
       {snapshot.programmes.length === 0 ? <p>No reviewed public programmes.</p> : snapshot.programmes.map((p) => <div className="cockpit-outcome-note" key={p.id}>
         <strong>{p.state}</strong>{p.reason_code ? ` · ${p.reason_code}` : ""}
-        <div>last actual run · {time(p.last_run)} · sources checked {p.sources_checked}</div>
+        {p.current_run_status ? <div>Current source work · {p.current_run_status} · admitted {time(p.current_admitted_at)}{["accepted", "queued"].includes(p.current_run_status) ? " · awaiting execution" : ""}</div> : null}
+        <div>Last completed source run · {time(p.last_run)} · sources checked {p.sources_checked}</div>
         <div>output · {p.output ?? "No output recorded"}</div>
         {p.next_digest_at ? <div>Next digest · {time(p.next_digest_at)}</div> : null}
         {p.next_run ? <div>Next source run · {time(p.next_run)}</div> : null}

@@ -9,7 +9,8 @@ import { CockpitHome } from "./CockpitHome";
 // Finite API fixtures establish UI bindings, not discovery or model quality.
 function receipt() {
   return { programmes: [{ id: "programme-one", goal_id: "goal-one", grant_revision: 2, state: "active", reason_code: null as string | null,
-    last_run: "2026-10-09T06:00:00Z", sources_checked: 3, output: "actual-brief", next_run: null as string | null,
+    last_run: "2026-10-09T06:00:00Z" as string | null, sources_checked: 3, output: "actual-brief" as string | null, next_run: null as string | null,
+    current_run_status: "succeeded" as string | null, current_admitted_at: "2026-10-09T05:55:00Z" as string | null,
     next_digest_at: "2026-10-10T06:00:00Z", remaining_allowance_microusd: 400, recovery: null }],
   notifications: { enabled: false, deadline_categories: [], digest_slots_remaining: 1, deadline_slots_remaining: 1, quiet_hours_active: true, delivery_debt: false },
   digests: [{ id: "daily-one", created_at: "2026-10-09T06:00:00Z", digest: { schema_version: "ProgrammeDigest.v1", local_date: "2026-10-09", timezone: "Europe/Warsaw", programme_ids: ["programme-one"], finding_ids: ["finding-one"], prepared_outputs: [], blocked_reasons: [] },
@@ -148,6 +149,36 @@ describe("Programme digest binding", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open daily digest in Inbox" }));
     expect(section).toHaveBeenCalledWith("inbox");
     expect(fetchMock.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(0);
+  });
+
+  it("shows queued admission separately while retaining the last verified completed source", async () => {
+    const data = receipt();
+    data.programmes[0].current_run_status = "queued";
+    data.programmes[0].current_admitted_at = "2026-10-10T06:00:00Z";
+    fetchMock.mockResolvedValue(reply(data));
+    render(<ProgrammeDigestContent ownerKey="operator:root" summaryOnly />);
+    await screen.findByText(/Current source work · queued · admitted.*awaiting execution/);
+    const completed = screen.getByText(/Last completed source run/);
+    expect(completed).toHaveTextContent(new Date(data.programmes[0].last_run!).toLocaleString());
+    expect(completed).not.toHaveTextContent(new Date(data.programmes[0].current_admitted_at!).toLocaleString());
+    expect(completed).toHaveTextContent("sources checked 3");
+    expect(screen.getByText(/output · actual-brief/)).toBeInTheDocument();
+    expect(screen.queryByText(/last actual run/i)).not.toBeInTheDocument();
+  });
+
+  it("does not invent completed activity for an accepted admission with no completed source", async () => {
+    const data = receipt(); const programme = data.programmes[0];
+    programme.current_run_status = "accepted";
+    programme.last_run = null;
+    programme.sources_checked = 0;
+    programme.output = null;
+    fetchMock.mockResolvedValue(reply(data));
+    render(<ProgrammeDigestContent ownerKey="operator:root" summaryOnly />);
+    await screen.findByText(/Current source work · accepted · admitted.*awaiting execution/);
+    expect(screen.getByText(/No completed source run recorded · sources checked 0/)).toBeInTheDocument();
+    expect(screen.getByText(/output · No output recorded/)).toBeInTheDocument();
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, current_run_status: "invented_activity" }] })).toBe(false);
+    expect(isProgrammeDigestSnapshot({ ...data, programmes: [{ ...programme, current_admitted_at: null }] })).toBe(false);
   });
 
   it("reads original source and output through authenticated discovery readback without fetching source URLs", async () => {

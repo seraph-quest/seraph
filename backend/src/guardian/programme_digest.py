@@ -45,6 +45,11 @@ class ProgrammeDigestV1(Closed):
         return value
 
 
+class DeadlineNegativeMemo(Closed):
+    key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reason: Literal["reviewed_category_no_match", "deadline_source_requires_current_readback"]
+
+
 class FollowThroughIntent(Closed):
     finding_id: str
     desired_outcome: str = Field(max_length=2000)
@@ -250,7 +255,7 @@ async def tick(now=None):
             staged[binding.programme_id] = (run, witness, brief["parsed"])
         except (ValueError, PermissionError, RuntimeError):
             staged[binding.programme_id] = None
-    async with discovery_writer_scope():
+    async with discovery_writer_scope() as policy:
       async with database.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         owners = {}
@@ -378,8 +383,24 @@ async def list_digests(operator, now=None):
     digests = []
     for receipt in receipts:
         digest = ProgrammeDigestV1.model_validate_json(receipt.digest_json)
-        findings, errors = [], []
+        findings, errors, output_groups = [], [], []
+        visible_programme_ids = set()
+        async with database.get_session() as db:
+            for goal in (await db.execute(select(Goal))).scalars():
+                try:
+                    await authorize_goal_read(db, operator, goal.id)
+                except GoalProgrammeError:
+                    continue
+                visible_programme_ids.update(p["id"] for p in _load(goal)["generations"]
+                    if p["owner_identity_id"] == identity.id and p["id"] in digest.programme_ids)
         for binding in json.loads(receipt.finding_bindings_json):
+            async with database.get_session() as db:
+                try:
+                    await authorize_goal_read(db, operator, binding["goal_id"])
+                except GoalProgrammeError:
+                    errors.append("programme_read_scope_required")
+                    continue
+            visible_programme_ids.add(binding["programme_id"])
             try:
                 readback, fresh = await _read_binding(operator, binding, now)
             except (GoalProgrammeError, ValueError, PermissionError, RuntimeError):
@@ -394,6 +415,7 @@ async def list_digests(operator, now=None):
                         "task_id": row.task_proposal_id if row else None, "actionable": False,
                         "source_freshness": "blocked", "recovery": "Review the original Goal, programme and source artifacts; provider replay is forbidden."})
                 continue
+            output_groups.append((binding["goal_id"], readback["brief"]["prepared_artifact_refs"]))
             async with database.get_session() as db:
                 goal = await db.get(Goal, binding["goal_id"])
                 current_owner = bool(goal and goal.owner_principal_id == operator.principal.principal_id and goal.owner_session_id == operator.session_id)
@@ -414,8 +436,32 @@ async def list_digests(operator, now=None):
                     "actionable": current_owner and fresh and (row is None or row.task_proposal_id is None and row.status != "dismissed") and (row is None or row.due_at is None or _aware(row.due_at) <= now),
                     "source_freshness": "current" if fresh else "stale",
                     "recovery": "Verify the original task's physical output before treating its linked output as complete." if row and row.status == "blocked" else "Selected recovery permits read-only inspection. Prepare new work only with current Goal ownership." if not current_owner else None if fresh else "Refresh sources in the original finite programme before preparing work."})
-        projected = digest.model_copy(update={"finding_ids": [f["id"] for f in findings],
-            "blocked_reasons": list(dict.fromkeys(digest.blocked_reasons + errors +
+        # Recheck after asynchronous physical readbacks: an earlier permission
+        # snapshot cannot expose private fallback metadata after scope changes.
+        allowed_goal_ids, final_programme_ids = set(), set()
+        async with database.get_session() as db:
+            await owner_identity(db, operator)
+            for goal in (await db.execute(select(Goal))).scalars():
+                try:
+                    await authorize_goal_read(db, operator, goal.id)
+                except GoalProgrammeError:
+                    continue
+                allowed_goal_ids.add(goal.id)
+                final_programme_ids.update(p["id"] for p in _load(goal)["generations"]
+                    if p["owner_identity_id"] == identity.id and p["id"] in digest.programme_ids)
+            for binding in json.loads(receipt.finding_bindings_json):
+                if binding["goal_id"] in allowed_goal_ids:
+                    final_programme_ids.add(binding["programme_id"])
+        findings = [f for f in findings if f["goal_id"] in allowed_goal_ids]
+        visible_outputs = [output for goal_id, outputs in output_groups
+            if goal_id in allowed_goal_ids for output in outputs]
+        visible_programme_ids &= final_programme_ids
+        private_scope_denied = set(digest.programme_ids) - visible_programme_ids
+        if not visible_programme_ids and digest.programme_ids:
+            continue  # No current readable original Goal: omit historical existence too.
+        projected = digest.model_copy(update={"programme_ids": [p for p in digest.programme_ids if p in visible_programme_ids],
+            "finding_ids": [f["id"] for f in findings], "prepared_outputs": visible_outputs,
+            "blocked_reasons": list(dict.fromkeys((digest.blocked_reasons if not private_scope_denied else ["programme_read_scope_required"]) + errors +
                 (["programme_digest_original_day_elapsed"] if receipt.phase == "pending" and now.astimezone(ZoneInfo(receipt.timezone)).date().isoformat() > receipt.local_date else [])))})
         digests.append({"id": receipt.id, "digest": projected.model_dump(mode="json"),
             "findings": findings, "created_at": _aware(receipt.created_at).isoformat()})
@@ -448,19 +494,43 @@ async def programme_status(operator, now):
             next_at = local.replace(hour=8, minute=0, second=0, microsecond=0)
             if local >= next_at:
                 next_at += timedelta(days=1)
-            outcome = latest["outcome"] if latest else None
+            completed = next((r for r in runs if r["status"] in {"succeeded", "degraded"} and r["outcome"]), None)
+            last_run, sources_checked, output = None, 0, None
+            recovery = programme["recovery"]
+            if completed:
+                async with database.get_session() as db:
+                    completed_run = await db.scalar(select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == completed["job_id"]))
+                try:
+                    if completed_run is None or completed_run.finished_at is None:
+                        raise ValueError("programme_completed_timestamp_missing")
+                    readback = await goal_discovery_service.read_brief(operator=operator, goal_id=goal.id,
+                        programme_id=programme["id"], job_id=completed["job_id"])
+                    last_run = _aware(completed_run.finished_at).isoformat()
+                    sources_checked = len(readback["brief"]["coverage"]["sources"])
+                    output = readback["artifact_ref"]["artifact_id"]
+                except (GoalProgrammeError, ValueError, PermissionError, RuntimeError):
+                    recovery = "Last completed source output requires current physical and authority readback."
+            async with database.get_session() as db:
+                await owner_identity(db, operator)
+                try:
+                    await authorize_goal_read(db, operator, goal.id)
+                except GoalProgrammeError:
+                    continue
             result.append({"goal_id": goal.id, "id": programme["id"], "grant_revision": programme["grant_revision"],
                 "state": programme["state"], "reason_code": programme["reason_code"],
-                "last_run": _aware(run.started_at).isoformat() if run else None,
-                "sources_checked": len(outcome["sources"]) if outcome else 0,
-                "output": outcome["artifact_ref"]["artifact_id"] if outcome else None,
+                "last_run": last_run,
+                "sources_checked": sources_checked,
+                "output": output,
+                "current_run_status": run.status if run else None,
+                "current_admitted_at": _aware(run.started_at).isoformat() if run else None,
                 # Existing discovery admission has a UTC occurrence and native
                 # outstanding hold; a guessed timer is not execution truth.
                 "next_run": None,
                 "next_digest_at": next_at.isoformat() if programme["state"] == "active" and next_at < datetime.fromisoformat(programme["expires_at"]) else None,
                 "remaining_allowance_microusd": max(0, programme["budget"]["max_inference_microusd"] - sum(
                     (r.actual_cost_microusd or 0 if r.state == "settled" else r.bound_microusd if r.state != "released" else 0) for r in reservations)),
-                "recovery": programme["recovery"]})
+                "recovery": recovery})
     return result
 
 
@@ -499,6 +569,52 @@ async def notification_status(operator, now=None):
         "delivery_debt": bool(unknown or receipt and "unknown" in {receipt.digest_notice, receipt.deadline_notice})}
 
 
+async def _deadline_negative_key(db, receipt, preference, now, policy):
+    """Bounded negative-only memo identity; this never authorizes a notice."""
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    bindings = json.loads(receipt.finding_bindings_json)
+    if not bindings or len(bindings) > 128:
+        return None
+    root = await db.get(OperatorSession, preference.recipient_root_id, populate_existing=True)
+    identity = await db.get(OperatorIdentity, receipt.owner_identity_id, populate_existing=True)
+    if (not preference.enabled or not json.loads(preference.deadline_categories_json)
+        or not identity or identity.revoked_at or not root or root.revoked_at or root.is_bearer_tombstone
+        or root.operator_identity_id != identity.id or root.principal_id != preference.recipient_principal_id
+        or _aware(root.idle_expires_at) <= now or _aware(root.absolute_expires_at) <= now):
+        return None
+    current = []
+    for binding in bindings:
+        goal = await db.get(Goal, binding["goal_id"], populate_existing=True)
+        generation = next((p for p in _load(goal)["generations"] if p["id"] == binding["programme_id"]), None) if goal else None
+        if (not generation or goal.revision != binding["goal_revision"]
+            or generation["grant_revision"] != binding["grant_revision"] or generation["owner_identity_id"] != identity.id):
+            return None
+        try:
+            await goal_programme_service.validate_current_binding(db=db,
+                binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(generation),
+                    "guardian.goal-discovery.v1"), policy=policy)
+        except GoalProgrammeError:
+            return None
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding["job_id"]))
+        if run is None or run.status not in {"succeeded", "degraded"}:
+            return None
+        current.append({"goal_revision": goal.revision, "goal_owner": [goal.owner_principal_id, goal.owner_session_id],
+            "programme": generation, "run": {name: getattr(run, name) for name in (
+                "run_identity", "job_kind", "status", "revision", "goal_id", "goal_revision", "plan_revision",
+                "owner_principal_id", "operator_session_id", "input_digest", "authority_digest", "budget_digest",
+                "declared_authority_json", "checkpoint_receipts_json", "artifact_receipts_json", "effect_receipts_json",
+                "artifact_paths_json", "result_digest")}})
+    clean = [{k: v for k, v in binding.items() if k != "deadline_no_match"} for binding in bindings]
+    # Authentication touch/idle extension is not a source/category change.
+    # Current expiry/revocation is checked above on every pass, never cached.
+    value = {"preferences": preference.model_dump(mode="json"), "root": {
+        "id": root.id, "principal_id": root.principal_id, "operator_identity_id": root.operator_identity_id,
+        "token_hash": root.token_hash, "absolute_expires_at": _aware(root.absolute_expires_at).isoformat()},
+        "identity_id": identity.id, "digest": receipt.digest_json,
+        "bindings": clean, "current": current}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 async def deliver_notices(now):
     from src.observer.native_notification_queue import NativeNotificationQueue
     from src.approval.runtime import set_runtime_context, reset_runtime_context
@@ -510,7 +626,7 @@ async def deliver_notices(now):
         possible = list((await db.execute(select(ProgrammeDigestReceipt).where(
             ProgrammeDigestReceipt.local_date == local_clock(now).date().isoformat(),
             ProgrammeDigestReceipt.phase == "finalized", ProgrammeDigestReceipt.deadline_notice == "unreserved"))).scalars())
-        candidates = []
+        candidates, staged_keys = [], {}
         async with discovery_writer_scope() as policy:
             for candidate in possible:
                 preference = await db.get(ProgrammeNotificationPreference, candidate.owner_identity_id)
@@ -560,8 +676,16 @@ async def deliver_notices(now):
                         valid = False
                         break
                 if valid:
+                    key = await _deadline_negative_key(db, candidate, preference, now, policy)
+                    try:
+                        memo = DeadlineNegativeMemo.model_validate(bindings[0].get("deadline_no_match"))
+                    except ValueError:
+                        memo = None
+                    if key is None or memo is not None and memo.key == key:
+                        continue
+                    staged_keys[candidate.id] = key
                     candidates.append(candidate)
-    staged = {}
+    staged, failed_receipts = {}, set()
     for candidate in candidates:
         for binding in json.loads(candidate.finding_bindings_json):
             if not any(timedelta(0) < _aware(datetime.fromisoformat(d["due_at"])) - now <= timedelta(hours=48)
@@ -570,8 +694,9 @@ async def deliver_notices(now):
             try:
                 staged[binding["job_id"]] = await physical_discovery_inputs(goal_discovery_service.jobs, binding["job_id"], completed_read=True)
             except (ValueError, PermissionError, RuntimeError):
+                failed_receipts.add(candidate.id)
                 continue
-    async with discovery_writer_scope():
+    async with discovery_writer_scope() as policy:
       async with database.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         rows = list((await db.execute(select(ProgrammeDigestReceipt).where(
@@ -597,8 +722,11 @@ async def deliver_notices(now):
                 selected.append((row, "digest", root.principal_id, root.id, None))
             if allowance >= 2 and row.deadline_notice == "unreserved":
                 categories = json.loads(preference.deadline_categories_json)
-                urgent = False
-                for binding in json.loads(row.finding_bindings_json):
+                urgent, evaluated = False, 0
+                bindings = json.loads(row.finding_bindings_json)
+                expected = sum(any(timedelta(0) < _aware(datetime.fromisoformat(d["due_at"])) - now <= timedelta(hours=48)
+                    for d in b.get("deadline_evidence", [])) for b in bindings)
+                for binding in bindings:
                     witness = staged.get(binding["job_id"])
                     if witness is None:
                         continue
@@ -608,9 +736,17 @@ async def deliver_notices(now):
                             await assert_discovery_authority(db, run.declared_authority_json, run=run)
                     except (GoalProgrammeError, ValueError, RuntimeError):
                         continue
+                    evaluated += 1
                     brief = next(a["parsed"] for a in witness.artifacts.values() if a["kind"] == "brief")
                     urgent = urgent or any(any(re.search(r"(?<!\w)" + re.escape(category) + r"(?!\w)", deadline["source_line"]) for category in categories)
                         for deadline in deterministic_deadlines(witness, brief, now))
+                if not urgent and expected and (evaluated == expected or row.id in failed_receipts) and row.id in staged_keys:
+                    current_key = await _deadline_negative_key(db, row, preference, now, policy)
+                    if current_key == staged_keys[row.id]:
+                        bindings[0]["deadline_no_match"] = DeadlineNegativeMemo(key=current_key,
+                            reason="deadline_source_requires_current_readback" if row.id in failed_receipts
+                            else "reviewed_category_no_match").model_dump()
+                        row.finding_bindings_json = json.dumps(bindings)
                 if urgent:
                     row.deadline_notice = "unknown"
                     selected.append((row, "deadline", root.principal_id, root.id,
@@ -688,29 +824,33 @@ async def notice_claim_reason(db, notification, now):
     return None
 
 
+async def authorize_goal_read(db, operator, goal_id):
+    """Canonical current Goal read scope, never execution or data ownership alone."""
+    from src.auth.ownership import selected_read_scopes, selected_read_principal
+    goal = await db.get(Goal, goal_id, populate_existing=True)
+    if goal is not None:
+        if goal.owner_session_id == operator.session_id and goal.owner_principal_id == operator.principal.principal_id:
+            return
+        scopes = await selected_read_scopes(operator, "goal", db=db)
+        if (scopes.get(goal.id) == goal.owner_session_id
+            and await selected_read_principal(operator, "goal", goal.id, db=db) == goal.owner_principal_id):
+            return
+    raise GoalProgrammeError("programme_disposition_read_denied")
+
+
 async def authorize_disposition_replay(db, operator, identity, receipt):
     """Private receipt reads use the original finding's canonical Goal scope.
 
     This metadata-only fence neither reopens sources nor refreshes authority.
     Deleted Goals retain receipts but confer no new historical read permission.
     """
-    from src.auth.ownership import selected_read_scopes, selected_read_principal
     for digest_row in (await db.execute(select(ProgrammeDigestReceipt).where(
         ProgrammeDigestReceipt.owner_identity_id == identity.id))).scalars():
         for binding in json.loads(digest_row.finding_bindings_json):
             if not any(finding_id(binding["job_id"], index) == receipt.finding_id
                 for index in range(binding["finding_count"])):
                 continue
-            goal = await db.get(Goal, binding["goal_id"])
-            if goal is None:
-                raise GoalProgrammeError("programme_disposition_read_denied")
-            if goal.owner_session_id == operator.session_id and goal.owner_principal_id == operator.principal.principal_id:
-                return
-            scopes = await selected_read_scopes(operator, "goal", db=db)
-            if (scopes.get(goal.id) == goal.owner_session_id
-                and await selected_read_principal(operator, "goal", goal.id, db=db) == goal.owner_principal_id):
-                return
-            raise GoalProgrammeError("programme_disposition_read_denied")
+            return await authorize_goal_read(db, operator, binding["goal_id"])
     raise GoalProgrammeError("programme_disposition_read_denied")
 
 

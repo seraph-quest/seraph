@@ -13,12 +13,22 @@ from src.db.models import ProgrammeDigestReceipt, ProgrammeFindingAction, Native
 
 
 @pytest.fixture
-def digest_owner(programme_setup, monkeypatch):
+async def digest_owner(programme_setup, async_db, monkeypatch):
     service, operator, goal, request, clock = programme_setup
     monkeypatch.setattr(digest, "goal_programme_service", service)
     monkeypatch.setattr("src.guardian.goal_programmes.goal_programme_service", service)
     monkeypatch.setattr("config.settings.settings.user_timezone", "Europe/Warsaw")
     clock[0] = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)
+    # The controlled 08:00 clock must lie within this fixture's finite Root
+    # lifetime even when the ordinary test command runs just after midnight.
+    from dataclasses import replace
+    from src.db.models import OperatorSession
+    expiry = max(datetime.now(timezone.utc), clock[0]) + timedelta(hours=24)
+    async with async_db() as db:
+        root = await db.get(OperatorSession, operator.session_id)
+        root.idle_expires_at = root.absolute_expires_at = expiry
+        db.add(root)
+    operator = replace(operator, idle_expires_at=expiry, absolute_expires_at=expiry)
     return service, operator, goal, request, clock
 
 
@@ -291,7 +301,7 @@ async def test_original_programme_authority_cancels_even_without_finding_binding
 
 
 @pytest.mark.asyncio
-async def test_disposition_replay_requires_exact_selected_goal_after_root_recovery(digest_owner, async_db):
+async def test_disposition_replay_requires_exact_selected_goal_after_root_recovery(digest_owner, async_db, monkeypatch):
     from dataclasses import replace
     from src.auth.service import _principal, _token_hash, authenticate_token
     from src.auth import ownership
@@ -306,7 +316,8 @@ async def test_disposition_replay_requires_exact_selected_goal_after_root_recove
     async with async_db() as db:
         db.add(ProgrammeDigestReceipt(owner_identity_id="identity-owned", local_date="2026-01-01",
             timezone="Europe/Warsaw", phase="finalized", finalize_deadline=clock[0], digest_json=digest.ProgrammeDigestV1(local_date="2026-01-01",
-                timezone="Europe/Warsaw", programme_ids=[], finding_ids=[finding], prepared_outputs=[], blocked_reasons=[]).model_dump_json(),
+                timezone="Europe/Warsaw", programme_ids=["original-programme"], finding_ids=[finding],
+                prepared_outputs=[{"artifact_id": "PRIVATE_ARTIFACT", "digest": "a" * 64, "schema_version": 1}], blocked_reasons=[]).model_dump_json(),
             finding_bindings_json=json.dumps([{"goal_id": goal.id, "programme_id": "original-programme",
                 "job_id": "original-job", "finding_count": 1, "goal_revision": goal.revision, "grant_revision": 1}])))
         db.add(ProgrammeFollowThrough(owner_identity_id="identity-owned", finding_id=finding,
@@ -328,33 +339,45 @@ async def test_disposition_replay_requires_exact_selected_goal_after_root_recove
     async def authenticated_request(request, call_next):
         request.state.operator = await authenticate_token(request.headers["Authorization"].removeprefix("Bearer "), touch=False)
         return await call_next(request)
-    async def get_finding():
+    async def get_payload():
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get("/api/guardian/inbox/programme-digests", headers={"Authorization": "Bearer replay-fresh-token"})
             assert response.status_code == 200
-            return response.json()["digests"][0]["findings"][0]
+            return response.json()
     with pytest.raises(GoalProgrammeError, match="programme_disposition_read_denied"):
         await digest.action(fresh, finding, action, clock[0])
-    unselected = await get_finding()
-    assert unselected["follow_through"] is None and unselected["task_id"] is None
-    assert "PRIVATE_INTENT" not in json.dumps(unselected) and "PRIVATE_TASK" not in json.dumps(unselected)
+    unselected = await get_payload()
+    for private_value in ("PRIVATE_INTENT", "PRIVATE_TASK", "PRIVATE_ARTIFACT", goal.id,
+        "original-programme", "original-job", finding):
+        assert private_value not in json.dumps(unselected)
+    assert unselected["digests"] == [] and unselected["programmes"] == []
     selections = [ownership.RecoverySelection(kind="goal", record_id=goal.id)]
     preview = await ownership.preview(fresh, ownership.RecoveryRequest(selections=selections))
     await ownership.confirm(fresh, ownership.RecoveryConfirmRequest(selections=selections,
         idempotency_key="select-original-goal", preview_digest=preview["preview_digest"], acknowledge_read_only=True))
     assert await digest.action(fresh, finding, action, clock[0]) == private_result
-    selected = await get_finding()
+    selected_payload = await get_payload()
+    selected = selected_payload["digests"][0]["findings"][0]
     assert selected["follow_through"]["desired_outcome"] == "PRIVATE_INTENT" and selected["task_id"] == "PRIVATE_TASK"
+    assert selected["goal_id"] == goal.id and selected["programme_id"] == "original-programme"
+    # A metadata-authorized fallback never launders an unverified stored artifact.
+    assert selected_payload["digests"][0]["digest"]["prepared_outputs"] == []
     for new_action in (digest.FindingAction(action="dismiss", idempotency_key="recovered-dismiss"),
         digest.FindingAction(action="snooze", until=clock[0] + timedelta(days=1), idempotency_key="recovered-snooze")):
         with pytest.raises(GoalProgrammeError, match="programme_finding_refresh_required"):
             await digest.action(fresh, finding, new_action, clock[0])
-    async with async_db() as db:
-        await db.delete(await db.get(Goal, goal.id))
+    async def deleted_during_readback(*args, **kwargs):
+        async with async_db() as db:
+            await db.delete(await db.get(Goal, goal.id))
+        raise PermissionError("Deleted during asynchronous source read")
+    monkeypatch.setattr(digest, "_read_binding", deleted_during_readback)
+    deleted = await get_payload()
     with pytest.raises(GoalProgrammeError, match="programme_disposition_read_denied"):
         await digest.action(fresh, finding, action, clock[0])
-    deleted = await get_finding()
-    assert deleted["follow_through"] is None and deleted["task_id"] is None
+    for private_value in ("PRIVATE_INTENT", "PRIVATE_TASK", "PRIVATE_ARTIFACT", goal.id,
+        "original-programme", "original-job", finding):
+        assert private_value not in json.dumps(deleted)
+    assert deleted["digests"] == [] and deleted["programmes"] == []
     from src.auth.service import AuthFailure
     async with async_db() as db:
         revoked = await db.get(OperatorSession, root.id)
@@ -461,3 +484,64 @@ async def test_quiet_then_revoked_recipient_skip_physical_deadline_staging(diges
         root.revoked_at = datetime.now(timezone.utc)
         db.add(root)
     await digest.tick(now + timedelta(minutes=1))
+
+
+@pytest.mark.asyncio
+async def test_deadline_read_failure_negative_memo_skips_repeated_fs_and_rechecks_changed_preferences(digest_owner, async_db, monkeypatch):
+    """Negative metadata fixture proves no success or authority from a cache."""
+    from src.db.models import WorkflowRunState, OperatorSession
+    operator, goal, now = await negative_deadline_pointer(digest_owner, async_db)
+    async with async_db() as db:
+        db.add(WorkflowRunState(run_identity="MUST_NOT_REOPEN_UNAUTHORIZED_METADATA",
+            root_run_identity="negative-source", workflow_name="negative-source", status="succeeded"))
+        from src.auth.service import _token_hash
+        root = await db.get(OperatorSession, operator.session_id)
+        root.token_hash = _token_hash("negative-auth-token")
+        root.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        root.last_seen_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db.add(root)
+    await digest.preferences(operator, digest.NotificationPreference(enabled=True, deadline_categories=["nonmatching"]))
+    reads = []
+    async def unreadable(*args, **kwargs):
+        reads.append(args[1])
+        raise PermissionError("Private physical bytes changed; never publish this exception")
+    monkeypatch.setattr("src.workflows.research_sources.physical_discovery_inputs", unreadable)
+    await digest.deliver_notices(now)
+    assert len(reads) == 1
+    async with async_db() as db:
+        receipt = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
+        memo = json.loads(receipt.finding_bindings_json)[0]["deadline_no_match"]
+        assert memo["reason"] == "deadline_source_requires_current_readback"
+        assert len(json.dumps(memo).encode()) <= 160
+        assert receipt.deadline_notice == "unreserved"
+    from src.auth.service import authenticate_token
+    # Authenticate with the same explicitly bounded lifetime as the 08:00
+    # fixture; touching must not expire it before the controlled delivery clock.
+    monkeypatch.setattr("config.settings.settings.operator_auth_idle_seconds", 24 * 3600)
+    async with async_db() as db:
+        before_touch = (await db.get(OperatorSession, operator.session_id)).last_seen_at
+    await authenticate_token("negative-auth-token", touch=True)
+    async with async_db() as db:
+        assert (await db.get(OperatorSession, operator.session_id)).last_seen_at != before_touch
+    await digest.deliver_notices(now + timedelta(minutes=1))
+    assert len(reads) == 1
+    await digest.preferences(operator, digest.NotificationPreference(enabled=True, deadline_categories=["grants"]))
+    await digest.deliver_notices(now + timedelta(minutes=2))
+    assert len(reads) == 2  # Changed categories physically recheck; failure grants nothing.
+    async with async_db() as db:
+        run = (await db.execute(select(WorkflowRunState))).scalar_one()
+        run.input_digest = "b" * 64  # Original metadata change invalidates a negative decision.
+        db.add(run)
+    await digest.deliver_notices(now + timedelta(minutes=3))
+    assert len(reads) == 3
+    async with async_db() as db:
+        root = await db.get(OperatorSession, operator.session_id)
+        root.revoked_at = datetime.now(timezone.utc)
+        db.add(root)
+    await digest.deliver_notices(now + timedelta(minutes=4))
+    assert len(reads) == 3
+    async with async_db() as db:
+        receipt = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
+        assert receipt.deadline_notice == "unreserved"
+        assert all(row.intervention_type != "programme_deadline"
+            for row in (await db.execute(select(NativeNotificationOutbox))).scalars())

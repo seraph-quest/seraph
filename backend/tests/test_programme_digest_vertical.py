@@ -354,6 +354,13 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             # Explicit opt-in with nonmatching category cannot deliver urgency.
             opted = await client.post(preferences, json={"enabled": True, "deadline_categories": ["research"]})
             assert opted.status_code == 200, opted.text
+            import src.workflows.research_sources as actual_sources
+            original_physical_read = actual_sources.physical_discovery_inputs
+            physical_reads = []
+            async def count_physical_reads(*args, **kwargs):
+                physical_reads.append(args[1] if len(args) > 1 else kwargs.get("job_id"))
+                return await original_physical_read(*args, **kwargs)
+            monkeypatch.setattr(actual_sources, "physical_discovery_inputs", count_physical_reads)
             await digest.tick(delivery_now)
             async with factory.accounting_sessions() as db:
                 notices = list((await db.execute(select(NativeNotificationOutbox))).scalars())
@@ -361,9 +368,17 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 issuer = await db.get(OperatorSession, notices[0].operator_session_id)
                 assert issuer.principal_id == notices[0].owner_principal_id
                 root_id, principal_id = issuer.id, issuer.principal_id
+            unchanged_category_reads = len(physical_reads)
+            touched_root = await client.get("/api/auth/session")
+            assert touched_root.status_code == 200 and touched_root.json()["session_id"] == root_id
+            await digest.deliver_notices(delivery_now + timedelta(seconds=15))
+            await digest.deliver_notices(delivery_now + timedelta(seconds=30))
+            assert len(physical_reads) == unchanged_category_reads
+            assert len(calls) == 6 and len(physical_contacts) == 4
             opted = await client.post(preferences, json={"enabled": True, "deadline_categories": ["grants"]})
             assert opted.status_code == 200, opted.text
             await digest.deliver_notices(delivery_now)
+            assert len(physical_reads) > unchanged_category_reads
             await digest.tick(delivery_now + timedelta(minutes=1))
             await digest.deliver_notices(delivery_now + timedelta(minutes=2))
             projected = await client.get("/api/guardian/inbox/programme-digests")
@@ -429,7 +444,16 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             monkeypatch.setattr(goal_programme_service, "_clock", lambda: next_day)
             held = await discovery.admit(goal_id=bindings[0][0], programme_id=bindings[0][1], grant_revision=1)
             assert held["job_id"] != bindings[0][2] and held["status"] in {"accepted", "queued"}
-            import src.workflows.research_sources as actual_sources
+            pending_read = await client.get("/api/guardian/inbox/programme-digests")
+            assert pending_read.status_code == 200, pending_read.text
+            pending_status = next(p for p in pending_read.json()["programmes"] if p["id"] == bindings[0][1])
+            completed_status = next(p for p in receipt["programmes"] if p["id"] == bindings[0][1])
+            assert pending_status["current_run_status"] == held["status"]
+            assert pending_status["current_admitted_at"] is not None
+            assert pending_status["last_run"] == completed_status["last_run"] is not None
+            assert pending_status["current_admitted_at"] != pending_status["last_run"]
+            assert pending_status["sources_checked"] == completed_status["sources_checked"] == 1
+            assert pending_status["output"] == completed_status["output"] is not None
             async def forbid_previous_physical_source(*args, **kwargs):
                 raise AssertionError("A current held/missing occurrence must not reopen yesterday's physical source")
             monkeypatch.setattr(actual_sources, "physical_discovery_inputs", forbid_previous_physical_source)
@@ -443,6 +467,14 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 next_digest = json.loads(next_receipt.digest_json)
                 assert next_digest["finding_ids"] == next_digest["prepared_outputs"] == []
                 assert "programme_current_output_unresolved" in next_digest["blocked_reasons"]
+            assert len(calls) == 6 and len(physical_contacts) == 4
+            # A real fresh Root for the same identity has no selected Goal recovery.
+            # Read projection must not expose the previous Root's private sources.
+            fresh_login = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
+            assert fresh_login.status_code == 200, fresh_login.text
+            unselected = await client.get("/api/guardian/inbox/programme-digests")
+            assert unselected.status_code == 200, unselected.text
+            assert unselected.json()["digests"] == unselected.json()["programmes"] == []
             assert len(calls) == 6 and len(physical_contacts) == 4
             print(json.dumps({"flow": "actual_cited_deadline_two_programmes_owner_day_daemon_claim", "programme_jobs": bindings,
                 "source_http_sha256": hashlib.sha256(literal_source).hexdigest(), "native_claim_ids": claimed_ids, "owner_root": root_id,

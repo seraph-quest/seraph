@@ -18,6 +18,7 @@ export interface ProgrammeFinding {
 export interface ProgrammeStatus {
   goal_id: string; id: string; grant_revision: number; state: string; reason_code: string | null;
   last_run: string | null; sources_checked: number; output: string | null; next_run: string | null;
+  current_run_status: string | null; current_admitted_at: string | null;
   next_digest_at?: string | null;
   remaining_allowance_microusd: number | null; recovery: string | null;
 }
@@ -50,6 +51,8 @@ export function isProgrammeDigestSnapshot(value: unknown): value is ProgrammeDig
     && Number.isSafeInteger(p.grant_revision) && p.grant_revision > 0
     && ["active", "blocked", "paused", "revoked", "review_due"].includes(p.state) && Number.isSafeInteger(p.sources_checked) && p.sources_checked >= 0
     && timestamp(p.last_run) && timestamp(p.next_run) && nullableText(p.output) && nullableText(p.reason_code) && nullableText(p.recovery)
+    && (p.current_run_status === null || ["accepted", "queued", "running", "awaiting_approval", "paused", "blocked", "unknown_external_effect", "cost_liability", "failed", "degraded", "succeeded", "cancelled"].includes(p.current_run_status))
+    && timestamp(p.current_admitted_at) && ((p.current_run_status === null) === (p.current_admitted_at === null))
     && (p.next_digest_at === undefined || timestamp(p.next_digest_at))
     && (p.remaining_allowance_microusd === null || (Number.isSafeInteger(p.remaining_allowance_microusd) && p.remaining_allowance_microusd >= 0)))
     && Array.isArray(snapshot.digests) && snapshot.digests.every((entry) => entry && typeof entry.id === "string"

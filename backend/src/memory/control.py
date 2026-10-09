@@ -830,7 +830,12 @@ async def _forget_memory_in_session(
     db, *, owner_session_id: str, memory_id: str, actor: str = "operator",
     reason: str | None = None, mode: str = "archive",
     privacy_boundary: str | None = None, composition_authority_check=None,
+    native_prepared_mutation=None, native_memory_report_source=None,
 ) -> dict[str, Any]:
+    if native_prepared_mutation is not None:
+        from src.memory.m5 import _apply_native_memory_mutation_plan
+        return await _apply_native_memory_mutation_plan(db, native_prepared_mutation,
+            method="memory.forget", native_memory_report_source=native_memory_report_source)
     """Strict existing-owner forget in the caller's original writer."""
     if not db.in_transaction():
         raise RuntimeError("memory forget requires a caller-owned writer")
@@ -869,6 +874,14 @@ async def _forget_memory_in_writer(
     return await _apply_prepared_forget_memory_in_writer(db, prepared)
 
 
+async def _certify_original_memory_body(db, budget, model):
+    if budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, COMPOSITION_DESCRIPTORS
+        if type(budget) is not HeaderReadBudget:
+            raise ValueError("original_memory_header_budget_invalid")
+        await budget.certify_all(db, COMPOSITION_DESCRIPTORS[model.__tablename__])
+
+
 async def _prepare_forget_memory_in_writer(
     db, *,
     memory_id: str,
@@ -878,6 +891,7 @@ async def _prepare_forget_memory_in_writer(
     privacy_boundary: str | None = None,
     composition_authority_check=None,
     expected_owner_session_id: str | None = None,
+    header_budget=None,
 ) -> _PreparedMemoryForget:
     normalized_mode = "redact" if str(mode or "").strip().lower() == "redact" else "archive"
     boundary = _normalize_privacy_boundary(privacy_boundary)
@@ -903,7 +917,7 @@ async def _prepare_forget_memory_in_writer(
     update_plan = await memory_repository._prepare_memory_control_metadata_in_session(
         db, memory_id, composition_authority_check=composition_authority_check,
         expected_owner_session_id=expected_owner_session_id, **update_kwargs
-    )
+    , header_budget=header_budget)
     memory = update_plan.memory
     audit_event = audit_repository._prepare_event(
         actor=actor,
@@ -937,8 +951,17 @@ async def _prepare_forget_memory_in_writer(
         capability_choice="guardian_canonical_memory",
         audit_event_type="memory_forgotten",
     )
+    projected_changes = dict(update_plan.changes)
+    dialect = db.get_bind().dialect
+    for name in ("last_confirmed_at", "updated_at"):
+        value = projected_changes[name]
+        column_type = Memory.__table__.columns[name].type.dialect_impl(dialect)
+        binder = column_type.bind_processor(dialect)
+        reader = column_type.result_processor(dialect, None)
+        if value is not None and binder is not None and reader is not None:
+            projected_changes[name] = reader(binder(value))
     result = {
-        "memory": _memory_payload(memory, _pending_changes=dict(update_plan.changes)),
+        "memory": _memory_payload(memory, _pending_changes=projected_changes),
         "receipt": receipt.as_payload(),
         "audit_event_id": audit_event.id,
         "policy": memory_operator_policy_payload(),

@@ -235,6 +235,53 @@ that original job, protected recovery bytes and unresolved liability. Unknown
 effects, suppressed Current output and debt retain their original recovery
 owners across restart; certificates cannot authorize replay or adoption.
 
+The accepted own-run refinement keeps Core15/native.v3 raw codecs unchanged.
+Only the Memory-reference tuple temporarily replaces three lexical values in
+its own Current record: the wrapper `state_digest` and own-row `tuple_digest`
+with 64 ASCII zeroes, and own-row `encoded_bytes` with integer zero. Every other
+journal byte remains exact, including Original, unrelated records, whitespace
+and escapes. Current `rows_digest` hashes the sorted closed rows using those
+same two own-row placeholders. The complete actual Current wrapper digest is
+independently required; normalization grants no authority. Original remains a
+genuine historical prepublication snapshot, never a Current substitute.
+
+Retained producer context carries only the closed locator
+`{profile, invocation_ref, original_checkpoint_id, original_checkpoint_digest}`,
+without duplicate Current rows or digests. Counts measure complete raw tuples,
+including the actual self-containing journal. Resolve decimal count lengths in
+at most 32 bounded iterations before computing cryptographic digests, then
+assert exact raw counts and their sum. The source-selected causal delta is
+`{schema_version: 1, new_rows: [{ref, values}], updates: [{ref, columns}], owner_events: [{table, key}]}`,
+with actual sorted addresses and exact resolved SQLite bind values. Exclude only
+derived Current; include Original, unrelated journal changes, context, status,
+lease, result, revision and all other causal fields. Full prior/new raw rows and
+journals remain separately CAS-bound and charged to the original frame.
+
+Capture requires the registered actual Source operation, the same sealed M5
+plan consumed by its original owner and the identical actual returned Effect.
+Stage the complete result and locator before computing Current, then publish
+context, Original and Current atomically. Completion requires the identical
+original claim held by the still-live registered Source, current original
+authority checks and all pending completion fields before one writer CAS
+advances the raw row and Current. Copy/restart cannot recreate that Source.
+Own-run target SHA-256 is
+`c7788ef63aea67418516e40778973c29d6d1fdc97c45a9cae8549461ac4308f7`;
+independent architecture review SHA-256 is
+`b657e3092f9acab4b4f8ed61e81589f645b84a774005120f24f8859c211f57f8`.
+
+Before Original exists, bounded read-only retention may recognize the complete
+Memory job universe under the same current 33-table certificate and frame.
+Require a closed candidate/context, native binding and actual claim journal
+when claimed, a nonterminal pre-effect state, `result = null`, and no Original,
+Current or effect receipts. Retain the entire unnormalized WRS with its existing
+Core codec and joins. Foreign, unbound, terminal, corrupt and overflowing
+members cannot be omitted. Readability grants no execution, adoption or future
+Source permission. After effect, Source-independent Original/Current validation
+is mandatory; Unknown grants no success or replay. Generic cancellation and
+recovery cannot leave stale validated Current or reconstruct original capacity
+from snapshot counts. Missing genuine owner or original capacity blocks mutation
+while preserving Original, fences and liabilities.
+
 A small selected Memory graph can therefore be blocked by excessive unrelated
 retained history. This is an explicit native Memory capability limit. Ordinary
 Forget, full audit history and existing privacy-deletion semantics remain

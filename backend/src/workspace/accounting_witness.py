@@ -340,7 +340,7 @@ def _splice_native_memory_current_checkpoint(raw, replacement):
     return result
 
 
-def _native_memory_transient_sql_row(instance):
+def _native_memory_planned_sql_row(instance, changes=None, *, transient=False):
     """Closed deterministic SQLite binding of a real transient constructor row.
 
     This byte projection does not enroll the instance or issue source authority.
@@ -354,11 +354,17 @@ def _native_memory_transient_sql_row(instance):
     from src.memory.header_bounds import HeaderBoundsError, MEMORY_DESCRIPTORS, _MEMORY_MODELS, AUDIT_EVENT, WRS_BY_RUN
     table = getattr(type(instance), "__tablename__", None)
     model = {"audit_events": AuditEvent, "workflow_run_states": WorkflowRunState}.get(table, _MEMORY_MODELS.get(table))
-    if model is None or type(instance) is not model or not inspect(instance).transient:
+    if model is None or type(instance) is not model or (transient and not inspect(instance).transient):
         raise HeaderBoundsError("memory_transient_row_unavailable")
     descriptor = {"audit_events": AUDIT_EVENT, "workflow_run_states": WRS_BY_RUN}.get(table)
     if descriptor is None:
         descriptor = MEMORY_DESCRIPTORS[table]
+    from sqlalchemy.orm.attributes import NO_VALUE
+    state=inspect(instance)
+    if changes is None:
+        changes={}
+    if type(changes) is not dict or not set(changes)<=set(descriptor.columns):
+        raise HeaderBoundsError("memory_transient_bind_value_invalid")
     selected_dialect = dialect()
     row = {}
     allowed_types = {String, Integer, Boolean, Float, DateTime, Enum, AutoString}
@@ -366,7 +372,14 @@ def _native_memory_transient_sql_row(instance):
         column = model.__table__.columns[name]
         if type(column.type) not in allowed_types:
             raise HeaderBoundsError("memory_transient_bind_type_unsupported")
-        value = getattr(instance, name)
+        if name in changes:
+            value=changes[name]
+        else:
+            value=state.attrs[name].loaded_value
+            if value is NO_VALUE:
+                raise HeaderBoundsError(
+                    "memory_transient_bind_value_invalid" if transient else "memory_planned_row_not_loaded"
+                )
         try:
             processor = column.type.dialect_impl(selected_dialect).bind_processor(selected_dialect)
             value = processor(value) if processor is not None else value
@@ -381,6 +394,234 @@ def _native_memory_transient_sql_row(instance):
             raise HeaderBoundsError("memory_transient_bind_value_invalid")
         row[name] = value
     return row
+
+
+def _native_memory_transient_sql_row(instance):
+    """Bind a real original transient row; no Source/constructor enrollment."""
+    return _native_memory_planned_sql_row(instance, transient=True)
+
+
+def _native_memory_row_bytes(descriptor, key, row):
+    """The closed raw Memory-reference tuple; never a Source permission."""
+    from src.memory.header_bounds import HeaderBoundsError
+    if (set(row) != set(descriptor.columns) or type(key) is not str
+            or not key or len(key.encode("utf-8")) > 512):
+        raise HeaderBoundsError("memory_reference_row_invalid")
+    return json.dumps(["native-composition-memory.v1", descriptor.table, key,
+        [[name, row[name].hex() if type(row[name]) is float else row[name]]
+         for name in descriptor.columns]], ensure_ascii=True, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+async def _native_memory_read_reference_rows(db, references, header_budget):
+    """Read exact source-selected raw tuples after their whole-row certificate.
+
+    This byte helper grants no Source, publication, adoption or cleanup right.
+    The owner must supply its genuine selected graph and validate its semantics.
+    """
+    from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, HeaderReadBudget, HeaderBoundsError
+    from sqlalchemy import text
+    if type(references) is not tuple or type(header_budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("memory_reference_row_invalid")
+    if (len(references) > 128 or any(type(ref) is not tuple or len(ref) != 2
+            or type(ref[0]) is not str or type(ref[1]) is not str for ref in references)
+            or references != tuple(sorted(set(references)))):
+        raise HeaderBoundsError("memory_reference_row_invalid")
+    result = []
+    for table, key in references:
+        descriptor = COMPOSITION_DESCRIPTORS.get(table)
+        if descriptor is None or type(key) is not str or not key or len(key.encode("utf-8")) > 512:
+            raise HeaderBoundsError("memory_reference_row_invalid")
+        await header_budget.certify(db, descriptor, (key,))
+        columns = ",".join('"' + name + '"' for name in descriptor.columns)
+        parameter = int(_composition_address(table, key)) if table == "work_board_events" else key
+        rows = (await db.execute(text(
+            f'SELECT {columns} FROM "{table}" WHERE "{descriptor.key}"=:key'),
+            {"key": parameter})).all()
+        if len(rows) != 1:
+            raise HeaderBoundsError("memory_reference_row_missing")
+        row = dict(zip(descriptor.columns, rows[0]))
+        encoded = _native_memory_row_bytes(descriptor, key, row)
+        result.append((descriptor, key, row, encoded))
+    return tuple(result)
+
+
+def _native_memory_own_journal_projection(raw, run_identity):
+    """Replace exactly the adopted three lexical values in a temporary copy."""
+    from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
+    records = strict_json_loads(raw)
+    _, current = preflight_native_memory_reference_journal(raw)
+    if current is None or current["payload"]["state"] != "validated":
+        raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    record_index = next(index for index, record in enumerate(records)
+        if record.get("checkpoint_id") == MEMORY_CURRENT_CHECKPOINT)
+    own = [index for index, row in enumerate(current["payload"]["rows"])
+        if row["ref"] == {"table": "workflow_run_states", "key": run_identity}]
+    if len(own) != 1:
+        raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    replacements = {
+        (record_index, "state_digest"): '"' + "0" * 64 + '"',
+        (record_index, "payload", "rows", own[0], "tuple_digest"): '"' + "0" * 64 + '"',
+        (record_index, "payload", "rows", own[0], "encoded_bytes"): "0",
+    }
+    decoder = json.JSONDecoder()
+    spans = []
+    def whitespace(position):
+        while position < len(raw) and raw[position] in " \t\r\n":
+            position += 1
+        return position
+    def visit(position, path):
+        position = whitespace(position)
+        start = position
+        if path in replacements:
+            _, end = decoder.raw_decode(raw, position)
+            spans.append((start, end, replacements[path]))
+            return end
+        if raw[position] == "{":
+            position = whitespace(position + 1)
+            while raw[position] != "}":
+                key, position = decoder.raw_decode(raw, position)
+                position = whitespace(position)
+                if raw[position] != ":":
+                    raise HeaderBoundsError("memory_reference_journal_invalid")
+                position = whitespace(visit(position + 1, (*path, key)))
+                if raw[position] == ",":
+                    position = whitespace(position + 1)
+            return position + 1
+        if raw[position] == "[":
+            position, index = whitespace(position + 1), 0
+            while raw[position] != "]":
+                position = whitespace(visit(position, (*path, index)))
+                index += 1
+                if raw[position] == ",":
+                    position = whitespace(position + 1)
+            return position + 1
+        return decoder.raw_decode(raw, position)[1]
+    visit(0, ())
+    if len(spans) != 3:
+        raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    for start, end, replacement in sorted(spans, reverse=True):
+        raw = raw[:start] + replacement + raw[end:]
+    return raw
+
+
+def _native_memory_current_rows_digest(rows, run_identity):
+    """The adopted aggregate uses the same two own-row placeholders."""
+    from src.workflows.job_runtime import _digest
+    from src.memory.header_bounds import HeaderBoundsError
+    normalized = []
+    count = 0
+    for row in rows:
+        value = dict(row)
+        if row["ref"] == {"table": "workflow_run_states", "key": run_identity}:
+            value.update(tuple_digest="0" * 64, encoded_bytes=0)
+            count += 1
+        normalized.append(value)
+    if count != 1:
+        raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    return _digest(normalized)
+
+
+def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
+    """Finite numeric convergence over real pending WRS values, no writer grant.
+
+    The caller must first establish the genuine owner/readset. This helper
+    never mutates its input, writes SQL, or installs a protected checkpoint.
+    Every temporary tuple appearance consumes the original numeric frame.
+    """
+    from copy import deepcopy
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget, WRS_BY_RUN, MAX_BYTES
+    from src.workflows.job_runtime import _canonical, _digest
+    if type(header_budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("memory_current_budget_unavailable")
+    row, payload = dict(raw_row), deepcopy(payload)
+    identity = row["run_identity"]
+    own = [item for item in payload["rows"]
+           if item["ref"] == {"table": "workflow_run_states", "key": identity}]
+    if len(own) != 1:
+        raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    own = own[0]
+    own.update(tuple_digest="0" * 64, encoded_bytes=0)
+    payload["rows_digest"] = _native_memory_current_rows_digest(payload["rows"], identity)
+    original_journal = row["checkpoint_receipts_json"]
+    def build():
+        payload["encoded_bytes"] = sum(item["encoded_bytes"] for item in payload["rows"])
+        preflight_native_memory_reference_payload(payload, current=True)
+        record = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "safe": True,
+                  "state_digest": _digest(payload), "payload": payload}
+        journal = _splice_native_memory_current_checkpoint(original_journal, record)
+        # Count all temporary raw appearances before encoding the full tuple.
+        # Six times UTF8 is a conservative bound for canonical ASCII escaping.
+        candidate = dict(row, checkpoint_receipts_json=journal)
+        upper = len(_canonical(["native-composition-memory.v1", WRS_BY_RUN.table, identity,
+            [[name, None] for name in WRS_BY_RUN.columns]]).encode("utf-8"))
+        upper += sum(6 * len(value.encode("utf-8")) + 2 if type(value) is str
+                     else 32 if value is not None else 0 for value in candidate.values())
+        header_budget.debit(upper)
+        encoded = _native_memory_row_bytes(WRS_BY_RUN, identity, candidate)
+        if len(encoded) > MAX_BYTES:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        return candidate, record, encoded
+    for _ in range(32):
+        candidate, record, encoded = build()
+        measured = len(encoded)
+        if measured == own["encoded_bytes"]:
+            break
+        if measured < own["encoded_bytes"]:
+            raise HeaderBoundsError("memory_current_count_not_convergent")
+        own["encoded_bytes"] = measured
+    else:
+        raise HeaderBoundsError("memory_current_count_not_convergent")
+    projected = dict(candidate)
+    # The normalized temporary tuple is also a charged byte appearance.
+    header_budget.debit(len(encoded))
+    projected["checkpoint_receipts_json"] = _native_memory_own_journal_projection(
+        candidate["checkpoint_receipts_json"], identity)
+    own["tuple_digest"] = hashlib.sha256(_native_memory_row_bytes(WRS_BY_RUN, identity, projected)).hexdigest()
+    candidate, record, final_bytes = build()
+    if len(final_bytes) != measured or record["payload"]["encoded_bytes"] != sum(
+            item["encoded_bytes"] for item in record["payload"]["rows"]):
+        raise HeaderBoundsError("memory_current_count_not_convergent")
+    return candidate, record
+
+
+def _native_memory_selected_delta_preimage(new_rows, updates, owner_events):
+    """Closed source-produced SQL binds, not a reconstructed owner effect."""
+    from src.memory.header_bounds import HeaderBoundsError, COMPOSITION_DESCRIPTORS
+    from src.workflows.job_runtime import _canonical
+    def selected(values, field):
+        result = []
+        for descriptor, key, row in values:
+            if (not any(descriptor is item for item in COMPOSITION_DESCRIPTORS.values())
+                    or type(row) is not dict or type(key) is not str or not key
+                    or len(key.encode("utf-8")) > 512):
+                raise HeaderBoundsError("memory_reference_row_invalid")
+            if any(type(value) is float and not math.isfinite(value) for value in row.values()):
+                raise HeaderBoundsError("memory_reference_row_invalid")
+            if field == "values":
+                _native_memory_row_bytes(descriptor, key, row)
+            elif not set(row) <= set(descriptor.columns):
+                raise HeaderBoundsError("memory_reference_row_invalid")
+            # Causal preimages retain exact resolved SQLite bind values. The
+            # separate raw tuple codec's float.hex encoding is unchanged.
+            encoded = dict(row)
+            if any(value is not None and type(value) not in {str, int, float} for value in encoded.values()):
+                raise HeaderBoundsError("memory_reference_row_invalid")
+            result.append({"ref": {"table": descriptor.table, "key": key}, field: encoded})
+        result.sort(key=lambda value: (value["ref"]["table"], value["ref"]["key"]))
+        if len({(item["ref"]["table"], item["ref"]["key"]) for item in result}) != len(result):
+            raise HeaderBoundsError("memory_reference_row_invalid")
+        return result
+    if any(table not in {"audit_events", "work_board_events"} or type(key) is not str
+           or not key or len(key.encode("utf-8")) > 512 for table, key in owner_events):
+        raise HeaderBoundsError("memory_reference_row_invalid")
+    value = {"schema_version": 1, "new_rows": selected(new_rows, "values"),
+             "updates": selected(updates, "columns"),
+             "owner_events": [{"table": table, "key": key} for table, key in sorted(set(owner_events))]}
+    # All leaves are now closed raw SQLite scalars. The existing serializer's
+    # default=str is never relied upon for an unsupported object/nonfinite.
+    _canonical(value)
+    return value
 
 
 async def reserve_native_memory_admission_run(db,run,admission):
@@ -409,6 +650,28 @@ async def reserve_native_memory_admission_run(db,run,admission):
         ensure_ascii=True,sort_keys=True,separators=(",",":"),allow_nan=False).encode("utf-8")
     admission.header_budget.reserve_future_row(WRS_BY_RUN,run.run_identity,len(encoded))
     return len(encoded)
+
+
+async def reserve_native_memory_pending_run(db, run, pending_changes, header_budget, *, outputs=()):
+    """Numeric prewrite reserve for an actual original owner's staged WRS.
+
+    This deliberately grants no claim, transition or checkpoint permission.
+    Each actual public/private output appearance must be supplied by its
+    original owner, in addition to the complete pending raw tuple.
+    """
+    from src.db.models import WorkflowRunState
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget, WRS_BY_RUN, _connection_state
+    from src.workflows.job_runtime import _canonical
+    if (type(run) is not WorkflowRunState or type(header_budget) is not HeaderReadBudget
+            or type(outputs) is not tuple):
+        raise HeaderBoundsError("memory_pending_reserve_unavailable")
+    await _connection_state(db)
+    row = _native_memory_planned_sql_row(run, pending_changes)
+    amount = len(_native_memory_row_bytes(WRS_BY_RUN, run.run_identity, row))
+    for output in outputs:
+        amount += len(_canonical(output).encode("utf-8"))
+    header_budget.debit(amount)
+    return amount
 
 
 async def _preflight_native_memory_journal_headers(db, *, existing_references=(),
@@ -629,6 +892,55 @@ def composition_row_digest(table, key, row):
     return hashlib.sha256(b"seraph-continuity-row-v1\0" + encoded).hexdigest()
 
 
+def _checked_preoriginal_memory_row(row):
+    """Bounded read-only pre-effect retention; never execution permission."""
+    from src.runtime_plugins.memory_producer import memory_context
+    from src.runtime_plugins.dispatch import _receipt_witness, _ms
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    from src.memory.header_bounds import strict_json_loads
+    try:
+        run = SimpleNamespace(**row)
+        run.deadline_at = datetime.fromisoformat(row["deadline_at"])
+        context = memory_context(run)
+        original, current = preflight_native_memory_reference_journal(row["checkpoint_receipts_json"])
+        if (original is not None or current is not None or context["result"] is not None
+                or row["status"] not in {"accepted", "queued", "running", "awaiting_approval", "paused", "blocked"}
+                or strict_json_loads(row["effect_receipts_json"]) != []):
+            raise ValueError("memory_preoriginal_state_changed")
+        entries = strict_json_loads(row["checkpoint_receipts_json"])
+        claims = [entry for entry in entries if type(entry) is dict
+                  and str(entry.get("checkpoint_id", "")).startswith("runtime-service-invocation:")]
+        if type(row["attempt_count"]) is not int or not 0 <= row["attempt_count"] <= 1:
+            raise ValueError("memory_preoriginal_claim_changed")
+        if row["attempt_count"] == 0:
+            if claims or row["status"] == "running" or row["lease_owner"] is not None:
+                raise ValueError("memory_preoriginal_claim_changed")
+        else:
+            if len(claims) != 1:
+                raise ValueError("memory_preoriginal_claim_changed")
+            if set(claims[0]) != {"checkpoint_id", "state_digest", "safe", "payload"}:
+                raise ValueError("memory_preoriginal_claim_changed")
+            claim = _receipt_witness(claims[0])
+            binding = RuntimeCompositionBinding.from_json(row["composition_binding_json"])
+            if (any(claim[field] != row[column] for field, column in (
+                    ("invocation_ref", "run_identity"), ("input_digest", "input_digest"),
+                    ("authority_digest", "authority_digest"), ("run_fingerprint", "run_fingerprint"),
+                    ("attempt_count", "attempt_count"), ("fencing_token", "fencing_token")))
+                    or claim["origin_method"] != binding.origin_method
+                    or claim["native_branch"] != binding.native_branch
+                    or claim["allowed_child_methods"] != binding.allowed_child_methods
+                    or claim["composition_binding_digest"] != binding.binding_digest
+                    or claim["package_digest"] != binding.host_package_digest
+                    or claim["host_composition_digest"] != binding.host_composition_digest
+                    or claim["host_boot_nonce"] != context["candidate"]["host_boot_nonce"]
+                    or claim["original_deadline_at"] != _ms(run.deadline_at)
+                    or (row["status"] == "running" and claim["lease_owner"] != row["lease_owner"])):
+                raise ValueError("memory_preoriginal_claim_changed")
+        return context["candidate"]
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise ProductionWorkspaceReconciliationError("composition_native_memory_preoriginal_invalid") from error
+
+
 def composition_closure(connection, *, verify_files=None):
     """Finite native joins. Stream row bodies; publish only hashes and counts.
 
@@ -637,12 +949,22 @@ def composition_closure(connection, *, verify_files=None):
     """
     from src.runtime_plugins.ownership import DOMAINS, RuntimeCompositionBinding, CompositionDependency
     tables = {row[0] for row in _sql(connection, "SELECT name FROM sqlite_master WHERE type='table'")}
+    from src.memory.universe import native_memory_universe_on_connection
+    from src.memory.composition_headers import current_budget, charge_table
+    if "workflow_run_states" in tables and current_budget() is not None:
+        # The whole-table certificate pays before the repeated bounded census.
+        charge_table(connection, "workflow_run_states")
+    memory_identities = (native_memory_universe_on_connection(connection)
+                         if "workflow_run_states" in tables else ())
     if "runtime_composition_states" not in tables:
+        if memory_identities:
+            raise ProductionWorkspaceReconciliationError("composition_native_memory_retention_unavailable")
         return None, set()
-    from src.memory.composition_headers import charge_table
     charge_table(connection, "runtime_composition_states")
     inventory = list(_sql(connection, "SELECT runtime_domain,owner_kind,epoch,composition_digest,state,recovery_receipt_ref FROM runtime_composition_states ORDER BY runtime_domain"))
     if not inventory:
+        if memory_identities:
+            raise ProductionWorkspaceReconciliationError("composition_native_memory_retention_unavailable")
         return None, set()
     if len(inventory) != 14 or {row[0] for row in inventory} != set(DOMAINS):
         raise ProductionWorkspaceReconciliationError("composition_inventory_incomplete")
@@ -650,19 +972,18 @@ def composition_closure(connection, *, verify_files=None):
         CompositionDependency(*row[:4])
         if row[4] not in {"ready", "draining", "blocked"}:
             raise ProductionWorkspaceReconciliationError("composition_inventory_invalid")
-    # The full genuine Memory Original/Current/copy owner contract is not
-    # installed yet. Discover even unbound, foreign, unsealed and terminal
-    # members before any private tuple. Binding-only traversal must not omit
-    # them and publish a seemingly complete source/destination/stopped closure.
-    if _sql(connection, "SELECT 1 FROM workflow_run_states "
-            "INDEXED BY ix_workflow_run_states_job_kind WHERE job_kind=? LIMIT 1",
-            ("runtime_service_memory_v1",)).fetchone() is not None:
-        raise ProductionWorkspaceReconciliationError("composition_native_memory_retention_unavailable")
+    # The exact indexed universe includes foreign, unbound and terminal rows.
+    # A current whole-superset certificate is mandatory before their bodies;
+    # readable pre-effect rows confer no Source or future permission.
+    if memory_identities:
+        if current_budget() is None:
+            raise ProductionWorkspaceReconciliationError("composition_native_memory_retention_unavailable")
     for table, fields in RETAINED_FIELDS.items():
         if table not in tables:
             raise ProductionWorkspaceReconciliationError("composition_projection_schema_changed")
         validate_retained_table_schema(connection, table)
     pending = [("runtime_composition_states", row[0]) for row in inventory]
+    pending.extend(("workflow_run_states", identity) for identity in memory_identities)
     charge_table(connection, "workflow_run_states")
     pending.extend(("workflow_run_states", row[0]) for row in _sql(connection,
         "SELECT run_identity FROM workflow_run_states WHERE composition_binding_json IS NOT NULL"))
@@ -746,6 +1067,13 @@ def composition_closure(connection, *, verify_files=None):
                 required("audit_events", reference)
         if table == "workflow_run_states":
             session_role("legacy_job_session_fk", table, key, row["session_id"])
+            memory_candidate = None
+            if row["job_kind"] == "runtime_service_memory_v1":
+                memory_candidate = _checked_preoriginal_memory_row(row)
+                source = memory_candidate.get("source")
+                if source is not None:
+                    required("work_board_tasks", source["task_id"])
+                    required("work_board_attempts", source["attempt_id"])
             binding = row["composition_binding_json"]
             if binding is not None:
                 native_binding = RuntimeCompositionBinding.from_json(binding)
@@ -760,7 +1088,7 @@ def composition_closure(connection, *, verify_files=None):
                         ("work_board_links", "link_id"), ("work_board_handoffs", "handoff_id"),
                         ("work_board_tasks", "producer_task_id"), ("work_board_attempts", "producer_attempt_id")):
                         required(target_table, report[field])
-                elif row["job_kind"] not in {"workflow", "conversation_turn_v1", "research_dossier", "readonly_research_child", "runtime_service_read_v1"}:
+                elif row["job_kind"] not in {"workflow", "conversation_turn_v1", "research_dossier", "readonly_research_child", "runtime_service_read_v1", "runtime_service_memory_v1"}:
                     raise ProductionWorkspaceReconciliationError("composition_extension_unsupported")
             for field in ("root_run_identity", "parent_run_identity", "parent_job_id"):
                 required(table, row[field])

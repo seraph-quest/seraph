@@ -139,7 +139,7 @@ class NativeServiceDispatcher:
         from src.workflows.job_runtime import durable_job_repository
         self.jobs = jobs or durable_job_repository
 
-    async def _current_in_db(self, db, invocation_ref, method, original_scope):
+    async def _current_in_db(self, db, invocation_ref, method, original_scope, *, native_memory_call=None):
         from src.auth.service import authenticate_principal
         from src.db.models import OperatorSession
         from src.workflows.job_runtime import _assert_canonical_goal_fence
@@ -150,7 +150,16 @@ class NativeServiceDispatcher:
             raise NativeServiceBlocked("native_original_scope_missing")
         # Upgrade the existing owner session before private claims/message
         # bytes. Ordinary public reads do not establish this full proof.
-        await begin_native_writer(db, owner="finite_service")
+        memory_budget = None
+        if method in {"memory.propose", "memory.applyReviewed", "memory.forget"}:
+            from .memory_producer import memory_dispatch_header_budget
+            memory_budget = memory_dispatch_header_budget(dispatcher=self, scope=original_scope,
+                called_scope=native_memory_call, invocation_ref=invocation_ref, method=method)
+        await begin_native_writer(db, owner="finite_service", **(
+            {"header_budget": memory_budget} if memory_budget is not None else {}))
+        if memory_budget is not None:
+            from src.memory.header_bounds import WRS_BY_RUN
+            await memory_budget.certify(db, WRS_BY_RUN, (invocation_ref,))
         run = await self.jobs._fetch(db, invocation_ref)
         witness = _witness(run, original_scope)
         binding = RuntimeCompositionBinding.from_json(run.composition_binding_json)
@@ -171,7 +180,8 @@ class NativeServiceDispatcher:
             raise NativeServiceBlocked("native_original_attempt_changed")
         if dict(original_scope.witness) != witness:
             raise NativeServiceBlocked("native_original_scope_changed")
-        await validate_invocation(db, binding)
+        await validate_invocation(db, binding, **(
+            {"header_budget": memory_budget} if memory_budget is not None else {}))
         if run.status != "running" and not terminal_output_read:
             raise NativeServiceBlocked("native_original_job_not_running")
         if not terminal_output_read:
@@ -182,6 +192,9 @@ class NativeServiceDispatcher:
         if run.owner_kind != "user":
             raise NativeServiceBlocked("native_programme_provenance_unavailable")
         now = datetime.now(timezone.utc)
+        if memory_budget is not None:
+            from src.memory.header_bounds import OPERATOR_SESSION
+            await memory_budget.certify(db, OPERATOR_SESSION, (run.operator_session_id,))
         root = await db.scalar(select(OperatorSession).where(
             OperatorSession.id == run.operator_session_id,
             OperatorSession.principal_id == run.owner_principal_id,
@@ -191,7 +204,13 @@ class NativeServiceDispatcher:
             .execution_options(populate_existing=True))
         if root is None or run.operator_session_id != run.session_id:
             raise NativeServiceBlocked("native_original_root_inactive")
+        if memory_budget is not None:
+            from .memory_producer import certify_original_memory_principal
+            await certify_original_memory_principal(db, run.owner_principal_id, memory_budget)
         await authenticate_principal(run.owner_principal_id, db=db)
+        if memory_budget is not None and run.goal_id is not None:
+            from src.memory.header_bounds import GOAL
+            await memory_budget.certify(db, GOAL, (run.goal_id,))
         await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
             owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
             session_id=run.session_id, authority=run.declared_authority_json)
@@ -202,6 +221,7 @@ class NativeServiceDispatcher:
     async def dispatch(self, frame, *, original_scope):
         from src.auth.service import AuthFailure
         from src.workflows.job_runtime import DurableJobError
+        from src.memory.header_bounds import HeaderBoundsError
         method = frame["method"]
         payload = validate_request(method, frame["payload"])
         if type(original_scope) is not CalledServiceInvocation:
@@ -239,7 +259,9 @@ class NativeServiceDispatcher:
                 async with self.jobs._session() as db:
                     return await dispatch_native_turn_cancel(self, db, frame, payload, call_scope, purpose)
             async with self.jobs._session() as db:
-                run, witness, binding = await self._current_in_db(db, frame["invocation_ref"], method, original_scope)
+                run, witness, binding = await self._current_in_db(db, frame["invocation_ref"], method, original_scope,
+                    **({"native_memory_call": call_scope} if method in
+                        {"memory.propose", "memory.applyReviewed", "memory.forget"} else {}))
                 if method == "conversation.read":
                     from src.agent.session import session_manager
                     from src.agent.turn_execution import validate_native_turn_owner
@@ -318,6 +340,10 @@ class NativeServiceDispatcher:
             # Every remaining operation needs its reviewed canonical native
             # candidate/owner binding, never a generic handler or plugin args.
             return blocked("native_method_candidate_not_bound")
+        except HeaderBoundsError:
+            if method in {"memory.propose", "memory.applyReviewed", "memory.forget"}:
+                return blocked("canonical_bound_not_certified")
+            raise
         except NativeServiceBlocked as exc:
             return blocked(exc.reason_code)
         except (AuthFailure, DurableJobError):

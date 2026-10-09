@@ -2279,6 +2279,29 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
     return payload
 
 
+def _native_memory_pending_output(run, pending_changes, *, receipt):
+    """Original serializer over actual pending binds, for numeric reserve only."""
+    from sqlalchemy.dialects.sqlite import dialect
+    from src.workspace.accounting_witness import _native_memory_planned_sql_row
+    # The closed binder validates all loaded original fields and exact pending
+    # values. This temporary view is never a mapped row or an authority handle.
+    bound = _native_memory_planned_sql_row(run, pending_changes)
+    selected_dialect = dialect()
+    projected = {}
+    for name in pending_changes:
+        column = WorkflowRunState.__table__.columns[name]
+        processor = column.type.dialect_impl(selected_dialect).result_processor(selected_dialect, None)
+        projected[name] = processor(bound[name]) if processor is not None and bound[name] is not None else bound[name]
+
+    class _NumericProjection:
+        def __getattr__(self, name):
+            if name in projected:
+                return projected[name]
+            return getattr(run, name)
+
+    return _serialize(_NumericProjection(), receipt=receipt)
+
+
 def _deduped_admission(existing: WorkflowRunState, *, binding: str) -> dict[str, Any]:
     """Return the canonical row for a repeated admission attempt.
 
@@ -5419,7 +5442,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """Complete only the same-writer actual Memory result and retained owners."""
         from src.runtime_plugins.memory_producer import memory_context
         from src.runtime_plugins.ownership import begin_native_writer
-        from src.workspace.accounting_witness import validate_native_memory_retention
+        from src.workspace.accounting_witness import (
+            validate_native_memory_retention,
+            prepare_native_memory_lifecycle,
+            apply_native_memory_lifecycle,
+        )
         if type(original_claim) is not NativeServiceClaim or original_claim._host is None:
             raise DurableJobLeaseError("original native Memory claim required")
         host = original_claim._host
@@ -5446,18 +5473,37 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             self._assert_lease(run, owner=payload["lease_owner"], fencing_token=payload["fencing_token"])
             await _validate_native_service_claim(db, run,
                 _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce, header_budget=header_budget))
+            from src.memory.header_bounds import GOAL
+            if run.goal_id is not None:
+                await header_budget.certify(db, GOAL, (run.goal_id,))
+            await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+                goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+                owner_principal_id=run.owner_principal_id, session_id=run.session_id,
+                authority=run.declared_authority_json)
             await validate_native_memory_retention(db, run, sealed)
             now = _utc_now()
-            run.status = "succeeded" if result["status"] == "succeeded" else "blocked"
-            run.result_digest = sealed["result_digest"]
-            run.result_summary = "Native Memory owner result committed"
-            run.failure_reason = result.get("reason_code")
-            run.finished_at, run.updated_at = now, now
-            run.lease_owner, run.lease_expires_at = None, None
-            run.revision += 1
+            # Stage the original owner's whole causal patch before computing
+            # the self-containing Current envelope. The private preparation
+            # binds the actual registered claim, writer, prior row and journal;
+            # these values alone carry no publication authority.
+            pending_changes = {
+                "status": "succeeded" if result["status"] == "succeeded" else "blocked",
+                "result_digest": sealed["result_digest"],
+                "result_summary": "Native Memory owner result committed",
+                "failure_reason": result.get("reason_code"),
+                "finished_at": now,
+                "updated_at": now,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "revision": _revision(run) + 1,
+                "checkpoint_context_json": run.checkpoint_context_json,
+            }
+            lifecycle = await prepare_native_memory_lifecycle(db, run,
+                original_claim=original_claim, pending_changes=pending_changes,
+                header_budget=header_budget)
             if not host.admitting or host.boot_nonce != original_claim.host_boot_nonce:
                 raise DurableJobLeaseError("original native Memory host changed before settlement")
-            await db.flush()
+            await apply_native_memory_lifecycle(db, run, lifecycle)
             return _serialize(run, receipt={"kind": "native_memory_completed", "memory_status": result["memory_status"]})
 
     async def claim_service_job(self, job_id: str, *, host, owner: str,
@@ -5912,6 +5958,33 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     raise DurableJobLeaseError("native service claim already stamped")
                 claim_values["checkpoint_receipts_json"] = _canonical(_bounded_checkpoint_receipts([*history, service_checkpoint]))
                 db.info["composition_native_claim_receipt"] = service_checkpoint
+            if run.job_kind == "runtime_service_memory_v1":
+                from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission, memory_context
+                from src.workspace.accounting_witness import (
+                    preflight_native_memory_reference_journal,
+                    reserve_native_memory_pending_run,
+                )
+                if (_runtime_service_claim is None or service_checkpoint is None
+                        or type(_runtime_service_claim.native_memory_admission) is not NativeMemoryMutationAdmission
+                        or _runtime_service_claim.native_memory_admission.header_budget is not header_budget
+                        or memory_context(run)["result"] is not None
+                        or preflight_native_memory_reference_journal(run.checkpoint_receipts_json) != (None, None)):
+                    raise DurableJobLeaseError("native_memory_original_claim_reserve_unavailable")
+                # The unchanged original revision/fence CAS binds these exact
+                # concrete values. Ordinary claims retain SQL arithmetic.
+                claim_values["fencing_token"] = expected_fence + 1
+                claim_values["revision"] = current_revision + 1
+                claim_values["attempt_count"] = int(run.attempt_count) + 1
+                pending_receipt = {
+                    "kind": "claim", "status": "claimed", "owner": owner,
+                    "fencing_token": expected_fence + 1,
+                    "lease_expires_at": expires.isoformat(),
+                    "attempt": int(run.attempt_count) + 1,
+                    "revision": current_revision + 1, "operator_visible": True,
+                }
+                output = _native_memory_pending_output(run, claim_values, receipt=pending_receipt)
+                await reserve_native_memory_pending_run(db, run, claim_values, header_budget,
+                    outputs=(output, service_checkpoint))
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)

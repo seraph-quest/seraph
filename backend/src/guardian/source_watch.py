@@ -1122,6 +1122,15 @@ class SourceWatchService:
         }
         criteria_digest = _sha(_dump(criteria_json))
         async with db_engine.get_session() as db:
+            from src.workspace.accounting_witness import CompositionReadGuard
+            read_guard = db.info.get("composition_read_guard")
+            retained_native = read_guard is not None
+            if retained_native:
+                if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                    raise SourceWatchError("composition_provider_invalid")
+                from src.runtime_plugins.ownership import begin_native_writer
+                await begin_native_writer(db, owner="native_ingress")
             goal = (await db.execute(select(Goal).where(Goal.id == goal_id))).scalars().first()
             if goal is None or int(goal.revision or 1) != int(expected_goal_revision):
                 raise SourceWatchError("goal_revision_stale")
@@ -1139,7 +1148,20 @@ class SourceWatchService:
                 raise SourceWatchError("goal_budget_missing_reviewed_grant")
             if write_mode == "standing_reviewed" and _text(reviewed_grant_id) != _text(goal_budget.grant_id):
                 raise SourceWatchError("standing_grant_mismatch")
-            await ensure_sessions_exist(db, [owner_session_id])
+            if retained_native:
+                # Creation is an interactive ingress, not the standing-public
+                # read exception. Check the exact original Root in this writer.
+                root = await db.get(OperatorSession, owner_session_id)
+                if root is None or root.principal_id != owner_principal_id:
+                    raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+                if (root.is_bearer_tombstone is not False or root.revoked_at is not None
+                    or root.replaced_by_id is not None):
+                    raise HTTPException(status_code=401, detail={"code": "session_revoked"})
+                now = _now()
+                if any(expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) <= now
+                       for expiry in (root.idle_expires_at, root.absolute_expires_at)):
+                    raise HTTPException(status_code=401, detail={"code": "session_expired"})
+            await ensure_sessions_exist(db, [owner_session_id], retained_native=retained_native)
             watch = GuardianSourceWatch(
                 id=watch_id,
                 goal_id=goal_id,

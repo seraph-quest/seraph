@@ -282,3 +282,144 @@ async def test_unissued_report_witness_cannot_reach_authority_or_read(async_db, 
     async with async_db() as db:
         assert not list((await db.execute(select(MemoryProposal))).scalars())
         assert not list((await db.execute(select(AuditEvent))).scalars())
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_original_prepared_proposal_rows_are_readonly_then_same_instances_written(async_db, monkeypatch):
+    """Constructor mechanics on real SQLite; this does not issue stock Source."""
+    _, task, attempt = await source(async_db, monkeypatch)
+    admission = await proposal_candidate(async_db, task, attempt)
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        before = await m5._native_memory_writer_state(db)
+        plan = await m5.prepare_native_memory_mutation(db, admission=admission)
+        assert await m5._native_memory_writer_state(db) == before
+        assert not db.new and not db.dirty and not db.deleted
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(AuditEvent))).scalars())
+        copied = replace(plan)
+        with pytest.raises(ValueError, match="prepared_memory_mutation_changed"):
+            await m5.validate_native_memory_mutation_plan(copied, db=db, candidate_digest=admission.candidate_digest)
+        source_value = admission.candidate()["source"]
+        result = await m5._create_memory_proposal_in_session(db,
+            owner_principal_id=OWNER.principal_id, owner_session_id=OWNER.session_id,
+            task_id=task.task_id, expected_task_revision=task.task_revision,
+            attempt_id=attempt.attempt_id, native_prepared_mutation=plan)
+        from src.audit.repository import audit_repository
+        event = await audit_repository._log_event_in_session(db, actor=OWNER.principal_id,
+            session_id=OWNER.session_id, event_type="memory_learning_proposed",
+            tool_name="memory_control", policy_mode="operator_controlled",
+            summary="Operator requested verified work-board memory",
+            details={"proposal_id": result["proposal_id"], "source_task_id": source_value["task_id"],
+                "source_attempt_id": source_value["attempt_id"], "status": result["status"]},
+            _prepared_event=plan.audit_event)
+        assert event is plan.audit_event and plan.consumed
+        assert result == plan.original_result()
+        await m5.validate_native_memory_mutation_plan(plan, db=db,
+            candidate_digest=admission.candidate_digest, consumed=True)
+        with pytest.raises(ValueError, match="prepared_memory_mutation_changed"):
+            await m5._create_memory_proposal_in_session(db,
+                owner_principal_id=OWNER.principal_id, owner_session_id=OWNER.session_id,
+                task_id=task.task_id, expected_task_revision=task.task_revision,
+                attempt_id=attempt.attempt_id, native_prepared_mutation=plan)
+    async with async_db() as db:
+        proposal = await db.get(MemoryProposal, result["proposal_id"])
+        assert proposal.status.value == "proposed"
+        assert (await db.get(AuditEvent, event.id)).event_type == "memory_learning_proposed"
+        text = await m5.prepare_m5_text(db, proposal.preview_text)
+        review = _owner_admission({**common("memory.applyReviewed"),
+            "source": admission.candidate()["source"], "proposal_id": proposal.proposal_id,
+            "proposal_schema": proposal.schema_version, "action": "accept", "expected_revision": proposal.revision,
+            "expected_preview_text_digest": proposal.preview_text_digest,
+            "edited_text": None, "decision_effect": "none", "preferred_capability_id": None,
+            "corrects_memory_id": None, "reason": None,
+            "proposal_expires_at": m5._utc(proposal.expires_at).isoformat(), "prepared_text": asdict(text)})
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        before = await m5._native_memory_writer_state(db)
+        review_plan = await m5.prepare_native_memory_mutation(db, admission=review)
+        assert await m5._native_memory_writer_state(db) == before
+        assert not db.new and not db.dirty and not db.deleted
+        value = review.candidate()
+        accepted = await m5._apply_memory_proposal_action_in_session(db,
+            owner_principal_id=OWNER.principal_id, owner_session_id=OWNER.session_id,
+            proposal_id=value["proposal_id"], action="accept", expected_revision=value["expected_revision"],
+            native_prepared_mutation=review_plan)
+        assert accepted == review_plan.original_result() and accepted["status"] == "accepted"
+        assert accepted["audit_event_id"] == review_plan.audit_event.id
+        await m5.validate_native_memory_mutation_plan(review_plan, db=db,
+            candidate_digest=review.candidate_digest, consumed=True)
+    async with async_db() as db:
+        assert (await db.get(Memory, accepted["accepted_memory_id"])).status is MemoryStatus.active
+        assert (await db.get(AuditEvent, review_plan.audit_event.id)).event_type == "memory_learning_accepted"
+    forget = _owner_admission({**common("memory.forget"),
+        "record_ref": accepted["accepted_memory_id"], "mode": "redact", "privacy_boundary": "private",
+        "reason": None, "prepared_reason": None})
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        before = await m5._native_memory_writer_state(db)
+        forget_plan = await m5.prepare_native_memory_mutation(db, admission=forget)
+        assert await m5._native_memory_writer_state(db) == before
+        assert not db.new and not db.dirty and not db.deleted
+        from src.memory.control import _forget_memory_in_session
+        forgotten = await _forget_memory_in_session(db, owner_session_id=OWNER.session_id,
+            memory_id=accepted["accepted_memory_id"], native_prepared_mutation=forget_plan)
+        assert forgotten == forget_plan.original_result()
+        assert forgotten["audit_event_id"] == forget_plan.audit_event.id
+        await m5.validate_native_memory_mutation_plan(forget_plan, db=db,
+            candidate_digest=forget.candidate_digest, consumed=True)
+    async with async_db() as db:
+        memory = await db.get(Memory, accepted["accepted_memory_id"])
+        assert memory.status is MemoryStatus.archived and memory.content == "[forgotten by operator]"
+        assert (await db.get(AuditEvent, forget_plan.audit_event.id)).event_type == "memory_forgotten"
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_exhausted_actual_constructor_frame_denies_before_any_owner_write(async_db, monkeypatch):
+    """The real shared byte frame fails before writes; no stock Source grant."""
+    from src.memory.header_bounds import HeaderBoundsError
+    _, task, attempt = await source(async_db, monkeypatch)
+    admission = await proposal_candidate(async_db, task, attempt)
+    frame = admission.header_budget
+    frame.debit(frame.remaining)
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        before = await m5._native_memory_writer_state(db)
+        with pytest.raises(HeaderBoundsError):
+            await m5.prepare_native_memory_mutation(db, admission=admission)
+        assert admission.header_budget is frame and frame.remaining == 0
+        assert await m5._native_memory_writer_state(db) == before
+        assert not db.new and not db.dirty and not db.deleted
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(Memory))).scalars())
+        assert not list((await db.execute(select(AuditEvent))).scalars())
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("changed", ["audit", "proposal"])
+@pytest.mark.asyncio
+async def test_changed_prepared_original_row_denies_before_any_owner_write(async_db, monkeypatch, changed):
+    """Borrowing an actual transient row cannot change the staged effect."""
+    _, task, attempt = await source(async_db, monkeypatch)
+    admission = await proposal_candidate(async_db, task, attempt)
+    async with async_db() as db:
+        await _begin_sqlite_immediate(db)
+        plan = await m5.prepare_native_memory_mutation(db, admission=admission)
+        before = await m5._native_memory_writer_state(db)
+        if changed == "audit":
+            plan.audit_event.summary = "Changed borrowed audit"
+        else:
+            row = next(row for row in plan.original_rows() if type(row) is MemoryProposal)
+            row.preview_text = "Changed borrowed proposal"
+        with pytest.raises(ValueError, match="prepared_memory_rows_changed"):
+            await m5._create_memory_proposal_in_session(db,
+                owner_principal_id=OWNER.principal_id, owner_session_id=OWNER.session_id,
+                task_id=task.task_id, expected_task_revision=task.task_revision,
+                attempt_id=attempt.attempt_id, native_prepared_mutation=plan)
+        assert await m5._native_memory_writer_state(db) == before
+        assert not db.new and not db.dirty and not db.deleted
+        assert not list((await db.execute(select(MemoryProposal))).scalars())
+        assert not list((await db.execute(select(Memory))).scalars())
+        assert not list((await db.execute(select(AuditEvent))).scalars())

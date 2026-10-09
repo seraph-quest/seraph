@@ -456,7 +456,13 @@ async def test_memory_pin_and_forget_are_audited_and_change_active_recall(client
 
 
 @pytest.mark.asyncio
-async def test_memory_redaction_and_audit_receipts_are_queryable_without_leaking_content(client):
+async def test_memory_redaction_and_audit_receipts_are_queryable_without_leaking_content(client, async_db):
+    from src.db.engine import get_session
+    from src.db.models import Session
+
+    async with get_session() as db:
+        db.add(Session(id=test_bypass_operator().session_id))
+
     created = await memory_repository.create_memory(
         content="The deployment token is seraph-secret-token.",
         kind=MemoryKind.fact,

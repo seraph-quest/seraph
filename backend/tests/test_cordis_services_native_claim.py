@@ -1,6 +1,7 @@
 """Actual stock host + original canonical native claim; no effect dispatcher."""
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 
@@ -100,19 +101,60 @@ async def test_actual_host_original_native_claim_read_and_restart_rejects_old_sc
 
 @pytest.mark.asyncio
 async def test_actual_plain_turn_same_writer_ingress_claim_and_native_observers(foreign_key_composition_db, monkeypatch):
+    import httpx
+    from src.agent.direct_chat import run_direct_local_chat
     from src.agent.session import SessionManager
-    from src.agent.turn_execution import NativeTurnAdmission, NativeTurnExecution
+    from src.agent.turn_execution import NativeTurnAdmission, claim_native_turn
+    from src.agent.native_turn_controls import NativeTurnResourceOwner
     from src.api.chat import (_bind_chat_principal, build_chat_ingress_envelope, chat_ingress_metadata,
         assistant_message_id_for_ingress, chat_assistant_metadata)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "isolated-actual-turn-observer")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
-    _, operator = await create_session()
-    repo = DurableJobRepository()
+    token, operator = await create_session()
+    from src.workflows.job_runtime import durable_job_repository as repo
     host = CordisHost(node_path=Path(os.environ["SERAPH_CORDIS_TEST_NODE"]),
         service_dispatch=NativeServiceDispatcher(jobs=repo))
+    monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+    monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-test-key")
+    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "openai")
+    monkeypatch.setattr(settings, "default_model", "openrouter/openai/gpt-4o-mini")
+    resources = NativeTurnResourceOwner()
+    callbacks = []
+    original_post = httpx.AsyncClient.post
+    async def scripted_route_probe(client, url, **kwargs):
+        if not str(url).startswith("https://openrouter.ai/"):
+            return await original_post(client, url, **kwargs)
+        assert str(url) == "https://openrouter.ai/api/v1/chat/completions"
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "id": "owned-plain-turn-route-probe", "choices": [{"message": {"role": "assistant", "content": "CANARY_OK"}}],
+            "usage": {"cost": "0", "prompt_tokens": 1, "completion_tokens": 1}})
+    def scripted_completion_transport(client, url, **kwargs):
+        assert str(url) == "https://openrouter.ai/api/v1/chat/completions"
+        callbacks.append(ingress.message_id)
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "id": "owned-plain-turn-completion", "choices": [{"message": {"role": "assistant",
+                "content": "Controlled native callback output; no inference."}}],
+            "usage": {"cost": "0", "prompt_tokens": 1, "completion_tokens": 1}})
+    monkeypatch.setattr(httpx.AsyncClient, "post", scripted_route_probe)
+    monkeypatch.setattr(httpx.Client, "post", scripted_completion_transport)
     try:
         assert await host.start(), host.snapshot()
+        from src.app import create_app
+        # Use the original settings API and readiness owner; only final HTTP is scripted.
+        from httpx import ASGITransport, AsyncClient
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://127.0.0.1:8004",
+            cookies={settings.operator_auth_cookie_name: token}, headers={"origin": "http://127.0.0.1:3001"}) as client:
+            configured = await client.put("/api/settings/model-fabric", json={"openrouter_setup": {
+                "model_ids": ["openai/gpt-4o-mini"], "capabilities": ["text"], "allowed_upstreams": ["openai"],
+                "data_collection": "deny", "data_retention_policy": "deny", "egress_class": "cloud_allowed_full",
+                "cloud_egress_acknowledged": True, "spend_ceiling_microusd": 1000,
+                "request_cost_bound_microusd": 100, "credential_ref": "env:OPENROUTER_API_KEY"}})
+            assert configured.status_code == 200, configured.text
+            for capability in ("text", "health", "latency_ms"):
+                verified = await client.post("/api/settings/model-fabric/canary",
+                    json={"profile_id": "openrouter", "capability": capability, "timeout_seconds": 120})
+                assert verified.status_code == 200 and verified.json()["outcome"] == "passed", verified.text
         manager = SessionManager()
         conversation = await manager.get_for_ingress(None, owner_principal_id=operator.principal.principal_id)
         principal = _bind_chat_principal(conversation.id, operator=operator)
@@ -122,12 +164,12 @@ async def test_actual_plain_turn_same_writer_ingress_claim_and_native_observers(
             client_message_id="actual-stock-host-native-turn")
         admission = NativeTurnAdmission.capture(ingress, principal=principal,
             reviewed_composition=host.reviewed, native_route="direct_turn")
+        resource = resources.reserve(admission)
         message, duplicate, job = await manager.reserve_native_turn_message(conversation.id, text,
             message_id=ingress.message_id, metadata_json=chat_ingress_metadata(ingress), admission=admission)
         assert not duplicate and message.id == ingress.message_id
-        await repo.transition_job(job["job_id"], "queued")
-        claim = await repo.claim_service_job(job["job_id"], host=host, owner="actual-turn-observer")
-        scope = capture_original_scope(claim, host)
+        execution = await claim_native_turn(admission, host, job, resource=resource)
+        claim, scope = execution.claim, execution.scope
         accepted = await host.request_service("conversation.accept", {"turn_ref": job["job_id"]}, original_scope=scope)
         assert accepted["status"] == "succeeded", accepted
         assert accepted["value"] == {"turn_ref": job["job_id"], "job_ref": job["job_id"], "replayed": False}
@@ -141,20 +183,43 @@ async def test_actual_plain_turn_same_writer_ingress_claim_and_native_observers(
         from src.db.models import Message
         async with get_session() as db:
             assert await db.scalar(select(func.count()).select_from(Message)) == 1
-        # A controlled native callback proves observer/atomic output plumbing;
-        # it is not inference execution or a provider success receipt.
-        execution = NativeTurnExecution(admission, host, claim, scope)
-        callbacks = []
-        async def original_native_callback():
-            callbacks.append(ingress.message_id)
-            return "Controlled native callback output; no inference."
-        response = await execution.execute(original_native_callback())
+        # Original direct owner, broker and output seal run with scripted HTTP;
+        # this proves mechanics, not provider availability or inference quality.
+        from src.approval.runtime import get_current_approval_mode, set_runtime_context, reset_runtime_context
+        tokens = set_runtime_context(conversation.id, get_current_approval_mode(), trust_principal=principal)
+        try:
+            response = await execution.execute(run_direct_local_chat(text, runtime_path="chat_agent",
+                is_onboarding=False, session_id=conversation.id, request_id=ingress.message_id))
+        finally:
+            reset_runtime_context(tokens)
+        assert execution.worker.done() and not execution.worker.cancelled()
         output_id = assistant_message_id_for_ingress(ingress)
         output = await manager.add_native_turn_result(conversation.id, response, message_id=output_id,
             metadata_json=chat_assistant_metadata(ingress, message_id=output_id), execution=execution)
+        await execution.observe_resource()
         assert callbacks == [ingress.message_id] and output.id == output_id
         settled = await repo.get_job(job["job_id"])
         assert settled["status"] == "succeeded" and settled["lease"]["owner"] is None
+        from src.db.models import WorkflowRunState, InferenceCostReservation
+        async with get_session() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job["job_id"]))
+            family = next(item["payload"] for item in json.loads(run.checkpoint_receipts_json)
+                if item["checkpoint_id"] == "conversation:operation-family")
+            assert len(family["operations"]) == 1
+            operation = family["operations"][0]
+            owner = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == operation["job_id"]))
+            reservation = await db.get(InferenceCostReservation, operation["operation_id"])
+            assert owner.status == "succeeded" and owner.lease_owner is None
+            assert reservation.state == "settled" and reservation.actual_cost_microusd == 0
+            outputs = [item for item in json.loads(owner.checkpoint_receipts_json)
+                if item["checkpoint_id"] == "inference:owned-output.v1"]
+            assert len(outputs) == 1 and outputs[0]["safe"] is True
+            payload = outputs[0]["payload"]
+            import hashlib
+            retained_output = (Path(settings.workspace_dir) / payload["file_ref"]).read_bytes()
+            assert hashlib.sha256(retained_output).hexdigest() == payload["content_sha256"]
+            assert len(retained_output) == payload["size_bytes"]
+            assert response.encode() in retained_output
         appended = await host.request_service("conversation.append", {"message_ref": output.id}, original_scope=scope)
         assert appended["status"] == "succeeded", appended
         assert appended["value"]["message_ref"] == output.id
@@ -168,6 +233,7 @@ async def test_actual_plain_turn_same_writer_ingress_claim_and_native_observers(
             assert await db.scalar(select(func.count()).select_from(Message)) == 2
         assert (await repo.get_job(job["job_id"]))["effects"] == []
     finally:
+        await resources.shutdown()
         await host.stop(preserve_blocked=host.state == "blocked")
         if host._cleanup_task is not None:
             await host._cleanup_task

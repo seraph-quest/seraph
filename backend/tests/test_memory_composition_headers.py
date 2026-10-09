@@ -222,3 +222,83 @@ async def test_exact_1355_schema_objects_overflow_before_private_bodies(async_db
         assert await db.scalar(text("SELECT count(*) FROM sqlite_schema"))==1355
         with pytest.raises(HeaderBoundsError,match="header_schema_object_bound"):
             await certify_composition_superset(db,HeaderReadBudget())
+
+
+@pytest.mark.asyncio
+async def test_real_pending_update_projection_matches_sql_without_preparation_writes(model_db):
+    from src.workspace.accounting_witness import _native_memory_planned_sql_row
+    from src.memory.header_bounds import MEMORY_DESCRIPTORS
+    memory=Memory(content="actual bounded update");model_db.add(memory);await model_db.flush()
+    before=await model_db.scalar(text("SELECT total_changes()"))
+    planned=_native_memory_planned_sql_row(memory,{"status":"archived"})
+    assert memory.status.value=="active"
+    assert await model_db.scalar(text("SELECT total_changes()"))==before
+    assert not model_db.dirty
+    await model_db.execute(text("UPDATE memories SET status='archived' WHERE id=:id"),{"id":memory.id})
+    descriptor=MEMORY_DESCRIPTORS["memories"]
+    columns=",".join('"'+name+'"' for name in descriptor.columns)
+    actual=(await model_db.execute(text(f'SELECT {columns} FROM memories WHERE id=:id'),{"id":memory.id})).one()
+    assert dict(zip(descriptor.columns,actual))==planned
+    model_db.sync_session.expire(memory,["content"])
+    with pytest.raises(HeaderBoundsError,match="memory_planned_row_not_loaded"):
+        _native_memory_planned_sql_row(memory,{"status":"archived"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ("actual raw selected body", "x" * 200_000))
+async def test_exact_reference_body_reader_certifies_before_private_body(model_db, content):
+    from src.workspace.accounting_witness import _native_memory_read_reference_rows, _native_memory_row_bytes
+    from src.memory.header_bounds import MEMORY_DESCRIPTORS
+    memory = Memory(content=content)
+    model_db.add(memory)
+    await model_db.flush()
+    statements = []
+    connection = await model_db.connection()
+    def observe(_c, _cursor, statement, _params, _context, _many):
+        statements.append(statement)
+    event.listen(connection.sync_connection, "before_cursor_execute", observe)
+    budget = HeaderReadBudget()
+    try:
+        if len(content) > 100_000:
+            with pytest.raises(HeaderBoundsError):
+                await _native_memory_read_reference_rows(model_db, (("memories", memory.id),), budget)
+            assert not any(statement.startswith('SELECT "id","content"') for statement in statements)
+        else:
+            rows = await _native_memory_read_reference_rows(model_db, (("memories", memory.id),), budget)
+            descriptor, key, row, encoded = rows[0]
+            assert descriptor is MEMORY_DESCRIPTORS["memories"]
+            assert key == memory.id and row["content"] == content
+            assert encoded == _native_memory_row_bytes(descriptor, key, row)
+            assert budget.remaining < 1_048_576
+            body_index = next(index for index, statement in enumerate(statements)
+                              if statement.startswith('SELECT "id","content"'))
+            assert any("octet_length" in statement for statement in statements[:body_index])
+    finally:
+        event.remove(connection.sync_connection, "before_cursor_execute", observe)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inventory", ("empty", "absent"))
+async def test_memory_census_cannot_be_skipped_by_missing_composition_inventory(model_db, inventory):
+    from src.db.models import WorkflowRunState
+    from src.workspace.accounting_witness import composition_closure
+    from src.workspace.production import ProductionWorkspaceReconciliationError
+    model_db.add(WorkflowRunState(run_identity="unbound-retained-memory", root_run_identity="unbound-retained-memory",
+        workflow_name="negative-census", job_kind="runtime_service_memory_v1", status="succeeded",
+        checkpoint_context_json="x" * 2_000_000))
+    await model_db.flush()
+    if inventory == "absent":
+        await model_db.execute(text("DROP TABLE runtime_composition_states"))
+    statements = []
+    connection = await model_db.connection()
+    def observe(_c, _cursor, statement, _params, _context, _many):
+        statements.append(statement)
+    event.listen(connection.sync_connection, "before_cursor_execute", observe)
+    try:
+        with pytest.raises(ProductionWorkspaceReconciliationError,
+                           match="composition_native_memory_retention_unavailable"):
+            await connection.run_sync(composition_closure)
+    finally:
+        event.remove(connection.sync_connection, "before_cursor_execute", observe)
+    assert any("INDEXED BY ix_workflow_run_states_job_kind" in statement for statement in statements)
+    assert not any("checkpoint_context_json" in statement for statement in statements)

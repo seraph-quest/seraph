@@ -3254,6 +3254,15 @@ class _PreparedMemoryControlUpdate:
     before: tuple
     changes: tuple
     expected_owner_session_id: str | None
+    header_budget: object = None
+
+
+async def _certify_original_memory_body(db, budget, model):
+    if budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, COMPOSITION_DESCRIPTORS
+        if type(budget) is not HeaderReadBudget:
+            raise ValueError("original_memory_header_budget_invalid")
+        await budget.certify_all(db, COMPOSITION_DESCRIPTORS[model.__tablename__])
 
 
 class MemoryRepository:
@@ -3446,6 +3455,7 @@ class MemoryRepository:
         corrects_memory_id: str | None = None,
         proposal_id: str = "",
         _memory_id: str | None = None,
+        header_budget=None,
     ) -> _PreparedM5MemoryWrite:
         """Write one M5 memory through the canonical repository transaction.
 
@@ -3471,6 +3481,7 @@ class MemoryRepository:
         normalized_kind = _coerce_enum(kind, MemoryKind)
         if normalized_kind not in {MemoryKind.fact, MemoryKind.pattern}:
             raise ValueError("M5 memories must be fact or pattern")
+        await _certify_original_memory_body(db, header_budget, Memory)
         existing = (
             await db.execute(
                 select(Memory).where(
@@ -3527,11 +3538,13 @@ class MemoryRepository:
         target_before = ()
         target_changes = ()
         if corrects_memory_id:
+            await _certify_original_memory_body(db, header_budget, Memory)
             target = (
                 await db.execute(select(Memory).where(Memory.id == corrects_memory_id))
             ).scalars().first()
             if target is None or target.source_session_id != source_session_id:
                 raise PermissionError("correction_target_owner_mismatch")
+            await _certify_original_memory_body(db, header_budget, MemoryTombstone)
             target_tombstone = (
                 await db.execute(
                     select(MemoryTombstone).where(MemoryTombstone.memory_id == corrects_memory_id)
@@ -7330,6 +7343,7 @@ class MemoryRepository:
         last_confirmed_at: datetime | None = None,
         composition_authority_check=None,
         expected_owner_session_id: str | None = None,
+        header_budget=None,
     ) -> _PreparedMemoryControlUpdate:
         """Use the caller's already-started canonical writer; never commit it."""
         if not db.in_transaction():
@@ -7347,6 +7361,7 @@ class MemoryRepository:
 
         if composition_authority_check is not None:
             await composition_authority_check(db)
+        await _certify_original_memory_body(db, header_budget, Memory)
         memory = (
             await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
         ).scalars().first()
@@ -7363,6 +7378,7 @@ class MemoryRepository:
             if status is not None
             else None
         )
+        await _certify_original_memory_body(db, header_budget, MemoryTombstone)
         tombstone = (
             await db.execute(
                 select(MemoryTombstone).where(
@@ -7413,7 +7429,7 @@ class MemoryRepository:
 
         changes["updated_at"] = _now()
         return _PreparedMemoryControlUpdate(db, db.sync_session.get_transaction(), memory,
-            before, tuple(changes.items()), expected_owner_session_id)
+            before, tuple(changes.items()), expected_owner_session_id, header_budget)
 
     async def _apply_prepared_memory_control_metadata_in_session(self, db, prepared) -> Memory:
         if (type(prepared) is not _PreparedMemoryControlUpdate or prepared.db is not db
@@ -7447,6 +7463,7 @@ class MemoryRepository:
             raise ValueError(
                 "memory changed before control update; canonical deletion or another memory control won"
             )
+        await _certify_original_memory_body(db, prepared.header_budget, Memory)
         memory = (await db.execute(select(Memory).where(Memory.id == normalized_memory_id))).scalars().one()
         db.expunge(memory)
         return memory

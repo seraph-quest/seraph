@@ -17,6 +17,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
+from weakref import WeakValueDictionary
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +78,201 @@ M5_NONE_DIGEST = "digest:none"
 M5_NONE_ACTION = "action:none"
 M5_NO_LEARNING = "no_learning"
 M5_MAX_CANDIDATES = 20
+_NATIVE_MUTATION_PLANS = WeakValueDictionary()
+_NATIVE_MUTATION_PLAN_SEAL = object()
+
+
+@dataclass(frozen=True, eq=False)
+class PreparedNativeMemoryMutation:
+    """Actual original constructor mechanics; never Source authority."""
+    _db: object
+    _transaction: object
+    _sql_transaction: object
+    _driver: object
+    _total_changes: int
+    _candidate_digest: str
+    _report_context: object
+    _method: str
+    _prepared: object
+    _rows: tuple
+    _updates: tuple
+    _row_values: tuple
+    _update_before: tuple
+    _result: dict
+    audit_event: AuditEvent | None
+    _seal: object
+    _consumed: bool = False
+    _applied_total_changes: int | None = None
+
+    def original_rows(self):
+        return self._rows
+
+    def original_updates(self):
+        return tuple((type(row), key, dict(changes)) for row, key, changes in self._updates)
+
+    def original_update_rows(self):
+        """Retain actual original row identity for the closed SQL bind projection."""
+        return tuple((row, key, dict(changes)) for row, key, changes in self._updates)
+
+    def original_result(self):
+        from copy import deepcopy
+        return deepcopy(self._result)
+
+    @property
+    def consumed(self):
+        return self._consumed
+
+
+async def _native_memory_writer_state(db):
+    if not db.in_transaction():
+        raise ValueError("prepared_memory_writer_unavailable")
+    connection = await db.connection()
+    def read_state(sync_connection):
+        if sync_connection.dialect.name != "sqlite" or not sync_connection.in_transaction():
+            raise ValueError("prepared_memory_writer_unavailable")
+        driver = sync_connection.connection.driver_connection
+        if not driver.in_transaction:
+            raise ValueError("prepared_memory_writer_unavailable")
+        changes = sync_connection.exec_driver_sql("SELECT total_changes()").scalar_one()
+        return sync_connection.get_transaction(), driver, changes
+    return await connection.run_sync(read_state)
+
+
+def _native_memory_mapped_values(row):
+    return tuple((name, getattr(row, name)) for name in row.__table__.columns.keys())
+
+
+async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, consumed=False):
+    from sqlalchemy import inspect
+    if (type(plan) is not PreparedNativeMemoryMutation
+        or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+        or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or plan._db is not db
+        or plan._transaction is not db.sync_session.get_transaction()
+        or plan._candidate_digest != candidate_digest or plan._consumed is not consumed):
+        raise ValueError("prepared_memory_mutation_changed")
+    sql_transaction, driver, changes = await _native_memory_writer_state(db)
+    expected_changes = plan._applied_total_changes if consumed else plan._total_changes
+    if (sql_transaction is not plan._sql_transaction or driver is not plan._driver
+        or changes != expected_changes):
+        raise ValueError("prepared_memory_writer_changed")
+    if not consumed and (
+        any(not inspect(row).transient or _native_memory_mapped_values(row) != values
+            for row, values in zip(plan._rows, plan._row_values))
+        or any(_native_memory_mapped_values(row) != before
+            for (row, _, _), before in zip(plan._updates, plan._update_before))):
+        raise ValueError("prepared_memory_rows_changed")
+    return plan
+
+
+async def prepare_native_memory_mutation(db, *, admission, native_memory_report_source=None):
+    from src.runtime_plugins.memory_producer import (
+        NativeMemoryMutationAdmission, validate_original_memory_owner, _consume_original_memory_text)
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.memory.control import _prepare_forget_memory_in_writer
+    from src.audit.repository import audit_repository
+    from sqlalchemy import inspect
+    if (type(admission) is not NativeMemoryMutationAdmission
+        or type(admission.header_budget) is not HeaderReadBudget):
+        raise ValueError("prepared_memory_admission_unavailable")
+    initial_state = await _native_memory_writer_state(db)
+    transaction = db.sync_session.get_transaction()
+    value = await validate_original_memory_owner(db, admission)
+    principal, session = value["operator_principal_id"], value["operator_session_id"]
+    rows, updates = [], []
+    audit = None
+    method = value["method"]
+    if method == "memory.propose":
+        source = value["source"]
+        prepared = await _prepare_memory_proposal_in_session(db,
+            owner_principal_id=principal, owner_session_id=session,
+            task_id=source["task_id"], expected_task_revision=source["expected_task_revision"],
+            attempt_id=source["attempt_id"], prepared_text=PreparedM5Text(**value["prepared_text"]),
+            require_original_session=True, native_memory_report_source=native_memory_report_source, header_budget=admission.header_budget)
+        rows.extend(prepared.rows)
+        for baseline in prepared.baselines:
+            if baseline.new_row:
+                rows.append(baseline.receipt)
+            else:
+                updates.append((baseline.receipt, baseline.receipt.receipt_id, baseline.changes))
+        result = prepared.result
+        audit = audit_repository._prepare_event(actor=principal, session_id=session,
+            event_type="memory_learning_proposed", tool_name="memory_control", policy_mode="operator_controlled",
+            summary="Operator requested verified work-board memory",
+            details={"proposal_id": result["proposal_id"], "source_task_id": source["task_id"],
+                "source_attempt_id": source["attempt_id"], "status": result["status"]})
+        rows.append(audit)
+    elif method == "memory.applyReviewed":
+        source = value["source"]
+        prepared = await _prepare_native_memory_review_in_session(db,
+            owner_principal_id=principal, owner_session_id=session,
+            proposal_id=value["proposal_id"], action=value["action"], expected_revision=value["expected_revision"],
+            expected_preview_text_digest=value["expected_preview_text_digest"],
+            expected_task_revision=source["expected_task_revision"], expected_goal_revision=source["goal_revision"],
+            edited_text=value["edited_text"], decision_effect=value["decision_effect"], reason=value["reason"],
+            corrects_memory_id=value["corrects_memory_id"], preferred_capability_id=value["preferred_capability_id"],
+            prepared_text=PreparedM5Text(**value["prepared_text"]), require_original_session=True,
+            native_memory_report_source=native_memory_report_source, header_budget=admission.header_budget)
+        if prepared.changes:
+            updates.append((prepared.proposal, prepared.proposal.proposal_id, prepared.changes))
+        if prepared.canonical is not None:
+            memory_plan = prepared.canonical.memory_plan
+            rows.extend(memory_plan.rows)
+            if memory_plan.target is not None:
+                updates.append((memory_plan.target, memory_plan.target.id, memory_plan.target_changes))
+        audit = prepared.audit_event
+        if audit is not None:
+            rows.append(audit)
+        result = prepared.result
+    elif method == "memory.forget":
+        await _require_original_m5_session(db, principal, session, header_budget=admission.header_budget)
+        reason = (None if value["prepared_reason"] is None else await _consume_original_memory_text(
+            db, value["reason"], PreparedM5Text(**value["prepared_reason"]), admission.header_budget))
+        prepared = await _prepare_forget_memory_in_writer(db, memory_id=value["record_ref"],
+            actor=principal, reason=reason, mode=value["mode"], privacy_boundary=value["privacy_boundary"],
+            expected_owner_session_id=session, header_budget=admission.header_budget)
+        update = prepared.update_plan
+        updates.append((update.memory, update.memory.id, update.changes))
+        audit = prepared.audit_event
+        rows.append(audit)
+        result = prepared.result
+    else:
+        raise ValueError("prepared_memory_method_invalid")
+    if (db.sync_session.get_transaction() is not transaction
+        or await _native_memory_writer_state(db) != initial_state
+        or db.new or db.dirty or db.deleted or any(not inspect(row).transient for row in rows)):
+        raise ValueError("prepared_memory_preparation_wrote")
+    from copy import deepcopy
+    plan = PreparedNativeMemoryMutation(db, transaction, *initial_state,
+        admission.candidate_digest, native_memory_report_source, method, prepared,
+        tuple(rows), tuple(updates), tuple(_native_memory_mapped_values(row) for row in rows),
+        tuple(_native_memory_mapped_values(row) for row, _, _ in updates), deepcopy(result), audit,
+        _NATIVE_MUTATION_PLAN_SEAL)
+    _NATIVE_MUTATION_PLANS[id(plan)] = plan
+    return plan
+
+
+async def _apply_native_memory_mutation_plan(db, plan, *, method, native_memory_report_source=None):
+    await validate_native_memory_mutation_plan(plan, db=db, candidate_digest=plan._candidate_digest)
+    if plan._method != method or plan._report_context is not native_memory_report_source:
+        raise ValueError("prepared_memory_owner_changed")
+    if method == "memory.propose":
+        result = await _apply_prepared_m5_proposal(db, plan._prepared)
+    elif method == "memory.applyReviewed":
+        result = await _apply_prepared_native_memory_review(db, plan._prepared)
+    else:
+        from src.memory.control import _apply_prepared_forget_memory_in_writer
+        result = await _apply_prepared_forget_memory_in_writer(db, plan._prepared)
+    if result != plan._result:
+        raise ValueError("prepared_memory_result_changed")
+    _, _, changes = await _native_memory_writer_state(db)
+    expected_changes = plan._total_changes + len(plan._rows) + len(plan._updates)
+    # Propose's original audit owner inserts the same prepared event next.
+    completed_changes = expected_changes - (1 if method == "memory.propose" else 0)
+    if changes != completed_changes:
+        raise ValueError("prepared_memory_effect_write_count_changed")
+    object.__setattr__(plan, "_applied_total_changes", expected_changes)
+    object.__setattr__(plan, "_consumed", True)
+    return result
 _M5_SOURCE_RECOVERY_REASON_CODES = frozenset(
     {
         "accepted_memory_binding_unverifiable",
@@ -205,8 +401,17 @@ class PreparedM5Text:
     vault_rows_digest: str
 
 
-async def _vault_rows_digest(db) -> str:
+async def _certify_original_memory_body(db, budget, model):
+    if budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, COMPOSITION_DESCRIPTORS
+        if type(budget) is not HeaderReadBudget:
+            raise ValueError("original_memory_header_budget_invalid")
+        await budget.certify_all(db, COMPOSITION_DESCRIPTORS[model.__tablename__])
+
+
+async def _vault_rows_digest(db, *, header_budget=None) -> str:
     from src.db.models import Secret
+    await _certify_original_memory_body(db, header_budget, Secret)
     rows = list((await db.execute(select(Secret).order_by(Secret.id))).scalars())
     # Secret has no revision. Bind its exact existing fields, including the
     # encrypted value, so inserts, replacements and deletions all fence staging.
@@ -220,27 +425,30 @@ async def prepare_m5_text(db, value: str, *, header_budget=None) -> PreparedM5Te
     if not isinstance(value, str):
         raise ValueError("M5 memory text must be a string")
     original_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    before = await _vault_rows_digest(db)
+    before = await _vault_rows_digest(db,
+        **({"header_budget": header_budget} if header_budget is not None else {}))
     redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True,
         **({"header_budget": header_budget} if header_budget is not None else {}))
     if redacted == "[redaction unavailable]":
         raise ValueError("memory proposal redaction is unavailable")
     text = sanitize_m5_memory_text(redacted)
-    if await _vault_rows_digest(db) != before:
+    if await _vault_rows_digest(db,
+        **({"header_budget": header_budget} if header_budget is not None else {})) != before:
         raise ValueError("memory proposal Vault changed during staging")
     return PreparedM5Text(original_digest, text, before)
 
 
-async def _consume_prepared_m5_text(db, original: str, prepared: PreparedM5Text) -> str:
+async def _consume_prepared_m5_text(db, original: str, prepared: PreparedM5Text, *, header_budget=None) -> str:
     if (type(prepared) is not PreparedM5Text or not isinstance(original, str)
         or hashlib.sha256(original.encode("utf-8")).hexdigest() != prepared.original_digest
-        or await _vault_rows_digest(db) != prepared.vault_rows_digest):
+        or await _vault_rows_digest(db, header_budget=header_budget) != prepared.vault_rows_digest):
         raise ValueError("memory proposal staged Vault binding changed")
     # This is structural checking only: no file open, key lookup or decrypt.
     return sanitize_m5_memory_text(prepared.sanitized_text)
 
 
-async def _require_original_m5_session(db, principal_id: str, session_id: str) -> None:
+async def _require_original_m5_session(db, principal_id: str, session_id: str, *, header_budget=None) -> None:
+    await _certify_original_memory_body(db, header_budget, Session)
     session = await db.get(Session, session_id)
     if session is None or session.owner_principal_id != principal_id:
         raise PermissionError("original memory Session owner is required")
@@ -706,63 +914,66 @@ def _receipt_input_value(
     }
 
 
-def _proposal_payload(proposal: MemoryProposal, *, include_preview: bool = True) -> dict[str, Any]:
-    if proposal.schema_version == "opportunity_recommendation.v1":
+def _proposal_payload(proposal: MemoryProposal, *, include_preview: bool = True, _pending_changes: dict | None = None) -> dict[str, Any]:
+    def value(name):
+        return (_pending_changes[name] if _pending_changes is not None and name in _pending_changes
+            else getattr(proposal, name))
+    if value("schema_version") == "opportunity_recommendation.v1":
         from src.guardian.opportunity_preferences import proposal_projection
         return proposal_projection(proposal, include_preview=include_preview)
-    scope = _decode_object(proposal.memory_scope_json)
+    scope = _decode_object(value("memory_scope_json"))
     payload: dict[str, Any] = {
-        "proposal_id": proposal.proposal_id,
-        "recovered_from_proposal_id": proposal.recovered_from_proposal_id,
-        "schema_version": proposal.schema_version,
-        "owner_principal_id": proposal.owner_principal_id,
-        "owner_session_id": proposal.owner_session_id,
-        "source_task_id": proposal.source_task_id,
-        "source_task_revision": proposal.source_task_revision,
-        "source_attempt_id": proposal.source_attempt_id,
-        "source_attempt_fence": proposal.source_attempt_fence,
-        "workflow_run_id": proposal.workflow_run_id,
-        "goal_id": proposal.goal_id,
-        "goal_revision": proposal.goal_revision,
-        "capability_id": proposal.capability_id,
-        "capability_version": proposal.capability_version,
-        "typed_input_digest": proposal.typed_input_digest,
-        "source_context_digest": proposal.source_context_digest,
-        "evidence_digest": proposal.evidence_digest,
-        "readback_kind": proposal.readback_kind,
-        "readback_ref": proposal.readback_ref,
-        "readback_digest": proposal.readback_digest,
-        "artifact_ref": proposal.artifact_ref,
-        "artifact_digest": proposal.artifact_digest,
-        "status": _enum_value(proposal.status),
-        "memory_kind": _enum_value(proposal.memory_kind) if proposal.memory_kind else None,
-        "scope": scope if proposal.privacy_state is not MemoryProposalPrivacyState.redacted else None,
-        "preview_text": proposal.preview_text if include_preview and proposal.privacy_state is not MemoryProposalPrivacyState.redacted else None,
-        "preview_text_digest": proposal.preview_text_digest,
-        "proposed_text": proposal.preview_text if include_preview and proposal.privacy_state is not MemoryProposalPrivacyState.redacted else None,
-        "proposed_text_digest": proposal.preview_text_digest,
-        "corrects_memory_id": proposal.corrects_memory_id,
+        "proposal_id": value("proposal_id"),
+        "recovered_from_proposal_id": value("recovered_from_proposal_id"),
+        "schema_version": value("schema_version"),
+        "owner_principal_id": value("owner_principal_id"),
+        "owner_session_id": value("owner_session_id"),
+        "source_task_id": value("source_task_id"),
+        "source_task_revision": value("source_task_revision"),
+        "source_attempt_id": value("source_attempt_id"),
+        "source_attempt_fence": value("source_attempt_fence"),
+        "workflow_run_id": value("workflow_run_id"),
+        "goal_id": value("goal_id"),
+        "goal_revision": value("goal_revision"),
+        "capability_id": value("capability_id"),
+        "capability_version": value("capability_version"),
+        "typed_input_digest": value("typed_input_digest"),
+        "source_context_digest": value("source_context_digest"),
+        "evidence_digest": value("evidence_digest"),
+        "readback_kind": value("readback_kind"),
+        "readback_ref": value("readback_ref"),
+        "readback_digest": value("readback_digest"),
+        "artifact_ref": value("artifact_ref"),
+        "artifact_digest": value("artifact_digest"),
+        "status": _enum_value(value("status")),
+        "memory_kind": _enum_value(value("memory_kind")) if value("memory_kind") else None,
+        "scope": scope if value("privacy_state") is not MemoryProposalPrivacyState.redacted else None,
+        "preview_text": value("preview_text") if include_preview and value("privacy_state") is not MemoryProposalPrivacyState.redacted else None,
+        "preview_text_digest": value("preview_text_digest"),
+        "proposed_text": value("preview_text") if include_preview and value("privacy_state") is not MemoryProposalPrivacyState.redacted else None,
+        "proposed_text_digest": value("preview_text_digest"),
+        "corrects_memory_id": value("corrects_memory_id"),
         "preferred_capability_id": scope.get("preferred_capability_id"),
         "registered_capabilities": m5_registered_capability_options(),
-        "evidence_refs": _decode_list(proposal.source_refs_json),
-        "decision_effect": _enum_value(proposal.decision_effect),
+        "evidence_refs": _decode_list(value("source_refs_json")),
+        "decision_effect": _enum_value(value("decision_effect")),
         "allowed_decision_effects": ["none", "require_operator_confirmation"],
-        "confidence": proposal.confidence,
-        "reason_code": proposal.reason_code,
-        "recovery_action": proposal.recovery_action,
-        "rollback_reason": proposal.rollback_reason,
-        "provider_contact_started": bool(proposal.provider_contact_started),
-        "provider_contact_state": _enum_value(proposal.provider_contact_state),
-        "provider_contact_count": int(proposal.provider_contact_count or 0),
-        "privacy_state": _enum_value(proposal.privacy_state),
-        "accepted_memory_id": proposal.accepted_memory_id,
-        "accepted_memory_content_digest": proposal.accepted_memory_content_digest,
-        "revision": proposal.revision,
-        "expires_at": _utc(proposal.expires_at).isoformat() if proposal.expires_at else None,
-        "created_at": _utc(proposal.created_at).isoformat() if proposal.created_at else None,
-        "updated_at": _utc(proposal.updated_at).isoformat() if proposal.updated_at else None,
+        "confidence": value("confidence"),
+        "reason_code": value("reason_code"),
+        "recovery_action": value("recovery_action"),
+        "rollback_reason": value("rollback_reason"),
+        "provider_contact_started": bool(value("provider_contact_started")),
+        "provider_contact_state": _enum_value(value("provider_contact_state")),
+        "provider_contact_count": int(value("provider_contact_count") or 0),
+        "privacy_state": _enum_value(value("privacy_state")),
+        "accepted_memory_id": value("accepted_memory_id"),
+        "accepted_memory_content_digest": value("accepted_memory_content_digest"),
+        "revision": value("revision"),
+        "expires_at": _utc(value("expires_at")).isoformat() if value("expires_at") else None,
+        "created_at": _utc(value("created_at")).isoformat() if value("created_at") else None,
+        "updated_at": _utc(value("updated_at")).isoformat() if value("updated_at") else None,
     }
-    if proposal.privacy_state is MemoryProposalPrivacyState.redacted:
+    if value("privacy_state") is MemoryProposalPrivacyState.redacted:
         payload.pop("source_context_digest", None)
     return payload
 
@@ -1400,11 +1611,13 @@ async def _verified_source(
     *,
     requested_attempt_id: str | None = None,
     native_memory_report_source=None,
+    header_budget=None,
 ) -> M5SourceProof:
     if task.status is not WorkBoardStatus.done:
         raise ValueError("source_not_verified")
     from src.work_board import review as review_service
 
+    await _certify_original_memory_body(db, header_budget, WorkBoardAttempt)
     statement = select(WorkBoardAttempt).where(
         WorkBoardAttempt.task_id == task.task_id,
         WorkBoardAttempt.ended_at.is_not(None),
@@ -1414,10 +1627,14 @@ async def _verified_source(
         requested_attempt_id is not None and attempt.attempt_id != requested_attempt_id
     ):
         raise ValueError("stale_source_attempt")
+    if native_memory_report_source is None:
+        # The ordinary readback helper fetches this original full row itself.
+        await _certify_original_memory_body(db, header_budget, WorkflowRunState)
     proof = await review_service._verified_workflow_readback(db, task, attempt,
         native_memory_report_source=native_memory_report_source)
     if proof is None:
         raise ValueError("source_not_verified")
+    await _certify_original_memory_body(db, header_budget, WorkflowRunState)
     run = (
         await db.execute(
             select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)
@@ -1470,9 +1687,11 @@ async def _validate_current_proposal_source(
     expected_task_revision: int,
     expected_goal_revision: int,
     native_memory_report_source=None,
+    header_budget=None,
 ) -> None:
     """Re-read every authority and evidence binding before canonical accept."""
 
+    await _certify_original_memory_body(db, header_budget, WorkBoardTask)
     task = (
         await db.execute(
             select(WorkBoardTask).where(
@@ -1491,6 +1710,7 @@ async def _validate_current_proposal_source(
         raise ValueError("stale_task_revision")
     if task.status is not WorkBoardStatus.done:
         raise ValueError("stale_source_task_status")
+    await _certify_original_memory_body(db, header_budget, Goal)
     goal = (
         await db.execute(
             select(Goal).where(
@@ -1514,7 +1734,7 @@ async def _validate_current_proposal_source(
         task,
         requested_attempt_id=proposal.source_attempt_id,
         native_memory_report_source=native_memory_report_source,
-    )
+    header_budget=header_budget)
     if (
         proof.attempt.fencing_token != proposal.source_attempt_fence
         or proof.attempt.workflow_run_id != proposal.workflow_run_id
@@ -1811,6 +2031,7 @@ async def _prepare_source_baseline(
     *,
     allow_reseal: bool = False,
     _signing_key: bytes | None = None,
+    header_budget=None,
 ) -> _PreparedM5Baseline:
     action_id = f"dispatch:{proof.task.capability_id}"
     before = m5_digest(
@@ -1833,6 +2054,7 @@ async def _prepare_source_baseline(
             "source_proposal_revision": int(proposal.revision or 0),
         }
     )
+    await _certify_original_memory_body(db, header_budget, WorkBoardDecisionReceipt)
     existing = (
         await db.execute(
             select(WorkBoardDecisionReceipt)
@@ -1985,6 +2207,30 @@ async def _apply_prepared_source_baseline(db, prepared) -> WorkBoardDecisionRece
     return prepared.receipt
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedM5Proposal:
+    db: object
+    transaction: object
+    rows: tuple
+    baselines: tuple
+    result: dict
+
+
+async def _apply_prepared_m5_proposal(db, prepared) -> dict[str, Any]:
+    from sqlalchemy import inspect
+    if (type(prepared) is not _PreparedM5Proposal or prepared.db is not db
+        or prepared.transaction is not db.sync_session.get_transaction()
+        or any(not inspect(row).transient for row in prepared.rows)):
+        raise ValueError("prepared_memory_proposal_changed")
+    for row in prepared.rows:
+        db.add(row)
+    if prepared.rows:
+        await db.flush()
+    for baseline in prepared.baselines:
+        await _apply_prepared_source_baseline(db, baseline)
+    return dict(prepared.result)
+
+
 async def _write_source_failure_proposal(
     db: AsyncSession,
     *,
@@ -1994,8 +2240,24 @@ async def _write_source_failure_proposal(
     reason: str,
     recovery_action: str,
 ) -> dict[str, Any]:
+    prepared = await _prepare_source_failure_proposal(db, task=task, attempt_id=attempt_id,
+        status=status, reason=reason, recovery_action=recovery_action)
+    return await _apply_prepared_m5_proposal(db, prepared)
+
+
+async def _prepare_source_failure_proposal(
+    db: AsyncSession,
+    *,
+    task: WorkBoardTask,
+    attempt_id: str,
+    status: MemoryProposalStatus,
+    reason: str,
+    recovery_action: str,
+    header_budget=None,
+) -> _PreparedM5Proposal:
     """Persist a bounded source failure instead of dropping the attempt."""
 
+    await _certify_original_memory_body(db, header_budget, WorkBoardAttempt)
     attempt = (
         await db.execute(
             select(WorkBoardAttempt).where(
@@ -2007,6 +2269,7 @@ async def _write_source_failure_proposal(
         raise ValueError("source_attempt_not_found")
     if int(attempt.fencing_token or 0) < 1 or not attempt.workflow_run_id:
         raise ValueError("source_attempt_binding_invalid")
+    await _certify_original_memory_body(db, header_budget, WorkflowRunState)
     run = (
         await db.execute(
             select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)
@@ -2056,6 +2319,7 @@ async def _write_source_failure_proposal(
             "reason": reason,
         }
     )
+    await _certify_original_memory_body(db, header_budget, MemoryProposal)
     existing = (
         await db.execute(
             select(MemoryProposal).where(
@@ -2070,7 +2334,7 @@ async def _write_source_failure_proposal(
     if existing is not None:
         if existing.request_binding_digest != binding:
             raise ValueError("proposal_source_binding_conflict")
-        return _proposal_payload(existing)
+        return _PreparedM5Proposal(db, db.sync_session.get_transaction(), (), (), _proposal_payload(existing))
     proposal = MemoryProposal(
         schema_version=M5_SCHEMA_VERSION,
         owner_principal_id=task.owner_principal_id,
@@ -2110,8 +2374,6 @@ async def _write_source_failure_proposal(
         privacy_state=MemoryProposalPrivacyState.visible,
         status=status,
     )
-    db.add(proposal)
-    await db.flush()
     receipt_binding = m5_digest(
         {
             "version": M5_RECEIPT_SCHEMA_VERSION,
@@ -2171,12 +2433,10 @@ async def _write_source_failure_proposal(
     if receipt.receipt_integrity_mac is None:
         receipt.decision_status = WorkBoardDecisionStatus.blocked
         receipt.admission_status = WorkBoardDecisionAdmissionStatus.blocked
-    db.add(receipt)
-    await db.flush()
     payload = _proposal_payload(proposal)
     if receipt.receipt_integrity_mac is None:
         payload["error_code"] = "decision_receipt_signing_unavailable"
-    return payload
+    return _PreparedM5Proposal(db, db.sync_session.get_transaction(), (proposal, receipt), (), payload)
 
 
 async def create_memory_proposal(
@@ -2225,7 +2485,39 @@ async def _create_memory_proposal_in_session(
     prepared_text=None,
     require_original_session: bool = False,
     native_memory_report_source=None,
+    native_prepared_mutation=None,
 ) -> dict[str, Any]:
+    if native_prepared_mutation is not None:
+        return await _apply_native_memory_mutation_plan(db, native_prepared_mutation,
+            method="memory.propose", native_memory_report_source=native_memory_report_source)
+    prepared = await _prepare_memory_proposal_in_session(db,
+        owner_principal_id=owner_principal_id, owner_session_id=owner_session_id,
+        task_id=task_id, expected_task_revision=expected_task_revision, attempt_id=attempt_id,
+        candidate_text=candidate_text, candidate_kind=candidate_kind,
+        preferred_capability_id=preferred_capability_id, decision_effect=decision_effect,
+        composition_authority_check=composition_authority_check, prepared_text=prepared_text,
+        require_original_session=require_original_session,
+        native_memory_report_source=native_memory_report_source)
+    return await _apply_prepared_m5_proposal(db, prepared)
+
+
+async def _prepare_memory_proposal_in_session(
+    db, *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    task_id: str,
+    expected_task_revision: int,
+    attempt_id: str,
+    candidate_text: str | None = None,
+    candidate_kind: MemoryKind | str | None = None,
+    preferred_capability_id: str | None = None,
+    decision_effect: MemoryProposalDecisionEffect | str = MemoryProposalDecisionEffect.none,
+    composition_authority_check=None,
+    prepared_text=None,
+    require_original_session: bool = False,
+    native_memory_report_source=None,
+    header_budget=None,
+) -> _PreparedM5Proposal:
     """Existing M5 owner; caller retains the complete mutation/result writer."""
     if not db.in_transaction():
         raise RuntimeError("M5 proposal requires a caller-owned writer")
@@ -2234,9 +2526,10 @@ async def _create_memory_proposal_in_session(
     task_id = _safe_identifier(task_id, field="task_id")
     attempt_id = _safe_identifier(attempt_id, field="attempt_id")
     if require_original_session:
-        await _require_original_m5_session(db, owner_principal_id, owner_session_id)
+        await _require_original_m5_session(db, owner_principal_id, owner_session_id, header_budget=header_budget)
     if composition_authority_check is not None:
         await composition_authority_check(db)
+    await _certify_original_memory_body(db, header_budget, WorkBoardTask)
     task = (
         await db.execute(
             select(WorkBoardTask).where(
@@ -2252,36 +2545,37 @@ async def _create_memory_proposal_in_session(
         raise ValueError("opportunity_preference_requires_specialized_review")
     if int(task.task_revision or 0) != int(expected_task_revision):
         raise ValueError("stale_task_revision")
+    await _certify_original_memory_body(db, header_budget, Goal)
     goal = (
         await db.execute(select(Goal).where(Goal.id == task.goal_id))
     ).scalar_one_or_none()
     if goal is None or int(goal.revision or 0) != int(task.goal_revision or 0):
-        return await _write_source_failure_proposal(
+        return await _prepare_source_failure_proposal(
             db,
             task=task,
             attempt_id=attempt_id,
             status=MemoryProposalStatus.blocked,
             reason="stale_goal_revision",
             recovery_action="refresh_goal_and_request_new_verified_source",
-        )
+        header_budget=header_budget)
     try:
         proof = await _verified_source(db, task, requested_attempt_id=attempt_id,
-            native_memory_report_source=native_memory_report_source)
+            native_memory_report_source=native_memory_report_source, header_budget=header_budget)
     except ValueError as exc:
         if str(exc) == "source_not_verified":
-            return await _write_source_failure_proposal(
+            return await _prepare_source_failure_proposal(
                 db,
                 task=task,
                 attempt_id=attempt_id,
                 status=MemoryProposalStatus.no_learning,
                 reason="source_not_verified",
                 recovery_action="complete_verified_readback_then_request_again",
-            )
+            header_budget=header_budget)
         raise
     candidate_text = candidate_text if candidate_text is not None else _structured_source_candidate(proof)
     redaction_unavailable = False
     try:
-        candidate_text = (await _consume_prepared_m5_text(db, candidate_text, prepared_text)
+        candidate_text = (await _consume_prepared_m5_text(db, candidate_text, prepared_text, header_budget=header_budget)
                 if prepared_text is not None else await sanitize_m5_memory_text_async(candidate_text))
         memory_kind = MemoryKind(candidate_kind or MemoryKind.fact)
         if memory_kind not in {MemoryKind.fact, MemoryKind.pattern}:
@@ -2311,6 +2605,7 @@ async def _create_memory_proposal_in_session(
             "evidence_digest": proof.evidence_digest,
         }
     )
+    await _certify_original_memory_body(db, header_budget, MemoryProposal)
     existing_statement = select(MemoryProposal).where(
         MemoryProposal.owner_principal_id == owner_principal_id,
         MemoryProposal.owner_session_id == owner_session_id,
@@ -2345,7 +2640,7 @@ async def _create_memory_proposal_in_session(
         )
         if existing is None:
             raise ValueError("proposal_source_binding_conflict")
-        return _proposal_payload(existing)
+        return _PreparedM5Proposal(db, db.sync_session.get_transaction(), (), (), _proposal_payload(existing))
     if candidate_text is None or preview_digest is None:
         status = (
             MemoryProposalStatus.blocked
@@ -2439,7 +2734,10 @@ async def _create_memory_proposal_in_session(
         status=status,
         expires_at=_now() + timedelta(minutes=15) if status is MemoryProposalStatus.proposed else None,
     )
+    rows = [proposal]
+    baselines = []
     if status is MemoryProposalStatus.proposed:
+        await _certify_original_memory_body(db, header_budget, WorkBoardProposal)
         proposal_job = (
             await db.execute(
                 select(WorkBoardProposal).where(
@@ -2478,23 +2776,21 @@ async def _create_memory_proposal_in_session(
                 proposal_digest=m5_digest({"text_digest": preview_digest, "evidence": _source_refs(proof.readback)}),
                 expires_at=_now() + timedelta(minutes=15),
             )
-            db.add(proposal_job)
-    db.add(proposal)
-    await db.flush()
+            rows.insert(0, proposal_job)
     if status is MemoryProposalStatus.proposed:
-        baseline = await _write_source_baseline(db, proof, proposal)
-        if baseline.receipt_integrity_mac is None:
+        baseline_plan = await _prepare_source_baseline(db, proof, proposal, header_budget=header_budget)
+        baselines.append(baseline_plan)
+        baseline_mac = dict(baseline_plan.changes).get("receipt_integrity_mac", baseline_plan.receipt.receipt_integrity_mac)
+        if baseline_mac is None:
             proposal.status = MemoryProposalStatus.blocked
             proposal.reason_code = "accepted_binding_unavailable"
             proposal.recovery_action = "verify_source_and_reaccept"
             proposal.revision += 1
             proposal.updated_at = _now()
-            db.add(proposal)
-            await db.flush()
             payload = _proposal_payload(proposal)
             payload["error_code"] = "accepted_binding_unavailable"
-            return payload
-    return _proposal_payload(proposal)
+            return _PreparedM5Proposal(db, db.sync_session.get_transaction(), tuple(rows), tuple(baselines), payload)
+    return _PreparedM5Proposal(db, db.sync_session.get_transaction(), tuple(rows), tuple(baselines), _proposal_payload(proposal))
 
 async def list_memory_proposals(*, owner_principal_id: str, owner_session_id: str, task_id: str | None = None) -> list[dict[str, Any]]:
     async with get_session() as db:
@@ -2595,6 +2891,7 @@ async def _prepare_canonical_accept(
     corrects_memory_id: str | None,
     preferred_capability_id: str | None,
     prepared_text=None,
+    header_budget=None,
 ) -> _PreparedCanonicalAccept:
     if proposal.status is not MemoryProposalStatus.proposed:
         raise ValueError("proposal_not_accepting")
@@ -2602,7 +2899,7 @@ async def _prepare_canonical_accept(
     proposal_changes = {}
     selected_correction_id = proposal.corrects_memory_id
     original_text = edited_text if edited_text is not None else proposal.preview_text or ""
-    text = (await _consume_prepared_m5_text(db, original_text, prepared_text)
+    text = (await _consume_prepared_m5_text(db, original_text, prepared_text, header_budget=header_budget)
         if prepared_text is not None else await sanitize_m5_memory_text_async(original_text))
     kind = proposal.memory_kind
     if kind not in {MemoryKind.fact, MemoryKind.pattern}:
@@ -2622,6 +2919,7 @@ async def _prepare_canonical_accept(
     correction_target = None
     correction_target_content_digest = None
     if corrects_memory_id:
+        await _certify_original_memory_body(db, header_budget, Memory)
         correction_target = (
             await db.execute(select(Memory).where(Memory.id == corrects_memory_id))
         ).scalar_one_or_none()
@@ -2629,6 +2927,7 @@ async def _prepare_canonical_accept(
             raise PermissionError("correction_target_owner_mismatch")
         if correction_target.status is not MemoryStatus.active:
             raise ValueError("correction_target_unavailable")
+        await _certify_original_memory_body(db, header_budget, MemoryTombstone)
         if (
             await db.execute(
                 select(MemoryTombstone).where(MemoryTombstone.memory_id == correction_target.id)
@@ -2705,7 +3004,7 @@ async def _prepare_canonical_accept(
         confidence=float(proposal.confidence or 0.5),
         corrects_memory_id=selected_correction_id,
         proposal_id=proposal.proposal_id,
-    )
+    header_budget=header_budget)
     memory = memory_plan.memory
     proposal_changes["accepted_memory_id"] = memory.id
     proposal_changes["accepted_memory_content_digest"] = m5_text_digest(memory.content)
@@ -2793,6 +3092,226 @@ async def apply_memory_proposal_action(
         )
 
 
+@dataclass(frozen=True, eq=False)
+class _PreparedM5Review:
+    db: object
+    transaction: object
+    proposal: MemoryProposal
+    before: tuple
+    changes: tuple
+    canonical: object
+    audit_event: AuditEvent | None
+    result: dict
+
+
+async def _prepare_native_memory_review_in_session(
+    db, *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    proposal_id: str,
+    action: str,
+    expected_revision: int,
+    expected_preview_text_digest: str | None = None,
+    expected_task_revision: int | None = None,
+    expected_goal_revision: int | None = None,
+    edited_text: str | None = None,
+    decision_effect: MemoryProposalDecisionEffect | str | None = None,
+    reason: str | None = None,
+    corrects_memory_id: str | None = None,
+    preferred_capability_id: str | None = None,
+    composition_authority_check=None,
+    prepared_text=None,
+    require_original_session: bool = False,
+    native_memory_report_source=None,
+    header_budget=None,
+) -> _PreparedM5Review:
+    """Same existing M5 review checks in the caller-owned result writer."""
+    if not db.in_transaction():
+        raise RuntimeError("M5 review requires a caller-owned writer")
+    if require_original_session:
+        await _require_original_m5_session(db, owner_principal_id, owner_session_id, header_budget=header_budget)
+    action = str(action or "").strip().lower()
+    if action not in {"accept", "edit_accept"}:
+        raise ValueError("native_memory_review_action_invalid")
+    if action not in {"accept", "edit_accept", "reject", "rollback", "recover"}:
+        raise ValueError("unknown_proposal_action")
+    normalized_rollback_reason = None
+    if action == "rollback":
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 500:
+            raise ValueError("rollback_reason_invalid")
+        normalized_rollback_reason = reason.strip()
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
+    await _certify_original_memory_body(db, header_budget, MemoryProposal)
+    proposal = (
+        await db.execute(
+            select(MemoryProposal).where(
+                MemoryProposal.proposal_id == proposal_id,
+                MemoryProposal.owner_principal_id == owner_principal_id,
+                MemoryProposal.owner_session_id == owner_session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if proposal is None:
+        raise PermissionError("proposal_owner_mismatch")
+    if proposal.schema_version == "task_method_proposal.v1":
+        raise ValueError("task_method_requires_specialized_review")
+    if (proposal.schema_version == "opportunity_recommendation.v1"
+        or proposal.capability_id == "memory.opportunity-preference.v1"
+        or _decode_object(proposal.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):
+        raise ValueError("opportunity_preference_requires_specialized_review")
+    if proposal.schema_version == "procedure_recommendation.v1":
+        raise ValueError("procedure_preference_requires_specialized_review")
+    if action == "rollback" and proposal.status is MemoryProposalStatus.rolled_back:
+        payload = _proposal_payload(proposal)
+        payload["idempotent_replay"] = True
+        return _PreparedM5Review(db, db.sync_session.get_transaction(), proposal, (), (), None, None, payload)
+    effect: MemoryProposalDecisionEffect | None = None
+    acceptance_binding: str | None = None
+    if action in {"accept", "edit_accept"}:
+        try:
+            effect = MemoryProposalDecisionEffect(decision_effect or MemoryProposalDecisionEffect.none)
+        except ValueError as exc:
+            raise ValueError("decision_effect_invalid") from exc
+        if action == "accept" and edited_text is not None:
+            raise ValueError("edited_text_requires_edit_accept")
+        original_text = edited_text if edited_text is not None else proposal.preview_text or ""
+        normalized_text = (await _consume_prepared_m5_text(db, original_text, prepared_text, header_budget=header_budget)
+            if prepared_text is not None else await sanitize_m5_memory_text_async(original_text))
+        target_id = (
+            _safe_identifier(corrects_memory_id, field="corrects_memory_id")
+            if corrects_memory_id
+            else proposal.corrects_memory_id
+        )
+        selected_capability = (
+            _safe_identifier(preferred_capability_id, field="preferred_capability_id")
+            if preferred_capability_id
+            else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
+        )
+        if selected_capability and not _capability_version(selected_capability):
+            raise ValueError("preferred_capability_unregistered")
+        if selected_capability == "memory.opportunity-preference.v1":
+            raise ValueError("opportunity_preference_requires_specialized_review")
+        acceptance_binding = m5_digest(
+            {
+                "version": M5_SCHEMA_VERSION,
+                "proposal_id": proposal.proposal_id,
+                "expected_revision": int(expected_revision),
+                "expected_preview_text_digest": str(expected_preview_text_digest or ""),
+                "action": action,
+                "accepted_text_digest": m5_text_digest(normalized_text),
+                "decision_effect": effect.value,
+                "corrects_memory_id": target_id or "",
+                "preferred_capability_id": selected_capability,
+            }
+        )
+        if proposal.status is MemoryProposalStatus.accepted:
+            if proposal.acceptance_binding_digest == acceptance_binding:
+                payload = _proposal_payload(proposal)
+                payload["idempotent_replay"] = True
+                return _PreparedM5Review(db, db.sync_session.get_transaction(), proposal, (), (), None, None, payload)
+            raise ValueError("proposal_already_accepted")
+    if action == "reject" and proposal.status is MemoryProposalStatus.rejected:
+        if (
+            proposal.rejected_by_principal_id == owner_principal_id
+            and int(proposal.revision or 0) == int(expected_revision) + 1
+            and proposal.preview_text_digest == expected_preview_text_digest
+            and proposal.reason_code == str(reason or "operator_rejected")[:200]
+        ):
+            payload = _proposal_payload(proposal)
+            payload["idempotent_replay"] = True
+            return _PreparedM5Review(db, db.sync_session.get_transaction(), proposal, (), (), None, None, payload)
+    if int(proposal.revision or 0) != int(expected_revision):
+        raise ValueError("stale_proposal_revision")
+    if action in {"accept", "edit_accept", "reject", "recover"}:
+        if expected_task_revision is None or int(proposal.source_task_revision or 0) != int(expected_task_revision):
+            raise ValueError("stale_task_revision")
+        if expected_goal_revision is None or int(proposal.goal_revision or 0) != int(expected_goal_revision):
+            raise ValueError("stale_goal_revision")
+    if action in {"accept", "edit_accept", "reject"} and not expected_preview_text_digest:
+        raise ValueError("preview_digest_required")
+    if (
+        action != "rollback"
+        and expected_preview_text_digest is not None
+        and proposal.preview_text_digest != expected_preview_text_digest
+    ):
+        raise ValueError("stale_preview_digest")
+    if corrects_memory_id and action not in {"accept", "edit_accept"}:
+        raise ValueError("correction_target_requires_accept")
+    before = tuple((name, getattr(proposal, name)) for name in MemoryProposal.__table__.columns.keys())
+    changes = {}
+    canonical = None
+    audit_action = action
+    error_code = None
+    if proposal.expires_at is not None and _utc(proposal.expires_at) <= _now():
+        changes.update(status=MemoryProposalStatus.expired, reason_code="proposal_expired",
+            recovery_action="request_verified_proposal_again", revision=proposal.revision + 1,
+            updated_at=_now())
+        audit_action = "expire"
+    else:
+        await _validate_current_proposal_source(db, proposal,
+            owner_principal_id=owner_principal_id, owner_session_id=owner_session_id,
+            expected_task_revision=int(expected_task_revision),
+            expected_goal_revision=int(expected_goal_revision),
+            native_memory_report_source=native_memory_report_source, header_budget=header_budget)
+        correction_id = (_safe_identifier(corrects_memory_id, field="corrects_memory_id")
+            if corrects_memory_id is not None else proposal.corrects_memory_id)
+        selected_capability = (_safe_identifier(preferred_capability_id, field="preferred_capability_id")
+            if preferred_capability_id else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")) or None
+        try:
+            canonical = await _prepare_canonical_accept(db, proposal,
+                actor_principal_id=owner_principal_id, actor_session_id=owner_session_id,
+                edited_text=edited_text, decision_effect=effect or MemoryProposalDecisionEffect.none,
+                corrects_memory_id=correction_id, preferred_capability_id=selected_capability,
+                prepared_text=prepared_text, header_budget=header_budget)
+            changes.update(canonical.proposal_changes)
+            changes["acceptance_binding_digest"] = acceptance_binding
+        except CapabilityJournalError:
+            # Preserve the original early scope/correction patches on signing outage.
+            if corrects_memory_id is not None:
+                changes["corrects_memory_id"] = correction_id
+            if selected_capability:
+                scope = _decode_object(proposal.memory_scope_json)
+                scope.update(preferred_capability_id=selected_capability,
+                    preferred_capability_version=_capability_version(selected_capability),
+                    candidate_capability_ids=[selected_capability])
+                changes["memory_scope_json"] = m5_canonical_json(scope)
+            changes.update(status=MemoryProposalStatus.blocked,
+                reason_code="accepted_binding_unavailable", recovery_action="verify_source_and_reaccept",
+                revision=proposal.revision + 1, updated_at=_now())
+            error_code = "accepted_binding_unavailable"
+    event = None if error_code else _prepare_memory_action_audit(
+        owner_principal_id=owner_principal_id, owner_session_id=owner_session_id,
+        proposal=proposal, action=audit_action, _proposal_changes=changes)
+    result = _proposal_payload(proposal, _pending_changes=changes)
+    if event is not None:
+        result["audit_event_id"] = event.id
+    if error_code:
+        result["error_code"] = error_code
+    return _PreparedM5Review(db, db.sync_session.get_transaction(), proposal, before,
+        tuple(changes.items()), canonical, event, result)
+
+
+async def _apply_prepared_native_memory_review(db, prepared) -> dict[str, Any]:
+    from sqlalchemy import inspect
+    if (type(prepared) is not _PreparedM5Review or prepared.db is not db
+        or prepared.transaction is not db.sync_session.get_transaction()
+        or any(getattr(prepared.proposal, name) != value for name, value in prepared.before)
+        or (prepared.audit_event is not None and not inspect(prepared.audit_event).transient)):
+        raise ValueError("prepared_memory_review_changed")
+    if prepared.canonical is not None:
+        await _apply_prepared_canonical_accept(db, prepared.canonical)
+    if prepared.changes:
+        for name, value in prepared.changes:
+            setattr(prepared.proposal, name, value)
+        db.add(prepared.proposal)
+    if prepared.audit_event is not None:
+        db.add(prepared.audit_event)
+    if prepared.changes or prepared.audit_event is not None:
+        await db.flush()
+    return dict(prepared.result)
+
+
 async def _apply_memory_proposal_action_in_session(
     db, *,
     owner_principal_id: str,
@@ -2812,7 +3331,11 @@ async def _apply_memory_proposal_action_in_session(
     prepared_text=None,
     require_original_session: bool = False,
     native_memory_report_source=None,
+    native_prepared_mutation=None,
 ) -> dict[str, Any]:
+    if native_prepared_mutation is not None:
+        return await _apply_native_memory_mutation_plan(db, native_prepared_mutation,
+            method="memory.applyReviewed", native_memory_report_source=native_memory_report_source)
     """Same existing M5 review checks in the caller-owned result writer."""
     if not db.in_transaction():
         raise RuntimeError("M5 review requires a caller-owned writer")

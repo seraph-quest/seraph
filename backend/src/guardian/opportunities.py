@@ -391,7 +391,16 @@ async def save_policy(*, operator, goal_id: str, request: GuardianPolicySave):
     receipt_id = "guardian-policy:" + digest(json_bytes([owner, root_id, goal_id, str(request.idempotency_key)]))
     request_digest = digest(json_bytes(request.model_dump(mode="json")))
     async with db_engine.get_session() as db:
-        await db.execute(text("BEGIN IMMEDIATE"))
+        from src.workspace.accounting_witness import CompositionReadGuard
+        read_guard = db.info.get("composition_read_guard")
+        if read_guard is not None:
+            if (type(read_guard) is not CompositionReadGuard
+                    or read_guard.db is not db or read_guard.closed):
+                raise OpportunityError("composition_provider_invalid")
+            from src.runtime_plugins.ownership import begin_native_writer
+            await begin_native_writer(db, owner="native_ingress")
+        else:
+            await db.execute(text("BEGIN IMMEDIATE"))
         goal, root, budget = await current_goal_authority(
             db, goal_id=goal_id, owner=owner, root_id=root_id, goal_revision=request.expected_goal_revision,
             require_budget=request.policy.assessment_enabled)

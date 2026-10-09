@@ -551,7 +551,7 @@ def approved_receipt_digest(approval, context_digest):
         approval.session_id, approval.tool_name, approval.action, context_digest])
 
 
-async def effective_child_phase(db, child, parent=None, *, _repository_completion_witness=None):
+async def effective_child_phase(db, child, parent=None, *, _repository_completion_witness=None, _specialist_physical=None):
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _as_utc, _utc_now
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     binding = child_binding(child)
@@ -564,14 +564,14 @@ async def effective_child_phase(db, child, parent=None, *, _repository_completio
         and manifest.phase_digest == binding.phase_digest):
         return EffectiveChildPhase(binding.phase_revision, binding.phase_digest, child.fencing_token)
     witness, _approval = await verify_native_approval_transition(db, child, parent,
-        _repository_completion_witness=_repository_completion_witness)
+        _repository_completion_witness=_repository_completion_witness, _specialist_physical=_specialist_physical)
     if witness.phase != "native_wait":
         raise DurableJobLeaseError("native approval wait cannot authorize execution")
     return EffectiveChildPhase(witness.phase_revision, witness.phase_digest,
         witness.current_child_fence, _digest(witness.model_dump(mode="json")))
 
 
-async def verify_native_approval_transition(db, child, parent, *, _repository_completion_witness=None):
+async def verify_native_approval_transition(db, child, parent, *, _repository_completion_witness=None, _specialist_physical=None):
     from src.workflows.job_runtime import DurableJobLeaseError, _digest, _as_utc, _utc_now
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     assert_original_parent_authority(parent)
@@ -599,7 +599,11 @@ async def verify_native_approval_transition(db, child, parent, *, _repository_co
             or (witness.phase == "native_wait" and approved_receipt_digest(approval,
                 witness.approval_context_digest) != witness.approved_receipt_digest)):
             raise ValueError()
-        if _repository_completion_witness is None:
+        if _specialist_physical is not None:
+            from src.work_board.general_task_runtime_artifacts import _specialist_native_reference
+            awaiting = _specialist_native_reference(_specialist_physical, witness.awaiting_receipt,
+                parent_job_id=parent.run_identity, creation_digest=binding.creation_digest, callback=child)
+        elif _repository_completion_witness is None:
             awaiting = read_native_artifact_reference(witness.awaiting_receipt,
                 parent_job_id=parent.run_identity, creation_digest=binding.creation_digest)
         else:
@@ -804,7 +808,7 @@ def append_general_task_root_gate(conditions, run, *, now):
     ])
 
 
-def append_general_task_parent_gate(conditions, run, *, now, _repository_completion_witness=None):
+def append_general_task_parent_gate(conditions, run, *, now, _repository_completion_witness=None, _specialist_physical=None):
     """The sole paused-parent exception is an exact declared native wait."""
     if run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND:
         return False
@@ -812,7 +816,12 @@ def append_general_task_parent_gate(conditions, run, *, now, _repository_complet
         binding = child_binding(run)
         from src.work_board.pipelines import root_binding
         from src.work_board.pipeline_contracts import digest
-        if _repository_completion_witness is None:
+        if _specialist_physical is not None:
+            from src.workflows.job_runtime import _canonical
+            if _specialist_physical["callback_json"] != _canonical(run.model_dump(mode="json")):
+                raise ValueError()
+            live_root_digest = digest(dict(_specialist_physical["root"]))
+        elif _repository_completion_witness is None:
             live_root_digest = digest(root_binding())
         else:
             from src.workflows.repo_repair_source import _recovered_repository_native_root_digest
@@ -954,7 +963,7 @@ def append_general_task_parent_gate(conditions, run, *, now, _repository_complet
     return True
 
 
-async def assert_general_task_child_phase_current(db, run, *, _repository_completion_witness=None):
+async def assert_general_task_child_phase_current(db, run, *, _repository_completion_witness=None, _specialist_physical=None):
     """Strict canonical check before any native tool contact or adoption."""
     from src.workflows.job_runtime import DurableJobLeaseError, _append_goal_fence_condition, _utc_now
     binding = child_binding(run)
@@ -963,7 +972,7 @@ async def assert_general_task_child_phase_current(db, run, *, _repository_comple
         raise DurableJobLeaseError("general task original manifest is unavailable")
     assert_original_parent_authority(parent)
     effective = await effective_child_phase(db, run, parent,
-        _repository_completion_witness=_repository_completion_witness)
+        _repository_completion_witness=_repository_completion_witness, _specialist_physical=_specialist_physical)
     specialist = None
     if run.branch_depth == 3:
         from src.workflows.specialist_delegation import assert_specialist_root_current
@@ -981,13 +990,13 @@ async def assert_general_task_child_phase_current(db, run, *, _repository_comple
     conditions = [WorkflowRunState.run_identity == run.run_identity]
     _append_goal_fence_condition(conditions, run)
     append_general_task_parent_gate(conditions, run, now=_utc_now(),
-        _repository_completion_witness=_repository_completion_witness)
+        _repository_completion_witness=_repository_completion_witness, _specialist_physical=_specialist_physical)
     if await db.scalar(select(WorkflowRunState.id).where(*conditions)) is None:
         raise DurableJobLeaseError("general task original native phase is unavailable")
     return effective
 
 
-def _step_receipt(manifest, step_id):
+def _step_receipt(manifest, step_id, *, _specialist_physical=None):
     from src.work_board.contracts import GeneralTaskArtifactRef
     from src.work_board.general_task_runtime_artifacts import read_native_artifact_reference
     from src.workflows.job_runtime import DurableJobLeaseError
@@ -995,21 +1004,26 @@ def _step_receipt(manifest, step_id):
         index = manifest.step_ids.index(step_id)
     except ValueError as exc:
         raise DurableJobLeaseError("positive original native claim receipt is required before contact") from exc
-    return read_native_artifact_reference(GeneralTaskArtifactRef(
+    reference = GeneralTaskArtifactRef(
         artifact_id=manifest.step_receipt_artifact_ids[index], digest=manifest.step_receipt_digests[index],
-        schema_version="StepReceipt.v1"), parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
+        schema_version="StepReceipt.v1")
+    if _specialist_physical is not None:
+        from src.work_board.general_task_runtime_artifacts import _specialist_native_reference
+        return _specialist_native_reference(_specialist_physical, reference,
+            parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
+    return read_native_artifact_reference(reference, parent_job_id=manifest.run_id, creation_digest=manifest.creation_digest)
 
 
-async def assert_general_task_child_current(db, run, *, _repository_completion_witness=None):
+async def assert_general_task_child_current(db, run, *, _repository_completion_witness=None, _specialist_physical=None):
     """Contact requires the durable original positive claim, never admission0."""
     from src.workflows.job_runtime import DurableJobLeaseError, _as_utc, _utc_now
     effective = await assert_general_task_child_phase_current(db, run,
-        _repository_completion_witness=_repository_completion_witness)
+        _repository_completion_witness=_repository_completion_witness, _specialist_physical=_specialist_physical)
     binding = child_binding(run)
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
     _require_callback_reservation(parent, binding, run.fencing_token)
     if _repository_completion_witness is None:
-        receipt = _step_receipt(read_manifest(parent), binding.step_id)
+        receipt = _step_receipt(read_manifest(parent), binding.step_id, _specialist_physical=_specialist_physical)
     else:
         from src.workflows.repo_repair_source import _recovered_repository_native_claim_receipt
         receipt = _recovered_repository_native_claim_receipt(

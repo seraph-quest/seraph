@@ -586,13 +586,13 @@ def _decode_and_validate_payload(
         raise _raise_input_error(exc) from exc
 
 
-async def _verify_general_proposal(db, row, parsed):
+async def _verify_general_proposal(db, row, parsed, *, _repository_stop_context=None):
     if row.capability_id != "agent.task.v1" or parsed.get("proposal_group") is None:
         return
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_proposal import seal_proposal_publication
     await seal_proposal_publication(db, WorkBoardOwner(principal_id=row.owner_principal_id,
-        session_id=row.owner_session_id), GeneralTaskEnvelope.model_validate(parsed), goal_revision=row.goal_revision)
+        session_id=row.owner_session_id), GeneralTaskEnvelope.model_validate(parsed), goal_revision=row.goal_revision, _repository_stop_context=_repository_stop_context)
 
 
 async def _finalize_pending(
@@ -1021,7 +1021,7 @@ async def prepare_input_artifact(
         return _metadata(refreshed)
 
 
-async def resolve_input_artifact_for_task(
+async def _resolve_input_artifact_metadata_for_task(
     db: AsyncSession,
     owner: WorkBoardOwner,
     *,
@@ -1031,8 +1031,8 @@ async def resolve_input_artifact_for_task(
     capability_id: str,
     expected_task_id: str | None = None,
     now: datetime | None = None,
-) -> ResolvedInputArtifact:
-    """Resolve and verify an owner-bound artifact for dispatcher execution."""
+) -> WorkBoardInputArtifact:
+    """Original task resolver metadata predicates, with no physical reads."""
 
     row = (
         await db.execute(
@@ -1064,6 +1064,25 @@ async def resolve_input_artifact_for_task(
         raise BoardError("input_artifact_task_conflict", "The input artifact is bound to another task", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:
         raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
+    return row
+
+
+async def resolve_input_artifact_for_task(
+    db: AsyncSession,
+    owner: WorkBoardOwner,
+    *,
+    artifact_id: str,
+    goal_id: str,
+    goal_revision: int,
+    capability_id: str,
+    expected_task_id: str | None = None,
+    now: datetime | None = None,
+) -> ResolvedInputArtifact:
+    """Resolve and verify an owner-bound artifact for dispatcher execution."""
+
+    row = await _resolve_input_artifact_metadata_for_task(db, owner,
+        artifact_id=artifact_id, goal_id=goal_id, goal_revision=goal_revision,
+        capability_id=capability_id, expected_task_id=expected_task_id, now=now)
     payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
     parsed = _decode_and_validate_payload(row, payload)
     await _verify_general_proposal(db, row, parsed)
@@ -1598,3 +1617,16 @@ __all__ = [
     "revoke_input_artifact",
     "revoke_unpublished_input_artifact",
 ]
+
+
+async def _verify_general_proposal_staged(db, row, parsed, physical):
+    """Original Stop's read-only pre-issuance proposal validation."""
+    if row.capability_id != "agent.task.v1" or parsed.get("proposal_group") is None:
+        if physical is not None:
+            raise BoardError("specialist_handoff_changed", "Original proposal scope changed", status_code=409)
+        return
+    from src.work_board.contracts import GeneralTaskEnvelope
+    from src.work_board.general_task_proposal import _verify_proposal_publication_staged
+    await _verify_proposal_publication_staged(db, WorkBoardOwner(principal_id=row.owner_principal_id,
+        session_id=row.owner_session_id), GeneralTaskEnvelope.model_validate(parsed),
+        goal_revision=row.goal_revision, physical=physical)

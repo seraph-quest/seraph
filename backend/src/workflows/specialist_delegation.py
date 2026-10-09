@@ -169,7 +169,19 @@ def read_reservation(run):
 
 
 async def current_delegation(db, invocation_id, *, callback_fence=None,
-                             require_reservation=True):
+                             require_reservation=True, _repository_stop_context=None):
+    physical = None
+    if _repository_stop_context is not None:
+        from src.workflows.repo_repair_stop import (validate_specialist_native_context_sql,
+            specialist_native_physical)
+        await validate_specialist_native_context_sql(db, _repository_stop_context, invocation_id=invocation_id)
+        physical = specialist_native_physical(_repository_stop_context, invocation_id=invocation_id)
+    return await _current_delegation_data(db, invocation_id, callback_fence=callback_fence,
+        require_reservation=require_reservation, _specialist_physical=physical)
+
+
+async def _current_delegation_data(db, invocation_id, *, callback_fence=None,
+                             require_reservation=True, _specialist_physical=None):
     """Read the real original callback and private request, never caller claims."""
     from src.workflows.general_task_guard import (
         assert_general_task_child_current, assert_general_task_child_phase_current, child_binding, read_manifest,
@@ -184,9 +196,9 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
         _deny()
     waiting = callback.status == "paused" and callback.failure_reason == "specialist_wait"
     if waiting:
-        await assert_general_task_child_phase_current(db, callback)
+        await assert_general_task_child_phase_current(db, callback, _specialist_physical=_specialist_physical)
     else:
-        await assert_general_task_child_current(db, callback)
+        await assert_general_task_child_current(db, callback, _specialist_physical=_specialist_physical)
     native = child_binding(callback)
     # A specialist may not become another delegation owner. This exact native
     # invocation must belong to the original transport-depth-zero Board root.
@@ -204,8 +216,18 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
     manifest = read_manifest(parent)
     if manifest is None or manifest.phase != "native_wait":
         _deny()
-    envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
-    private = read_bound_native_tool_input(callback, native)
+    if _specialist_physical is None:
+        envelope = await verify_general_task_manifest(db, parent, task, attempt, manifest)
+    else:
+        from src.workflows.job_runtime import _canonical
+        from src.work_board.general_task_runtime_artifacts import verify_specialist_native_manifest_sql
+        for key, row in (("callback", callback), ("parent", parent), ("task", task), ("attempt", attempt)):
+            if _specialist_physical[key + "_json"] != _canonical(row.model_dump(mode="json")):
+                _deny("specialist_handoff_changed")
+        if _specialist_physical["manifest_json"] != _canonical(manifest.model_dump(mode="json")):
+            _deny("specialist_handoff_changed")
+        envelope = await verify_specialist_native_manifest_sql(db, parent, task, attempt, manifest, _specialist_physical)
+    private = read_bound_native_tool_input(callback, native, _specialist_physical=_specialist_physical)
     if private.tool_id != "delegate_task":
         _deny()
     # Root and step identities belong to the canonical native invocation,
@@ -255,7 +277,7 @@ async def current_delegation(db, invocation_id, *, callback_fence=None,
         callback, native, request, reservation)
     if waiting:
         from src.workflows.specialist_lifecycle import verify_current_wait
-        await verify_current_wait(db,context)
+        await verify_current_wait(db,context, _specialist_physical=_specialist_physical)
     return context
 
 
@@ -685,3 +707,54 @@ async def reserve_delegation(jobs, invocation_id, *, service, owner, fence):
         if changed.rowcount != 1:
             _deny()
         return reservation
+
+
+async def capture_specialist_native_rows(db, callback, *, evidence_refs=()):
+    """Original metadata capture only; no physical reads or authority issuance."""
+    from src.db.models import WorkBoardInputArtifact, Goal, OperatorSession, ApprovalRequest
+    from src.workflows.general_task_guard import child_binding, read_manifest, _protected_payload, approval_checkpoint_id
+    from src.work_board.contracts import GeneralTaskApprovalTransitionV1
+    from src.workflows.specialist_lifecycle import read_fact, WAIT_KEY, SpecialistWaitV1
+    from src.workflows.job_runtime import _canonical
+    binding = child_binding(callback)
+    async def one(model, **fields):
+        conditions = [getattr(model, key) == value for key, value in fields.items()]
+        row = await db.scalar(select(model).where(*conditions).execution_options(populate_existing=True))
+        if row is None:
+            _deny("specialist_handoff_changed")
+        return row
+    parent = await one(WorkflowRunState, run_identity=binding.parent_job_id)
+    task = await one(WorkBoardTask, task_id=binding.task_id)
+    attempt = await one(WorkBoardAttempt, attempt_id=binding.attempt_id)
+    artifact = await one(WorkBoardInputArtifact, artifact_id=task.input_artifact_id)
+    manifest = read_manifest(parent)
+    if manifest is None:
+        _deny("specialist_handoff_changed")
+    rows = [callback, parent, task, attempt, artifact,
+        await one(Goal, id=task.goal_id), await one(OperatorSession, id=task.owner_session_id)]
+    if (manifest.phase != "native_wait" or manifest.phase_revision != binding.phase_revision
+            or manifest.phase_digest != binding.phase_digest):
+        approval = _protected_payload(parent, approval_checkpoint_id(binding), GeneralTaskApprovalTransitionV1)
+        rows.append(await one(ApprovalRequest, id=approval.approval_id))
+    wait = read_fact(callback, WAIT_KEY, SpecialistWaitV1)
+    if wait is not None:
+        child = await one(WorkflowRunState, run_identity=wait.child_job_id)
+        child_task = await one(WorkBoardTask, task_id=wait.child_task_id)
+        rows.extend([child, child_task, await one(WorkBoardAttempt, attempt_id=wait.child_attempt_id),
+            await one(WorkBoardInputArtifact, artifact_id=child_task.input_artifact_id)])
+    # Actual original envelope's evidence refs, never model-selected inputs.
+    for reference in evidence_refs:
+        producer = await one(WorkBoardTask, task_id=reference.removeprefix("board-output:"))
+        producer_attempt = await db.scalar(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.task_id == producer.task_id).order_by(
+                WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1)
+            .execution_options(populate_existing=True))
+        if producer_attempt is None:
+            _deny("specialist_handoff_changed")
+        rows.extend([producer, producer_attempt,
+            await one(WorkflowRunState, run_identity=producer_attempt.workflow_run_id),
+            await one(Goal, id=producer.goal_id),
+            await one(WorkBoardInputArtifact, artifact_id=producer.input_artifact_id)])
+    return {"callback": callback, "parent": parent, "task": task, "attempt": attempt,
+        "artifact": artifact, "manifest": manifest,
+        "rows": tuple((type(row), tuple(getattr(row, column.name) for column in row.__table__.primary_key), _canonical(row.model_dump(mode="json"))) for row in rows)}

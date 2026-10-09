@@ -425,7 +425,7 @@ async def seal_child_admission(db, context, task, attempt, child):
     return fact
 
 
-async def verify_current_wait(db, context):
+async def verify_current_wait(db, context, *, _specialist_physical=None):
     """A sealed original wait authorizes only its already-admitted specialist.
 
     The callback itself remains paused and cannot contact a tool. The original
@@ -441,8 +441,8 @@ async def verify_current_wait(db, context):
     if wait is None or creation is None or admission is None or reservation is None:
         raise BoardError("specialist_wait_missing","Exact original admitted child wait required",status_code=409)
     _require_callback_reservation(context.parent,context.native_binding,wait.original_claim_fence)
-    phase = await effective_child_phase(db,callback,context.parent)
-    receipt = _step_receipt(context.manifest,context.native_binding.step_id)
+    phase = await effective_child_phase(db,callback,context.parent, _specialist_physical=_specialist_physical)
+    receipt = _step_receipt(context.manifest,context.native_binding.step_id, _specialist_physical=_specialist_physical)
     child = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == wait.child_job_id))
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == wait.child_attempt_id))
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == wait.child_task_id))

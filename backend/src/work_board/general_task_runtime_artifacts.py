@@ -269,7 +269,7 @@ def selected_grant_digest(envelope):
     return digest([item.model_dump(mode="json") for item in envelope.descriptors])
 
 
-def compile_creation_digest(parent, task, attempt, envelope):
+def compile_creation_digest(parent, task, attempt, envelope, *, _physical_root=None):
     from src.work_board.general_task import digest
     from src.work_board.pipelines import root_binding
     from src.workflows.inference_accounting import _utc
@@ -278,7 +278,7 @@ def compile_creation_digest(parent, task, attempt, envelope):
         task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,
         task.typed_input_digest, envelope.proposal_group.group_id,
         digest(envelope.proposal_group.model_dump(mode="json")), selected_grant_digest(envelope),
-        digest(root_binding()), _utc(parent.deadline_at).isoformat(),
+        digest(root_binding() if _physical_root is None else dict(_physical_root)), _utc(parent.deadline_at).isoformat(),
         envelope.proposal_group.original_deadline_at.isoformat()])
 
 
@@ -349,7 +349,7 @@ async def read_current_native_tool_input(db, child):
     return read_bound_native_tool_input(child, binding)
 
 
-def read_bound_native_tool_input(child, binding):
+def read_bound_native_tool_input(child, binding, *, _specialist_physical=None):
     """Physical literals after the fixed caller proves its current phase."""
     from src.work_board.general_task import digest
     arguments = json.loads(child.arguments_json)
@@ -362,8 +362,10 @@ def read_bound_native_tool_input(child, binding):
         raise BoardError("general_task_native_input_changed", "Exact private native input required", status_code=409)
     reference = GeneralTaskArtifactRef(artifact_id=arguments["typed_input_ref"].removeprefix("general-task-input:"),
         digest=arguments["typed_input_digest"], schema_version="GeneralTaskToolInput.v1")
-    payload = read_native_artifact_reference(reference, parent_job_id=binding.parent_job_id,
-        creation_digest=binding.creation_digest)
+    payload = (read_native_artifact_reference(reference, parent_job_id=binding.parent_job_id,
+        creation_digest=binding.creation_digest) if _specialist_physical is None else
+        _specialist_native_reference(_specialist_physical, reference, parent_job_id=binding.parent_job_id,
+            creation_digest=binding.creation_digest, callback=child))
     if (payload.invocation_id != child.run_identity or payload.tool_id != arguments["tool_id"]
         or payload.descriptor_digest != binding.descriptor_digest
         or payload.input_digest != binding.input_digest or digest(payload.inputs) != binding.input_digest
@@ -493,7 +495,7 @@ async def verify_general_task_manifest(db, parent, task, attempt, manifest):
     return await _verify_native_manifest_data(parent, task, attempt, manifest, envelope)
 
 
-async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope):
+async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope, *, _specialist_physical=None):
     from src.work_board.contracts import GeneralTaskCurrentManifestV1
     from src.work_board.general_task import digest
     from src.workflows.inference_accounting import _utc
@@ -512,7 +514,8 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
         or manifest.original_deadline_at != group.original_deadline_at
         or manifest.native_deadline_at != _utc(parent.deadline_at)
         or manifest.native_deadline_at > group.original_deadline_at
-        or manifest.creation_digest != compile_creation_digest(parent, task, attempt, envelope)
+        or manifest.creation_digest != compile_creation_digest(parent, task, attempt, envelope,
+            _physical_root=None if _specialist_physical is None else _specialist_physical["root"])
         or manifest.phase_digest != compile_phase_digest(manifest)
         or len(manifest.admitted_invocation_ids) > group.max_steps
         or len(manifest.step_ids) > group.max_steps
@@ -523,9 +526,14 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
     if manifest.plan_revision == 1 and (manifest.current_plan_artifact_id != task.input_artifact_id
         or manifest.current_plan_digest != digest(envelope.plan.model_dump(mode="json"))):
         raise BoardError("general_task_manifest_plan_changed", "Original immutable plan changed", status_code=409)
+    def read_reference(reference, *, parent_job_id, creation_digest):
+        if _specialist_physical is None:
+            return read_native_artifact_reference(reference, parent_job_id=parent_job_id, creation_digest=creation_digest)
+        return _specialist_native_reference(_specialist_physical, reference,
+            parent_job_id=parent_job_id, creation_digest=creation_digest)
     active_plan = envelope.plan
     for index in range(1, len(manifest.revision_numbers)):
-        revision = read_native_artifact_reference(GeneralTaskArtifactRef(
+        revision = read_reference(GeneralTaskArtifactRef(
             artifact_id=manifest.revision_artifact_ids[index], digest=manifest.revision_artifact_digests[index],
             schema_version=manifest.revision_artifact_schemas[index]), parent_job_id=parent.run_identity,
             creation_digest=manifest.creation_digest)
@@ -539,7 +547,7 @@ async def _verify_native_manifest_data(parent, task, attempt, manifest, envelope
     if manifest.current_plan_digest != digest(active_plan.model_dump(mode="json")) or manifest.current_plan_artifact_id != manifest.revision_artifact_ids[-1]:
         raise BoardError("general_task_manifest_plan_changed", "Current immutable revision reference changed", status_code=409)
     for index, step_id in enumerate(manifest.step_ids):
-        receipt = read_native_artifact_reference(GeneralTaskArtifactRef(
+        receipt = read_reference(GeneralTaskArtifactRef(
             artifact_id=manifest.step_receipt_artifact_ids[index], digest=manifest.step_receipt_digests[index],
             schema_version=manifest.step_receipt_schemas[index]), parent_job_id=parent.run_identity,
             creation_digest=manifest.creation_digest)
@@ -580,3 +588,113 @@ async def verify_readonly_native_projection(db, owner, parent, task, attempt, ma
     if envelope.proposal_group is None:
         raise BoardError("general_task_provenance_missing", "Original retained source binding unavailable", status_code=409)
     return await _verify_native_manifest_data(parent, task, attempt, manifest, envelope)
+
+
+def _specialist_native_reference(physical, reference, *, parent_job_id, creation_digest, callback=None):
+    """Pure data comparison; this private map never supplies writer authority."""
+    from src.workflows.job_runtime import _canonical
+    if (physical["parent_id"] != parent_job_id or physical["creation_digest"] != creation_digest
+            or callback is not None and physical["callback_json"] != _canonical(callback.model_dump(mode="json"))):
+        raise BoardError("specialist_handoff_changed", "Original staged native scope changed", status_code=409)
+    key = (reference.artifact_id, reference.digest, reference.schema_version)
+    if key not in physical["references"]:
+        raise BoardError("specialist_handoff_changed", "Original staged native reference missing", status_code=409)
+    value, captured_json = physical["references"][key]
+    if _canonical(value.model_dump(mode="json")) != captured_json:
+        raise BoardError("specialist_handoff_changed", "Original staged native data changed", status_code=409)
+    return value
+
+
+async def stage_specialist_native_physical(capture):
+    """Original retained physical reads after the candidate SQL reader closes."""
+    from config.settings import settings
+    from src.work_board.input_artifacts import _safe_file_bytes, _payload_path, _decode_and_validate_payload
+    from src.work_board.pipelines import root_binding
+    from src.workflows.job_runtime import _canonical
+    from src.workflows.general_task_guard import child_binding, _protected_payload, approval_checkpoint_id
+    from src.work_board.contracts import GeneralTaskApprovalTransitionV1
+    parent, task, attempt, artifact, callback, manifest = (capture[key] for key in
+        ("parent", "task", "attempt", "artifact", "callback", "manifest"))
+    payload = _safe_file_bytes(_payload_path(artifact), expected_digest=artifact.payload_sha256,
+                              expected_size=artifact.size_bytes)
+    envelope = GeneralTaskEnvelope.model_validate(_decode_and_validate_payload(artifact, payload))
+    physical = {"parent_id": parent.run_identity, "creation_digest": manifest.creation_digest,
+        "callback_json": _canonical(callback.model_dump(mode="json")),
+        "parent_json": _canonical(parent.model_dump(mode="json")),
+        "task_json": _canonical(task.model_dump(mode="json")),
+        "attempt_json": _canonical(attempt.model_dump(mode="json")),
+        "manifest_json": _canonical(manifest.model_dump(mode="json")),
+        "artifact_json": _canonical(artifact.model_dump(mode="json")),
+        "root": root_binding(), "workspace_dir": settings.workspace_dir, "envelope": envelope, "references": {}}
+    references = [GeneralTaskArtifactRef(artifact_id=manifest.revision_artifact_ids[index],
+        digest=manifest.revision_artifact_digests[index], schema_version=manifest.revision_artifact_schemas[index])
+        for index in range(1, len(manifest.revision_numbers))]
+    references += [GeneralTaskArtifactRef(artifact_id=identifier, digest=sha, schema_version=schema)
+        for identifier, sha, schema in zip(manifest.step_receipt_artifact_ids,
+            manifest.step_receipt_digests, manifest.step_receipt_schemas, strict=True)]
+    arguments = json.loads(callback.arguments_json)
+    references.append(GeneralTaskArtifactRef(artifact_id=arguments["typed_input_ref"].removeprefix("general-task-input:"),
+        digest=arguments["typed_input_digest"], schema_version="GeneralTaskToolInput.v1"))
+    binding = child_binding(callback)
+    if (manifest.phase != "native_wait" or manifest.phase_revision != binding.phase_revision
+            or manifest.phase_digest != binding.phase_digest):
+        approval = _protected_payload(parent, approval_checkpoint_id(binding), GeneralTaskApprovalTransitionV1)
+        references.append(approval.awaiting_receipt)
+    for reference in references:
+        parsed = read_native_artifact_reference(reference, parent_job_id=parent.run_identity,
+                                               creation_digest=manifest.creation_digest)
+        physical["references"][(reference.artifact_id, reference.digest, reference.schema_version)] = (
+            parsed, _canonical(parsed.model_dump(mode="json")))
+    await _verify_native_manifest_data(parent, task, attempt, manifest, envelope, _specialist_physical=physical)
+    read_bound_native_tool_input(callback, binding, _specialist_physical=physical)
+    from types import MappingProxyType
+    physical["envelope_json"] = _canonical(envelope.model_dump(mode="json"))
+    physical["root"] = MappingProxyType(dict(physical["root"]))
+    physical["references"] = MappingProxyType(dict(physical["references"]))
+    return MappingProxyType(physical)
+
+
+def specialist_native_physical_digest(physical):
+    """Exact private physical content binding for the existing Stop issuer."""
+    from config.settings import settings
+    from src.workflows.job_runtime import _canonical
+    if settings.workspace_dir != physical["workspace_dir"]:
+        raise BoardError("specialist_handoff_changed", "Original staged workspace changed", status_code=409)
+    from src.work_board.general_task import digest
+    if _canonical(physical["envelope"].model_dump(mode="json")) != physical["envelope_json"]:
+        raise BoardError("specialist_handoff_changed", "Original staged envelope changed", status_code=409)
+    references = []
+    for key in sorted(physical["references"]):
+        parsed, captured = physical["references"][key]
+        if _canonical(parsed.model_dump(mode="json")) != captured:
+            raise BoardError("specialist_handoff_changed", "Original staged reference changed", status_code=409)
+        references.append([list(key), captured])
+    return digest({**{key: value for key, value in physical.items()
+        if key not in {"root", "references", "envelope"}}, "root": dict(physical["root"]), "references": references})
+
+
+async def verify_specialist_native_manifest_sql(db, parent, task, attempt, manifest, physical):
+    """Same original envelope metadata/proposal and manifest semantics, no IO."""
+    from src.workflows.general_task_guard import assert_original_parent_authority
+    from src.work_board.input_artifacts import _resolve_input_artifact_metadata_for_task, _verify_general_proposal_staged
+    from src.workflows.job_runtime import _canonical
+    assert_original_parent_authority(parent)
+    if (task.capability_id != "agent.task.v1" or attempt.task_id != task.task_id
+            or attempt.workflow_run_id != parent.run_identity or attempt.ended_at is not None
+            or attempt.cancel_requested_at is not None or task.owner_principal_id != parent.owner_principal_id
+            or task.owner_session_id != parent.session_id or parent.operator_session_id != task.owner_session_id
+            or task.goal_id != parent.goal_id or task.goal_revision != parent.goal_revision):
+        raise BoardError("general_task_native_binding_changed", "Original native task binding changed", status_code=409)
+    artifact = await _resolve_input_artifact_metadata_for_task(db,
+        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+        artifact_id=task.input_artifact_id, goal_id=task.goal_id, goal_revision=task.goal_revision,
+        capability_id="agent.task.v1", expected_task_id=task.task_id)
+    if (artifact.typed_input_ref != task.typed_input_ref or artifact.payload_sha256 != task.typed_input_digest
+            or _canonical(artifact.model_dump(mode="json")) != physical["artifact_json"]):
+        raise BoardError("general_task_native_binding_changed", "Original native input reference changed", status_code=409)
+    specialist_native_physical_digest(physical)
+    envelope = physical["envelope"]
+    if envelope.proposal_group is None:
+        raise BoardError("general_task_provenance_missing", "Original task allowance required", status_code=409)
+    await _verify_general_proposal_staged(db, artifact, envelope.model_dump(mode="json"), None)
+    return await _verify_native_manifest_data(parent, task, attempt, manifest, envelope, _specialist_physical=physical)

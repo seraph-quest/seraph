@@ -19,15 +19,19 @@ class ProposalPublicationWitness:
     seal: object
 
 
-async def seal_proposal_publication(db, owner, envelope, *, goal_revision):
+async def seal_proposal_publication(db, owner, envelope, *, goal_revision, _repository_stop_context=None):
     from src.work_board.general_task import canonical
     witness = ProposalPublicationWitness(owner.principal_id, owner.session_id,
         envelope.task_input.goal_ref, goal_revision, canonical(envelope.model_dump(mode="json")), _PUBLICATION_SEAL)
-    await recheck_proposal_publication(db, owner, witness)
+    await recheck_proposal_publication(db, owner, witness, _repository_stop_context=_repository_stop_context)
     return witness
 
 
-async def recheck_proposal_publication(db, owner, witness):
+async def recheck_proposal_publication(db, owner, witness, *, _repository_stop_context=None):
+    return await _recheck_proposal_publication_data(db, owner, witness, _repository_stop_context=_repository_stop_context)
+
+
+async def _recheck_proposal_publication_data(db, owner, witness, *, _repository_stop_context=None, _specialist_physical=None):
     from src.workflows.inference_group_lookup import group_reservation_rows
     from src.workflows.inference_accounting import InferenceAccountingError
     from src.work_board.contracts import GeneralTaskEnvelope
@@ -45,7 +49,11 @@ async def recheck_proposal_publication(db, owner, witness):
         raise BoardError("general_task_publication_binding_changed", "Original proposal binding changed", status_code=409)
     await validate_group_owner(db, group)
     from src.workflows.specialist_evidence import validate_handoff_publication
-    await validate_handoff_publication(db, owner, envelope)
+    if _specialist_physical is None:
+        await validate_handoff_publication(db, owner, envelope, _repository_stop_context=_repository_stop_context)
+    else:
+        from src.workflows.specialist_evidence import validate_handoff_publication_staged
+        await validate_handoff_publication_staged(db, owner, envelope, _specialist_physical)
     try:
         operations = await group_reservation_rows(db, owner_id=owner.principal_id,
             group_id=group.group_id, group_digest=digest(group.model_dump(mode="json")),
@@ -144,3 +152,18 @@ def proposal_provenance(operation, group):
         initial_policy_digest=operation["policy_digest"], deployment_id=operation["deployment_id"],
         settings_revision=operation["settings_revision"], reservation_sequence=operation["sequence"],
         reservation_binding_digest=reservation_binding(operation), original_deadline_at=group.original_deadline_at)
+
+
+async def _verify_proposal_publication_staged(db, owner, envelope, *, goal_revision, physical):
+    """Initial original Stop validation only; never returns a publication witness."""
+    from src.work_board.general_task import canonical
+    witness = ProposalPublicationWitness(owner.principal_id, owner.session_id,
+        envelope.task_input.goal_ref, goal_revision, canonical(envelope.model_dump(mode="json")), _PUBLICATION_SEAL)
+    if envelope.specialist_handoff is None:
+        if physical is not None:
+            raise BoardError("specialist_handoff_changed", "Original optional handoff changed", status_code=409)
+        await _recheck_proposal_publication_data(db, owner, witness)
+    else:
+        if physical is None:
+            raise BoardError("specialist_handoff_changed", "Original optional staged handoff required", status_code=409)
+        await _recheck_proposal_publication_data(db, owner, witness, _specialist_physical=physical)

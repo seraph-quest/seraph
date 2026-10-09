@@ -554,7 +554,7 @@ async def _stage_repository_completion_append_publication(service, jobs, *, cont
     # A caller dictionary is not provenance: obtain the protected current
     # context again through the actual Source reader before issuing identity.
     if source._repository_record(run, stop.STOP_ID) is not None:
-        fresh = (await stop._context(service, jobs, job_id=run.run_identity, owner=owner)).data
+        fresh = (await stop._context(service, jobs, job_id=run.run_identity, owner=owner, fence=fence)).data
     else:
         fresh = await source._repository_precontact(service, jobs, job_id=run.run_identity, owner=owner)
     if (fresh["rows"] != context["rows"]
@@ -620,6 +620,16 @@ def assert_repository_original_stop_completion(witness, *, service, jobs,
             raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
 
 
+def recheck_repository_original_stop_physical(witness, *, service, jobs, context, fence):
+    from src.execution.repo_original_producer import original_producer_completion_result
+    assert_repository_original_stop_completion(witness, service=service, jobs=jobs,
+        context=context, fence=fence)
+    data = _STOP_COMPLETIONS[witness]
+    for identity, physical in data["physical"].items():
+        if original_producer_completion_result(physical) is not data["results"][identity]:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+
+
 def repository_original_stop_completion_result(witness, *, iteration_id):
     data = _STOP_COMPLETIONS.get(witness) if type(witness) is _OriginalRepositoryStopCompletionWitness else None
     if data is None:
@@ -641,7 +651,7 @@ def repository_original_stop_completion_cleanup_envelope(witness, *, iteration_i
 
 
 @asynccontextmanager
-async def stage_repository_original_stop_completion(service, jobs, *, context, owner, fence):
+async def stage_repository_original_stop_completion(service, jobs, *, context, owner, fence, completion_witness=None):
     """Already-committed full Running v3 cleanup under one active guard.
 
     This issues no publication, dispatch, accounting settlement or Unknown
@@ -685,6 +695,29 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
             row = await db.get(model, key, populate_existing=True)
             if row is None or _canonical(row.model_dump(mode="json")) != expected:
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
+    borrowed = None
+    if completion_witness is not None:
+        # Only the original Stop issuer may borrow an actual active primary.
+        # Explicit invalid values cannot fall back to reopening its flock.
+        assert_repository_scoped_completion(completion_witness, service=service, jobs=jobs,
+            job_id=run.run_identity, owner=owner, fence=fence)
+        data = _COMPLETIONS[completion_witness]
+        if (data["registration_json"] != _canonical(entries[-1][1])
+                or data["finalizer_state"] != {"state": None}
+                or any(data[key] for key in ("wait_issued", "final_source_issued", "final_witness_issued"))
+                or data["post_cas"]["stop_digest"] != source._source_digest(source._repository_record(run, stop.STOP_ID))):
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
+        async with jobs._session() as db:
+            if not await source._validate_repository_completion_post_context_sql(db, service, jobs,
+                    witness=completion_witness, context=context.data):
+                raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
+            for model, key, expected in data["committed_rows"]:
+                actual = await db.get(model, key, populate_existing=True)
+                if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                    raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
+        borrowed = data["physical"]
+        if original_producer_completion_result(borrowed) is not data["result"]:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_changed")
     latest = entries[-1]
     callback = service._iterative_process_callbacks.get(latest[0])
     live_result = None
@@ -704,7 +737,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 return stages.enter_context(manager)
             except (ValueError, OSError) as exc:
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_pending") from exc
-        primary = enter_physical(stage_original_producer_completion(latest[1],
+        primary = borrowed if borrowed is not None else enter_physical(stage_original_producer_completion(latest[1],
             owner=live_owner, result=live_result))
         physical = {latest[0]: primary}
         for identity, registration, _, _ in entries[:-1]:
@@ -787,6 +820,59 @@ def assert_repository_completion_witness(witness, *, service=None, jobs=None):
             or {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}
                 != data["output_digests"]):
         raise RepositorySourceRecoveryError("original_repository_completion_witness_changed")
+
+
+def repository_completion_knownpost_context(witness, *, service, jobs, owner, job_id):
+    """Actual registered request lifetime; no caller context supplies authority."""
+    from src.workflows.repo_repair_stop import assert_repository_stop_context
+    assert_repository_completion_witness(witness, service=service, jobs=jobs)
+    data = _COMPLETIONS[witness]
+    stage = data.get("knownpost_stage")
+    if stage is None:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_required")
+    actual = repository_knownpost_stage(stage)
+    context = data.get("staged_context")
+    assert_repository_stop_context(context, service=service, jobs=jobs)
+    if (actual["owner"] is not owner or actual["job_id"] != job_id
+            or context.data is not data["context"]
+            or context["_knownpost_stage"] is not stage):
+        raise RepositorySourceRecoveryError("original_repository_knownpost_stage_required")
+    return stage, context
+
+
+async def validate_repository_knownpost_projection_sql(db, service, jobs, *, witness, owner, job_id):
+    from src.workflows.repo_repair_stop import _validate_repository_stop_context_rows_sql
+    from src.workflows.job_runtime import _canonical
+    stage, staged = repository_completion_knownpost_context(witness, service=service,
+        jobs=jobs, owner=owner, job_id=job_id)
+    context = staged.data
+    await _validate_repository_stop_context_rows_sql(db, service, jobs, context=context,
+        _knownpost_stage=stage)
+    for model, key, expected in _COMPLETIONS[witness]["committed_rows"]:
+        actual = await db.get(model, key, populate_existing=True)
+        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+            raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
+    accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
+    from src.db.models import InferenceCostReservation
+    expected = {key: raw for model, key, raw in _COMPLETIONS[witness]["committed_rows"]
+        if model is InferenceCostReservation}
+    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting} != expected:
+        raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+    return stage, context
+
+
+async def recheck_repository_knownpost_physical(witness, *, service, jobs, owner, job_id):
+    from src.execution.repo_original_producer import original_producer_completion_result
+    stage, context = repository_completion_knownpost_context(witness, service=service,
+        jobs=jobs, owner=owner, job_id=job_id)
+    actual = repository_knownpost_stage(stage)
+    if original_producer_completion_result(actual["physical"]) is not actual["result"]:
+        raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
+    from src.workflows.repo_repair_stop import _stage_repository_stop_context_artifacts, STOP_ID
+    await _stage_repository_stop_context_artifacts(service, context.data,
+        stop=_source()._repository_record(context["run"], STOP_ID),
+        expired_cleanup=context["expired_cleanup"])
+    _source()._assert_task_publication_configuration(service)
 
 
 def assert_repository_scoped_completion(witness, *, service, jobs, job_id, owner, fence=None):
@@ -887,10 +973,12 @@ async def repository_completion_recovered_final_source(witness):
         raise RepositorySourceRecoveryError("original_repository_completion_phase_changed")
     data["final_source_issued"] = True
     source = _source()
+    staged_policy = source._repository_policy_limits()
     async with data["jobs"]._session() as db:
         canonical = await source.stage_repository_canonical_source(data["service"], db,
             repository_job_id=data["job_id"], native_invocation_id=data["context"]["binding"].invocation_id,
-            consent_id=data["wait"]._source_binding.consent_id)
+            consent_id=data["wait"]._source_binding.consent_id, staged_policy=staged_policy)
+    source._recheck_repository_policy_limits(staged_policy)
     repository_scoped_completion_fence(witness)
     source.assert_repository_canonical_source(canonical)
     from dataclasses import replace
@@ -1025,6 +1113,7 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
     from src.workflows import repo_repair_source as source
     assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
     source._assert_task_publication_configuration(service)
+    staged_policy = source._repository_policy_limits()
     async with jobs._session() as db:
         run = await jobs._fetch(db, job_id)
         if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
@@ -1036,7 +1125,7 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
         if inventory["schema"] != "repository.checkpoint_inventory.v3":
             raise RepositorySourceRecoveryError("original_producer_registration_missing")
         goal = await db.get(Goal, group.goal_id)
-        source._assert_repository_original_limits(run, goal, source._repository_policy_limits())
+        source._assert_repository_original_limits(run, goal, staged_policy)
         if goal is None or goal.status != GoalStatus.active:
             raise RepositorySourceRecoveryError("repository_source_recovery_goal_changed")
         reservation = jobs._repo_repair_reservation_state(run)
@@ -1046,8 +1135,9 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
                     authority_digest=run.authority_digest)
                 or reservation["execution_deadline_at"] != original["original_deadline_at"]):
             raise RepositorySourceRecoveryError("repository_source_recovery_hold_changed")
-        return {"run": run, "original": original, "work": work, "compiled": compiled,
-            "group": group, "binding": binding, "task_source": task_source, "inventory": inventory}
+    source._recheck_repository_policy_limits(staged_policy)
+    return {"run": run, "original": original, "work": work, "compiled": compiled,
+        "group": group, "binding": binding, "task_source": task_source, "inventory": inventory}
 
 
 async def issue_repository_source_producer(service, jobs, job, *, owner):
@@ -1226,6 +1316,37 @@ async def recover_original_repository_cleanup(service, jobs, *, job_id, owner,
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
 
 
+async def _reconcile_original_repository_stop(service, jobs, *, job_id, owner,
+        expected_job_revision, reason=None):
+    """Existing Stop intent/issuer/writer under exactly one original fence."""
+    from src.workflows import repo_repair_stop as stop_owner
+    source = _source()
+    async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
+        original = await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
+            expected_job_revision=expected_job_revision, fence=fence)
+        stop = source._repository_record(original["run"], stop_owner.STOP_ID)
+        if stop is not None:
+            reason = stop["stop_reason"]
+        elif reason is None:
+            reason = await stop_owner.repository_automatic_limit_reason(service, jobs, job_id=job_id, owner=owner)
+        if reason is None:
+            raise RepositorySourceRecoveryError("original_repository_stop_completion_unavailable")
+        context = await stop_owner._context(service, jobs, job_id=job_id, owner=owner,
+            limit_reason=reason if reason in stop_owner.AUTOMATIC_REASONS else None, fence=fence)
+        if stop is None:
+            context = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
+                context=context, owner=owner, reason=reason, fence=fence)
+            stop = source._repository_record(context["run"], stop_owner.STOP_ID)
+        async with source.stage_repository_stop_original_producer_witnesses(service, jobs,
+                context=context, fence=fence) as completion:
+            await stop_owner._complete_repository_stop_held(service, jobs, context=context,
+                stop=stop, original_completion=completion, fence=fence)
+    # Canonical terminal readback preceded scope exit and physical release.
+    lane = service._iterative_lanes.pop(job_id, None)
+    if lane is not None:
+        lane.clear_quarantine()
+
+
 async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner,
         expected_job_revision):
     """Internal candidate: original same-boot owners, with no public enablement.
@@ -1234,6 +1355,7 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
     grant: the actual owner checks that revision again under its single fence.
     """
     source = _source()
+    from src.workflows import repo_repair_stop as stop_owner
     if type(expected_job_revision) is not int or expected_job_revision < 0:
         raise RepositorySourceRecoveryError("repository_source_recovery_request_invalid")
     async with jobs._session() as db:
@@ -1247,6 +1369,15 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
             raise RepositorySourceRecoveryError("original_producer_registration_missing")
         index, identity = registration["iteration_index"], registration["iteration_id"]
         unknown = run.status == "unknown_external_effect"
+        cleanup = source._repository_record(run, "repository:cleanup:" + identity)
+        readback = source._repository_record(run, "repository:readback:" + identity)
+        stopping = source._repository_record(run, "repository:stop-intent:v1")
+        committed = cleanup is not None or readback is not None
+        _, work, *_ = source.read_repository_original(run)
+        capped_failure = readback is not None and readback.get("status") == "failed" and index == work.limits.max_iterations
+    if unknown and committed:
+        # The Source GET owns its one registered knownpost fence/primary.
+        return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
     if unknown:
         # Ordinary discovery retains its exact Unknown successor predicate.
         # The separately registered known-post verifier cannot be replaced by
@@ -1255,9 +1386,15 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
             await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
                 expected_job_revision=expected_job_revision, fence=fence)
             return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+    if committed and (stopping is not None or capped_failure):
+        await _reconcile_original_repository_stop(service, jobs, job_id=job_id, owner=owner,
+            expected_job_revision=expected_job_revision, reason="iterations_exhausted" if capped_failure else None)
+        return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
     # Each scope independently authenticates the exact original registration,
     # current rows, physical owner and optimistic revision. Never nest locks.
     next_iteration = None
+    terminal_stop = None
+    stopped = False
     try:
         async with stage_original_repository_completion_publication(service, jobs, job_id=job_id, owner=owner,
                 iteration_index=index, expected_job_revision=expected_job_revision) as completion:
@@ -1268,15 +1405,30 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
                 stopping = source._repository_record(current, "repository:stop-intent:v1")
                 current_status = current.status
             if stopping is not None or current_status == "unknown_external_effect":
-                # The existing terminal Stop owner requires complete Running
-                # positive authority. Unknown and partial never inherit it.
-                pass
+                if (current_status == "running" and stopping is not None
+                        and outcome["status"] in {"succeeded", "failed"}):
+                    from src.workflows import repo_repair_stop as stop_owner
+                    fence = repository_scoped_completion_fence(completion)
+                    staged = await source.stage_repository_completion_post_context(service, jobs,
+                        witness=completion, owner=owner, fence=fence)
+                    async with source.stage_repository_stop_original_producer_witnesses(service, jobs,
+                            context=staged, fence=fence, completion_witness=completion) as stop_completion:
+                        await stop_owner._complete_repository_stop_held(service, jobs, context=staged,
+                            stop=stopping, original_completion=stop_completion, fence=fence)
+                    stopped = True
+                # Unknown and partial retain their original liabilities.
+            elif outcome["status"] in {"succeeded", "failed"} and (
+                    automatic_reason := await stop_owner.repository_automatic_limit_reason(
+                        service, jobs, job_id=job_id, owner=owner)) is not None:
+                terminal_stop = automatic_reason
             elif outcome["status"] == "succeeded":
                 await source.finalize_recovered_repository_iteration(service, jobs,
                     job_id=job_id, owner=owner, iteration_index=index,
                     completion_witness=completion)
             elif outcome["status"] == "failed" and index < context["work"].limits.max_iterations:
                 next_iteration = index + 1
+            elif outcome["status"] == "failed":
+                terminal_stop = "iterations_exhausted"
             elif outcome["status"] == "held_partial":
                 pass
     except ValueError as exc:
@@ -1295,6 +1447,15 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
     except FileNotFoundError:
         # Missing authenticated closure remains held, without an invented result.
         return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+    if stopped:
+        lane = service._iterative_lanes.pop(job_id, None)
+        if lane is not None:
+            lane.clear_quarantine()
+    if terminal_stop is not None:
+        async with jobs._session() as db:
+            revision = (await jobs._fetch(db, job_id)).revision
+        await _reconcile_original_repository_stop(service, jobs, job_id=job_id, owner=owner,
+            expected_job_revision=revision, reason=terminal_stop)
     if next_iteration is not None:
         # Cleanup committed and the physical/Source fence is CLOSED before the
         # original preparation owner applies all current caps/consent gates.
@@ -1587,7 +1748,7 @@ async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner,
                             raise RepositorySourceRecoveryError("original_repository_knownpost_readback_changed")
                 witness = _OriginalRepositoryProducerCompletionWitness()
                 _COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
-                    "knownpost_stage": stage, "result": result, "post_cas": envelope["source_completion_cas"],
+                    "knownpost_stage": stage, "staged_context": staged, "result": result, "post_cas": envelope["source_completion_cas"],
                     "status": result["status"] if complete else "held_partial", "committed_rows": rows,
                     "cleanup_envelope": _canonical(envelope),
                     "completion_digest": source._source_digest(result["original_producer_completion"]),
@@ -1661,12 +1822,12 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
         if existing_stop is not None or expired:
             reason = existing_stop["stop_reason"] if existing_stop else "deadline_exhausted"
             staged_stop = await stop_owner._context(service, jobs, job_id=job_id, owner=owner,
-                limit_reason=reason if reason in stop_owner.AUTOMATIC_REASONS else None)
+                limit_reason=reason if reason in stop_owner.AUTOMATIC_REASONS else None, fence=fence)
             staged_stop = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
                 context=staged_stop, owner=owner, reason=reason, fence=fence)
             context = staged_stop.data
         elif run.status == "unknown_external_effect":
-            context = (await stop_owner._context(service, jobs, job_id=job_id, owner=owner)).data
+            context = (await stop_owner._context(service, jobs, job_id=job_id, owner=owner, fence=fence)).data
         else:
             context = await source._repository_precontact(service, jobs, job_id=job_id, owner=owner)
         run = context["run"]

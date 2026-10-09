@@ -66,7 +66,7 @@ async def read_specialist_handoff(db, context):
     return copied
 
 
-async def validate_handoff_publication(db, owner, envelope):
+async def collect_handoff_publication_rows(db, owner, envelope):
     """Metadata-only private envelope gate on the existing publication writer."""
     if envelope.specialist_handoff is None:
         return
@@ -108,7 +108,18 @@ async def validate_handoff_publication(db, owner, envelope):
         and reservation.handoff_ref == envelope.specialist_handoff]
     if len(matched) != 1:
         raise BoardError("specialist_handoff_denied", "Unique original copied handoff required", status_code=409)
-    context = await current_delegation(db, matched[0].run_identity)
+    from src.workflows.job_runtime import _canonical
+    return {"callback": matched[0], "rows": tuple((type(row), tuple(getattr(row, column.name) for column in row.__table__.primary_key),
+        _canonical(row.model_dump(mode="json"))) for row in [*rows, *candidates])}
+
+
+async def validate_handoff_publication(db, owner, envelope, *, _repository_stop_context=None):
+    selection = await collect_handoff_publication_rows(db, owner, envelope)
+    if selection is None:
+        return
+    from src.workflows.specialist_delegation import current_delegation
+    context = await current_delegation(db, selection["callback"].run_identity,
+        _repository_stop_context=_repository_stop_context)
     if (envelope.proposal_group != context.envelope.proposal_group
         or envelope.proposal_provenance != context.envelope.proposal_provenance
         or envelope.task_input.intent != context.request.instruction
@@ -118,6 +129,29 @@ async def validate_handoff_publication(db, owner, envelope):
         or any(step.tool_id not in context.request.allowed_tool_ids for step in envelope.plan.steps)):
         raise BoardError("specialist_handoff_denied", "Original narrowed specialist envelope required", status_code=409)
     return context
+
+
+async def validate_handoff_publication_staged(db, owner, envelope, physical):
+    """Original Stop initializer: complete read-only semantics, no issued proof."""
+    selection = await collect_handoff_publication_rows(db, owner, envelope)
+    if selection is None:
+        if physical is not None:
+            raise BoardError("specialist_handoff_changed", "Original optional handoff changed", status_code=409)
+        return
+    if physical is None:
+        raise BoardError("specialist_handoff_changed", "Original optional staged handoff required", status_code=409)
+    from src.workflows.specialist_delegation import _current_delegation_data
+    context = await _current_delegation_data(db, selection["callback"].run_identity,
+        _specialist_physical=physical)
+    if (envelope.proposal_group != context.envelope.proposal_group
+        or envelope.proposal_provenance != context.envelope.proposal_provenance
+        or envelope.task_input.intent != context.request.instruction
+        or envelope.task_input.evidence_refs != context.request.evidence_refs
+        or envelope.task_input.limits != context.envelope.task_input.limits
+        or envelope.plan is None or len(envelope.plan.steps) > context.request.limits.max_steps
+        or any(step.tool_id not in context.request.allowed_tool_ids for step in envelope.plan.steps)):
+        raise BoardError("specialist_handoff_denied", "Original narrowed specialist envelope required", status_code=409)
+    return None
 
 
 async def resolve_specialist_evidence(db, task, envelope, value):

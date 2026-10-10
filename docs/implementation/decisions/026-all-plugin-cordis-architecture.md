@@ -153,6 +153,13 @@ operator_identities(id, created_at, revoked_at) bodies in the same original
 frame. This is the only retained-field exception; it adds no table, index,
 ledger, grant or authority. All other R1G restrictions remain in force.
 
+[ADR-033](./033-task-method-composition-metadata.md) supersedes only the
+closed schema-object allowance and ceiling below: the exact existing
+`task_method_active` metadata and four indexes yield 1359 objects / LIMIT 1360.
+Its metadata-only rule adds no common body or authority. The original numeric
+clauses below retain their decision provenance and are governed by that narrow
+supersession.
+
 Before snapshot row bodies, certify the complete superset on the original current
 SQLite connection under the existing maintenance lock. Bound all schema-object
 metadata to the source-derived ceiling of **1354 objects**, with unfiltered
@@ -304,11 +311,13 @@ clause only for this named programme component. The prior FTS metadata amendment
 (adoption SHA256 044aa6742494234dae8e6e0d0f627d1f007661631e57f6cf5ff68e7e32823432)
 already owns the 1354-object ceiling and unfiltered LIMIT1355; this exception
 adds no metadata allowance and leaves its metadata-only FTS restrictions intact.
+The later [ADR-033](./033-task-method-composition-metadata.md) supersedes that
+schema inventory/ceiling only; this programme exception itself adds no metadata.
 All other R1G contracts, ADR-027's Python programme owner and ADR-030 remain unchanged.
 
 **1. One original capacity frame.** Each applicable operation retains one original maximum of128 distinct canonical references and1,048,576 bytes. The common33 superset remains unchanged. Only when the actual original programme closure requires it, an additional explicitly named certificate covers the existing operator_identities table's exact `(id,created_at,revoked_at)` body for the original selected identity IDs. Those rows, schema metadata, repeated reads, raw tuples, prospective copies and outputs spend the **same original** frame. No reset/renewal, cap increase, identity-specific pool or renewed phase budget. If common33 certification or Current construction already overflows, this allowance does not rescue it: block honestly before the next body/effect and preserve original recovery debt.
 
-**2. Conditional selection and metadata before bodies.** Certify unchanged common33 first on the original current SQLite connection/transaction, preserving its current unfiltered row census and source-derived metadata ceiling1354/LIMIT1355. Obtain candidate identity IDs only from already certified exact original DISCOVERY_KIND declared authority and the selected canonical Goal's matching stored programme generation/issuer binding. Deduplicate original IDs; no name prefix/wildcard/all-identity scan or active/current-status filter. ID possession alone is not authority.
+**2. Conditional selection and metadata before bodies.** Certify unchanged common33 first on the original current SQLite connection/transaction, preserving its current unfiltered row census and the effective source-derived metadata ceiling1359/LIMIT1360 under [ADR-033](./033-task-method-composition-metadata.md). Obtain candidate identity IDs only from already certified exact original DISCOVERY_KIND declared authority and the selected canonical Goal's matching stored programme generation/issuer binding. Deduplicate original IDs; no name prefix/wildcard/all-identity scan or active/current-status filter. ID possession alone is not authority.
 
 Before any selected Identity body, certify table metadata against the actual three-column SQLModel owner: exact columns id,created_at,revoked_at; hidden0/no generated fields; original nullable/storage/PK layout and existing primary-key single BINARY ascending unique locator; exact source-owned supported indexes. Bounded table_xinfo4, index metadata and the original schema census provide overflow witnesses; debit complete accepted metadata before bodies. Unknown column/index/trigger/locator, unsupported schema or insufficient original budget blocks before private bodies. `_rowid_`, typeof and octet_length headers for each exact original identity determine complete raw-body upper cost; actual genuine int64 physical references and full three-field appearances enroll/spend the same original budget before fetching strings/timestamps. Missing or duplicate selected row blocks; genuine absent/revoked identity never becomes a new grant.
 

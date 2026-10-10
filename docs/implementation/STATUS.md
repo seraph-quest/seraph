@@ -22,6 +22,11 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+[ADR-033](./decisions/033-task-method-composition-metadata.md) records the
+narrow accepted-target compatibility allowance for existing reviewed-method
+schema metadata under ADR-026. It changes no body/authority budget and claims
+no shipped composition or native Memory availability.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

@@ -15,6 +15,11 @@ operator controls. The architecture decision by itself does not install Cordis,
 replace the runtime or migrate stored data. The separately implemented optional
 lifecycle host below does not migrate the agent loop or canonical ownership.
 
+[ADR-033](./decisions/033-task-method-composition-metadata.md) records the
+narrow accepted-target compatibility allowance for existing reviewed-method
+schema metadata under ADR-026. It changes no body/authority budget and claims
+no shipped composition or native Memory availability.
+
 ### Reviewed optional Cordis lifecycle host
 
 This is the implementation contract for [#1006](https://github.com/seraph-quest/seraph/issues/1006)

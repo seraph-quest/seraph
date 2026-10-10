@@ -69,7 +69,7 @@ discriminator; seal its full server-derived vector before effects.
 
 A v4 Root requires `repository.original_producer.v2` registration and
 `repository.original_producer_completion.v2` completion. Their existing exact
-31-key registration and 12-key completion-body grammars remain unchanged; their
+31-key registration and 11-key completion-body grammars remain unchanged; their
 new discriminators, pinned source digests and new completion signature domain
 pin this protocol. The completion envelope remains exactly `completion` and
 `signature`. Its signature domain is

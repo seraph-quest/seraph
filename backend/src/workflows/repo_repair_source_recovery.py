@@ -669,7 +669,7 @@ def repository_completion_append_stage(stage):
     values = {key: data[key] for key in ("root", "root_json", "owner", "work", "job_id", "iteration_id",
         "iteration_index", "before_revision", "journal_prefix", "inventory", "result", "status",
         "context_rows", "accounting_rows", "proposal_json", "approval_json")}
-    for key in ("registration", "execution", "cas", "physical_projection", "retry_metadata"):
+    for key in ("registration", "execution", "cas", "physical_projection", "retry_metadata", "recovery_commitment"):
         values[key] = json.loads(data[key]) if data[key] is not None else None
     return MappingProxyType(values)
 
@@ -710,6 +710,7 @@ async def _stage_repository_completion_append_publication(service, jobs, *, cont
         "proposal_json": _canonical(proposal_json), "approval_json": _canonical(approval_json),
         "result": result, "result_status": result["status"], "status": status,
         "body_digest": source._source_digest(result["original_producer_completion"]),
+        "recovery_commitment": _canonical(_make_recovery_commitment(context, cas)) if _v4_root(run) else None,
         "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}}
     for key, value in (("registration", registration), ("execution", execution), ("cas", cas),
             ("physical_projection", physical_projection), ("retry_metadata", retry_metadata)):

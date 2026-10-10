@@ -779,7 +779,8 @@ async def _persist_repository_stop_intent_locked(service, jobs, *, context, owne
     assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
     if context["owner"] != owner or reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS:
         raise DurableJobLeaseError("closed original repository stop reason required")
-    existing_stop = source._repository_record(context["run"], STOP_ID)
+    run = context["run"]
+    existing_stop = source._repository_record(run, STOP_ID)
     if existing_stop is None:
         snapshot = {"schema": _stop_schema(run, "stop_snapshot"), "static_rows": context["static_rows"],
             "repository_job_id": job_id, "source_checkpoint_digest": source._source_digest(context["original"])}

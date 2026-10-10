@@ -14,6 +14,61 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_stop_metadata import stopped_original, forbid_private_metadata_reads
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["v3", "v4"])
+async def test_first_original_stop_intent_persists_selected_snapshot_version(
+        accounting_db, monkeypatch, repository_admission_signer, version):
+    from src.workflows import repo_repair_stop as stop_owner
+    from src.workflows.repo_repair_source_recovery import _repository_recovery_fence
+    real_append = source_module._append_repository_record
+    sealed = []
+
+    def original_version_seal(run, identity, payload, **kwargs):
+        if identity == "repository:inventory:v1":
+            # Legacy fixture selection occurs at the authentic first server
+            # seal, before any dispatch. Never rewrite a sealed Root, copy an
+            # owner, or upgrade an old inventory during Stop.
+            assert source_module._repository_record(run, identity) is None
+            assert payload["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            payload = {**payload, "schema": "repository.checkpoint_inventory." + version}
+            sealed.append(run.run_identity)
+        return real_append(run, identity, payload, **kwargs)
+
+    monkeypatch.setattr(source_module, "_append_repository_record", original_version_seal)
+    factory, owner, service, jobs, binding, root_id, _ = await stopped_original(
+        accounting_db, monkeypatch, prepared=True)
+    assert sealed == [root_id]
+    monkeypatch.setattr(source_module, "_append_repository_record", real_append)
+    async with factory() as db:
+        root = await jobs._fetch(db, root_id)
+        before = root.model_dump(mode="json")
+        hold = jobs._repo_repair_reservation_state(root)
+        assert source_module.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory." + version
+        assert source_module._repository_record(root, stop_owner.STOP_ID) is None
+        assert not any(item["checkpoint_id"].startswith("repository:execution:")
+            for item in json.loads(root.checkpoint_receipts_json))
+    async with _repository_recovery_fence(service, jobs, job_id=root_id, owner=owner) as fence:
+        context = await stop_owner._context(service, jobs, job_id=root_id, owner=owner)
+        committed = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
+            context=context, owner=owner, reason="operator_cancelled", fence=fence)
+        stop_owner.assert_repository_stop_context(committed, service=service, jobs=jobs)
+    async with factory() as db:
+        root = await jobs._fetch(db, root_id)
+        intent = source_module._repository_record(root, stop_owner.STOP_ID)
+        assert root.revision == before["revision"] + 1
+        assert root.status == before["status"] == "running"
+        assert jobs._repo_repair_reservation_state(root) == hold
+        assert (root.lease_owner, root.lease_expires_at, root.fencing_token) == (
+            before["lease_owner"], context["run"].lease_expires_at, before["fencing_token"])
+        schema_version = "v2" if version == "v4" else "v1"
+        assert intent["schema"] == "repository.stop_intent." + schema_version
+    snapshot = json.loads(service._read_private_artifact(intent["snapshot_artifact_ref"],
+        expected_digest=intent["snapshot_artifact_digest"]))
+    assert snapshot == {"schema": "repository.stop_snapshot." + schema_version,
+        "static_rows": intent["static_rows"], "repository_job_id": root_id,
+        "source_checkpoint_digest": source_module._source_digest(committed["original"])}
+
+
 async def original_and_owners(accounting_db, monkeypatch):
     from src.auth import service as auth_service
     credentials = {}

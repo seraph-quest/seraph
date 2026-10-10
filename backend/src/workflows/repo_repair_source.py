@@ -746,6 +746,11 @@ def bind_repository_completion_append_payloads(stage, pending, *, service, jobs,
     metadata = [json.loads(raw) for raw in data["metadata"]]
     envelope = {"physical_projection": binding["physical_projection"],
         "source_completion_cas": binding["cas"], "source_append_metadata": metadata}
+    from src.workflows.repo_repair_source_recovery import _validate_cleanup_artifact_version
+    if read_repository_inventory(binding["root"])["schema"] == "repository.checkpoint_inventory.v4":
+        envelope.update(schema="repository.original_cleanup_artifact.v2",
+            recovery_commitment=binding["recovery_commitment"])
+    _validate_cleanup_artifact_version(binding["root"], envelope)
     envelope_raw = _canonical(envelope).encode()
     if len(envelope_raw) > 1048576:
         raise DurableJobLeaseError("original completion artifact exceeds its bound")

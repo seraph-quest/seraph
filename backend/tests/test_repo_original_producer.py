@@ -22,22 +22,35 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 
 
 def test_original_producer_requires_committed_registration_before_any_command(tmp_path):
+    from datetime import datetime, timezone, timedelta
     directory = tmp_path / "durable"
     directory.mkdir(mode=0o700)
     guard = os.open(tmp_path / "guard", os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     request = directory / "admission.json"
+    wall_cutoff = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
     request.write_bytes(producer.canonical({"deadline_at": time.monotonic() + 5,
-        "original_producer": {"directory": str(directory), "nonce": "n" * 64,
-            "sources": producer.original_producer_sources()}}))
+        "original_producer": {"schema": producer.PROFILE_V2,
+            "original_deadline_at": wall_cutoff, "durability_filename": producer.DURABILITY_FILE,
+            "directory": str(directory), "nonce": producer.secrets.token_hex(32),
+            "sources": producer.original_producer_sources(),
+            "job": {"execution_deadline_at": wall_cutoff}}}))
     request.chmod(0o600)
     process = subprocess.Popen([sys.executable, "-I", producer.__file__, str(request),
         str(child.fileno()), str(guard)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, pass_fds=(child.fileno(), guard), start_new_session=True)
     child.close()
     try:
-        ready = producer.receive(parent, time.monotonic() + 5)
+        try:
+            ready = producer.receive(parent, time.monotonic() + 5)
+        except ValueError as exc:
+            if str(exc) != "original_producer_parent_eof":
+                raise
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail("original producer EOF before READY; exit=" + str(process.returncode)
+                + "; stderr=" + stderr[:4096].decode(errors="replace")
+                + "; stdout_bytes=" + str(len(stdout)))
         assert ready["kind"] == "ready" and ready["pid"] == process.pid
         assert ready["admission_digest"] == producer.digest(request.read_bytes())
         assert ready["start_identity"] == repo_supervisor.start_identity(process.pid)
@@ -170,6 +183,49 @@ def test_durable_reader_rejects_symlink_and_replaced_output(tmp_path):
         os.close(root)
 
 
+async def _assert_actual_protected_cleanup_artifact_bindings(flow, *, count):
+    import hashlib
+    from src.workflows import repo_repair_source as source
+    from src.workflows import repo_repair_source_recovery as recovery
+    from src.workflows.job_runtime import _canonical, _digest
+    from src.workflows.repo_repair import RepoRepairError
+    service = flow["service"].repository_source_service
+    async with flow["factory"]() as db:
+        root = await flow["jobs"]._fetch(db, flow["root_id"])
+        before = root.model_dump_json()
+        history = json.loads(root.checkpoint_receipts_json)
+        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v4"
+        for index in range(1, count + 1):
+            registration = recovery.read_registered_repository_producer(root, iteration_index=index)
+            identity = registration["iteration_id"]
+            cleanup = source._repository_record(root, "repository:cleanup:" + identity)
+            readback = source._repository_record(root, "repository:readback:" + identity)
+            raw = service._read_private_artifact(cleanup["artifact_ref"], expected_digest=cleanup["artifact_digest"])
+            envelope = json.loads(raw)
+            assert set(envelope) == {"schema", "recovery_commitment", "physical_projection",
+                "source_completion_cas", "source_append_metadata"}
+            recovery._validate_cleanup_artifact_version(root, envelope)
+            assert envelope["schema"] == "repository.original_cleanup_artifact.v2"
+            assert _canonical(envelope).encode() == raw
+            assert hashlib.sha256(raw).hexdigest() == cleanup["artifact_digest"]
+            assert envelope["source_completion_cas"] == cleanup["source_completion_cas"] == readback["source_completion_cas"]
+            assert envelope["source_completion_cas"]["iteration_id"] == identity
+            assert envelope["recovery_commitment"]["before_revision"] == envelope["source_completion_cas"]["before_revision"]
+            metadata = envelope["source_append_metadata"]
+            assert len(metadata) == 2 and all(set(item) == {"checkpoint_id", "safe", "created_at"} for item in metadata)
+            for item, payload in zip(metadata, (cleanup, readback)):
+                wrappers = [entry for entry in history if entry["checkpoint_id"] == item["checkpoint_id"]]
+                assert wrappers == [{**item, "payload": payload, "state_digest": _digest(payload)}]
+            legacy = {key: envelope[key] for key in ("physical_projection", "source_completion_cas", "source_append_metadata")}
+            legacy_digest = hashlib.sha256(_canonical(legacy).encode()).hexdigest()
+            assert legacy_digest != cleanup["artifact_digest"]
+            with pytest.raises(RepoRepairError) as denied:
+                service._read_private_artifact(cleanup["artifact_ref"], expected_digest=legacy_digest)
+            assert denied.value.code == "private_artifact_digest_changed"
+            assert service._read_private_artifact(cleanup["artifact_ref"], expected_digest=cleanup["artifact_digest"]) == raw
+        assert root.model_dump_json() == before
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
 async def test_actual_source_bundle_staging_holds_guard_and_revokes_physical_witness(
@@ -177,6 +233,7 @@ async def test_actual_source_bundle_staging_holds_guard_and_revokes_physical_wit
     from tests.test_repo_work_task_publication import _actual_source_callback_journey
     from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
     flow = await _actual_source_callback_journey(accounting_db, monkeypatch, False, language)
+    await _assert_actual_protected_cleanup_artifact_bindings(flow, count=1)
     async with flow["factory"]() as db:
         run = await flow["jobs"]._fetch(db, flow["root_id"])
         registration = read_registered_repository_producer(run, iteration_index=1)
@@ -401,7 +458,8 @@ async def test_actual_three_iteration_group_keeps_same_live_guard_and_scope(
         return await original_publish(service, jobs, **kwargs)
 
     monkeypatch.setattr(recovery, "publish_original_repository_completion", observe_group)
-    await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
+    flow = await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
+    await _assert_actual_protected_cleanup_artifact_bindings(flow, count=3)
     assert checked == [language]
 
 

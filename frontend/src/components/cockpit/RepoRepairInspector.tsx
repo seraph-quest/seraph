@@ -1293,6 +1293,14 @@ export function RepoRepairInspector({
     const canInspect = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "review_code_egress" && review.contact_state === "not_started";
     const canExecute = !effectsBlocked && !sourceMutationUncertain && current.status === "running" && current.recovery_action === "execute_approved_patch" && current.patch_proposal?.status === "awaiting_approval"
       && current.approval?.status === "approved" && isFiniteFutureTimestamp(current.approval.expires_at) && isFiniteFutureTimestamp(current.patch_proposal.expires_at);
+    const physicalCleanupStatus = current.source_recovery?.physical_hold === false
+      ? "Original physical cleanup is verified; physical hold released."
+      : current.source_recovery?.physical_hold === null
+        ? "Original physical cleanup status is unknown."
+        : "Physical cleanup is pending verification.";
+    const unknownOutcomeStatus = current.source_recovery
+      ? `Unknown outcome. Task and result remain Unknown. Original reservation and contacted cost debt remain held. ${physicalCleanupStatus}`
+      : "Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification.";
     return <section className="rounded border border-cyan-400/30 p-3" aria-label="Repository repair execution">
       <div className="font-semibold">Repository repair</div>
       <div>{statusLabel(current.status)}{review.contact_state !== "not_prepared" && <> · iteration {review.iteration_index} of at most 3</>}</div>
@@ -1306,7 +1314,7 @@ export function RepoRepairInspector({
       </div>}
       {current.repository_stop && <div>
         <div>Stop reason: {current.repository_stop.reason}</div>
-        <div role="status">{current.repository_stop.pending ? "Original reservation remains held. Physical cleanup is pending verification." : "Original repository stop recorded."}</div>
+        <div role="status">{current.repository_stop.pending ? `Original reservation remains held. ${physicalCleanupStatus}` : "Original repository stop recorded."}</div>
         {current.repository_stop.limit_evidence && <div>
           <div>Recorded Root cost: {current.repository_stop.limit_evidence.root_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_root_max_cost_microusd} microusd</div>
           <div>Recorded group cost: {current.repository_stop.limit_evidence.group_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_group_max_cost_microusd} microusd</div>
@@ -1347,7 +1355,7 @@ export function RepoRepairInspector({
           {outcome.command_results_status === "unknown" ? <div>Command outcomes: Unknown</div> : outcome.command_results?.map((command) => <div key={command.check}>{command.check}: {statusLabel(command.status)} · exit {command.exit_code ?? "unknown"}</div>)}
         </details>;
       })}
-      <div role="status">{current.status === "unknown_external_effect" ? "Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification." : statusLabel(current.recovery_action)}</div>
+      <div role="status">{current.status === "unknown_external_effect" ? unknownOutcomeStatus : statusLabel(current.recovery_action)}</div>
       {current.status === "succeeded" && <div>The recorded named checks passed. Review the local patch; passing checks do not establish patch quality or authorize publication.</div>}
     </section>;
   }

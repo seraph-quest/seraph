@@ -757,6 +757,42 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     expect(fetch.mock.calls.every(call => !call[1]?.method || call[1].method === 'GET')).toBe(true);
   });
 
+  it.each([
+    [false, false], [false, true], [true, false], [true, true], [null, false], [null, true],
+  ])('keeps Unknown liabilities distinct from physical hold %s with pending Stop %s', async (physical_hold, pendingStop) => {
+    const fetch = vi.fn().mockResolvedValue(response({
+      ...repositorySourceStatus(), status: 'unknown_external_effect', provider_contacted: true,
+      recovery_action: pendingStop ? 'repository_stop_pending' : 'original_unknown',
+      source_recovery: { ...recovery, state: physical_hold === false ? 'physical_cleanup_only' : 'held_unknown', physical_hold },
+      ...(pendingStop ? { repository_stop: { reason: 'operator_cancelled', pending: true,
+        limit_evidence: null, limit_evidence_digest: null } } : {}),
+    }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const holdLabel = physical_hold === null ? 'unknown' : physical_hold ? 'held' : 'released';
+    expect(await screen.findByText(`Original physical hold: ${holdLabel}`)).toBeInTheDocument();
+    expect(screen.getByText('Original result: unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Task and result remain Unknown\. Original reservation and contacted cost debt remain held\./)).toBeInTheDocument();
+    if (physical_hold === false) {
+      expect(screen.getAllByText(/Original physical cleanup is verified; physical hold released\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/Physical cleanup is pending verification\./)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Original physical cleanup status is unknown\./)).not.toBeInTheDocument();
+    } else if (physical_hold === true) {
+      expect(screen.getAllByText(/Physical cleanup is pending verification\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/physical hold released\./)).not.toBeInTheDocument();
+    } else {
+      expect(screen.getAllByText(/Original physical cleanup status is unknown\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/physical hold released\.|Physical cleanup is pending verification\./)).not.toBeInTheDocument();
+    }
+    if (pendingStop) expect(screen.getByText(/^Original reservation remains held\./)).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(screen.queryByRole('button', { name: /recover|reconcile|settle|Try original cleanup/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.every(call => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
   it('keeps unknown physical hold distinct from released capacity', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: { ...recovery, physical_hold: null } })));
     render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);

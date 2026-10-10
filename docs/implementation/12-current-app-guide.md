@@ -20,6 +20,11 @@ narrow accepted-target compatibility allowance for existing reviewed-method
 schema metadata under ADR-026. It changes no body/authority budget and claims
 no shipped composition or native Memory availability.
 
+[ADR-034](./decisions/034-first-discovery-capacity-selection.md) accepts only
+the original first-discovery capacity selector before job insertion. It preserves
+current grant checks and the same original frame; it establishes no implemented
+admission, execution permission or shipped composition availability.
+
 ### Reviewed optional Cordis lifecycle host
 
 This is the implementation contract for [#1006](https://github.com/seraph-quest/seraph/issues/1006)

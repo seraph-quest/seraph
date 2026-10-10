@@ -27,6 +27,11 @@ narrow accepted-target compatibility allowance for existing reviewed-method
 schema metadata under ADR-026. It changes no body/authority budget and claims
 no shipped composition or native Memory availability.
 
+[ADR-034](./decisions/034-first-discovery-capacity-selection.md) accepts only
+the original first-discovery capacity selector before job insertion. It preserves
+current grant checks and the same original frame; it establishes no implemented
+admission, execution permission or shipped composition availability.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

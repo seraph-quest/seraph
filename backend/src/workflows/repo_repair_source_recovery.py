@@ -35,7 +35,7 @@ class RepositorySourceRecoveryProjection(BaseModel):
     reason: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]*$")
     physical_hold: bool | None
     original_result: Literal["succeeded", "failed", "held_partial"] | None
-    public_actions: Literal["unavailable"] = "unavailable"
+    public_actions: Literal["unavailable", "reconcile_original_cleanup"] = "unavailable"
 
 
 def _latest_original_repository_registration(run):
@@ -1303,16 +1303,20 @@ async def issue_repository_source_producer(service, jobs, job, *, owner):
 
 async def recover_original_repository_cleanup(service, jobs, *, job_id, owner,
                                                expected_job_revision, action):
-    """Two closed actions; incomplete owner dependencies remain fail-closed."""
+    """Dispatch the original same-boot owner; foreign-boot ownership stays closed."""
     if (type(expected_job_revision) is not int or expected_job_revision < 0
             or type(action) is not str or action not in _ACTIONS):
         raise RepositorySourceRecoveryError("repository_source_recovery_request_invalid")
+    if action == "reconcile_original_cleanup":
+        # This adapter owns its one original fence and repeats all current
+        # checks. Never wrap it in another fence or retry a stale revision.
+        return await _reconcile_original_repository_cleanup(service, jobs,
+            job_id=job_id, owner=owner, expected_job_revision=expected_job_revision)
     async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
         await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
             expected_job_revision=expected_job_revision, fence=fence)
-        # Registration, completion and physical-release owners must all be
-        # integrated before this selected mode can authorize either action.
-        # No legacy fallback, injected callback or public DTO supplies them.
+        # Different-boot physical settlement still requires its separate
+        # fresh native-host issuer. Stored history never supplies that grant.
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
 
 
@@ -1349,7 +1353,7 @@ async def _reconcile_original_repository_stop(service, jobs, *, job_id, owner,
 
 async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner,
         expected_job_revision):
-    """Internal candidate: original same-boot owners, with no public enablement.
+    """Original same-boot owners, shared by the authenticated public action.
 
     Caller data chooses only the current Root revision. Selection precedes no
     grant: the actual owner checks that revision again under its single fence.

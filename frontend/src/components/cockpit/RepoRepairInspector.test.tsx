@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RepoRepairInspector } from "./RepoRepairInspector";
+import { API_URL } from "../../config/constants";
 import nodePendingApi from "./__fixtures__/node-repair-pending-api.json";
 // Actual authenticated recovery GETs; only host binary paths are normalized.
 // Original DTOs and the exact-field correlation stay in private test evidence.
@@ -810,6 +811,215 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expectNoRepositoryEffects();
+  });
+});
+
+// UI response fixtures only; genuine authenticated owner/effect proof is backend-owned.
+describe('RepoRepairInspector original cleanup action', () => {
+  const recovery = { state: 'held_unknown', reason: 'original_completion_unproven', physical_hold: true,
+    original_result: null, public_actions: 'reconcile_original_cleanup' };
+  const status = (changes: Record<string, unknown> = {}) => ({ ...repositorySourceStatus(), source_recovery: recovery, ...changes });
+  const endpoint = `${API_URL}/api/workflows/repo-repair/repository%3Asource-test`;
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); window.sessionStorage.clear(); });
+
+  it.each([null, { ...recovery, public_actions: 'unavailable' }])('offers no cleanup for %j', async (source_recovery) => {
+    const fetch = vi.fn().mockResolvedValue(response(status({ source_recovery })));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    await screen.findByRole('button', { name: 'Refresh repair status' });
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['generic available', { ...recovery, public_actions: 'available' }],
+    ['foreign boot action', { ...recovery, public_actions: 'settle_original_host_boot_cleanup' }],
+    ['boolean action', { ...recovery, public_actions: true }],
+    ['extra field', { ...recovery, private_path: '/private/key' }],
+    ['unsafe reason', { ...recovery, reason: '/private/key' }],
+    ['untyped hold', { ...recovery, physical_hold: 'false' }],
+    ['missing result', { state: recovery.state, reason: recovery.reason, physical_hold: true, public_actions: recovery.public_actions }],
+  ])('rejects %s despite an action response', async (_label, source_recovery) => {
+    const fetch = vi.fn().mockResolvedValue(response(status({ source_recovery })));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('posts only the latest GET revision and holds controls through actual refetch', async () => {
+    let resolvePost!: (value: Response) => void;
+    let resolveGet!: (value: Response) => void;
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()))
+      .mockResolvedValueOnce(response(status({ revision: 8 })))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { resolvePost = resolve; }))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { resolveGet = resolve; }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    await screen.findByRole('button', { name: 'Try original cleanup' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try original cleanup' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Try original cleanup' }));
+    expect(screen.getByRole('button', { name: 'Try original cleanup' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh repair status' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try original cleanup' }));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls[2][0]).toBe(`${endpoint}/source-recovery`);
+    expect(fetch.mock.calls[2][1]).toMatchObject({ method: 'POST', credentials: 'include' });
+    expect(JSON.parse(String(fetch.mock.calls[2][1].body))).toEqual({ expected_job_revision: 8, action: 'reconcile_original_cleanup' });
+    await act(async () => resolvePost(response({ status: 'succeeded', physical_capacity_released: true })));
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole('button', { name: 'Try original cleanup' })).toBeDisabled();
+    expect(screen.getByText('Original physical hold: held')).toBeInTheDocument();
+    await act(async () => resolveGet(response(status({ revision: 9, status: 'failed', source_recovery: {
+      ...recovery, state: 'original_cleanup_committed', original_result: 'failed', physical_hold: false, public_actions: 'unavailable',
+    } }))));
+    expect(screen.getByText('Original recovery: original cleanup committed')).toBeInTheDocument();
+    expect(screen.getByText('Original result: failed')).toBeInTheDocument();
+    expect(screen.getByText('Original physical hold: released')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh repair status' })).toBeEnabled();
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+    expect(fetch.mock.calls.filter(call => call[1]?.method !== 'POST').every(call => call[0] === endpoint)).toBe(true);
+  });
+
+  it.each([
+    ['pending_original_producer', 'running', true, null],
+    ['held_partial', 'unknown_external_effect', true, 'held_partial'],
+    ['continuation_ready', 'running', true, 'failed'],
+    ['original_stop_committed', 'cancelled', false, 'failed'],
+  ])('renders actual GET %s instead of POST proof', async (state, jobStatus, physicalHold, originalResult) => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()))
+      .mockResolvedValueOnce(response({ status: 'succeeded', source_recovery: { state: 'original_cleanup_committed', physical_hold: false } }))
+      .mockResolvedValueOnce(response(status({ revision: 7, status: jobStatus, source_recovery: {
+        ...recovery, state, physical_hold: physicalHold, original_result: originalResult, public_actions: 'unavailable',
+      } })));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    await screen.findByText(`Original recovery: ${String(state).replace(/_/g, ' ')}`);
+    expect(screen.getByText(`Original physical hold: ${physicalHold ? 'held' : 'released'}`)).toBeInTheDocument();
+    expect(screen.getByText(/no learning/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+  });
+
+  it.each(['stale revision', 'unsupported owner', 'lost response', 'malformed response'])('refreshes after %s without automatic retry', async (mode) => {
+    let resolveGet!: (value: Response) => void;
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()));
+    if (mode === 'lost response') fetch.mockRejectedValueOnce(new Error('response lost'));
+    else if (mode === 'malformed response') fetch.mockResolvedValueOnce(response(null));
+    else fetch.mockResolvedValueOnce(response({ detail: mode }, false, mode === 'stale revision' ? 409 : 503));
+    fetch.mockImplementationOnce(() => new Promise<Response>(resolve => { resolveGet = resolve; }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    expect(screen.getByText('Repository action outcome is uncertain. Refresh the original repair before another action.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try original cleanup' })).toBeDisabled();
+    await act(async () => resolveGet(response(status({ revision: 7, source_recovery: {
+      ...recovery, state: 'original_cleanup_committed', public_actions: 'unavailable',
+    } }))));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Original cleanup request was not confirmed');
+    expect(screen.getByText('Original recovery: original cleanup committed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('refreshes actual GET after the original request deadline', async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()))
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(response(status({ revision: 7, source_recovery: { ...recovery, public_actions: 'unavailable' } })));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: 'Try original cleanup' }));
+    await act(async () => { vi.advanceTimersByTime(15_000); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByRole('alert')).toHaveTextContent('timed out or was cancelled');
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['foreign job', { job_id: 'repository:foreign' }],
+    ['foreign callback', { repository_review: { ...repositorySourceStatus().repository_review, native_child_id: 'general-tool:foreign' } }],
+    ['older revision', { revision: 5 }],
+    ['private field', { private_path: '/private/key' }],
+    ['learning enabled', { no_learning: false }],
+  ])('removes action after %s readback and preserves both errors', async (_label, changed) => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()))
+      .mockRejectedValueOnce(new Error('uncertain POST'))
+      .mockResolvedValueOnce(response(status(changed)));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('uncertain POST');
+    expect(screen.getByRole('alert')).toHaveTextContent(/status.*(malformed|binding)/);
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([401, 403])('clears owner after POST %i without unauthorized refetch', async (code) => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(status())).mockResolvedValueOnce(response({ detail: 'authorization lost' }, false, code));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('no longer authorized');
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 403])('clears owner after actual refetch %i', async (code) => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(status())).mockResolvedValueOnce(response({}))
+      .mockResolvedValueOnce(response({ detail: 'authorization lost' }, false, code));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('no longer authorized');
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([['POST', 'session'], ['GET', 'session'], ['POST', 'job'], ['GET', 'job']])('ignores late %s during %s rotation', async (phase, binding) => {
+    let resolveLate!: (value: Response) => void;
+    const fetch = vi.fn().mockResolvedValueOnce(response(status()));
+    if (phase === 'GET') fetch.mockResolvedValueOnce(response({}));
+    const jobId = binding === 'job' ? 'repository:other' : 'repository:source-test';
+    const nextStatus = status({ job_id: jobId, source_recovery: null, repository_review: {
+      ...repositorySourceStatus().repository_review, repository_job_id: jobId,
+      source_preview_path: `/api/workflows/repo-repair/${jobId}/source-preview`,
+    } });
+    fetch.mockImplementationOnce(() => new Promise<Response>(resolve => { resolveLate = resolve; }))
+      .mockResolvedValueOnce(response(nextStatus));
+    vi.stubGlobal('fetch', fetch);
+    const view = render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Try original cleanup' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(phase === 'POST' ? 2 : 3));
+    view.rerender(<RepoRepairInspector {...inspectorProps} jobId={jobId}
+      ownerSessionId={binding === 'session' ? 'new-session' : inspectorProps.ownerSessionId}
+      taskOwnerSessionId={binding === 'session' ? 'new-session' : inspectorProps.taskOwnerSessionId} />);
+    await act(async () => resolveLate(response(status())));
+    await screen.findByRole('button', { name: 'Refresh repair status' });
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(phase === 'POST' ? 3 : 4);
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('does not request cleanup or private status for mismatched Task ownership', () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' taskOwnerSessionId='foreign' />);
+    expect(screen.getByRole('alert')).toHaveTextContent('current operator session');
+    expect(screen.queryByRole('button', { name: 'Try original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 

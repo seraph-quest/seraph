@@ -410,7 +410,7 @@ interface RepositorySourceRecovery {
   reason: string;
   physical_hold: boolean | null;
   original_result: "succeeded" | "failed" | "held_partial" | null;
-  public_actions: "unavailable";
+  public_actions: "unavailable" | "reconcile_original_cleanup";
 }
 
 function validateSourceRecovery(value: unknown): RepositorySourceRecovery | null {
@@ -422,7 +422,7 @@ function validateSourceRecovery(value: unknown): RepositorySourceRecovery | null
     || typeof value.reason !== "string" || !/^[a-z][a-z0-9_]{0,127}$/.test(value.reason)
     || (value.physical_hold !== null && typeof value.physical_hold !== "boolean")
     || (value.original_result !== null && (typeof value.original_result !== "string" || !["succeeded", "failed", "held_partial"].includes(value.original_result)))
-    || value.public_actions !== "unavailable") throw new Error("The repository Source recovery readback is malformed.");
+    || (value.public_actions !== "unavailable" && value.public_actions !== "reconcile_original_cleanup")) throw new Error("The repository Source recovery readback is malformed.");
   return value as unknown as RepositorySourceRecovery;
 }
 
@@ -1117,6 +1117,44 @@ export function RepoRepairInspector({
     } finally { if (isCurrent(generation)) setBusy(false); }
   }
 
+  async function reconcileOriginalCleanup() {
+    const current = repositoryStatus;
+    const generation = generationRef.current;
+    if (!hasCurrentBinding || !isCurrent(generation) || loading || busy || sourceMutationUncertain || !current
+      || current.source_recovery?.public_actions !== "reconcile_original_cleanup") return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    setRepositoryPreview(null);
+    setAcknowledgedSource(false);
+    setAcknowledgedDiagnostics(false);
+    let requestError: string | null = null;
+    try {
+      try {
+        const receipt = await requestJson(`${endpoint}/source-recovery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_job_revision: current.revision, action: "reconcile_original_cleanup" }),
+        }, generation);
+        if (!isRecord(receipt)) {
+          requestError = "The original cleanup response was unavailable or malformed.";
+          setSourceMutationUncertain(true);
+        }
+      } catch (cause) {
+        if (!isCurrent(generation) || cause instanceof StaleRepairRequest) return;
+        requestError = cause instanceof Error ? cause.message : "The original cleanup request could not be confirmed.";
+        setSourceMutationUncertain(true);
+      }
+      if (!isCurrent(generation)) return;
+      // POST is never proof. Source refresh returns null while storing its GET.
+      await refresh(generation);
+      if (isCurrent(generation) && requestError) {
+        const message = `Original cleanup request was not confirmed: ${requestError}`;
+        setError(previous => previous ? `${message} ${previous}` : message);
+      }
+    } finally { if (isCurrent(generation)) setBusy(false); }
+  }
+
   async function inspectSource() {
     const generation = generationRef.current;
     const current = projection;
@@ -1302,7 +1340,10 @@ export function RepoRepairInspector({
         <div>Recovery reason: {current.source_recovery.reason}</div>
         <div>Original physical hold: {current.source_recovery.physical_hold === null ? "unknown" : current.source_recovery.physical_hold ? "held" : "released"}</div>
         <div>Original result: {current.source_recovery.original_result === null ? "unavailable" : statusLabel(current.source_recovery.original_result)}</div>
-        <div role="status">Public Source recovery actions are unavailable pending acceptance. Refresh reads the original durable status; no recovery is retried.</div>
+        {current.source_recovery.public_actions === "reconcile_original_cleanup"
+          ? <><div role="status">The original cleanup owner can attempt reconciliation. Refresh reads the actual outcome.</div>
+            <button type="button" disabled={busy || loading || sourceMutationUncertain} onClick={() => void reconcileOriginalCleanup()}>Try original cleanup</button></>
+          : <div role="status">Public Source recovery actions are unavailable pending acceptance. Refresh reads the original durable status; no recovery is retried.</div>}
       </div>}
       {current.repository_stop && <div>
         <div>Stop reason: {current.repository_stop.reason}</div>
@@ -1316,7 +1357,7 @@ export function RepoRepairInspector({
         </div>}
       </div>}
       <button type="button" disabled={busy || loading} onClick={() => void refresh()}>Refresh repair status</button>
-      {sourceMutationUncertain && <div role="status">Continuation outcome is uncertain. Refresh the original repair before another action.</div>}
+      {sourceMutationUncertain && <div role="status">Repository action outcome is uncertain. Refresh the original repair before another action.</div>}
       {error && <div role="alert">{error}</div>}{sourceError && <div role="alert">{sourceError}</div>}{notice && <div role="status">{notice}</div>}
       {canInspect && <button type="button" disabled={busy || loading || sourceLoading} onClick={() => void inspectRepositorySource()}>Inspect exact source and diagnostics</button>}
       {canInspect && preview && <div>

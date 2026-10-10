@@ -8021,6 +8021,45 @@ def _repo_repair_source_owner():
     return tasks, source, source.jobs
 
 
+async def _repo_repair_public_recovery_projection(tasks, source, jobs, *, job_id, owner, projection):
+    """Current public-owner metadata; dispatch never consumes this field."""
+    from src.workflows.repo_repair_source import repository_source_root
+    from src.workflows.repo_repair_source_recovery import (
+        RepositorySourceRecoveryError, RepositorySourceRecoveryProjection,
+        repository_source_recovery_projection,
+    )
+
+    if any(actual is not expected for actual, expected in zip(
+            _repo_repair_source_owner(), (tasks, source, jobs))):
+        raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        if (projection["job_id"] != job_id or projection["revision"] != run.revision
+                or projection["status"] != run.status):
+            raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+        if not await repository_source_root(db, job_id=job_id, owner=owner):
+            raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+        # The original metadata owner validates the exact latest protected
+        # registration and reservation against this freshly loaded Root.
+        current = repository_source_recovery_projection(source, jobs, run)
+        packet = projection["source_recovery"]
+        if packet is None:
+            if current is not None:
+                raise RepositorySourceRecoveryError("original_producer_registration_changed")
+            return projection
+        parsed = RepositorySourceRecoveryProjection.model_validate(packet)
+        if (current is None or parsed.physical_hold != current["physical_hold"]
+                or parsed.original_result != current["original_result"]):
+            raise RepositorySourceRecoveryError("original_producer_registration_changed")
+        # A physical Pending proof may be stronger than durable discovery;
+        # its original state/reason remain untouched by this metadata helper.
+    if any(actual is not expected for actual, expected in zip(
+            _repo_repair_source_owner(), (tasks, source, jobs))):
+        raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
+    return {**projection, "source_recovery": {
+        **packet, "public_actions": "reconcile_original_cleanup"}}
+
+
 async def _repo_repair_rows(
     job_id: str,
     operator: AuthenticatedOperator,
@@ -8388,10 +8427,13 @@ async def recover_repo_repair_source(job_id: str, req: RepoSourceRecoveryRequest
         if not await _repo_repair_source_root(safe_job_id, operator):
             raise RepositorySourceRecoveryError("repository_source_recovery_unavailable")
         _tasks, source, jobs = _repo_repair_source_owner()
-        return await recover_original_repository_cleanup(source, jobs,
-            job_id=safe_job_id, owner=WorkBoardOwner(
-                principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
+        owner = WorkBoardOwner(principal_id=str(operator.principal.principal_id),
+            session_id=str(operator.session_id))
+        projection = await recover_original_repository_cleanup(source, jobs,
+            job_id=safe_job_id, owner=owner,
             expected_job_revision=req.expected_job_revision, action=req.action)
+        return await _repo_repair_public_recovery_projection(_tasks, source, jobs,
+            job_id=safe_job_id, owner=owner, projection=projection)
     except RepositorySourceRecoveryError as exc:
         raise HTTPException(status_code=exc.status_code, detail={
             "code": exc.code, "operator_visible": True, "no_learning": True,
@@ -8887,14 +8929,22 @@ async def get_repo_repair(job_id: str, request: Request):
         raise _repo_repair_error(exc) from exc
     if source_root:
         from src.workflows.repo_repair_source import repository_operator_projection
+        from src.workflows.repo_repair_source_recovery import RepositorySourceRecoveryError
 
         _tasks, source, jobs = _repo_repair_source_owner()
         try:
-            return await repository_operator_projection(
+            owner = WorkBoardOwner(principal_id=str(operator.principal.principal_id),
+                session_id=str(operator.session_id))
+            projection = await repository_operator_projection(
                 source, jobs, job_id=safe_job_id,
-                owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id),
-                    session_id=str(operator.session_id)),
+                owner=owner,
             )
+            return await _repo_repair_public_recovery_projection(_tasks, source, jobs,
+                job_id=safe_job_id, owner=owner, projection=projection)
+        except RepositorySourceRecoveryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={
+                "code": exc.code, "operator_visible": True, "no_learning": True,
+            }) from exc
         except HTTPException:
             raise
         except Exception as exc:

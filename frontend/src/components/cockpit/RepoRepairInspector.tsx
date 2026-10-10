@@ -410,7 +410,7 @@ interface RepositorySourceRecovery {
   reason: string;
   physical_hold: boolean | null;
   original_result: "succeeded" | "failed" | "held_partial" | null;
-  public_actions: "unavailable" | "reconcile_original_cleanup";
+  public_actions: "unavailable" | "reconcile_original_cleanup" | "settle_original_host_boot_cleanup";
 }
 
 function validateSourceRecovery(value: unknown): RepositorySourceRecovery | null {
@@ -422,7 +422,7 @@ function validateSourceRecovery(value: unknown): RepositorySourceRecovery | null
     || typeof value.reason !== "string" || !/^[a-z][a-z0-9_]{0,127}$/.test(value.reason)
     || (value.physical_hold !== null && typeof value.physical_hold !== "boolean")
     || (value.original_result !== null && (typeof value.original_result !== "string" || !["succeeded", "failed", "held_partial"].includes(value.original_result)))
-    || !["unavailable", "reconcile_original_cleanup"].includes(value.public_actions as string)) throw new Error("The repository Source recovery readback is malformed.");
+    || !["unavailable", "reconcile_original_cleanup", "settle_original_host_boot_cleanup"].includes(value.public_actions as string)) throw new Error("The repository Source recovery readback is malformed.");
   return value as unknown as RepositorySourceRecovery;
 }
 
@@ -1239,7 +1239,9 @@ export function RepoRepairInspector({
   async function reconcileOriginalCleanup() {
     const generation = generationRef.current;
     const current = repositoryStatus;
-    if (busy || loading || !hasCurrentBinding || !current || current.source_recovery?.public_actions !== "reconcile_original_cleanup") return;
+    const action = current?.source_recovery?.public_actions;
+    if (busy || loading || !hasCurrentBinding || !current
+      || (action !== "reconcile_original_cleanup" && action !== "settle_original_host_boot_cleanup")) return;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -1248,7 +1250,7 @@ export function RepoRepairInspector({
       try {
         await requestJson(`${endpoint}/source-recovery`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expected_job_revision: current.revision, action: "reconcile_original_cleanup" }),
+          body: JSON.stringify({ expected_job_revision: current.revision, action }),
         }, generation);
       } catch (cause) {
         if (cause instanceof StaleRepairRequest || !isCurrent(generation)) return;
@@ -1338,8 +1340,12 @@ export function RepoRepairInspector({
         <div>Recovery reason: {current.source_recovery.reason}</div>
         <div>Original physical hold: {current.source_recovery.physical_hold === null ? "unknown" : current.source_recovery.physical_hold ? "held" : "released"}</div>
         <div>Original result: {current.source_recovery.original_result === null ? "unavailable" : statusLabel(current.source_recovery.original_result)}</div>
+        {current.source_recovery.state === "physical_cleanup_only" && <div role="status">Physical cleanup only. Unknown outcome, task result and contacted cost liability remain unchanged.</div>}
         {current.source_recovery.public_actions === "reconcile_original_cleanup"
           ? <button type="button" disabled={busy || loading} onClick={() => void reconcileOriginalCleanup()}>Reconcile original cleanup</button>
+          : current.source_recovery.public_actions === "settle_original_host_boot_cleanup"
+          ? <><div role="status">Host-boot cleanup removes only the original physical stage. It does not settle Unknown outcome, task result or contacted cost liability.</div>
+            <button type="button" disabled={busy || loading} onClick={() => void reconcileOriginalCleanup()}>Clean original stage after host boot</button></>
           : <div role="status">Public Source recovery actions are unavailable. Refresh reads the original durable status; no recovery is retried.</div>}
       </div>}
       {current.repository_stop && <div>

@@ -5263,7 +5263,50 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or not _text(payload.get("authority_digest"))
             ):
                 raise DurableJobTransitionError("repository repair reservation identity is malformed")
-            if status == "released" and payload.get("readback_scope") == "process_cleanup_only":
+            if status == "released" and payload.get("readback_scope") == "original_host_boot_cleanup":
+                from src.workflows import repo_repair_source as source
+                from src.workflows.repo_repair_source_recovery import _latest_original_repository_registration
+                physical = source._repository_record(run, "repository:physical-cleanup:v1")
+                registration = _latest_original_repository_registration(run)
+                keys = {"readback_scope", "cleanup_proven", "readback_verified", "outcome_status",
+                    "producer_registration_digest", "original_boot_id", "observed_boot_id", "stage_identity",
+                    "job_id", "attempt_id", "fence", "authority_digest", "execution_deadline_at", "iteration_id",
+                    "before_revision", "post_revision"}
+                release_keys = {"kind", "status", "job_id", "attempt_id", "fence", "authority_digest",
+                    "execution_deadline_at", "outcome_status", "cleanup_proven", "readback_verified",
+                    "readback_scope", "physical_cleanup_digest", "operator_visible", "recorded_at"}
+                if (run.status != "unknown_external_effect" or registration is None
+                        or source.read_repository_inventory(run)["schema"] not in {
+                            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+                        or physical is None or set(physical) != keys or set(payload) != release_keys
+                        or payload.get("operator_visible") is not True
+                        or physical["cleanup_proven"] is not True or physical["readback_verified"] is not False
+                        or payload.get("cleanup_proven") is not True or payload.get("readback_verified") is not False
+                        or physical["readback_scope"] != "original_host_boot_cleanup"
+                        or physical["outcome_status"] != "unknown_external_effect"
+                        or payload.get("outcome_status") != "unknown_external_effect"
+                        or payload.get("physical_cleanup_digest") != _digest(physical)
+                        or physical["producer_registration_digest"] != _digest(registration)
+                        or physical["original_boot_id"] != registration["native_host_binding"]["boot_id"]
+                        or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                            _text(physical["observed_boot_id"])) is None
+                        or physical["observed_boot_id"] == physical["original_boot_id"]
+                        or physical["stage_identity"] != registration["stage_identity"]
+                        or physical["iteration_id"] != registration["iteration_id"]
+                        or any(physical[key] != payload.get(key) for key in (
+                            "job_id", "attempt_id", "fence", "authority_digest", "execution_deadline_at"))
+                        or physical["job_id"] != run.run_identity
+                        or physical["attempt_id"] != registration["repository_attempt_id"]
+                        or type(physical["fence"]) is not int or type(payload.get("fence")) is not int
+                        or physical["fence"] != run.fencing_token or physical["authority_digest"] != run.authority_digest
+                        or physical["execution_deadline_at"] != registration["original_deadline_at"]
+                        or type(physical["before_revision"]) is not int or physical["before_revision"] < 0
+                        or type(physical["post_revision"]) is not int
+                        or physical["post_revision"] != physical["before_revision"] + 1
+                        or run.revision != physical["post_revision"]
+                        or source._repository_record(run, "repository:terminal:v1") is not None):
+                    raise DurableJobTransitionError("original repository host boot cleanup release proof is malformed")
+            elif status == "released" and payload.get("readback_scope") == "process_cleanup_only":
                 declared = _json_load(run.declared_authority_json, {})
                 if (run.job_kind != "engineering.repo-repair.v1" or declared.get("sandbox_profile") != "repo-node24-npm-v1"
                     or payload.get("cleanup_receipt_verified") is not True or payload.get("cleanup_proven") is not True

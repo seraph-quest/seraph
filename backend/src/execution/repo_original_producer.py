@@ -324,7 +324,7 @@ def original_producer_result_registration(result):
     raise ValueError("actual_original_producer_result_required")
 
 
-def _current_native_host_binding(binding):
+def _current_native_host_binding(binding, *, _boot_id=None):
     """Observe the same native host boundary used by original registration."""
     from src.execution.repo_sandbox import _open_trusted_directory
     workspace = _open_trusted_directory(Path(binding["workspace_path"]))
@@ -362,7 +362,7 @@ def _current_native_host_binding(binding):
     if len(mounts) != 1:
         raise ValueError("original_producer_proc_mount_unavailable")
     return {"schema": "repository.original_producer_host.v1", "machine_digest": digest(machine.strip()),
-        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip() if _boot_id is None else _boot_id,
         "pid_namespace": [pid_namespace.st_dev, pid_namespace.st_ino],
         "workspace_path": binding["workspace_path"], "workspace_identity": [workspace_stat.st_dev, workspace_stat.st_ino],
         "guard_path": binding["guard_path"], "guard_identity": binding["guard_identity"],
@@ -377,6 +377,164 @@ def _assert_registered_host(registration, ready):
             or host["guard_identity"] != list(ready.guard_identity)
             or registration["producer_sources"] != original_producer_sources()):
         raise ValueError("original_producer_native_host_changed")
+
+
+def _host_boot_id():
+    """Bounded literal kernel observation, never caller boot authority."""
+    fd = os.open("/proc/sys/kernel/random/boot_id", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        raw = os.read(fd, 130)
+        after = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+                or re.fullmatch(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n", raw) is None):
+            raise ValueError("original_host_boot_unavailable")
+        return raw.decode("ascii").strip()
+    finally:
+        os.close(fd)
+
+
+def _assert_original_host_boot_changed(registration):
+    stored = registration["native_host_binding"]
+    current = _current_native_host_binding(stored, _boot_id=_host_boot_id())
+    if current["boot_id"] == stored["boot_id"]:
+        raise ValueError("original_host_boot_unchanged")
+    # Ambiguous namespace/proc drift is not proof of a native-host reboot.
+    if (set(current) != set(stored)
+            or any(current[key] != stored[key] for key in stored if key != "boot_id")
+            or registration["producer_sources"] != original_producer_sources()):
+        raise ValueError("original_host_boot_boundary_changed")
+    return current
+
+
+@contextmanager
+def _stage_original_host_boot_cleanup(registration, *, service, jobs, owner, fence):
+    """Physical-only original guard/storage scope; no completion witness."""
+    from src.execution.repo_sandbox import _open_trusted_directory
+    from src.workflows.repo_repair_source_recovery import assert_repository_recovery_fence
+    assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+        job_id=registration["job_id"], owner=owner)
+    deadline = time.monotonic() + 5.0
+    task, thread = _physical_task(), threading.get_ident()
+    active, descriptors = False, []
+    def remaining():
+        if time.monotonic() >= deadline:
+            raise ValueError("original_host_boot_cleanup_timeout")
+    def opened(path):
+        remaining()
+        fd = _open_trusted_directory(path)
+        descriptors.append(fd)
+        return fd
+    def pair(metadata):
+        return [metadata.st_dev, metadata.st_ino]
+    try:
+        if registration.get("schema") not in {PROFILE, PROFILE_V2}:
+            raise ValueError("original_producer_registration_required")
+        if (registration["native_host_binding"]["boot_id"] != registration["ready"]["boot_id"]
+                or registration["native_host_binding"]["guard_path"] != registration["guard_path"]
+                or registration["native_host_binding"]["guard_identity"] != registration["ready"]["guard_identity"]):
+            raise ValueError("original_producer_registration_changed")
+        current = _assert_original_host_boot_changed(registration)
+        directory = opened(Path(registration["directory_path"]))
+        if pair(os.fstat(directory)) != registration["ready"]["directory_identity"]:
+            raise ValueError("original_producer_directory_changed")
+        raw = read_file(directory, "admission.json", MAX_ENVELOPE)
+        admission = _closed_json(raw)
+        producer, stage = admission["original_producer"], Path(admission["stage"])
+        if (digest(raw) != registration["admission_digest"] or canonical(admission) != raw
+                or producer["stage_identity"] != registration["stage_identity"]
+                or producer["sources"] != registration["producer_sources"]
+                or producer["directory"] != registration["directory_path"]
+                or admission["job_id"] != registration["job_id"]
+                or producer["job"]["job_id"] != registration["job_id"]
+                or producer["job"]["attempt_id"] != registration["repository_attempt_id"]
+                or not stage.is_absolute() or stage.name in {"", ".", ".."}
+                or stage.parent / "original-producers" / registration["iteration_id"] != Path(registration["directory_path"])):
+            raise ValueError("original_producer_admission_changed")
+        guard_path = Path(registration["guard_path"])
+        guard_parent = opened(guard_path.parent)
+        guard = os.open(guard_path.name, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=guard_parent)
+        descriptors.append(guard)
+        metadata = os.fstat(guard)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+                or pair(metadata) != registration["ready"]["guard_identity"]
+                or pair(os.stat(guard_path.name, dir_fd=guard_parent, follow_symlinks=False)) != pair(metadata)):
+            raise ValueError("original_producer_guard_changed")
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        parent = opened(stage.parent)
+        def remove_directory(parent_fd, name, expected):
+            remaining()
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                metadata = os.fstat(child)
+                if (pair(metadata) != expected or metadata.st_uid != os.getuid()
+                        or metadata.st_dev != registration["stage_identity"][0]):
+                    raise ValueError("original_host_boot_stage_changed")
+                with os.scandir(child) as entries:
+                    for entry in entries:
+                        remaining()
+                        before = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                        if stat.S_ISDIR(before.st_mode):
+                            remove_directory(child, entry.name, pair(before))
+                        else:
+                            if not (stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)):
+                                raise ValueError("original_host_boot_stage_changed")
+                            after = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                            if (before.st_dev, before.st_ino, before.st_mode) != (after.st_dev, after.st_ino, after.st_mode):
+                                raise ValueError("original_host_boot_stage_changed")
+                            os.unlink(entry.name, dir_fd=child)
+                remaining()
+                if pair(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != expected:
+                    raise ValueError("original_host_boot_stage_changed")
+                os.rmdir(name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            finally:
+                os.close(child)
+        try:
+            named_stage = os.stat(stage.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            named_stage = None
+        if named_stage is not None:
+            if not stat.S_ISDIR(named_stage.st_mode) or pair(named_stage) != registration["stage_identity"]:
+                raise ValueError("original_host_boot_stage_changed")
+            if _assert_original_host_boot_changed(registration) != current:
+                raise ValueError("original_host_boot_boundary_changed")
+            remove_directory(parent, stage.name, registration["stage_identity"])
+        remaining()
+        try:
+            os.stat(stage.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("original_host_boot_stage_present")
+        os.fsync(parent)
+        if _assert_original_host_boot_changed(registration) != current:
+            raise ValueError("original_host_boot_boundary_changed")
+        if (pair(os.fstat(guard)) != registration["ready"]["guard_identity"]
+                or pair(os.stat(guard_path.name, dir_fd=guard_parent, follow_symlinks=False))
+                    != registration["ready"]["guard_identity"]):
+            raise ValueError("original_producer_guard_changed")
+        projection = {"readback_scope": "original_host_boot_cleanup", "cleanup_proven": True,
+            "readback_verified": False, "outcome_status": "unknown_external_effect",
+            "producer_registration_digest": digest(canonical(registration)),
+            "original_boot_id": registration["native_host_binding"]["boot_id"],
+            "observed_boot_id": current["boot_id"], "stage_identity": registration["stage_identity"]}
+        active = True
+        def assert_staged():
+            remaining()
+            if not active or task is not _physical_task() or thread != threading.get_ident():
+                raise ValueError("original_host_boot_scope_closed")
+            assert_repository_recovery_fence(fence, service=service, jobs=jobs,
+                job_id=registration["job_id"], owner=owner)
+            return dict(projection)
+        yield assert_staged
+    finally:
+        active = False
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _assert_original_pid_absent(ready):

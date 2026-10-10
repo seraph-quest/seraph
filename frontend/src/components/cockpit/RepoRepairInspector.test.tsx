@@ -831,7 +831,7 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     ['invented result', { ...recovery, original_result: 'verified' }],
     ['array result', { ...recovery, original_result: ['succeeded'] }],
     ['caller enablement', { ...recovery, public_actions: 'available' }],
-    ['unproved host-boot action', { ...recovery, public_actions: 'settle_original_host_boot_cleanup' }],
+    ['unrecognized host-boot action', { ...recovery, public_actions: 'host_boot_original_repository_cleanup' }],
   ])('rejects %s without retaining controls', async (_label, source_recovery) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery })));
     render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
@@ -869,6 +869,59 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ expected_job_revision: 6, action: 'reconcile_original_cleanup' });
     expect(fetch.mock.calls[2][1]?.method ?? 'GET').toBe('GET');
     expect(screen.queryByRole('button', { name: 'Reconcile original cleanup' })).not.toBeInTheDocument();
+  });
+
+  it('uses only the API-advertised host-boot action and reads physical-only status from GET', async () => {
+    const initial = { ...repositorySourceStatus(), status: 'unknown_external_effect',
+      source_recovery: { ...recovery, public_actions: 'settle_original_host_boot_cleanup' } };
+    const final = { ...initial, revision: 7, source_recovery: { ...recovery,
+      state: 'physical_cleanup_only', reason: 'original_host_boot_cleanup', physical_hold: false } };
+    const fetch = vi.fn().mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response({ original_result: 'succeeded', task_result: 'succeeded' }))
+      .mockResolvedValueOnce(response(final));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const button = await screen.findByRole('button', { name: 'Clean original stage after host boot' });
+    expect(screen.getByText(/It does not settle Unknown outcome/)).toBeInTheDocument();
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText('Original physical hold: released')).toBeInTheDocument();
+    expect(screen.getByText('Original result: unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Physical cleanup only. Unknown outcome, task result and contacted cost liability remain unchanged/)).toBeInTheDocument();
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ expected_job_revision: 6, action: 'settle_original_host_boot_cleanup' });
+    expect(fetch.mock.calls[2][1]?.method ?? 'GET').toBe('GET');
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Clean original stage after host boot' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Original result: succeeded')).not.toBeInTheDocument();
+  });
+
+  it('keeps unsupported host-boot recovery visibly blocked without deriving readiness', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(),
+      source_recovery: { ...recovery, reason: 'original_host_boot_cleanup_unavailable' } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Recovery reason: original_host_boot_cleanup_unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Clean original stage after host boot' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes a rejected host-boot action without releasing liability or retrying', async () => {
+    const initial = { ...repositorySourceStatus(), source_recovery: {
+      ...recovery, public_actions: 'settle_original_host_boot_cleanup' } };
+    const fetch = vi.fn().mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response({ detail: { code: 'original_host_boot_cleanup_unavailable' } }, false, 503))
+      .mockResolvedValueOnce(response({ ...initial, source_recovery: recovery }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const button = await screen.findByRole('button', { name: 'Clean original stage after host boot' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Recovery response uncertain or rejected/);
+    expect(screen.getByText('Original physical hold: held')).toBeInTheDocument();
+    expect(screen.getByText('Original result: unavailable')).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Clean original stage after host boot' })).not.toBeInTheDocument();
   });
 
   it('keeps a committed failed cleanup on the next-iteration path without another cleanup action', async () => {

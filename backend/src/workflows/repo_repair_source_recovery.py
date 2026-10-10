@@ -73,6 +73,10 @@ def repository_source_recovery_projection(service, jobs, run):
             or hold["execution_deadline_at"] != original["original_deadline_at"]):
         raise RepositorySourceRecoveryError("repository_source_recovery_hold_changed")
     physical_hold = None if hold is None else hold["status"] == "held"
+    if hold is not None and hold.get("readback_scope") == "original_host_boot_cleanup":
+        return RepositorySourceRecoveryProjection(state="physical_cleanup_only",
+            reason="original_host_boot_cleanup_committed", physical_hold=False,
+            original_result=None, public_actions="unavailable").model_dump(mode="json")
     cleanup = source._repository_record(run, "repository:cleanup:" + identity)
     readback = source._repository_record(run, "repository:readback:" + identity)
     stop = source._repository_record(run, "repository:stop-intent:v1")
@@ -1495,6 +1499,138 @@ async def recover_original_repository_cleanup(service, jobs, *, job_id, owner,
         # integrated before this selected mode can authorize either action.
         # No legacy fallback, injected callback or public DTO supplies them.
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
+
+
+async def _settle_original_host_boot_cleanup(service, jobs, *, job_id, owner,
+        expected_job_revision):
+    """Private physical-only owner. Public activation remains independently held.
+
+    No supplied proof or result can enter this writer: it stages the original
+    registered storage itself, with the original fence held until readback.
+    """
+    from src.db.models import RepoRepairProposal, ApprovalRequest, WorkBoardInputArtifact
+    from src.workflows import repo_repair_stop as stop_owner
+    from src.workflows.job_runtime import _canonical, _utc_now, _as_utc
+    from src.work_board.repository import _begin_sqlite_immediate
+    from src.execution.repo_original_producer import _stage_original_host_boot_cleanup
+    from sqlalchemy import update
+    source = _source()
+    if type(expected_job_revision) is not int or expected_job_revision < 0:
+        raise RepositorySourceRecoveryError("repository_source_recovery_request_invalid")
+    async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
+        original = await _load_recovery_original(service, jobs, job_id=job_id, owner=owner,
+            expected_job_revision=expected_job_revision, fence=fence)
+        run = original["run"]
+        registration = _latest_original_repository_registration(run)
+        if (registration is None or run.status != "unknown_external_effect"
+                or source._repository_record(run, "repository:terminal:v1") is not None
+                or source._repository_record(run, "repository:physical-cleanup:v1") is not None
+                or source._repository_record(run, "repository:cleanup:" + registration["iteration_id"]) is not None
+                or source._repository_record(run, "repository:readback:" + registration["iteration_id"]) is not None):
+            raise RepositorySourceRecoveryError("original_host_boot_cleanup_not_eligible")
+        callback = service._iterative_process_callbacks.get(registration["iteration_id"])
+        if callback is not None and not callback.done():
+            raise RepositorySourceRecoveryError("pending_original_producer")
+        staged = await stop_owner._context(service, jobs, job_id=job_id, owner=owner)
+        context = staged.data
+        for model, key, raw in context["rows"]:
+            if model is WorkBoardInputArtifact and _as_utc(model.model_validate_json(raw).expires_at) <= _utc_now():
+                raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
+        run = context["run"]
+        if run.revision != expected_job_revision or _latest_original_repository_registration(run) != registration:
+            raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+        execution = source._repository_record(run, "repository:execution:" + registration["iteration_id"])
+        async with jobs._session() as db:
+            proposal = await db.get(RepoRepairProposal, execution["proposal_id"])
+            approval = await db.get(ApprovalRequest, execution["approval_id"])
+            if (proposal is None or approval is None
+                    or source._source_digest(proposal.model_dump(mode="json")) != registration["proposal_digest"]
+                    or source._source_digest(approval.model_dump(mode="json")) != registration["approval_digest"]):
+                raise RepositorySourceRecoveryError("original_producer_approval_changed")
+            additional = [(type(row), stop_owner._key(row), _canonical(row.model_dump(mode="json")))
+                for row in (proposal, approval)]
+            costs = await _repository_original_accounting_rows(db, context, job_id=job_id)
+            accounting = {row.operation_id: _canonical(row.model_dump(mode="json")) for row in costs}
+        # No filesystem read occurs in the SQL writer below. The closure only
+        # asserts actual task/thread/scope lifetime and the fixed admin cutoff.
+        with _stage_original_host_boot_cleanup(registration, service=service, jobs=jobs,
+                owner=owner, fence=fence) as assert_physical:
+            physical = assert_physical()
+            source._assert_task_publication_configuration(service)
+            policy = source._repository_policy_limits()
+            async with jobs._session() as db:
+                await _begin_sqlite_immediate(db)
+                assert_repository_recovery_fence(fence, service=service, jobs=jobs, job_id=job_id, owner=owner)
+                await stop_owner._validate_repository_stop_context_rows_sql(db, service, jobs, context=context)
+                for model, key, expected in context["rows"]:
+                    if model is WorkBoardInputArtifact and _as_utc(model.model_validate_json(expected).expires_at) <= _utc_now():
+                        raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
+                for model, key, expected in additional:
+                    actual = await db.get(model, key, populate_existing=True)
+                    if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                        raise RepositorySourceRecoveryError("original_producer_approval_changed")
+                current = await jobs._fetch(db, job_id)
+                source._assert_repository_original_limits(current, context["goal"], policy)
+                if (current.revision != expected_job_revision or current.status != "unknown_external_effect"
+                        or _latest_original_repository_registration(current) != registration):
+                    raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+                costs = await _repository_original_accounting_rows(db, context, job_id=job_id)
+                if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in costs} != accounting:
+                    raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+                if assert_physical() != physical:
+                    raise RepositorySourceRecoveryError("original_host_boot_cleanup_changed")
+                hold = jobs._repo_repair_reservation_state(current)
+                if hold is None or hold["status"] != "held":
+                    raise RepositorySourceRecoveryError("repository_source_recovery_hold_changed")
+                proof = {**physical, "job_id": job_id, "attempt_id": registration["repository_attempt_id"],
+                    "fence": current.fencing_token, "authority_digest": current.authority_digest,
+                    "execution_deadline_at": hold["execution_deadline_at"],
+                    "iteration_id": registration["iteration_id"], "before_revision": expected_job_revision,
+                    "post_revision": expected_job_revision + 1}
+                release = {"kind": "repo_repair_execution_reservation", "status": "released",
+                    "job_id": job_id, "attempt_id": proof["attempt_id"], "fence": proof["fence"],
+                    "authority_digest": proof["authority_digest"], "execution_deadline_at": proof["execution_deadline_at"],
+                    "outcome_status": "unknown_external_effect", "cleanup_proven": True,
+                    "readback_verified": False, "readback_scope": "original_host_boot_cleanup",
+                    "physical_cleanup_digest": source._source_digest(proof),
+                    "operator_visible": True, "recorded_at": _utc_now().isoformat()}
+                inventory = source.repository_checkpoint_inventory(current, context["work"])
+                source._append_repository_record(current, "repository:physical-cleanup:v1", proof, inventory=inventory)
+                source._append_repository_record(current, "repo-repair-execution-release", release, inventory=inventory)
+                current.revision += 1
+                # The physical audit must not touch the immutable outcome or
+                # timestamp commitment. Only journal/revision bookkeeping moves.
+                await db.flush()
+                await db.execute(update(type(current)).where(type(current).id == current.id).values(updated_at=run.updated_at))
+                expected_journal = current.checkpoint_receipts_json
+                source._recheck_repository_policy_limits(policy)
+                assert_physical()
+                await db.commit()
+                for model, key, expected in context["rows"] + additional:
+                    actual = await db.get(model, key, populate_existing=True)
+                    if actual is None:
+                        raise RepositorySourceRecoveryError("original_host_boot_cleanup_readback_changed")
+                    await db.refresh(actual)
+                    values = actual.model_dump(mode="json")
+                    if getattr(actual, "run_identity", None) == job_id:
+                        before = json.loads(expected)
+                        if (values["revision"] != expected_job_revision + 1
+                                or values["checkpoint_receipts_json"] != expected_journal
+                                or {k: v for k, v in values.items() if k not in {"revision", "checkpoint_receipts_json"}}
+                                    != {k: v for k, v in before.items() if k not in {"revision", "checkpoint_receipts_json"}}):
+                            raise RepositorySourceRecoveryError("original_host_boot_cleanup_readback_changed")
+                    elif _canonical(values) != expected:
+                        raise RepositorySourceRecoveryError("original_host_boot_cleanup_readback_changed")
+                costs = await _repository_original_accounting_rows(db, context, job_id=job_id)
+                if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in costs} != accounting:
+                    raise RepositorySourceRecoveryError("original_producer_accounting_changed")
+                current = await jobs._fetch(db, job_id)
+                jobs._repo_repair_reservation_state(current)
+        # Original local quarantine release follows committed exact readback.
+        lane = service._iterative_lanes.pop(job_id, None)
+        if lane is not None:
+            lane.clear_quarantine()
+    return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
 
 
 async def _reconcile_original_repository_stop(service, jobs, *, job_id, owner,

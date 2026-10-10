@@ -504,6 +504,88 @@ def _repository_unknown_root_projection(run):
     return _validate_repository_unknown_root_projection(run, stop, successor)
 
 
+def _host_boot_cleanup_static_rows_match(run, stop, current):
+    """Read only the physical audit successor of the original Stop/P/Q.
+
+    No ORM predecessor is constructed and the original Unknown codec is
+    unchanged. This metadata comparison cannot grant cleanup or completion.
+    """
+    from src.workflows.job_runtime import DurableJobRepository, DurableJobLeaseError, _digest
+    hold = DurableJobRepository._repo_repair_reservation_state(run)
+    physical = _repository_record(run, "repository:physical-cleanup:v1")
+    successor = _repository_record(run, "repository:stop-uncertainty-successor:v1")
+    if (hold is None or hold.get("status") != "released"
+            or hold.get("readback_scope") != "original_host_boot_cleanup"
+            or physical is None or successor is None):
+        raise DurableJobLeaseError("original host boot discovery successor required")
+    keys = {"schema", "job_id", "stop_digest", "root_key", "predecessor_digest",
+        "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision",
+        "predecessor_projection", "successor_projection"}
+    root_key = type(run).__tablename__ + ":" + str(run.id)
+    inventory = read_repository_inventory(run)
+    if (set(successor) != keys
+            or successor["schema"] != ("repository.stop_uncertainty_successor.v2"
+                if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_uncertainty_successor.v1")
+            or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
+            or successor["stop_digest"] != _source_digest(stop)
+            or successor["authority_digest"] != run.authority_digest
+            or type(successor["fencing_token"]) is not int or successor["fencing_token"] != run.fencing_token
+            or type(successor["from_revision"]) is not int or successor["from_revision"] < 0
+            or type(successor["to_revision"]) is not int
+            or successor["to_revision"] != successor["from_revision"] + 1
+            or physical["before_revision"] != successor["to_revision"]
+            or physical["post_revision"] != run.revision):
+        raise DurableJobLeaseError("original host boot discovery successor changed")
+    history = json.loads(run.checkpoint_receipts_json or "[]")
+    suffix = ("repository:physical-cleanup:v1", "repo-repair-execution-release")
+    if (type(history) is not list or len(history) < 3
+            or any(type(item) is not dict for item in history)
+            or tuple(item.get("checkpoint_id") for item in history[-2:]) != suffix
+            or history[-3].get("checkpoint_id") != "repository:stop-uncertainty-successor:v1"):
+        raise DurableJobLeaseError("original host boot discovery journal changed")
+    for item, payload in zip(history[-2:], (physical, hold)):
+        if (set(item) != {"checkpoint_id", "safe", "payload", "state_digest", "created_at"}
+                or item["safe"] is not True or item["payload"] != payload
+                or item["state_digest"] != _digest(payload)
+                or type(item["created_at"]) is not str):
+            raise DurableJobLeaseError("original host boot discovery journal changed")
+    # The original prefix remains a local value only. All its protected records
+    # are read from the current Root; no value is supplied as mutation authority.
+    prefix = history[:-2]
+    if (any(type(item.get("checkpoint_id")) is not str for item in prefix)
+            or len({item["checkpoint_id"] for item in prefix}) != len(prefix)
+            or prefix[-1]["payload"] != successor or prefix[-1]["state_digest"] != _digest(successor)):
+        raise DurableJobLeaseError("original host boot discovery journal changed")
+    predecessor, following = successor["predecessor_projection"], successor["successor_projection"]
+    _checked_uncertainty_columns(predecessor)
+    _checked_uncertainty_columns(following)
+    reasons = {"repository_callback_closure_unproven": "reconcile_original_callback",
+        "repository_process_closure_unproven": "reconcile_original_process"}
+    if (predecessor["status"] != "running" or type(predecessor["lease_owner"]) is not str
+            or not predecessor["lease_owner"] or predecessor["lease_expires_at"] is None
+            or following["status"] != "unknown_external_effect" or following["failure_reason"] not in reasons
+            or following["finished_at"] is not None or following["lease_owner"] is not None
+            or following["lease_expires_at"] is not None or following["result_summary"] != "result recorded"):
+        raise DurableJobLeaseError("original host boot discovery outcome changed")
+    original, work, *_ = read_repository_original(run)
+    matching = [index for index in range(1, work.limits.max_iterations + 1)
+        if following["result_digest"] == _digest({"no_learning": True,
+            "operator_action": reasons[following["failure_reason"]],
+            "iteration_id": iteration_identity(run.run_identity, original["repository_attempt_id"],
+                _source_digest(original["original_input"]), index)})]
+    values = run.model_dump(mode="json")
+    current_digest = _repository_root_static_digest(run, values)
+    predecessor_digest = _repository_root_static_digest(run, {**values, **predecessor})
+    if (len(matching) != 1 or {key: values[key] for key in _UNCERTAINTY_COLUMNS} != following
+            or current_digest != successor["successor_digest"] or current_digest != current.get(root_key)
+            or predecessor_digest != successor["predecessor_digest"]
+            or predecessor_digest != stop["static_rows"].get(root_key)):
+        raise DurableJobLeaseError("original host boot discovery immutable Root changed")
+    expected = dict(stop["static_rows"])
+    expected[root_key] = current_digest
+    return current == expected
+
+
 def _stop_static_rows_match(run, stop, current):
     """Read-only exact successor; never closure or release authority."""
     from src.workflows.job_runtime import DurableJobLeaseError
@@ -1528,7 +1610,9 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
             or repo_attempt.task_id != repo_task.task_id or repo_attempt.workflow_run_id != run.run_identity):
         raise DurableJobLeaseError("original repository stop discovery lineage changed")
     if terminal is None:
-        if run.status not in {"running", "unknown_external_effect"} or hold["status"] != "held":
+        physical_only = (run.status == "unknown_external_effect" and hold["status"] == "released"
+            and hold.get("readback_scope") == "original_host_boot_cleanup")
+        if run.status not in {"running", "unknown_external_effect"} or (hold["status"] != "held" and not physical_only):
             raise DurableJobLeaseError("original repository Pending discovery state changed")
         if service is not None:
             lane = service._iterative_lanes.get(run.run_identity)
@@ -1540,11 +1624,18 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
         rows = [run, parent, child, task, attempt, artifact, goal, session, repo_task, repo_attempt, repo_artifact]
         if (artifact is None or repo_artifact is None or attempt.ended_at is not None
                 or attempt.cancel_requested_at is not None or repo_attempt.ended_at is not None
-                or repo_attempt.cancel_requested_at is not None
-                or (not _stop_static_rows_match(run, stop,
-                    {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows})
-                    if _knownpost_completion is None else not await _validate_repository_knownpost_discovery_sql(
-                        db, service, run, owner=owner, completion=_knownpost_completion, rows=rows, context=context))):
+                or repo_attempt.cancel_requested_at is not None):
+            raise DurableJobLeaseError("original repository Pending static snapshot changed")
+        if physical_only:
+            matches = _host_boot_cleanup_static_rows_match(run, stop,
+                {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows})
+        elif _knownpost_completion is None:
+            matches = _stop_static_rows_match(run, stop,
+                {type(row).__tablename__ + ":" + str(_key(row)): _static(row, context) for row in rows})
+        else:
+            matches = await _validate_repository_knownpost_discovery_sql(db, service, run,
+                owner=owner, completion=_knownpost_completion, rows=rows, context=context)
+        if not matches:
             raise DurableJobLeaseError("original repository Pending static snapshot changed")
     else:
         try:

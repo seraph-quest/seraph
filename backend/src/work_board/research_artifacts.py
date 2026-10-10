@@ -208,7 +208,40 @@ def read_discovery(reference, expected_digest, *, programme_id, max_bytes=OUTPUT
     return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
 
 
-def stage_discovery_artifact(*, programme_id, job_id, kind, slot, content):
+class _DiscoveryStagingReservation:
+    """One original stager's prepaid bytes; no execution or row authority."""
+
+    def __init__(self, *, budget, path, reference, programme_id, kind, content):
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        from src.work_board.input_artifacts import INPUT_ARTIFACT_MAX_BYTES
+        if type(budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        self.budget, self.path, self.reference = budget, path, reference
+        self.programme_id, self.kind, self.content = programme_id, kind, content
+        self.digest, self.size = sha(content), len(content)
+        self.issued_id, self.started = id(self), False
+        # The original no-clobber writer can read a colliding file up to its
+        # full fixed cap. Reserve that appearance even when no race occurs.
+        budget.debit(self.size + INPUT_ARTIFACT_MAX_BYTES + 1 + self.size + 1,
+            appearance=("discovery-staging-reservation", reference, self.digest, self.size))
+
+    def publish(self, *, budget, path, reference, programme_id, kind, content):
+        from src.work_board.input_artifacts import _write_payload
+        if (self.issued_id != id(self) or self.started or budget is not self.budget
+                or path != self.path or reference != self.reference
+                or programme_id != self.programme_id or kind != self.kind
+                or type(content) is not bytes or content != self.content):
+            raise ValueError("discovery staging reservation changed")
+        self.started = True
+        _write_payload(path, content)
+        # This exact appearance was paid before the file effect. The original
+        # reader still checks private metadata, size, digest and descriptor
+        # continuity; no caller-visible prepaid read bypass is introduced.
+        return read_discovery(reference, self.digest, programme_id=programme_id,
+            max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind], expected_size=self.size)
+
+
+def stage_discovery_artifact(*, programme_id, job_id, kind, slot, content, header_budget=None):
     """Physical preparation only; native writer must adopt this exact output."""
     from src.work_board.input_artifacts import _write_payload
     from src.artifacts.registry import artifact_id_for
@@ -220,6 +253,29 @@ def stage_discovery_artifact(*, programme_id, job_id, kind, slot, content):
     content_digest = sha(content)
     key = sha(json_bytes([job_id, kind, slot]))
     path = f"{discovery_prefix(programme_id)}{key}-{content_digest}.json"
+    if header_budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        from src.work_board.repository import BoardError
+        if type(header_budget) is not HeaderReadBudget:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        try:
+            actual = read_discovery(path, content_digest, programme_id=programme_id,
+                max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind], expected_size=len(content),
+                header_budget=header_budget)
+        except BoardError as error:
+            if error.code != "input_artifact_unavailable" or not isinstance(error.__cause__, FileNotFoundError):
+                raise
+            target = canonical_workspace_root(settings.workspace_dir) / path
+            reservation = _DiscoveryStagingReservation(budget=header_budget, path=target,
+                reference=path, programme_id=programme_id, kind=kind, content=content)
+            actual = reservation.publish(budget=header_budget, path=target, reference=path,
+                programme_id=programme_id, kind=kind, content=content)
+        if actual != content:
+            raise ValueError("discovery immutable physical artifact changed")
+        identifier = artifact_id_for(file_path=path, artifact_type="goal_discovery_" + kind,
+            producer=DISCOVERY_KIND, run_id=job_id, content_sha256=content_digest)
+        return DiscoveryStagedArtifact(programme_id=programme_id, job_id=job_id, kind=kind, slot=slot,
+            file_path=path, reference=ArtifactRef(artifact_id=identifier, digest=content_digest, schema_version=1), content=actual)
     try:
         actual = read_discovery(path, content_digest, programme_id=programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind])
     except FileNotFoundError:

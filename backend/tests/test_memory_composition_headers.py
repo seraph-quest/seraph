@@ -289,16 +289,23 @@ async def test_changed_fixed_fts_trigger_denies_before_private_body(async_db):
 
 
 @pytest.mark.asyncio
-async def test_exact_1355_schema_objects_overflow_before_private_bodies(async_db):
+async def test_exact_1360_schema_objects_overflow_before_private_bodies(async_db):
     async with async_db() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         count=await db.scalar(text("SELECT count(*) FROM sqlite_schema"))
-        assert 1349<=count<1355
-        for index in range(1355-count):
+        assert 1349<=count<1360
+        for index in range(1360-count):
             await db.execute(text(f"CREATE INDEX bounded_fts_overflow_{index} ON memories(id)"))
-        assert await db.scalar(text("SELECT count(*) FROM sqlite_schema"))==1355
-        with pytest.raises(HeaderBoundsError,match="header_schema_object_bound"):
-            await certify_composition_superset(db,HeaderReadBudget())
+        assert await db.scalar(text("SELECT count(*) FROM sqlite_schema"))==1360
+        from types import SimpleNamespace
+        from tests.test_auth_session_composition_privacy import observe_prebody_sql
+        before = (await db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all()
+        with observe_prebody_sql(SimpleNamespace(engine=db.bind)) as observed:
+            with pytest.raises(HeaderBoundsError,match="^header_schema_object_bound$"):
+                await certify_composition_superset(db,HeaderReadBudget())
+        assert observed["queries"] > 0
+        assert observed["full_bodies_started"] == observed["full_bodies_delivered"] == 0
+        assert (await db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all() == before
 
 
 @pytest.mark.asyncio
@@ -465,3 +472,96 @@ async def test_inert_preoriginal_negative_rows_require_exact_original_input_bind
     with pytest.raises(ProductionWorkspaceReconciliationError, match="memory_publication_plan_unavailable"):
         await apply_native_memory_unknown(model_db, run, SimpleNamespace(
             db=model_db, run=run, statement="unowned", after=unknown))
+
+
+@pytest.mark.parametrize("application_registration", ["before", "after"])
+def test_actual_app_task_method_metadata_is_supported_without_pointer_bodies(tmp_path, application_registration):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    helper = Path(__file__).with_name("schema_registration_order.py")
+    backend = Path(__file__).parents[1]
+    dependencies = Path(pytest.__file__).parents[1]
+    # Each order starts a fresh interpreter, with no inherited credentials,
+    # PYTHONPATH, PTH/site execution or pytest/conftest model registration.
+    # Root's existing offline OS restrictions remain inherited through exec.
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", str(helper), str(backend), str(dependencies),
+         str(tmp_path), application_registration],
+        cwd=tmp_path, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "UTC",
+                          "LITELLM_LOCAL_MODEL_COST_MAP": "true"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=45, check=False,
+    )
+    for name, contents in (("registration.stdout", result.stdout), ("registration.stderr", result.stderr)):
+        receipt = tmp_path / name
+        receipt.write_text(contents)
+        receipt.chmod(0o600)
+    assert result.returncode == 0, "fresh registration child failed; private stdout/stderr retained"
+    assert json.loads(result.stdout) == {
+        "order": application_registration, "fresh_metadata_absent": True,
+        "five_objects": True, "no_pointer_bodies": True, "provider_contacts": 0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["unknown_table", "unknown_index", "wrong_table", "wrong_existing_name", "third_autoindex", "unknown_trigger"])
+async def test_task_method_schema_damage_denies_before_session_body_without_sql_changes(model_db, damage):
+    from types import SimpleNamespace
+    from src.db.task_method_models import TaskMethodActive
+    from tests.test_auth_session_composition_privacy import observe_prebody_sql
+    connection = await model_db.connection()
+    await connection.run_sync(lambda c: TaskMethodActive.__table__.create(c, checkfirst=True))
+    if damage == "unknown_table":
+        await model_db.execute(text("CREATE TABLE task_method_active_extra(id TEXT PRIMARY KEY)"))
+    elif damage == "unknown_index":
+        await model_db.execute(text("CREATE INDEX ix_task_method_active_unreviewed ON task_method_active(family)"))
+    elif damage == "wrong_table":
+        await model_db.execute(text("DROP INDEX ix_task_method_active_goal_id"))
+        await model_db.execute(text("CREATE INDEX ix_task_method_active_goal_id ON goals(id)"))
+    elif damage == "wrong_existing_name":
+        name = await model_db.scalar(text("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='goals' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 1"))
+        assert name is not None and name.replace("_", "").isalnum()
+        await model_db.execute(text(f'DROP INDEX "{name}"'))
+        await model_db.execute(text(f'CREATE INDEX "{name}" ON task_method_active(family)'))
+    elif damage == "third_autoindex":
+        # Real SQLite creates ordinal3 for this genuine adversarial extra UNIQUE;
+        # no sqlite_schema writes or copied accepted metadata are used.
+        await model_db.execute(text("DROP TABLE task_method_active"))
+        await model_db.execute(text("CREATE TABLE task_method_active(id TEXT PRIMARY KEY, owner_identity_id TEXT, goal_id TEXT, goal_revision INTEGER, family TEXT, UNIQUE(owner_identity_id,goal_id,goal_revision,family), UNIQUE(family))"))
+        assert await model_db.scalar(text("SELECT count(*) FROM sqlite_schema WHERE name='sqlite_autoindex_task_method_active_3'")) == 1
+    else:
+        await model_db.execute(text("CREATE TRIGGER task_method_active_unreviewed AFTER INSERT ON task_method_active BEGIN SELECT 1; END"))
+    # Full data remains in memory only; observe the original post-damage epoch.
+    before_schema = (await model_db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all()
+    before_rows = (await model_db.execute(text("SELECT * FROM operator_sessions ORDER BY id"))).all()
+    before_changes = await model_db.scalar(text("SELECT total_changes()"))
+    with observe_prebody_sql(SimpleNamespace(engine=model_db.bind)) as observed:
+        with pytest.raises(HeaderBoundsError, match="^header_schema_object_unavailable$"):
+            await certify_composition_superset(model_db, HeaderReadBudget())
+    assert observed["queries"] > 0
+    assert observed["full_bodies_started"] == observed["full_bodies_delivered"] == 0
+    assert await model_db.scalar(text("SELECT total_changes()")) == before_changes
+    assert (await model_db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all() == before_schema
+    assert (await model_db.execute(text("SELECT * FROM operator_sessions ORDER BY id"))).all() == before_rows
+
+
+@pytest.mark.asyncio
+async def test_exact_1359_census_still_rejects_unknown_schema_before_session_body(async_db):
+    from types import SimpleNamespace
+    from tests.test_auth_session_composition_privacy import observe_prebody_sql
+    async with async_db() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        count = await db.scalar(text("SELECT count(*) FROM sqlite_schema"))
+        assert 1349 <= count < 1359
+        for index in range(1359 - count):
+            await db.execute(text(f"CREATE INDEX unreviewed_schema_boundary_{index} ON memories(id)"))
+        assert await db.scalar(text("SELECT count(*) FROM sqlite_schema")) == 1359
+        before = (await db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all()
+        with observe_prebody_sql(SimpleNamespace(engine=db.bind)) as observed:
+            with pytest.raises(HeaderBoundsError, match="^header_schema_object_unavailable$"):
+                await certify_composition_superset(db, HeaderReadBudget())
+        assert observed["queries"] > 0
+        assert observed["full_bodies_started"] == observed["full_bodies_delivered"] == 0
+        assert (await db.execute(text("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY rowid"))).all() == before

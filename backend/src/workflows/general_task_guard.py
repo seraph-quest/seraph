@@ -420,7 +420,7 @@ def assert_native_callback_capacity(parent, binding, fence, *, capacity_witness)
             raise DurableJobLeaseError("original no-approval callback capacity policy changed")
 
 
-async def _ensure_future_cancel_capacity(db, parent, task, attempt, manifest, *, candidate=None):
+async def _ensure_future_cancel_capacity(db, parent, task, attempt, manifest, *, candidate=None, candidate_tool_id=None):
     """Size a conservative future witness; never publish synthetic evidence.
 
     The local dictionaries below exist only for counting UTF-8 bytes. All
@@ -432,10 +432,14 @@ async def _ensure_future_cancel_capacity(db, parent, task, attempt, manifest, *,
     rows = list((await db.execute(select(WorkflowRunState).where(
         WorkflowRunState.parent_job_id == parent.run_identity))).scalars())
     bindings = {row.run_identity: child_binding(row) for row in rows}
+    repository_children = {row.run_identity for row in rows
+        if json.loads(row.arguments_json).get("tool_id") == "repository_work"}
     if candidate is not None:
         if candidate.invocation_id in bindings and bindings[candidate.invocation_id] != candidate:
             raise DurableJobTransitionError("future cancellation original binding changed")
         bindings[candidate.invocation_id] = candidate
+        if candidate_tool_id == "repository_work":
+            repository_children.add(candidate.invocation_id)
     if set(bindings) != set(manifest.admitted_invocation_ids):
         raise DurableJobTransitionError("future cancellation admitted set changed")
     maximum_counter = 2 ** 63 - 1
@@ -443,7 +447,23 @@ async def _ensure_future_cancel_capacity(db, parent, task, attempt, manifest, *,
     for field in ("task_revision", "manifest_revision", "phase_revision", "board_fence", "job_fence"):
         future_manifest[field] = maximum_counter
     future_manifest["required_checkpoint_ids"] = sorted({record["checkpoint_id"] for record in _history(parent)
-        if record["checkpoint_id"].startswith("general:")})
+        if isinstance(record.get("checkpoint_id"), str)
+        and record["checkpoint_id"].startswith(("general:", _REPOSITORY_CHECKPOINT_PREFIX))})
+    # The original repository child may publish a wait/final identity for each
+    # of its at most three original iterations. Their actual identities depend
+    # on the later Source-created repository Root, but each fixed constructor
+    # emits its literal prefix plus a 64-hex digest. Count all six strings now,
+    # in addition to the real retained IDs; these are not reserved checkpoint
+    # identities, iteration witnesses or authority, and are never published.
+    for binding in bindings.values():
+        if binding.invocation_id in repository_children:
+            for index in range(3):
+                counting_iteration = "capacity-count-only:" + str(index)
+                future_manifest["required_checkpoint_ids"].extend((
+                    repository_child_wait_checkpoint_id(binding, counting_iteration),
+                    repository_child_final_checkpoint_id(binding, counting_iteration)))
+    if len({GENERAL_TASK_MANIFEST_KEY, *future_manifest["required_checkpoint_ids"]}) > 50:
+        raise DurableJobTransitionError("general task future cancellation checkpoint count capacity reached")
     # Every admitted step may acquire/change a receipt before the next safe
     # assembly/revision writer. Reserve all of these metadata maxima now.
     steps = sorted({binding.step_id for binding in bindings.values()})
@@ -455,12 +475,45 @@ async def _ensure_future_cancel_capacity(db, parent, task, attempt, manifest, *,
             invocation_id=binding.invocation_id, child_fence=maximum_counter,
             descriptor_digest=binding.descriptor_digest, input_digest=binding.input_digest,
             outcome="approval_precontact", approval_id="x" * 128, approval_fingerprint="a" * 64)
-        entries.append({"original_binding": binding.model_dump(mode="json"),
+        entry = {"original_binding": binding.model_dump(mode="json"),
             "original_binding_digest": _digest(binding.model_dump(mode="json")), "original_attempt_count": 1,
             "original_claim_fence": maximum_counter, "original_revision": maximum_counter,
             "current_child_fence": maximum_counter, "current_child_revision": maximum_counter,
             "effect_digest": "a" * 64, "artifact_digest": "a" * 64, "checkpoint_digest": "a" * 64,
-            "closure": closure.model_dump(mode="json"), "effect_debt": False, "no_learning": True})
+            "closure": closure.model_dump(mode="json"), "effect_debt": False, "no_learning": True}
+        if binding.invocation_id in repository_children:
+            # Counting data only: never validate, publish or issue this as a
+            # Stop witness. Repository cancellation repeats the entire original
+            # binding and may include automatic-limit evidence. That evidence
+            # is an exact subset of the original immutable Stop checkpoint,
+            # whose complete canonical payload is capped at 16 KiB by Source;
+            # the Stop validator requires literal equality before publication.
+            # Its integer fields have no schema numeric ceiling, so reserve the
+            # enforced record byte ceiling rather than inventing one.
+            # ensure_ascii canonicalization uses twelve bytes per astral scalar.
+            maximum_identity = "\U00010000"
+            entry["closure"] = None
+            entry["repository_closure"] = {
+                "schema_version": "repository.native_stop_closure.v1",
+                "original_binding": binding.model_dump(mode="json"),
+                "repository_job_id": maximum_identity * 256,
+                "repository_attempt_id": maximum_identity * 128,
+                "repository_fence": maximum_counter,
+                "original_input_digest": "a" * 64,
+                "source_checkpoint_digest": "a" * 64,
+                "original_group_digest": "a" * 64,
+                "original_deadline_at": "9999-12-31T23:59:59.999999Z",
+                "original_claim_fence": maximum_counter,
+                "iteration_ids": [maximum_identity * 127 + chr(0x10001 + index) for index in range(3)],
+                "stop_reason": "shared_group_exhausted",
+                "limit_evidence": "x" * 16384,
+                "limit_evidence_digest": "a" * 64,
+                **{name: "a" * 64 for name in ("stop_intent_digest", "model_quiescence_digest",
+                    "process_quiescence_digest", "all_original_accounting_digest",
+                    "request_response_approval_digest", "source_binding_digest")},
+                "no_learning": True,
+            }
+        entries.append(entry)
     prospective = {"schema_version": "general_task.native_cancel.v1", "original_manifest": future_manifest,
         "original_parent_authority_digest": parent.authority_digest, "original_parent_input_digest": parent.input_digest,
         "input_artifact_id": task.input_artifact_id, "typed_input_ref": task.typed_input_ref,
@@ -2738,7 +2791,8 @@ class _ChildAdmission:
         await verify_general_task_manifest(db, parent, task, attempt, proposed)
         capacity_parent = _reserve_native_capacity(parent, proposed, binding, envelope=envelope,
             service=self.service, capacity_witness=self.capacity_witness)
-        await _ensure_future_cancel_capacity(db, capacity_parent, task, attempt, proposed, candidate=binding)
+        await _ensure_future_cancel_capacity(db, capacity_parent, task, attempt, proposed,
+            candidate=binding, candidate_tool_id=step.tool_id)
         published, values = _published_values(capacity_parent, proposed, ())
         await _cas_board(db, task, attempt, status=WorkBoardStatus.blocked,
             reason="general_task_native_wait", owner=None, expiry=None, advance_fence=False)

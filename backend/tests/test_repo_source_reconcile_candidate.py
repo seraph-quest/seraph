@@ -45,15 +45,14 @@ async def test_genuine_sameboot_candidate_selects_original_and_preserves_public_
                 job_id=job_id, owner=bad_owner, expected_job_revision=revision)
         assert await _rows(jobs) == before
     # Foreign-boot settlement still needs its separate original native owner.
-    for action in ("settle_original_host_boot_cleanup",):
+    for action in ("reconcile_original_cleanup", "settle_original_host_boot_cleanup"):
         with pytest.raises(recovery.RepositorySourceRecoveryError) as denied:
             await recovery.recover_original_repository_cleanup(service, jobs,
                 job_id=job_id, owner=owner, expected_job_revision=revision, action=action)
         assert denied.value.status_code == 503
         assert await _rows(jobs) == before
-    result = await recovery.recover_original_repository_cleanup(service, jobs,
-        job_id=job_id, owner=owner, expected_job_revision=revision,
-        action="reconcile_original_cleanup")
+    result = await recovery._reconcile_original_repository_cleanup(service, jobs,
+        job_id=job_id, owner=owner, expected_job_revision=revision)
     packet = recovery.RepositorySourceRecoveryProjection.model_validate(result["source_recovery"])
     assert result["job_id"] == job_id and result["no_learning"] is True
     assert packet.public_actions == "unavailable"

@@ -59,6 +59,10 @@ def original_producer_sources():
         "repo_supervisor.py", "repo_sandbox.py", "repo_node.py", "repo_worker.py")}
 
 
+FINALIZATION_RESERVE_SECONDS = 1.0
+COMMAND_CLEANUP_RESERVE_SECONDS = 1.0
+
+
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class OriginalProducerReady:
     admission_digest: str
@@ -546,7 +550,7 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
         pidfd = pidfd_open(process.pid)
         observe_process(process)
         expected_start = start_identity(process.pid)
-        message = receive(parent, payload["deadline_at"] - 1)
+        message = receive(parent, payload["deadline_at"] - FINALIZATION_RESERVE_SECONDS)
         keys = {"kind", *OriginalProducerReady.__dataclass_fields__}
         if set(message) != keys or message["kind"] != "ready":
             raise ValueError("original_producer_ready_schema")
@@ -753,14 +757,21 @@ class ProducerControl:
     def authorize(self, argv):
         if self.no_spawn or self.interrupted:
             raise ValueError("original_producer_no_spawn")
+        command_deadline = self.deadline - COMMAND_CLEANUP_RESERVE_SECONDS
+        if time.monotonic() >= command_deadline:
+            self.no_spawn = True
+            raise ValueError("original_producer_command_reserve_exhausted")
         self.ordinal += 1
         command = OriginalProducerCommand(self.registration_digest, self.ordinal, digest(canonical(argv)))
         request = {"kind": "command", **{key: getattr(command, key) for key in command.__dataclass_fields__}}
         try:
             send(self.control, request)
-            reply = receive(self.control, self.deadline)
+            reply = receive(self.control, command_deadline)
             if reply != {"kind": "command_ack", **{key: value for key, value in request.items() if key != "kind"}}:
                 raise ValueError("original_producer_command_ack")
+            if time.monotonic() >= command_deadline:
+                self.no_spawn = True
+                raise ValueError("original_producer_command_reserve_exhausted")
             self.authorized_commands += 1
         except (ValueError, OSError):
             self.interrupted = True
@@ -873,12 +884,12 @@ def child_main(request, control_fd, guard_fd):
         Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         (metadata.st_dev, metadata.st_ino), (guard.st_dev, guard.st_ino))
     send(control, {"kind": "ready", **ready.projection()})
-    ack = receive(control, job["deadline_at"] - 1)
+    ack = receive(control, job["deadline_at"] - FINALIZATION_RESERVE_SECONDS)
     if (set(ack) != {"kind", "registration_digest", "ready_digest"} or ack["kind"] != "registered"
             or ack["ready_digest"] != digest(canonical(ready.projection()))
             or len(ack["registration_digest"]) != 64):
         raise ValueError("original_producer_registration_ack")
-    controller = ProducerControl(control, ack["registration_digest"], job["deadline_at"] - 1)
+    controller = ProducerControl(control, ack["registration_digest"], job["deadline_at"] - FINALIZATION_RESERVE_SECONDS)
     repo_supervisor.ORIGINAL_PRODUCER = controller
     try:
         repo_supervisor.main(Path(request))
@@ -887,6 +898,8 @@ def child_main(request, control_fd, guard_fd):
         manifest, outputs, outcome = finalize_original_outputs(job, controller)
         if durable["sources"] != original_producer_sources():
             raise ValueError("original_producer_sources_changed")
+        if time.monotonic() >= job["deadline_at"] - FINALIZATION_RESERVE_SECONDS:
+            raise ValueError("original_producer_finalization_reserve_exhausted")
         for name, raw in outputs.items():
             write_once(directory, name, raw, maximum=durable["max_output_bytes"])
         # Output directory entries must survive BEFORE the envelope can survive.
@@ -908,6 +921,8 @@ def child_main(request, control_fd, guard_fd):
             "signature": base64.b64encode(key.sign(DOMAIN + canonical(body))).decode()})
         write_once(directory, "completion.json", encoded, maximum=MAX_ENVELOPE)
         os.fsync(directory)
+        if time.monotonic() >= job["deadline_at"] or datetime.now(timezone.utc) >= cutoff:
+            raise ValueError("original_producer_publication_deadline")
         return 0
     finally:
         controller.no_spawn = True

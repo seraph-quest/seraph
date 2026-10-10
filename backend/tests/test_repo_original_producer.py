@@ -371,3 +371,92 @@ async def test_actual_three_iteration_group_keeps_same_live_guard_and_scope(
     monkeypatch.setattr(recovery, "publish_original_repository_completion", observe_group)
     await _actual_source_callback_journey(accounting_db, monkeypatch, True, language)
     assert checked == [language]
+
+
+@pytest.mark.parametrize('now', [8.0, 8.5, 9.0, 9.9])
+def test_original_command_requires_cleanup_and_finalization_margin_before_dispatch(tmp_path, monkeypatch, now):
+    from types import SimpleNamespace
+    # Original D=10, physical cleanup D-1=9, command cutoff D-2=8.
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    control = producer.ProducerControl(child, 'a' * 64, 9.0)
+    monkeypatch.setattr(repo_supervisor, 'ORIGINAL_PRODUCER', control)
+    monkeypatch.setattr(repo_supervisor, 'CANCELLED', False)
+    monkeypatch.setattr(repo_supervisor, 'time', SimpleNamespace(monotonic=lambda: now))
+    spawned = []
+    def forbidden_spawn(*args, **kwargs):
+        spawned.append(True)
+        raise AssertionError('insufficient-margin command must never dispatch')
+    monkeypatch.setattr(repo_supervisor.subprocess, 'Popen', forbidden_spawn)
+    try:
+        with pytest.raises(ValueError, match='original_producer_command_reserve_exhausted'):
+            repo_supervisor.run_command(['/usr/bin/git', '--version'], tmp_path, {}, 10.0, stream_limit=4096)
+        assert spawned == [] and control.ordinal == 0 and control.authorized_commands == 0
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_original_ack_cannot_consume_command_cleanup_margin(monkeypatch):
+    from types import SimpleNamespace
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    control = producer.ProducerControl(child, 'a' * 64, 9.0)
+    clock = {'now': 7.5}
+    monkeypatch.setattr(producer, 'time', SimpleNamespace(monotonic=lambda: clock['now']))
+    receive = producer.receive
+    deadlines = []
+    def acknowledge_then_expire(channel, deadline):
+        assert channel is child
+        deadlines.append(deadline)
+        request = receive(parent, deadline)
+        producer.send(parent, {**request, 'kind': 'command_ack'})
+        reply = receive(channel, deadline)
+        clock['now'] = 8.0
+        return reply
+    monkeypatch.setattr(producer, 'receive', acknowledge_then_expire)
+    try:
+        with pytest.raises(ValueError, match='original_producer_command_reserve_exhausted'):
+            control.authorize(['/usr/bin/git', '--version'])
+        assert deadlines == [8.0]
+        assert control.no_spawn and control.interrupted and control.authorized_commands == 0
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_original_post_ack_schedule_delay_never_spawns(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    control = producer.ProducerControl(child, 'a' * 64, 9.0)
+    monkeypatch.setattr(producer, 'time', SimpleNamespace(monotonic=lambda: 7.5))
+    supervisor_times = iter([7.5, 8.0])
+    monkeypatch.setattr(repo_supervisor, 'time', SimpleNamespace(monotonic=lambda: next(supervisor_times)))
+    monkeypatch.setattr(repo_supervisor, 'ORIGINAL_PRODUCER', control)
+    monkeypatch.setattr(repo_supervisor, 'CANCELLED', False)
+    receive = producer.receive
+    def acknowledge(channel, deadline):
+        request = receive(parent, deadline)
+        producer.send(parent, {**request, 'kind': 'command_ack'})
+        return receive(channel, deadline)
+    monkeypatch.setattr(producer, 'receive', acknowledge)
+    spawned = []
+    def forbidden_spawn(*args, **kwargs):
+        spawned.append(True)
+        raise AssertionError('expired post-ACK window must never dispatch')
+    monkeypatch.setattr(repo_supervisor.subprocess, 'Popen', forbidden_spawn)
+    try:
+        with pytest.raises(ValueError, match='original_producer_command_reserve_exhausted'):
+            repo_supervisor.run_command(['/usr/bin/git', '--version'], tmp_path, {}, 10.0, stream_limit=4096)
+        assert control.authorized_commands == 1 and spawned == []
+    finally:
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize('now', [9.0, 9.5, 9.9])
+def test_original_finalizer_cannot_start_in_serialization_reserve(monkeypatch, now):
+    from types import SimpleNamespace
+    from src.execution import repo_original_producer_finalizer as finalizer
+    monkeypatch.setattr(finalizer, 'time', SimpleNamespace(monotonic=lambda: now))
+    # No stage/runtime DTO can authorize physical work after D-1.
+    with pytest.raises(ValueError, match='original_producer_cleanup_deadline'):
+        finalizer.finalize_original_outputs({'deadline_at': 10.0}, None)

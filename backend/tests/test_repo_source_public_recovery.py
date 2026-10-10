@@ -15,7 +15,6 @@ from src.api.router import api_router as _registered_api_router
 from src.app import create_app
 from src.auth import service as auth_service
 from src.work_board.general_task import GeneralTaskService
-from src.workflows import repo_repair_source as source
 from src.workflows import repo_repair_source_recovery as recovery
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
@@ -77,7 +76,7 @@ async def _authenticated_original_api(accounting_db, monkeypatch, language, *, f
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "stop"])
-async def test_authenticated_sameboot_original_recovery_and_current_get(
+async def test_authenticated_sameboot_original_recovery_unavailable_and_current_get(
         accounting_db, monkeypatch, repository_admission_signer, language, outcome):
     async with _authenticated_original_api(accounting_db, monkeypatch, language,
             failed=outcome != "success", stop_requested=outcome == "stop") as (flow, tasks, client):
@@ -87,9 +86,22 @@ async def test_authenticated_sameboot_original_recovery_and_current_get(
         response = await client.get(url)
         assert response.status_code == 200, response.text
         initial = response.json()
-        assert initial["source_recovery"]["public_actions"] == "reconcile_original_cleanup"
+        assert initial["source_recovery"]["public_actions"] == "unavailable"
         revision = initial["revision"]
         before = await _rows(jobs)
+
+        async def forbidden_recovery(*args, **kwargs):
+            raise AssertionError("Public recovery must not enter the original mutation helper")
+
+        monkeypatch.setattr(recovery, "_reconcile_original_repository_cleanup", forbidden_recovery)
+
+        # Even a non-null internal DTO carrying an actionable string cannot
+        # enable the public surface before ADR-030 acceptance.
+        with pytest.raises(ValidationError):
+            await workflows_api._repo_repair_public_recovery_projection(
+                tasks, flow["service"], jobs, job_id=job_id, owner=owner,
+                projection={**initial, "source_recovery": {
+                    **initial["source_recovery"], "public_actions": "reconcile_original_cleanup"}})
 
         # Diagnostic metadata must be current and is never an execution grant.
         with pytest.raises(recovery.RepositorySourceRecoveryError, match="stale"):
@@ -129,31 +141,18 @@ async def test_authenticated_sameboot_original_recovery_and_current_get(
 
         response = await client.post(url + "/source-recovery", json={
             "expected_job_revision": revision, "action": "reconcile_original_cleanup"})
-        assert response.status_code == 200, response.text
-        result = response.json()
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == {
+            "code": "repository_source_recovery_unavailable", "operator_visible": True, "no_learning": True}
+        assert await _rows(jobs) == foreign_before
         readback = await client.get(url)
         assert readback.status_code == 200, readback.text
         current = readback.json()
         assert current["job_id"] == job_id and current["no_learning"] is True
-        assert current["revision"] == result["revision"]
-        assert current["source_recovery"] == result["source_recovery"]
+        assert current == initial
         packet = recovery.RepositorySourceRecoveryProjection.model_validate(current["source_recovery"])
-        assert packet.public_actions == "reconcile_original_cleanup"
-        assert packet.state == {"success": "original_cleanup_committed",
-            "failure": "continuation_ready", "stop": "original_stop_committed"}[outcome]
-        assert packet.physical_hold is (outcome == "failure")
-        assert current["status"] == {"success": "succeeded", "failure": "running",
-            "stop": "cancelled"}[outcome]
-        async with jobs._session() as db:
-            root = await jobs._fetch(db, job_id)
-            identity = flow["registration"]["iteration_id"]
-            assert root.revision == current["revision"]
-            assert source._repository_record(root, "repository:cleanup:" + identity)["cleanup_proven"] is True
-            if outcome == "failure":
-                review = current["repository_review"]
-                assert review["iteration_index"] == 2 and review["contact_state"] == "not_started"
-                assert source._repository_record(root, "repository:execution:" + review["iteration_id"]) is None
-                assert source._repository_record(root, "repository:callback-start:" + review["iteration_id"]) is None
+        assert packet.public_actions == "unavailable"
+        assert await _rows(jobs) == foreign_before
 
 
 @pytest.mark.asyncio
@@ -168,12 +167,16 @@ async def test_authenticated_unknown_original_recovery_stays_held(
         before = await _rows(flow["jobs"])
         result = await client.post(url + "/source-recovery", json={
             "expected_job_revision": initial.json()["revision"], "action": "reconcile_original_cleanup"})
-        assert result.status_code == 200, result.text
+        assert result.status_code == 503, result.text
+        assert result.json()["detail"]["code"] == "repository_source_recovery_unavailable"
         assert await _rows(flow["jobs"]) == before
-        packet = result.json()["source_recovery"]
-        assert result.json()["status"] == "unknown_external_effect"
+        readback = await client.get(url)
+        assert readback.status_code == 200, readback.text
+        assert readback.json() == initial.json()
+        packet = readback.json()["source_recovery"]
+        assert readback.json()["status"] == "unknown_external_effect"
         assert packet == {"state": "held_unknown", "reason": "original_stop_pending",
-            "physical_hold": True, "original_result": None, "public_actions": "reconcile_original_cleanup"}
+            "physical_hold": True, "original_result": None, "public_actions": "unavailable"}
 
 
 @pytest.mark.asyncio
@@ -204,28 +207,58 @@ async def test_authenticated_missing_original_registration_never_advertises_or_r
 
 
 @pytest.mark.asyncio
-async def test_public_sameboot_dispatch_preserves_revision_without_wrapper_fence(monkeypatch):
+async def test_public_sameboot_adapter_validates_original_but_never_dispatches(monkeypatch):
     """Boundary observation only; genuine authority comes from the API tests."""
     service, jobs, owner = object(), object(), object()
     observed = []
 
-    async def adapter(actual_service, actual_jobs, **kwargs):
-        observed.append((actual_service, actual_jobs, kwargs))
-        return "observed_only"
+    async def adapter(*args, **kwargs):
+        raise AssertionError("Public adapter must not dispatch the private candidate")
 
-    def wrapper_fence(*args, **kwargs):
-        raise AssertionError("Public wrapper must not nest the original adapter fence")
+    fence = object()
+    original_run = object()
+    fence_active = False
+
+    @asynccontextmanager
+    async def wrapper_fence(actual_service, actual_jobs, **kwargs):
+        nonlocal fence_active
+        observed.append((actual_service, actual_jobs, kwargs))
+        fence_active = True
+        try:
+            yield fence
+        finally:
+            fence_active = False
+
+    async def load(actual_service, actual_jobs, **kwargs):
+        assert fence_active and kwargs["fence"] is fence
+        observed.append((actual_service, actual_jobs, kwargs))
+        return {"run": original_run}
+
+    def projection(actual_service, actual_jobs, run):
+        assert fence_active and run is original_run
+        assert actual_service is service and actual_jobs is jobs
+        observed.append((actual_service, actual_jobs, run))
+        return recovery.RepositorySourceRecoveryProjection(
+            state="held_unknown", reason="original_completion_unproven",
+            physical_hold=None, original_result=None, public_actions="unavailable")
 
     monkeypatch.setattr(recovery, "_reconcile_original_repository_cleanup", adapter)
     monkeypatch.setattr(recovery, "_repository_recovery_fence", wrapper_fence)
-    result = await recovery.recover_original_repository_cleanup(service, jobs,
-        job_id="original", owner=owner, expected_job_revision=17, action="reconcile_original_cleanup")
-    assert result == "observed_only"
+    monkeypatch.setattr(recovery, "_load_recovery_original", load)
+    monkeypatch.setattr(recovery, "repository_source_recovery_projection", projection)
+    with pytest.raises(recovery.RepositorySourceRecoveryError) as denied:
+        await recovery.recover_original_repository_cleanup(service, jobs,
+            job_id="original", owner=owner, expected_job_revision=17, action="reconcile_original_cleanup")
+    assert denied.value.status_code == 503
+    assert denied.value.code == "repository_source_recovery_unavailable"
     assert observed == [(service, jobs, {"job_id": "original", "owner": owner,
-        "expected_job_revision": 17})]
+        }), (service, jobs, {"job_id": "original", "owner": owner,
+        "expected_job_revision": 17, "fence": fence}),
+        (service, jobs, original_run)]
+    assert fence_active is False
 
 
-@pytest.mark.parametrize("action", [True, False, "available", "enabled", "settle_original_host_boot_cleanup"])
+@pytest.mark.parametrize("action", [True, False, "available", "enabled", "reconcile_original_cleanup", "settle_original_host_boot_cleanup"])
 def test_public_response_action_rejects_noncanonical_metadata(action):
     with pytest.raises(ValidationError):
         recovery.RepositorySourceRecoveryProjection.model_validate({

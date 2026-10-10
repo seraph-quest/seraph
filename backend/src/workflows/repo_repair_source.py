@@ -80,8 +80,10 @@ async def _repository_startup_protected_lineage(db):
             present = False
             try:
                 history = _history(root)
+                # Reserved-prefix corruption is present evidence. Validate its
+                # grammar only after proving the exact mapped lineage below.
                 markers = [item for item in history if isinstance(item.get("checkpoint_id"), str)
-                    and re.fullmatch(r"repository:producer:[0-9a-f]{64}", item["checkpoint_id"])]
+                    and item["checkpoint_id"].startswith("repository:producer:")]
                 present = bool(markers)
                 if not present:
                     continue
@@ -116,7 +118,9 @@ async def _repository_startup_protected_lineage(db):
                             binding.goal_id, binding.goal_revision)):
                     raise DurableJobLeaseError("original startup explicit parent changed")
                 established.add(parent.run_identity)
-                if (len({item["checkpoint_id"] for item in markers}) != len(markers)
+                if (any(not re.fullmatch(r"repository:producer:[0-9a-f]{64}",
+                            item["checkpoint_id"]) for item in markers)
+                        or len({item["checkpoint_id"] for item in markers}) != len(markers)
                         or any(item.get("safe") is not True for item in markers)):
                     raise DurableJobLeaseError("original startup producer marker changed")
                 original, work, _, _, original_binding, _ = read_repository_original(root)

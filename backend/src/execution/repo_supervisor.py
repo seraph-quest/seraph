@@ -191,14 +191,22 @@ def cancel(signum: int, frame: Any) -> None:
 def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float, *, stream_limit: int) -> dict[str,Any]:
     if CANCELLED:raise ValueError("node_cancelled_before_command")
     if ORIGINAL_PRODUCER is not None:
+        from src.execution.repo_original_producer import COMMAND_CLEANUP_RESERVE_SECONDS
+        deadline = min(deadline, ORIGINAL_PRODUCER.deadline)
+        command_deadline = deadline - COMMAND_CLEANUP_RESERVE_SECONDS
+        if time.monotonic() >= command_deadline:
+            raise ValueError("original_producer_command_reserve_exhausted")
         ORIGINAL_PRODUCER.authorize(argv)
         if ORIGINAL_PRODUCER.parent_gone():
             raise ValueError("original_producer_no_spawn_after_parent_eof")
+        if time.monotonic() >= command_deadline:
+            raise ValueError("original_producer_command_reserve_exhausted")
     process=subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
     selector=selectors.DefaultSelector();buffers={"stdout":bytearray(),"stderr":bytearray()};truncated=False
     for name,stream in (("stdout",process.stdout),("stderr",process.stderr)):
         os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ,name)
-    command_deadline=deadline-min(1.0,max(.1,(deadline-time.monotonic())*.1))
+    if ORIGINAL_PRODUCER is None:
+        command_deadline=deadline-min(1.0,max(.1,(deadline-time.monotonic())*.1))
     timed_out=False;code=None;leftover=False;proof=None
     try:
         while selector.get_map() or code is None:

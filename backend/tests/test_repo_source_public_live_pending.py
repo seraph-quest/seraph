@@ -149,7 +149,7 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
                 assert await _root_state(jobs, job.job_id) == state
                 assert first["status"] == "running" and first["revision"] == state["revision"]
                 expected = {"state": "pending_original_producer", "reason": "pending_original_producer",
-                    "physical_hold": True, "original_result": None, "public_actions": "reconcile_original_cleanup"}
+                    "physical_hold": True, "original_result": None, "public_actions": "unavailable"}
                 assert first["source_recovery"] == expected  # Live-map metadata.
                 # Middleware's legitimate FIRST GET session touch is included
                 # in this literal baseline; no clock patch or timestamp masks.
@@ -166,19 +166,19 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
                 receipt.update(root_after_post=after_post, action_status_code=response.status_code,
                     physical_pending_registration_digests=list(physical_pending))
                 assert after_post == state and after_post["status"] == "running"
-                assert response.status_code == 200, response.text
+                assert response.status_code == 503, response.text
                 post = response.json()
                 receipt["action_post"] = post
-                assert post["status"] == "running" and post["revision"] == state["revision"]
-                assert post["source_recovery"] == expected
-                assert len(physical_pending) == 1  # Actual guard/PID stage error.
+                assert post["detail"] == {"code": "repository_source_recovery_unavailable",
+                    "operator_visible": True, "no_learning": True}
+                assert not physical_pending  # The public gate never enters physical staging.
                 fresh = await client.get(url)
                 assert fresh.status_code == 200, fresh.text
                 current = fresh.json()
                 receipt["fresh_get"] = current
                 assert current["source_recovery"] == expected
                 assert current["status"] == "running" and current["revision"] == state["revision"]
-                assert current["no_learning"] is True and post["no_learning"] is True
+                assert current["no_learning"] is True and post["detail"]["no_learning"] is True
                 after = await _rows(jobs)
                 physical_after = _physical(accounting_db[0])
                 receipt.update(raw_after=after, physical_after=physical_after)

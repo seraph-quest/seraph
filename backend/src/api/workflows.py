@@ -8056,8 +8056,7 @@ async def _repo_repair_public_recovery_projection(tasks, source, jobs, *, job_id
     if any(actual is not expected for actual, expected in zip(
             _repo_repair_source_owner(), (tasks, source, jobs))):
         raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
-    return {**projection, "source_recovery": {
-        **packet, "public_actions": "reconcile_original_cleanup"}}
+    return projection
 
 
 async def _repo_repair_rows(
@@ -8427,13 +8426,10 @@ async def recover_repo_repair_source(job_id: str, req: RepoSourceRecoveryRequest
         if not await _repo_repair_source_root(safe_job_id, operator):
             raise RepositorySourceRecoveryError("repository_source_recovery_unavailable")
         _tasks, source, jobs = _repo_repair_source_owner()
-        owner = WorkBoardOwner(principal_id=str(operator.principal.principal_id),
-            session_id=str(operator.session_id))
-        projection = await recover_original_repository_cleanup(source, jobs,
-            job_id=safe_job_id, owner=owner,
+        return await recover_original_repository_cleanup(source, jobs,
+            job_id=safe_job_id, owner=WorkBoardOwner(
+                principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
             expected_job_revision=req.expected_job_revision, action=req.action)
-        return await _repo_repair_public_recovery_projection(_tasks, source, jobs,
-            job_id=safe_job_id, owner=owner, projection=projection)
     except RepositorySourceRecoveryError as exc:
         raise HTTPException(status_code=exc.status_code, detail={
             "code": exc.code, "operator_visible": True, "no_learning": True,

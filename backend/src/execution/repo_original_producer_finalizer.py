@@ -12,7 +12,10 @@ import time
 def finalize_original_outputs(payload, control):
     from config.settings import RepoSandboxSettings
     from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxJob, _patch_paths_from_diff
-    from src.execution.repo_original_producer import canonical, digest
+    from src.execution.repo_original_producer import canonical, digest, FINALIZATION_RESERVE_SECONDS
+    physical_deadline = payload["deadline_at"] - FINALIZATION_RESERVE_SECONDS
+    if time.monotonic() >= physical_deadline:
+        raise ValueError("original_producer_cleanup_deadline")
     from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE, MAX_DEP_FILE_BYTES, MAX_DEP_FILES, read_regular
     from src.execution.repo_sandbox import SnapshotEntry, _digest_entries
     durable = payload["original_producer"]
@@ -110,10 +113,10 @@ def finalize_original_outputs(payload, control):
                 raise ValueError("original_producer_worker_identity_changed")
             if "publication_runtime" in runtime:
                 from src.execution.repo_publication_runtime import capture, verify
-                captured = capture(deadline_at=payload["deadline_at"])
+                captured = capture(deadline_at=physical_deadline)
                 if captured["proof"] != runtime["publication_runtime"]:
                     raise ValueError("original_producer_publication_runtime_changed")
-                verify(stage / "python-runtime", captured, deadline_at=payload["deadline_at"])
+                verify(stage / "python-runtime", captured, deadline_at=physical_deadline)
                 attestation = manifest.get("publication_test_input")
                 if (attestation != readback.get("publication_test_input") or not isinstance(attestation, dict)
                         or attestation.get("environment", {}).get("runtime_proof") != runtime["publication_runtime"]
@@ -123,7 +126,7 @@ def finalize_original_outputs(payload, control):
     original = executor.snapshot_repository(job.repository_root, stage / "original-after")
     if original.digest != job.base_digest:
         raise ValueError("original_producer_original_source_changed")
-    if time.monotonic() >= payload["deadline_at"] - .1:
+    if time.monotonic() >= physical_deadline:
         raise ValueError("original_producer_cleanup_deadline")
     executor._assert_stage_identity(stage, {"device": identity.st_dev, "inode": identity.st_ino})
     shutil.rmtree(stage)
@@ -134,6 +137,8 @@ def finalize_original_outputs(payload, control):
         os.fsync(parent_descriptor)
     finally:
         os.close(parent_descriptor)
+    if time.monotonic() >= physical_deadline:
+        raise ValueError("original_producer_cleanup_deadline")
     status = ("failed" if worker_failed else "succeeded") if eligible else "unknown_external_effect"
     outcome = ("completed_requested_check_failure" if worker_failed else "completed_requested_checks") if eligible else (
         "zero_command_prefix" if control.authorized_commands == 0 else "interrupted_prefix")

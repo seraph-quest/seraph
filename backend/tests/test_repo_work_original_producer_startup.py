@@ -114,7 +114,9 @@ async def test_startup_preserves_proven_lineage_before_malformed_original(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("edge", ["indexed_root", "native_owner", "parent_owner", "marker_prefix", "marker_duplicate", "marker_unsafe", "marker_hash"])
+@pytest.mark.parametrize("edge", ["indexed_root", "native_owner", "parent_owner",
+    "indexed_root_malformed_marker", "native_owner_malformed_marker", "parent_owner_malformed_marker",
+    "marker_prefix", "marker_duplicate", "marker_unsafe", "marker_hash"])
 async def test_startup_protects_only_exact_proven_prefix(
         accounting_db, monkeypatch, edge, repository_admission_signer):
     from src.workflows.job_runtime import _canonical
@@ -126,12 +128,17 @@ async def test_startup_protects_only_exact_proven_prefix(
         root = await jobs._fetch(db, job_id)
         binding = source.read_repository_original(root)[4]
         expected = {job_id}
-        if edge == "indexed_root":
+        if edge.endswith("_malformed_marker"):
+            history = json.loads(root.checkpoint_receipts_json)
+            marker = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
+            marker["checkpoint_id"] = "repository:producer:"
+            root.checkpoint_receipts_json = _canonical(history)
+        if edge in {"indexed_root", "indexed_root_malformed_marker"}:
             root.idempotency_binding = "foreign-indexed-binding"
-        elif edge == "native_owner":
+        elif edge in {"native_owner", "native_owner_malformed_marker"}:
             child = await jobs._fetch(db, binding.invocation_id)
             child.owner_principal_id = "foreign-owner"
-        elif edge == "parent_owner":
+        elif edge in {"parent_owner", "parent_owner_malformed_marker"}:
             parent = await jobs._fetch(db, binding.parent_job_id)
             parent.owner_principal_id = "foreign-owner"
             expected.add(binding.invocation_id)
@@ -140,7 +147,7 @@ async def test_startup_protects_only_exact_proven_prefix(
             marker = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
             if edge == "marker_prefix":
                 marker["checkpoint_id"] += ":foreign"
-                expected = set()
+                expected.update({binding.invocation_id, binding.parent_job_id})
             elif edge == "marker_duplicate":
                 history.append(dict(marker))
                 expected.update({binding.invocation_id, binding.parent_job_id})
@@ -157,13 +164,66 @@ async def test_startup_protects_only_exact_proven_prefix(
         async with factory() as db:
             await _begin_sqlite_immediate(db)
             assert await source._repository_startup_protected_lineage(db) == expected
-    if edge in {"marker_duplicate", "marker_unsafe", "marker_hash"}:
+    if edge in {"marker_prefix", "marker_duplicate", "marker_unsafe", "marker_hash"}:
         observed = datetime.now(timezone.utc) + timedelta(days=1)
         assert await jobs.recover_inference_accounting(now=observed) == []
         assert await jobs.recover_stale_jobs(now=observed) == []
         for protected_id in expected:
             receipt = await jobs.recover_stale_job(protected_id, now=observed)
             assert receipt["receipt"]["reason"] == "original_repository_source_recovery_required"
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker_shape", ["suffix", "truncated", "empty", "nonhex"])
+@pytest.mark.parametrize("reverse_candidates", [False, True])
+async def test_startup_retains_malformed_reserved_marker_in_both_candidate_orders(
+        accounting_db, monkeypatch, marker_shape, reverse_candidates, repository_admission_signer):
+    from sqlalchemy import event, or_
+    from src.workflows.job_runtime import _canonical
+    captured = await registered_running_source(accounting_db, monkeypatch)
+    jobs, job_id = (captured[key] for key in ("jobs", "job_id"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        binding = source.read_repository_original(root)[4]
+        history = json.loads(root.checkpoint_receipts_json)
+        marker = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
+        marker["checkpoint_id"] = {
+            "suffix": marker["checkpoint_id"] + ":foreign",
+            "truncated": marker["checkpoint_id"][:-1],
+            "empty": "repository:producer:",
+            "nonhex": "repository:producer:" + "g" * 64,
+        }[marker_shape]
+        root.checkpoint_receipts_json = _canonical(history)
+        await db.commit()
+    before = await exact_canonical_bytes(factory)
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    candidates = select(WorkflowRunState).where(WorkflowRunState.status == "running",
+        or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= observed))
+    async with factory() as db:
+        original_order = [row.run_identity for row in (await db.scalars(candidates)).all()]
+
+    def reverse_scan(connection, _record, _proxy):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA reverse_unordered_selects=ON")
+        cursor.close()
+
+    if reverse_candidates:
+        event.listen(accounting_db[1].sync_engine, "checkout", reverse_scan)
+    try:
+        async with factory() as db:
+            actual_order = [row.run_identity for row in (await db.scalars(candidates)).all()]
+        assert len(original_order) >= 2
+        assert actual_order == (list(reversed(original_order)) if reverse_candidates else original_order)
+        assert await jobs.recover_inference_accounting(now=observed) == []
+        assert await jobs.recover_stale_jobs(now=observed) == []
+        for protected_id in (job_id, binding.invocation_id, binding.parent_job_id):
+            result = await jobs.recover_stale_job(protected_id, now=observed)
+            assert result["receipt"]["reason"] == "original_repository_source_recovery_required"
+    finally:
+        if reverse_candidates:
+            event.remove(accounting_db[1].sync_engine, "checkout", reverse_scan)
     assert await exact_canonical_bytes(factory) == before
 
 
@@ -210,8 +270,9 @@ async def test_startup_preserves_registered_original_lineage_and_accounting(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("malformed_marker", [False, True])
 async def test_registered_lineage_does_not_protect_unrelated_same_goal_job(
-        accounting_db, monkeypatch, repository_admission_signer):
+        accounting_db, monkeypatch, malformed_marker, repository_admission_signer):
     from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
     captured = await registered_running_source(accounting_db, monkeypatch, goal_capacity=3)
     jobs, owner, job_id = (captured[key] for key in ("jobs", "owner", "job_id"))
@@ -219,6 +280,13 @@ async def test_registered_lineage_does_not_protect_unrelated_same_goal_job(
     async with factory() as db:
         original = await jobs._fetch(db, job_id)
         _, _, _, _, binding, _ = source.read_repository_original(original)
+        if malformed_marker:
+            from src.workflows.job_runtime import _canonical
+            history = json.loads(original.checkpoint_receipts_json)
+            marker = next(item for item in history if item["checkpoint_id"].startswith("repository:producer:"))
+            marker["checkpoint_id"] += ":foreign"
+            original.checkpoint_receipts_json = _canonical(history)
+            await db.commit()
         protected_ids = {job_id, binding.invocation_id, binding.parent_job_id}
         before = {row.run_identity: row.model_dump_json() for row in
             (await db.scalars(select(WorkflowRunState))).all() if row.run_identity in protected_ids}

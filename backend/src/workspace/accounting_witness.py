@@ -2273,6 +2273,9 @@ class CompositionSessionGuard:
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
         self._selection = None
+        self._prospective_admission = None
+        self._prospective_admission_facts = None
+        self._prospective_admission_finished = False
         self._programme_snapshot_owner = None
         self._programme_current_leaves = {}
         self._programme_base_leaves = {}
@@ -2325,16 +2328,258 @@ class CompositionSessionGuard:
         import threading
         from src.workspace.accounting_continuity import _ProgrammeSelection, _PROGRAMME_SELECTION_SEAL
         from src.memory.composition_headers import _validate
+        prospective = self._prospective_admission
+        is_prospective = prospective is not None and prospective[0] is selection
         if (type(selection) is not _ProgrammeSelection or selection.seal is not _PROGRAMME_SELECTION_SEAL
                 or selection.issued_id != id(selection) or selection.owner is not self
-                or self._selection is not selection or self._retention_closed
+                or (self._selection is not selection and not is_prospective) or self._retention_closed
                 or self.db.info.get("composition_guard") is not self
-                or self._programme_snapshot_owner is None
-                or self._programme_snapshot_owner != (asyncio.current_task(), threading.get_ident())
+                or (prospective[1] if is_prospective else self._programme_snapshot_owner)
+                    != (asyncio.current_task(), threading.get_ident())
                 or self.db.sync_session.connection() is not selection.common33.connection
                 or selection.common33.budget is not self.header_budget):
             raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
         _validate(selection.common33.connection, selection.common33)
+        if is_prospective:
+            service, host, operation = prospective[2:5]
+            if self._original_programme_admission_owner(service, host) is not operation:
+                raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+            reviewed, boot, process, dispatcher, jobs = prospective[5]
+            if (host.reviewed is not reviewed or host.boot_nonce != boot or host.process is not process
+                    or host.service_dispatch is not dispatcher or service.jobs is not jobs):
+                raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+
+    def _original_programme_admission_owner(self, service, host):
+        """Only the actual lifecycle/admission owner can bind capacity selection."""
+        import asyncio
+        from src.guardian.goal_discovery import GoalDiscoveryService, goal_discovery_service
+        from src.runtime_plugins.bridge import CordisHost, cordis_host
+        if (type(service) is not GoalDiscoveryService or service is not goal_discovery_service
+                or type(host) is not CordisHost or host is not cordis_host):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        validator = getattr(GoalDiscoveryService, "_validate_original_admission_owner", None)
+        if validator is None:
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        operation = validator(service, jobs=service.jobs, host=host, task=asyncio.current_task())
+        if operation is None or operation is not asyncio.current_task():
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        return operation
+
+    def _select_programme_admission(self, connection, common33, *, service, host,
+                                   goal_id, programme_id, grant_revision):
+        """Private ADR-034 capacity selection, never admission or publication."""
+        import asyncio
+        import threading
+        from types import MappingProxyType
+        from src.workspace.accounting_continuity import _ProgrammeSelection, _derive_programme_admission_rows
+        from src.memory.composition_headers import _validate, preflight_programme_identity_component
+        def fail(code):
+            raise ProductionWorkspaceReconciliationError(code)
+        if (not self._programme_tables() or self.db.info.get("composition_guard") is not self
+                or self._retention_closed or self._prospective_admission_finished or common33.raw_owner is not None
+                or common33.connection is not connection or common33.budget is not self.header_budget
+                or self.db.sync_session.connection() is not connection):
+            fail("programme_original_selection_unavailable")
+        _validate(connection, common33)
+        operation = self._original_programme_admission_owner(service, host)
+        owner = (host.reviewed, host.boot_nonce, host.process, host.service_dispatch, service.jobs)
+        # A failed rederivation never leaves a previous prospective certificate usable.
+        self._prospective_admission = None
+        programme, binding, goals, issuers = _derive_programme_admission_rows(connection, common33,
+            goal_id=goal_id, programme_id=programme_id, grant_revision=grant_revision, fail=fail)
+        facts = (operation, owner, binding, goals, issuers)
+        previous = self._prospective_admission_facts
+        if previous is not None:
+            old = previous[1]
+            if (previous[0] is not operation or old[0] is not owner[0] or old[1] != owner[1]
+                    or any(old[index] is not owner[index] for index in (2, 3, 4))):
+                fail("programme_original_selection_unavailable")
+            if previous[2:] != facts[2:]:
+                fail("programme_original_generation_changed")
+        selection = _ProgrammeSelection(self, common33, MappingProxyType(goals), MappingProxyType(issuers),
+            MappingProxyType({}), (binding.owner_identity_id,))
+        object.__setattr__(selection, "issued_id", id(selection))
+        self._prospective_admission = (selection, (asyncio.current_task(), threading.get_ident()),
+            service, host, operation, owner)
+        try:
+            self._validate_programme_selection(selection)
+            identity = preflight_programme_identity_component(common33, original_selection=selection)
+        except BaseException:
+            self._prospective_admission = None
+            raise
+        self._prospective_admission_facts = facts
+        return programme, binding, common33, identity
+
+    def _check_original_discovery_incoming(self, connection, certificate, *, service, host, job_id):
+        """Original certified first-constructor orphan check; capacity only.
+
+        These are exactly the ten reverse joins followed by composition_closure
+        for a WRS node. An existing edge cannot be adopted by minting that absent
+        root. SELECT1 returns bounded existence metadata, never foreign bodies.
+        The actual initial reader and fresh writer each pay their own check.
+        """
+        from src.memory.composition_headers import _validate
+        prospective = self._prospective_admission
+        if (prospective is None or prospective[0].common33 is not certificate
+                or prospective[2] is not service or prospective[3] is not host
+                or certificate.connection is not connection
+                or certificate.budget is not self.header_budget
+                or type(job_id) is not str or not job_id.startswith("goal-discovery:")
+                or len(job_id) != len("goal-discovery:") + 32
+                or any(char not in "0123456789abcdef" for char in job_id[len("goal-discovery:"):])):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        self._validate_programme_selection(prospective[0])
+        if self._original_programme_admission_owner(service, host) is not prospective[4]:
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        # Bind the query locator to the original service's current occurrence,
+        # not merely to a syntactically valid absent discovery ID.
+        from datetime import timezone
+        from uuid import uuid5, NAMESPACE_URL
+        from src.guardian.goal_programmes import goal_programme_service
+        binding = self._prospective_admission_facts[2]
+        day = goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
+        identifier = uuid5(NAMESPACE_URL,
+            f"seraph:public-discovery:{binding.owner_identity_id}:{binding.programme_id}:{day}")
+        if job_id != "goal-discovery:" + identifier.hex:
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        _validate(connection, certificate)
+        joins = (("workflow_run_states", "parent_run_identity"), ("workflow_run_states", "parent_job_id"),
+            *((table, "run_identity") for table in ("workflow_step_states", "production_workflow_authority_states",
+                "production_workflow_fault_receipts", "production_workflow_side_effect_receipts")),
+            *(("workflow_artifact_reviews", field) for field in ("run_identity", "root_run_identity", "parent_run_identity")),
+            ("work_board_attempts", "workflow_run_id"))
+        for table, field in joins:
+            # Maximum metadata [[1]] is four bytes; absence [] is two. The
+            # difference stays spent and is never a capacity refund.
+            self.header_budget.debit(4, appearance=("discovery-incoming", table, field, job_id))
+            result = _sql(connection, f'SELECT 1 FROM "{table}" WHERE "{field}"=? LIMIT 1', (job_id,)).fetchone()
+            if result is not None:
+                raise ProductionWorkspaceReconciliationError("programme_original_incoming_provenance_exists")
+        _validate(connection, certificate)
+
+    async def _discovery_publication_numeric_widths(self, *, constructor):
+        """Measure original target/output RESOURCE widths without predicting hashes.
+
+        Reads only authentic current selected facts and unchanged owner records.
+        No prospective domain row, planRef, authority or witness is constructed.
+        The real publisher independently derives its eventual target and delta.
+        """
+        from types import MappingProxyType
+        from src.memory.composition_headers import snapshot_reads, _validate
+        from src.workspace.production import MAX_ACCOUNTING_CHECKPOINT_BYTES, MAX_LIFECYCLE_RECEIPT_BYTES
+        prospective = self._prospective_admission
+        if (prospective is None or type(constructor) is not MappingProxyType
+                or self.db.new or self.db.dirty or self.db.deleted
+                or type(self.base) is not dict or self.base.get("schema_version") != 2):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+        connection = await self.db.connection()
+        common33 = prospective[0].common33
+        def selected_facts(conn):
+            self._validate_programme_selection(prospective[0])
+            _validate(conn, common33)
+            if ("workflow_run_states", constructor["job_id"]) in common33.rows:
+                raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+            self._check_original_discovery_incoming(conn, common33, service=prospective[2], host=prospective[3],
+                job_id=constructor["job_id"])
+            # This numerical forecast belongs to the original certified reader
+            # before staging. The fresh insertion/queue writer is a later
+            # owner check; no writer permission is issued by these widths.
+            if self._selection is None:
+                raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+            self._validate_programme_selection(self._selection)
+            old = self._selection
+            goals = dict(prospective[0].goals)
+            direct = tuple(goals)
+            pending = list(goals)
+            while pending:
+                key = pending.pop()
+                parent = goals[key]["parent_id"]
+                if parent is not None and parent not in goals:
+                    if parent in old.goals:
+                        goals[parent] = old.goals[parent]
+                    else:
+                        with snapshot_reads(common33):
+                            _descriptor, row, raw = _programme_reference_row_on_connection(conn, "goals", parent)
+                        # This retained fact copy is distinct from its paid read.
+                        self.header_budget.debit(len(raw), appearance=("discovery-ancestor-fact-copy", parent))
+                        goals[parent] = MappingProxyType(row)
+                    pending.append(parent)
+            for key in goals:
+                seen, current = set(), key
+                while current is not None:
+                    if current in seen or current not in goals:
+                        raise ProductionWorkspaceReconciliationError("programme_goal_parent_cycle")
+                    seen.add(current)
+                    current = goals[current]["parent_id"]
+            added_goals = tuple(key for key in goals if key not in old.goals)
+            added_issuers = tuple(key for key in prospective[0].issuers if key not in old.issuers)
+            added_identities = tuple(key for key in prospective[0].identity_ids if key not in old.identity_ids)
+            added = (("workflow_run_states", constructor["job_id"]),
+                *(("goals", key) for key in added_goals),
+                *(("operator_sessions", key) for key in added_issuers),
+                *(("operator_identities", key) for key in added_identities))
+            if len(self.members | set(added)) > 128:
+                raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+            return goals, direct, added_goals, added_issuers, added_identities, added
+        goals, direct, added_goals, added_issuers, added_identities, added = await connection.run_sync(selected_facts)
+        encoded = lambda value: len(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode())
+        def object_width(widths):
+            return 2 + sum(encoded(key) + 1 + size for key, size in widths.items()) + max(0, len(widths) - 1)
+        def modified_width(actual, changes):
+            return object_width({key: changes.get(key, encoded(value)) for key, value in actual.items()})
+        def count_width(actual, additions):
+            widths = {key: encoded(value + additions.get(key, 0)) for key, value in actual.items()}
+            widths.update((key, encoded(value)) for key, value in additions.items() if key not in actual and value)
+            return object_width(widths)
+        native = self.base["native"]
+        native_width = modified_width(native, {"total_rows": encoded(native["total_rows"] + 1),
+            "table_counts": count_width(native["table_counts"], {"workflow_run_states": 1})})
+        prior_programme = self.base["programme"]
+        rows = prior_programme["row_counts"] if prior_programme is not None else {}
+        relations = prior_programme["relation_counts"] if prior_programme is not None else {}
+        row_additions = {"goals": len(added_goals), "operator_sessions": len(added_issuers),
+            "operator_identities": len(added_identities)}
+        relation_additions = {"programme_goal": 1, "programme_issuer_provenance": 1,
+            "goal_parent_fk": sum(goals[key]["parent_id"] is not None for key in added_goals),
+            "programme_owner_identity": len(added_issuers)}
+        programme_width = object_width({"manifest_version": encoded(PROGRAMME_MANIFEST_VERSION),
+            "manifest_digest": encoded(PROGRAMME_MANIFEST_DIGEST),
+            "row_counts": count_width(rows, row_additions), "closure_digest": 66,
+            "relation_counts": count_width(relations, relation_additions), "relation_digest": 66,
+            "artifact_count": encoded((prior_programme["artifact_count"] if prior_programme is not None else 0) + 2),
+            "artifact_manifest_digest": 66})
+        target_width = modified_width(self.base, {"native": native_width, "programme": programme_width})
+        delta_widths = [object_width({"table_id": encoded(table), "key": encoded(key),
+            "before_digest": 4, "after_digest": 66}) for table, key in sorted(added)]
+        delta_width = 2 + sum(delta_widths) + max(0, len(delta_widths) - 1)
+        accounting = await self._publication_accounting_payload(_numeric_body_certificate=common33)
+        if accounting.get("operations"):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+        checkpoint_fields = {key: encoded(value) for key, value in accounting.items()}
+        checkpoint_fields.update(schema_version=1, composition_base=encoded(self.base),
+            composition_target=target_width, composition_delta=delta_width, secret_values_included=5)
+        checkpoint_width = object_width(checkpoint_fields)
+        receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {"secret_values_included": False}
+        receipt_fields = {key: encoded(value) for key, value in receipt.items()}
+        receipt_fields["runtime_composition"] = target_width
+        if accounting.get("witness") is not None:
+            receipt_fields["inference_accounting"] = encoded(accounting["witness"])
+        receipt_width = object_width(receipt_fields)
+        if checkpoint_width > MAX_ACCOUNTING_CHECKPOINT_BYTES or receipt_width > MAX_LIFECYCLE_RECEIPT_BYTES:
+            raise ProductionWorkspaceReconciliationError("composition_publication_size_exceeded")
+        # Numeric output/fact storage is a paid appearance, never a witness.
+        facts = {"target_bytes": target_width, "checkpoint_bytes": checkpoint_width,
+            "receipt_bytes": receipt_width, "added_members": added,
+            "added_goals": added_goals, "added_issuers": added_issuers, "added_identities": added_identities,
+            "direct_goals": direct, "ancestor_goals": tuple(key for key in goals if key not in direct)}
+        self.header_budget.debit(encoded(facts), appearance=("discovery-publication-width-output", constructor["job_id"]))
+        return MappingProxyType(facts)
+
+    def _finish_programme_admission_selection(self):
+        """Original insertion/unwind ends the capacity-only prospective lifetime."""
+        self._prospective_admission = None
+        self._prospective_admission_facts = None
+        self._prospective_admission_finished = True
 
     def _select_programmes(self, connection, common33):
         import asyncio
@@ -2783,6 +3028,66 @@ class CompositionSessionGuard:
             event.listen(self.db.sync_session, name, guarded)
             self.listeners.append((name, guarded))
 
+    async def _publication_accounting_payload(self, *, _numeric_body_certificate=None):
+        """Original unchanged ledger/readback predicates, in this same session."""
+        if _numeric_body_certificate is not None:
+            from src.memory.composition_headers import _validate
+            prospective = self._prospective_admission
+            if (prospective is None or _numeric_body_certificate is not prospective[0].common33
+                    or _numeric_body_certificate.budget is not self.header_budget
+                    or self.db.info.get("composition_guard") is not self):
+                raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+            connection = await self.db.connection()
+            def validate_numeric_reader(conn):
+                self._validate_programme_selection(prospective[0])
+                _validate(conn, _numeric_body_certificate)
+            await connection.run_sync(validate_numeric_reader)
+        accounting = self.db.info.get("composition_accounting_payload")
+        if accounting is None:
+            # A composition-only writer must retain the unchanged accounting
+            # owner proof. Dropping it would regress the shared checkpoint.
+            from sqlalchemy import select
+            from src.db.models import InferenceAccountingOwner, InferenceCostReservation
+            from src.workflows.inference_accounting import _witness, _ledger_digest
+            from src.workspace.production import read_accounting_checkpoint
+            prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
+            lifecycle = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {}
+            if self.header_budget is not None:
+                from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
+                from src.memory.composition_headers import locate_exact_rows
+                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment", self.header_budget)
+                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids)
+                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"])
+            if _numeric_body_certificate is not None:
+                from src.memory.composition_headers import snapshot_reads, charge_row, charge_table
+                def pay_owner(conn):
+                    with snapshot_reads(_numeric_body_certificate):
+                        if ids:
+                            charge_row(conn, "inference_accounting_owners", "deployment")
+                await connection.run_sync(pay_owner)
+            account = await self.db.get(InferenceAccountingOwner, "deployment")
+            if _numeric_body_certificate is not None:
+                def pay_costs(conn):
+                    with snapshot_reads(_numeric_body_certificate):
+                        charge_table(conn, "inference_cost_reservations")
+                await connection.run_sync(pay_costs)
+            rows = list((await self.db.execute(select(InferenceCostReservation))).scalars())
+            if account is None:
+                if rows or lifecycle.get("inference_accounting") is not None or (prior and prior.get("witness") is not None):
+                    raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
+                accounting = {}
+            else:
+                witness = _witness(account)
+                if (account.ledger_digest != _ledger_digest(account, rows)
+                    or lifecycle.get("inference_accounting") != witness
+                    or prior is None or prior.get("witness") != witness
+                    or prior.get("secret_values_included") is not False
+                    or not isinstance(prior.get("account"), dict)):
+                    raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
+                accounting = {"base": prior.get("base"), "account": prior["account"],
+                    "operations": [], "witness": witness, "secret_values_included": False}
+        return accounting
+
     async def _prepare_publication(self):
         connection = await self.db.connection()
         def checked_snapshot(conn):
@@ -2815,38 +3120,7 @@ class CompositionSessionGuard:
             after = await connection.run_sync(lambda conn, table=table, key=key:
                 self._leaf(conn, table, key)) if (table, key) in members else None
             delta.append({"table_id": table, "key": key, "before_digest": before, "after_digest": after})
-        accounting = self.db.info.get("composition_accounting_payload")
-        if accounting is None:
-            # A composition-only writer must retain the unchanged accounting
-            # owner proof. Dropping it would regress the shared checkpoint.
-            from sqlalchemy import select
-            from src.db.models import InferenceAccountingOwner, InferenceCostReservation
-            from src.workflows.inference_accounting import _witness, _ledger_digest
-            from src.workspace.production import read_accounting_checkpoint
-            prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
-            lifecycle = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {}
-            if self.header_budget is not None:
-                from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
-                from src.memory.composition_headers import locate_exact_rows
-                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment", self.header_budget)
-                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids)
-                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"])
-            account = await self.db.get(InferenceAccountingOwner, "deployment")
-            rows = list((await self.db.execute(select(InferenceCostReservation))).scalars())
-            if account is None:
-                if rows or lifecycle.get("inference_accounting") is not None or (prior and prior.get("witness") is not None):
-                    raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
-                accounting = {}
-            else:
-                witness = _witness(account)
-                if (account.ledger_digest != _ledger_digest(account, rows)
-                    or lifecycle.get("inference_accounting") != witness
-                    or prior is None or prior.get("witness") != witness
-                    or prior.get("secret_values_included") is not False
-                    or not isinstance(prior.get("account"), dict)):
-                    raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
-                accounting = {"base": prior.get("base"), "account": prior["account"],
-                    "operations": [], "witness": witness, "secret_values_included": False}
+        accounting = await self._publication_accounting_payload()
         if target == self.base and not self.db.info.get("composition_accounting_payload"):
             return target, None, None
         if len(delta) + len(accounting.get("operations", [])) > 128:
@@ -2991,6 +3265,7 @@ class CompositionSessionGuard:
         self._session_instance = None
         self._session_expected = None
         self._retention_closed = True
+        self._finish_programme_admission_selection()
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
         _HELD_COMPOSITION_WORKSPACE.reset(self.token)

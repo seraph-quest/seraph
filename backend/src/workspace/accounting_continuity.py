@@ -91,6 +91,46 @@ def _derive_programme_rows(connection, common33, *, fail):
     return goals, issuers, runs, tuple(sorted(identities))
 
 
+def _derive_programme_admission_rows(connection, common33, *, goal_id, programme_id,
+                                    grant_revision, fail):
+    """Canonical first-admission capacity facts; no Identity body or grant."""
+    from src.memory.composition_headers import _validate, snapshot_reads, _metadata_cost
+    from src.workspace.accounting_witness import _programme_reference_row_on_connection
+    from src.guardian.goal_programmes import _load
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    from src.work_board.research_parent import DISCOVERY_CAPABILITY
+    _validate(connection, common33)
+    if (any(type(value) is not str or not 0 < len(value.encode("utf-8")) <= 512
+            for value in (goal_id, programme_id))
+            or type(grant_revision) is not int or grant_revision < 1):
+        fail("programme_original_generation_changed")
+    with snapshot_reads(common33):
+        _, goal, goal_bytes = _programme_reference_row_on_connection(connection, "goals", goal_id)
+    stored = _load(SimpleNamespace(**goal))
+    matching = [GoalProgramme.model_validate(generation) for generation in stored["generations"]
+        if generation["id"] == programme_id]
+    if len(matching) != 1:
+        fail("programme_original_generation_changed")
+    programme = matching[0]
+    if (programme.grant_revision != grant_revision
+            or programme.goal_id != goal_id or programme.goal_revision != goal["revision"]
+            or DISCOVERY_CAPABILITY not in programme.capability_ids):
+        fail("programme_original_generation_changed")
+    binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
+    with snapshot_reads(common33):
+        _, issuer, issuer_bytes = _programme_reference_row_on_connection(connection, "operator_sessions", binding.issuer_root_id)
+    if (issuer["operator_identity_id"] != binding.owner_identity_id
+            or issuer["principal_id"] != binding.issuer_principal_id):
+        fail("programme_original_issuer_changed")
+    # Pay canonical retained facts and typed return appearances in the same frame
+    # before issuing/storing the private selection or delivering its outputs.
+    common33.budget.debit(len(goal_bytes) + len(issuer_bytes)
+        + _metadata_cost([programme.model_dump(mode="json"), binding.model_dump(mode="json")]),
+        appearance=("programme-admission-output", goal_id, programme_id, grant_revision))
+    return programme, binding, {goal_id: MappingProxyType(goal)}, {
+        binding.issuer_root_id: MappingProxyType(issuer)}
+
+
 class _RawRollbackConnection:
     """Private original rollback handle, not a plugin SQL or authority API.
 

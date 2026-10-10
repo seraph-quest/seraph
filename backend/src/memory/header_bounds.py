@@ -339,6 +339,52 @@ def _native_memory_projected_superset_charges(certificate, trace, new_rows, upda
     return tuple(result), headers
 
 
+def _discovery_projected_superset_charges(certificate, trace, *, job_id, row_upper):
+    """Numeric common33 appearances for ONE original future discovery address.
+
+    No speculative row/certificate/body is constructed. The actual constructor
+    binds, fresh certificate and current owner are independently mandatory.
+    This helper neither reserves capacity nor authorizes any SQL/file effect.
+    """
+    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_cost
+    if type(certificate) is not CompositionHeaderCertificate:
+        raise HeaderBoundsError("header_certificate_unavailable")
+    _validate(certificate.connection, certificate)
+    if (type(job_id) is not str or not job_id.startswith("goal-discovery:")
+            or len(job_id) != len("goal-discovery:") + 32
+            or any(char not in "0123456789abcdef" for char in job_id[len("goal-discovery:"):])
+            or type(row_upper) is not int or not 0 < row_upper <= MAX_BYTES
+            or (WRS_BY_RUN.table, job_id) in certificate.rows
+            or len(certificate.rows) + 1 > MAX_ROWS):
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    old_ids = tuple(key for table, key in certificate.rows if table == WRS_BY_RUN.table)
+    new_ids = (*old_ids, job_id)
+    entries = []
+    for appearance, amount in trace:
+        if ((appearance is not None and type(appearance) is not tuple)
+                or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+            raise HeaderBoundsError("programme_numeric_trace_changed")
+        if type(appearance) is tuple and appearance[:2] == ("locator-metadata", WRS_BY_RUN.table):
+            if appearance != ("locator-metadata", WRS_BY_RUN.table, None, False, old_ids):
+                raise HeaderBoundsError("programme_numeric_trace_changed")
+            # Generated physical rowid is not an authority locator. Only its
+            # original finite int64 width is forecast; actual order is checked.
+            amount += _metadata_cost([[2**63 - 1, "text", len(job_id.encode()), job_id, None]])
+            appearance = ("locator-metadata", WRS_BY_RUN.table, None, False, new_ids)
+        elif type(appearance) is tuple and appearance[:2] == ("complete-headers", WRS_BY_RUN.table):
+            if appearance != ("complete-headers", WRS_BY_RUN.table, old_ids):
+                raise HeaderBoundsError("programme_numeric_trace_changed")
+            amount += row_upper
+            appearance = ("complete-headers", WRS_BY_RUN.table, new_ids)
+        elif type(appearance) is tuple and appearance[:2] == ("table-body", WRS_BY_RUN.table):
+            if appearance != ("table-body", WRS_BY_RUN.table, old_ids):
+                raise HeaderBoundsError("programme_numeric_trace_changed")
+            amount += row_upper
+            appearance = ("table-body", WRS_BY_RUN.table, new_ids)
+        entries.append((appearance, amount))
+    return tuple(entries)
+
+
 @dataclass(eq=False)
 class _NativeMemoryNumericLedger:
     budget: HeaderReadBudget

@@ -425,7 +425,7 @@ def _protected_composition_checkpoint(checkpoint_id):
 
 
 @asynccontextmanager
-async def get_session():
+async def get_session(*, header_budget=None):
     """Resolve the shared session factory through the durable-state module.
 
     Keeping this narrow proxy makes the canonical repository's database
@@ -434,7 +434,8 @@ async def get_session():
     """
     from src.workflows import durable_state
 
-    async with durable_state.get_session() as db:
+    async with durable_state.get_session(**(
+        {"header_budget": header_budget} if header_budget is not None else {})) as db:
         db.info["composition_writer_owner"] = "durable_jobs"
         yield db
 
@@ -2378,6 +2379,188 @@ def _validate_approval_resume_receipt(
         "request_idempotency_key": request_idempotency_key,
         "recorded_at": now.isoformat(),
     }
+
+
+def _discovery_constructor_numeric_bounds(*, programme, binding, identifier, now,
+                                          deadline, strategy, composition_binding):
+    """Original constructor sizes only: no future ref, authority, spec or row.
+
+    The original Guard authenticates these current owner inputs and reserves the
+    complete continuation. This pure arithmetic supplies no permission and is
+    never a row certificate. Its scalar widths are checked against actual binds
+    after the existing constructor and callback have produced the real row.
+    """
+    from types import MappingProxyType
+    from uuid import UUID
+    from src.db import models
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    from src.work_board.contracts import TaskStrategyBinding
+    from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, DISCOVERY_CAPABILITY
+    from src.guardian.research_plan_contracts import STAGES, ArtifactRef, GoalResearchPlanSpecV1
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    from src.memory.header_bounds import WRS_BY_RUN, HeaderBoundsError
+    if (type(programme) is not GoalProgramme or type(binding) is not GoalProgrammeAuthorityBinding
+            or type(identifier) is not UUID or type(strategy) is not TaskStrategyBinding
+            or type(composition_binding) is not RuntimeCompositionBinding
+            or GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != binding
+            or composition_binding.origin_method != "research.executeAccepted"
+            or composition_binding.native_branch != "public_research"
+            or now.tzinfo is None or deadline.tzinfo is None or not now < deadline <= programme.expires_at):
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    encoded = lambda value: len(_canonical(value).encode("utf-8"))
+    def object_bytes(fields):
+        if any(type(size) is not int or size < 0 for size in fields.values()):
+            raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+        return 2 + sum(encoded(key) + 1 + size for key, size in fields.items()) + max(0, len(fields) - 1)
+    def array_bytes(sizes):
+        return 2 + sum(sizes) + max(0, len(sizes) - 1)
+    # Resource grammar: values below are encoded widths, never reference values.
+    reference = object_bytes({"artifact_id": 28 + 2, "digest": 64 + 2, "schema_version": 1})
+    if set(ArtifactRef.model_fields) != {"artifact_id", "digest", "schema_version"}:
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    path_bytes = len("goal-programmes/") + 32 + 1 + 64 + 1 + 64 + len(".json")
+    path = path_bytes + 2  # Original namespace and filename are entirely ASCII.
+    job_id = "goal-discovery:" + identifier.hex
+    timestamp = 34  # Quoted original timezone-aware ISO8601, at most32 ASCII.
+    input_refs = [array_bytes([reference]), encoded([{"producer_step_id": "plan_queries", "output_slot": "queries", "json_pointer": ""}]),
+        encoded([{"producer_step_id": "search_public", "output_slot": name, "json_pointer": ""}
+            for name in ("manifest", "selection")]),
+        encoded([{"producer_step_id": "extract_sources", "output_slot": "snapshots", "json_pointer": ""}])]
+    caps = {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}
+    steps = []
+    for index, (name, capability, outputs) in enumerate(STAGES):
+        steps.append(object_bytes({"step_id": encoded(name), "capability_id": encoded(capability),
+            "capability_version": 1, "input_refs": input_refs[index],
+            "output_slots": encoded([{"slot": slot, "artifact_type": kind, "max_bytes": caps[slot]}
+                for slot, kind in outputs])}))
+    plan_fields = {"schema_version": 1, "plan_id": 38, "programme_id": 38,
+        "programme_revision": encoded(programme.grant_revision), "goal_id": encoded(binding.goal_id),
+        "goal_revision": encoded(binding.goal_revision), "grant_id": encoded(programme.id),
+        "grant_revision": encoded(programme.grant_revision), "public_brief_digest": 66,
+        "route_epoch": encoded(programme.route_epoch), "strategy_binding": encoded(strategy.model_dump(mode="json")),
+        "issued_at": timestamp, "deadline_at": timestamp, "idempotency_key": 38,
+        "limits": encoded({"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
+            "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
+            "max_source_bytes": 262144, "max_output_bytes": 65536,
+            "cost_limit_microusd": programme.budget.max_inference_microusd}), "steps": array_bytes(steps)}
+    if set(plan_fields) != set(GoalResearchPlanSpecV1.model_fields):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    plan = object_bytes(plan_fields)
+    brief = len(programme.public_brief.encode("utf-8"))
+    if not 0 < brief <= 8000 or not 0 < plan <= 65536:
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    inputs = object_bytes({"plan_ref": reference, "plan_file_path": path,
+        "public_brief_ref": reference, "public_brief_file_path": path, "no_learning": 4})
+    authority_fields = {"authority_type": encoded("goal_programme_discovery_v1"),
+        "principal": encoded(DISCOVERY_SERVICE), "owner_kind": encoded("service"),
+        "service_id": encoded(DISCOVERY_SERVICE), "capability_id": encoded(DISCOVERY_CAPABILITY),
+        "capability_version": encoded("1"), "goal_owner_principal_id": encoded(binding.issuer_principal_id),
+        "goal_owner_session_id": encoded(binding.issuer_root_id),
+        "programme_binding": encoded(binding.model_dump(mode="json")), "plan_ref": reference,
+        "occurrence_day": 12, "original_job_id": encoded(job_id),
+        "budget_microusd": encoded(binding.cost_ceiling_microusd), "no_learning": 4}
+    from src.work_board.research_parent import GoalDiscoveryAuthority
+    if set(authority_fields) != set(GoalDiscoveryAuthority.model_fields):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    authority = object_bytes(authority_fields)
+    checkpoints, artifacts, effects = [], [], []
+    for kind, size in (("public_brief", brief), ("plan", plan)):
+        payload = object_bytes({"artifact_ref": reference, "file_path": path, "kind": encoded(kind),
+            "slot": 1, "job_id": encoded(job_id), "programme_id": encoded(programme.id),
+            "byte_count": len(str(size)), "producer_fence": 1, "no_learning": 4})
+        checkpoints.append(object_bytes({"checkpoint_id": encoded(f"discovery:artifact:{kind}:0"),
+            "payload": payload, "recorded_at": timestamp}))
+        artifacts.append(object_bytes({"artifact_id": 30, "artifact_type": encoded("goal_discovery_" + kind),
+            "file_path": path, "content_sha256": 66, "size_bytes": len(str(size)),
+            "producer": encoded(DISCOVERY_KIND), "exists": 4}))
+        effects.append(object_bytes({"effect_id": len("discovery-artifact:") + 28 + 2,
+            "receipt_kind": encoded("readback"), "effect_type": encoded("research_artifact_readback"),
+            "status": encoded("succeeded"), "target_path": path, "content_sha256": 66,
+            "target_digest": 66, "verified_at": timestamp,
+            "readback_id": len("discovery-readback-") + 28 + 2, "reconciled": 4,
+            "reconciliation_status": encoded("resolved"), "details": encoded({"verified": True, "no_learning": True})}))
+    # Each entry is a scalar UTF8 width, not a speculative SQL/domain row.
+    # The original queue may durably fail an expired just-admitted occurrence;
+    # its finished_at bind needs the same fixed SQLite timestamp width.
+    text = {"id": 32, "run_identity": len(job_id), "root_run_identity": len(job_id),
+        "workflow_name": len(DISCOVERY_KIND), "tool_name": len(DISCOVERY_KIND), "status": len("accepted"),
+        "run_fingerprint": 64, "arguments_json": inputs, "approval_context_json": authority,
+        "artifact_paths_json": 2, "continued_error_steps_json": 2,
+        "heartbeat_at": 26, "started_at": 26, "updated_at": 26, "finished_at": 26,
+        "job_kind": len(DISCOVERY_KIND), "owner_kind": len("service"),
+        "owner_principal_id": len(DISCOVERY_SERVICE), "service_id": len(DISCOVERY_SERVICE),
+        "goal_id": len(binding.goal_id.encode("utf-8")), "composition_binding_json": len(composition_binding.to_json().encode()),
+        "capability_version": 1, "input_digest": 64, "authority_digest": 64, "budget_digest": 64,
+        "idempotency_scope": len("goal-programme-daily"), "idempotency_key": 32, "idempotency_binding": 64,
+        "dependencies_json": 2, "resource_claims_json": encoded(["goal-discovery:" + binding.owner_identity_id]),
+        "declared_authority_json": authority, "deadline_at": 26, "failure_reason": len("deadline_expired"),
+        "checkpoint_receipts_json": array_bytes(checkpoints), "artifact_receipts_json": array_bytes(artifacts),
+        "effect_receipts_json": array_bytes(effects)}
+    integer = {"branch_depth", "record_schema_version", "goal_revision", "priority", "fencing_token", "revision", "attempt_count", "max_attempts"}
+    null = {"parent_run_identity", "session_id", "conversation_id", "operator_session_id", "branch_kind",
+        "checkpoint_context_json", "last_completed_step_id", "error", "metadata_json",
+        "parent_job_id", "parent_fencing_token", "plan_revision", "candidate_id", "source_task_id",
+        "selected_context_reserved_bytes", "lease_owner", "lease_expires_at", "github_read_revision_json",
+        "github_read_observation_history_json", "github_capacity_closure_json", "result_digest", "result_summary"}
+    if set(WRS_BY_RUN.columns) != set(text) | integer | null or set(WorkflowRunState.model_fields) != set(WRS_BY_RUN.columns):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    expected_defaults = {"branch_kind": None, "artifact_paths_json": "[]", "continued_error_steps_json": "[]",
+        "last_completed_step_id": None, "error": None, "finished_at": None, "metadata_json": None,
+        "lease_owner": None, "lease_expires_at": None, "fencing_token": 0, "revision": 0, "attempt_count": 0,
+        "github_read_revision_json": None, "github_read_observation_history_json": None,
+        "github_capacity_closure_json": None, "result_digest": None, "result_summary": None}
+    if (any(WorkflowRunState.model_fields[name].default != value for name, value in expected_defaults.items())
+            or WorkflowRunState.model_fields["id"].default_factory is not models._uuid
+            or any(WorkflowRunState.model_fields[name].default_factory is not models._now
+                for name in ("heartbeat_at", "started_at", "updated_at"))):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    skeleton = ["native-composition-memory.v1", WRS_BY_RUN.table, job_id, [[name, None] for name in WRS_BY_RUN.columns]]
+    upper = encoded(skeleton) + 128
+    for name, kind, nullable in zip(WRS_BY_RUN.columns, WRS_BY_RUN.kinds, WRS_BY_RUN.nullable):
+        if name in text:
+            if kind != "text": raise HeaderBoundsError("programme_constructor_schema_changed")
+            upper += 6 * text[name] + 2 - 4
+        elif name in integer:
+            if kind != "integer": raise HeaderBoundsError("programme_constructor_schema_changed")
+            upper += 20 - 4
+        elif not nullable:
+            raise HeaderBoundsError("programme_constructor_schema_changed")
+    return MappingProxyType({"job_id": job_id, "brief_bytes": brief, "plan_bytes": plan,
+        "input_bytes": inputs, "authority_bytes": authority, "checkpoint_bytes": text["checkpoint_receipts_json"],
+        "artifact_bytes": text["artifact_receipts_json"], "effect_bytes": text["effect_receipts_json"],
+        "row_header_bytes": upper, "text_bytes": MappingProxyType(text),
+        "integer_columns": frozenset(integer), "null_columns": frozenset(null)})
+
+
+def _validate_discovery_constructor_numeric_bounds(run, bounds):
+    """Check the ACTUAL original constructor binds against numerical widths.
+
+    This is resource validation only. Current authority, physical provenance,
+    native composition and writer scope remain the original owners' checks.
+    """
+    from sqlalchemy.dialects.sqlite import dialect
+    from src.memory.header_bounds import WRS_BY_RUN, HeaderBoundsError
+    if (type(run) is not WorkflowRunState or run.run_identity != bounds["job_id"]
+            or set(bounds["text_bytes"]) | set(bounds["integer_columns"]) | set(bounds["null_columns"])
+                != set(WRS_BY_RUN.columns)):
+        raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
+    selected_dialect = dialect()
+    for name, kind, nullable in zip(WRS_BY_RUN.columns, WRS_BY_RUN.kinds, WRS_BY_RUN.nullable):
+        column = WorkflowRunState.__table__.columns[name]
+        processor = column.type.dialect_impl(selected_dialect).bind_processor(selected_dialect)
+        value = getattr(run, name)
+        value = processor(value) if processor is not None and value is not None else value
+        if value is None:
+            if not nullable:
+                raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
+        elif name in bounds["text_bytes"]:
+            if kind != "text" or type(value) is not str or len(value.encode("utf-8")) > bounds["text_bytes"][name]:
+                raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
+        elif name in bounds["integer_columns"]:
+            if kind != "integer" or type(value) is not int or not -(2**63) <= value < 2**63:
+                raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
+        else:
+            raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
 
 
 def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -9801,11 +9984,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         return run
 
     @staticmethod
-    def _session():
+    def _session(*, header_budget=None):
         # Resolve dynamically so DB fixtures and migration shims can patch the
         # canonical job runtime session factory without changing production
         # persistence behavior.
-        return get_session()
+        return get_session(**(
+            {"header_budget": header_budget} if header_budget is not None else {}))
 
 
 durable_job_repository = DurableJobRepository()

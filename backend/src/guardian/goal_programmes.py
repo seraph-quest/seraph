@@ -257,7 +257,8 @@ class GoalProgrammeService:
         return GoalProgrammeAuthorityBinding.from_programme(programme, kwargs["capability_id"])
 
     async def validate_current_binding(self, *, db, binding: GoalProgrammeAuthorityBinding,
-                                       policy: ProgrammePolicySnapshot) -> GoalProgramme:
+                                       policy: ProgrammePolicySnapshot, original_admission_guard=None,
+                                       identity_certificate=None) -> GoalProgramme:
         """DB-ONLY validation within the existing native contact/adoption CAS.
 
         Caller owns the short writer transaction and the original durable
@@ -272,6 +273,31 @@ class GoalProgrammeService:
         this SAME transaction. Output must be staged before adoption validation.
         """
         self._ready()
+        selected = original_admission_guard is not None
+        if not selected and identity_certificate is not None:
+            raise GoalProgrammeError("programme_original_selection_unavailable")
+        if selected:
+            from src.workspace.accounting_witness import CompositionSessionGuard
+            from src.memory.composition_headers import CompositionHeaderCertificate, _validate, snapshot_reads, charge_row
+            guard = original_admission_guard
+            prospective = guard._prospective_admission if type(guard) is CompositionSessionGuard else None
+            if (prospective is None or guard.db is not db or db.info.get("composition_guard") is not guard
+                    or type(identity_certificate) is not CompositionHeaderCertificate
+                    or identity_certificate.original_selection is not prospective[0]
+                    or identity_certificate.common_certificate is not prospective[0].common33
+                    or identity_certificate.budget is not guard.header_budget
+                    or guard._prospective_admission_facts is None
+                    or guard._prospective_admission_facts[2] != binding):
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            connection = await db.connection()
+            def pay_goal(conn):
+                guard._validate_programme_selection(prospective[0])
+                if guard._original_programme_admission_owner(prospective[2], prospective[3]) is not prospective[4]:
+                    raise GoalProgrammeError("programme_original_selection_unavailable")
+                _validate(conn, identity_certificate)
+                with snapshot_reads(prospective[0].common33):
+                    charge_row(conn, "goals", binding.goal_id)
+            await connection.run_sync(pay_goal)
         goal = await db.get(Goal, binding.goal_id, populate_existing=True)
         if goal is None:
             raise GoalProgrammeError("goal_not_found")
@@ -279,14 +305,32 @@ class GoalProgrammeService:
         if raw is None:
             raise GoalProgrammeError("programme_not_found")
         programme = GoalProgramme.model_validate(raw)
+        if selected:
+            def pay_issuer(conn):
+                _validate(conn, identity_certificate)
+                with snapshot_reads(prospective[0].common33):
+                    charge_row(conn, "operator_sessions", programme.issuer_root_id)
+            await connection.run_sync(pay_issuer)
         root = await db.get(OperatorSession, programme.issuer_root_id, populate_existing=True)
-        identity = await db.get(OperatorIdentity, programme.owner_identity_id, populate_existing=True)
+        if selected:
+            from types import SimpleNamespace
+            from src.memory.composition_headers import read_programme_identity
+            identity_row = await connection.run_sync(
+                lambda conn: read_programme_identity(identity_certificate, programme.owner_identity_id))
+            identity = (SimpleNamespace(id=identity_row[0], created_at=identity_row[1], revoked_at=identity_row[2])
+                if identity_row is not None else None)
+        else:
+            identity = await db.get(OperatorIdentity, programme.owner_identity_id, populate_existing=True)
         reason = self._reason(programme, goal, root, identity, policy.epoch, policy.digest, policy.blocked_reason)
         if reason:
             raise GoalProgrammeError(reason)
         if (binding.capability_id not in CAPABILITY_IDS or binding.capability_id not in programme.capability_ids
                 or GoalProgrammeAuthorityBinding.from_programme(programme, binding.capability_id) != binding):
             raise GoalProgrammeError("programme_binding_stale")
+        if selected:
+            from src.memory.composition_headers import _metadata_cost
+            guard.header_budget.debit(_metadata_cost(programme.model_dump(mode="json")),
+                appearance=("programme-admission-current-output", binding.goal_id, binding.programme_id, binding.grant_revision))
         return programme
 
     async def inspect(self, *, operator, goal_id: str) -> dict:

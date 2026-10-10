@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import base64
@@ -14,7 +15,7 @@ import weakref
 from sqlalchemy import select, update
 
 from config.settings import settings
-from src.db.engine import get_session
+from src.db.engine import get_session, original_auth_header_budget
 from src.db.models import OperatorSession
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
@@ -363,6 +364,11 @@ async def _ownership_metadata(
     # is malformed metadata rather than an active root.
     if record.is_bearer_tombstone is not False or record.replaced_by_id is not None:
         return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
+    budget = db.info.get("auth_session_budget")
+    if budget is not None:
+        from src.memory.header_bounds import OPERATOR_SESSION
+        await budget.certify_all(db, OPERATOR_SESSION)
+        budget.debit(3 * (6 * 512 + 2) + 2, appearance=("auth-reverse-projection", record.id))
     try:
         non_tombstone_predecessors = (
             await db.execute(
@@ -414,11 +420,55 @@ async def _operator_from_record(
     )
 
 
+@asynccontextmanager
+async def _original_session_operation():
+    """Original Auth lifetime, one frame before inventory or any Root body."""
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.runtime_plugins.ownership import begin_native_writer
+    budget = HeaderReadBudget()
+    async with _auth_touch_lock():
+        with original_auth_header_budget(budget):
+            async with get_session() as db:
+                if db.info.get("composition_read_guard") is not None:
+                    guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
+                    db.info["auth_session_budget"] = budget
+                    if guard is None:
+                        raise RuntimeError("composition_native_writer_required")
+                yield db
+
+
+async def _session_body_cover(db, *, session_id=None, token_hash=None):
+    budget = db.info.get("auth_session_budget")
+    if budget is None:
+        return
+    from src.memory.header_bounds import OPERATOR_SESSION
+    from src.memory.composition_headers import locate_exact_rows, locate_operator_token
+    identities = (await locate_operator_token(db, token_hash, budget) if token_hash is not None
+        else await locate_exact_rows(db, OPERATOR_SESSION, session_id, budget))
+    await budget.certify(db, OPERATOR_SESSION, identities)
+
+
+async def _original_session_change(db, record, changes):
+    if db.info.get("auth_session_budget") is not None:
+        await db.info["composition_guard"].reserve_session_mutation(record, changes)
+    for name, value in changes.items():
+        setattr(record, name, value)
+    db.add(record)
+
+
+async def _original_due_touch(db, record, now):
+    if record is not None and _touch_is_due(record, now):
+        await _original_session_change(db, record, {"last_seen_at": now,
+            "idle_expires_at": min(now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                _aware(record.absolute_expires_at))})
+
+
 async def _find_token_record(
     db,
     token_hash: str,
     now: datetime,
 ) -> tuple[OperatorSession | None, str | None]:
+    await _session_body_cover(db, token_hash=token_hash)
     result = await db.execute(
         select(OperatorSession).where(OperatorSession.token_hash == token_hash)
     )
@@ -436,8 +486,7 @@ async def _find_token_record(
     if now >= idle_expires_at or now >= absolute_expires_at:
         # The caller deliberately lets this context exit normally so the
         # revocation is committed before the failure is returned.
-        record.revoked_at = now
-        db.add(record)
+        await _original_session_change(db, record, {"revoked_at": now})
         return None, "session_expired"
     return record, None
 
@@ -455,6 +504,7 @@ async def _find_session_record(
         if not current_id or current_id in visited:
             return None, "session_revoked"
         visited.add(current_id)
+        await _session_body_cover(db, session_id=current_id)
         record = await db.get(OperatorSession, current_id)
         if record is None:
             return None, "authentication_required"
@@ -474,43 +524,34 @@ async def _find_session_record(
         if now >= idle_expires_at or now >= absolute_expires_at:
             # See _find_token_record: expiry revocation must be committed by
             # the normal session-context exit before the error is raised.
-            record.revoked_at = now
-            db.add(record)
+            await _original_session_change(db, record, {"revoked_at": now})
             return None, "session_expired"
         return record, None
     return None, "session_revoked"
 
 
 async def _touch_token(token_hash: str) -> AuthenticatedOperator:
-    async with _auth_touch_lock():
+    async with _original_session_operation() as db:
         now = datetime.now(timezone.utc)
-        async with get_session() as db:
-            record, error = await _find_token_record(db, token_hash, now)
-            if record is not None and _touch_is_due(record, now):
-                absolute_expires_at = _aware(record.absolute_expires_at)
-                record.last_seen_at = now
-                record.idle_expires_at = min(
-                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
-                    absolute_expires_at,
-                )
-                db.add(record)
-            operator = (
-                await _operator_from_record(db, record, token_hash=token_hash)
-                if record is not None
-                else None
-            )
-        if error:
-            raise AuthFailure(error)
-        assert operator is not None
-        return operator
+        record, error = await _find_token_record(db, token_hash, now)
+        operator = await _operator_from_record(db, record, token_hash=token_hash) if record is not None else None
+        await _original_due_touch(db, record, now)
+        if record is not None:
+            operator = _operator_for_record(record, token_hash=token_hash,
+                ownership_continuity=operator.ownership_continuity,
+                ownership_recovery_action=operator.ownership_recovery_action)
+    if error:
+        raise AuthFailure(error)
+    assert operator is not None
+    return operator
 
 
 async def authenticate_token(token: str | None, *, touch: bool = True) -> AuthenticatedOperator:
     if not token:
         raise AuthFailure("authentication_required")
     token_hash = _token_hash(token)
-    now = datetime.now(timezone.utc)
-    async with get_session() as db:
+    async with _original_session_operation() as db:
+        now = datetime.now(timezone.utc)
         record, error = await _find_token_record(db, token_hash, now)
         operator = (
             await _operator_from_record(db, record, token_hash=token_hash)
@@ -518,6 +559,12 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
             else None
         )
         touch_due = bool(record is not None and touch and _touch_is_due(record, now))
+        if touch_due and db.info.get("auth_session_budget") is not None:
+            await _original_due_touch(db, record, now)
+            operator = _operator_for_record(record, token_hash=token_hash,
+                ownership_continuity=operator.ownership_continuity,
+                ownership_recovery_action=operator.ownership_recovery_action)
+            touch_due = False
     if error:
         raise AuthFailure(error)
     assert operator is not None
@@ -563,8 +610,8 @@ async def _authenticate_session(
 ) -> AuthenticatedOperator:
     if not session_id:
         raise AuthFailure("authentication_required")
-    now = datetime.now(timezone.utc)
-    async with get_session() as db:
+    async with _original_session_operation() as db:
+        now = datetime.now(timezone.utc)
         record, error = await _find_session_record(
             db,
             session_id,
@@ -573,6 +620,12 @@ async def _authenticate_session(
         )
         operator = await _operator_from_record(db, record) if record is not None else None
         touch_due = bool(record is not None and touch and _touch_is_due(record, now))
+        if touch_due and db.info.get("auth_session_budget") is not None:
+            await _original_due_touch(db, record, now)
+            operator = _operator_for_record(record,
+                ownership_continuity=operator.ownership_continuity,
+                ownership_recovery_action=operator.ownership_recovery_action)
+            touch_due = False
     if error:
         raise AuthFailure(error)
     assert operator is not None
@@ -581,41 +634,29 @@ async def _authenticate_session(
     return operator
 
 
-async def _touch_session(
-    session_id: str,
-    *,
-    follow_replacements: bool = False,
-) -> AuthenticatedOperator:
-    async with _auth_touch_lock():
+async def _touch_session(session_id: str, *, follow_replacements: bool = False) -> AuthenticatedOperator:
+    async with _original_session_operation() as db:
         now = datetime.now(timezone.utc)
-        async with get_session() as db:
-            record, error = await _find_session_record(
-                db,
-                session_id,
-                now,
-                follow_replacements=follow_replacements,
-            )
-            if record is not None and _touch_is_due(record, now):
-                absolute_expires_at = _aware(record.absolute_expires_at)
-                record.last_seen_at = now
-                record.idle_expires_at = min(
-                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
-                    absolute_expires_at,
-                )
-                db.add(record)
-            operator = await _operator_from_record(db, record) if record is not None else None
-        if error:
-            raise AuthFailure(error)
-        assert operator is not None
-        return operator
+        record, error = await _find_session_record(db, session_id, now, follow_replacements=follow_replacements)
+        operator = await _operator_from_record(db, record) if record is not None else None
+        await _original_due_touch(db, record, now)
+        if record is not None:
+            operator = _operator_for_record(record,
+                ownership_continuity=operator.ownership_continuity,
+                ownership_recovery_action=operator.ownership_recovery_action)
+    if error:
+        raise AuthFailure(error)
+    assert operator is not None
+    return operator
 
 
 async def revoke_session(session_id: str) -> None:
-    async with get_session() as db:
+    async with _original_session_operation() as db:
+        await _session_body_cover(db, session_id=session_id)
         record = await db.get(OperatorSession, session_id)
         if record and record.is_bearer_tombstone is False and record.revoked_at is None:
-            record.revoked_at = datetime.now(timezone.utc)
-            db.add(record)
+            await _original_session_change(db, record, {"revoked_at": datetime.now(timezone.utc)})
+
 
 async def authenticate_principal(principal_id: str, *, db=None) -> AuthenticatedOperator:
     """Recheck server-bound device authority without adopting role metadata.

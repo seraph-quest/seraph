@@ -597,7 +597,7 @@ def prepare_lifecycle_directory(workspace: ProductionWorkspace) -> Path:
         return directory
 
 
-def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *, _accounting_lock_held: bool = False) -> Path:
+def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *, _accounting_lock_held: bool = False, header_budget=None) -> Path:
     """Atomically persist a bounded operator receipt without secret values."""
     directory = workspace.lifecycle_directory
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
@@ -607,24 +607,24 @@ def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str
             raise ProductionWorkspaceError("accounting_continuity_unavailable")
         directory.mkdir(mode=0o700, parents=False)
     if _accounting_lock_held:
-        return _write_lifecycle_receipt_locked(workspace, receipt)
+        return _write_lifecycle_receipt_locked(workspace, receipt, header_budget=header_budget)
     descriptor = os.open(directory / "accounting.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ProductionWorkspaceError("workspace accounting continuity is busy") from exc
-        return _write_lifecycle_receipt_locked(workspace, receipt)
+        return _write_lifecycle_receipt_locked(workspace, receipt, header_budget=header_budget)
     finally:
         os.close(descriptor)
 
 
 def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *,
-        _programme_transition=None, _prior_receipt=None) -> Path:
+        _programme_transition=None, _prior_receipt=None, header_budget=None) -> Path:
     path = lifecycle_receipt_path(workspace)
     payload = dict(receipt)
     # Lifecycle status updates must not erase the accounting high-water mark.
-    prior = _prior_receipt if _prior_receipt is not None else read_lifecycle_receipt(workspace)
+    prior = _prior_receipt if _prior_receipt is not None else read_lifecycle_receipt(workspace, header_budget=header_budget)
     if (prior is not None and "runtime_composition" in prior and payload.get("operation") in {"restore", "rollback"}
             and payload.get("status") in {"restored", "rolled_back"}):
         from src.workspace.accounting_continuity import verify_promoted_composition
@@ -759,12 +759,12 @@ def read_lifecycle_receipt(workspace: ProductionWorkspace, *, header_budget=None
     return value
 
 
-def write_accounting_checkpoint(workspace: ProductionWorkspace, payload: Mapping[str, Any]) -> None:
+def write_accounting_checkpoint(workspace: ProductionWorkspace, payload: Mapping[str, Any], *, header_budget=None) -> None:
     """Retain one content-free transaction delta under the accounting lock."""
     path = workspace.lifecycle_directory / "accounting-checkpoint.json"
-    prior = read_accounting_checkpoint(workspace)
+    prior = read_accounting_checkpoint(workspace, header_budget=header_budget)
     if prior is not None and prior.get("schema_version") == 2:
-        receipt = read_lifecycle_receipt(workspace) or {}
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
         if (receipt.get("runtime_composition") != prior.get("composition_target")
             or (prior.get("witness") is not None and receipt.get("inference_accounting") != prior["witness"])):
             raise ProductionWorkspaceError("composition pending checkpoint requires reconciliation")
@@ -813,6 +813,18 @@ def _read_private_checkpoint(path: Path, *, header_budget=None) -> dict[str, Any
     if not isinstance(payload, dict) or payload.get("secret_values_included") is not False:
         raise ProductionWorkspaceError("accounting checkpoint is invalid")
     return payload
+
+
+def _verify_composition_publication_bytes(workspace, checkpoint, receipt, *, header_budget):
+    """Exact original atomic-writer bytes through the existing safe reader."""
+    for path, maximum, payload in (
+        (workspace.lifecycle_directory / "accounting-checkpoint.json", MAX_ACCOUNTING_CHECKPOINT_BYTES, checkpoint),
+        (lifecycle_receipt_path(workspace), MAX_LIFECYCLE_RECEIPT_BYTES, receipt),
+    ):
+        raw = _read_bounded_private_file(path, maximum=maximum, private_mode=True, header_budget=header_budget)
+        expected = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        if raw != expected:
+            raise ProductionWorkspaceReconciliationError("session_publication_readback_changed")
 
 
 def _invalidate_transport_credentials(connection) -> int:

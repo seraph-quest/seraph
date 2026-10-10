@@ -1586,7 +1586,13 @@ def _programme_component_on_connection(connection, common33, selection, identity
     for table, keys in (("goals", selection.goals), ("operator_sessions", selection.issuers)):
         for key in keys:
             with snapshot_reads(common33):
-                raw, row = _programme_reference_row_on_connection(connection, table, key)
+                descriptor, row, raw = _programme_reference_row_on_connection(connection, table, key)
+            forecast = _SESSION_ROW_FORECAST.get()
+            if (forecast is not None and forecast[0] is original_owner
+                    and table == "operator_sessions" and key == forecast[1]):
+                # Pure target arithmetic; the actual original row was paid/read
+                # above. This value is never enrolled or issued as a certificate.
+                raw = _native_memory_row_bytes(descriptor, key, dict(forecast[2]))
             rows[(table, key)] = hashlib.sha256(raw).hexdigest()
             if table == "goals" and row["parent_id"] is not None:
                 relations.add(("goal_parent_fk", table, key, "goals", row["parent_id"]))
@@ -1603,7 +1609,7 @@ def _programme_component_on_connection(connection, common33, selection, identity
     slots = set()
     for key in selection.runs:
         with snapshot_reads(common33):
-            _raw, run = _programme_reference_row_on_connection(connection, "workflow_run_states", key)
+            _descriptor, run, _raw = _programme_reference_row_on_connection(connection, "workflow_run_states", key)
         binding = discovery_authority(run["declared_authority_json"]).programme_binding
         relations.add(("programme_goal", "workflow_run_states", key, "goals", binding.goal_id))
         relations.add(("programme_issuer_provenance", "workflow_run_states", key,
@@ -2227,11 +2233,14 @@ class CompositionReadGuard:
             event.remove(connection, "before_cursor_execute", callback)
 
 
-async def prepare_composition_read_session(db):
+async def prepare_composition_read_session(db, *, header_budget=None):
     """Cheap inventory-presence check; never private files or publication."""
     from sqlalchemy import text
     exists = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'"))
     populated = await db.scalar(text("SELECT 1 FROM runtime_composition_states LIMIT 1")) if exists else None
+    if header_budget is not None:
+        from src.memory.composition_headers import _metadata_cost
+        header_budget.debit(_metadata_cost([exists, populated]), appearance=("composition-inventory-probes",))
     await db.rollback()
     if not populated:
         return None
@@ -2240,6 +2249,8 @@ async def prepare_composition_read_session(db):
     db.info["composition_read_guard"] = guard
     return guard
 
+
+_SESSION_ROW_FORECAST = ContextVar("session_row_forecast", default=None)
 
 class CompositionSessionGuard:
     """One existing session, external lock and precommit publisher.
@@ -2266,6 +2277,9 @@ class CompositionSessionGuard:
         self._programme_current_leaves = {}
         self._programme_base_leaves = {}
         self._programme_writer = None
+        self._session_reservation = None
+        self._session_expected = None
+        self._session_instance = None
 
     def _programme_tables(self):
         return {"goals", "operator_sessions", "operator_identities"} if (
@@ -2682,6 +2696,13 @@ class CompositionSessionGuard:
             event.listen(connection, "before_cursor_execute", guarded)
             self.connection_listeners.append((connection, guarded))
         def before_flush(session, context, instances):
+            if self.db.info.get("auth_session_budget") is not None:
+                changes = (*session.new, *session.dirty, *session.deleted)
+                if changes and (self._session_reservation is None or session.new or session.deleted
+                        or any(value is not self._session_instance[0] for value in session.dirty)):
+                    raise ProductionWorkspaceReconciliationError("session_mutation_unreserved")
+                if changes:
+                    self._validate_session_reservation()
             connection = session.connection()
             for value in (*session.new, *session.dirty, *session.deleted):
                 table = getattr(value, "__tablename__", None)
@@ -2762,13 +2783,7 @@ class CompositionSessionGuard:
             event.listen(self.db.sync_session, name, guarded)
             self.listeners.append((name, guarded))
 
-    async def publish(self):
-        from src.workspace.production import write_accounting_checkpoint, write_lifecycle_receipt
-        if self.db.info.get("composition_sticky_failure") is not None:
-            raise self.db.info["composition_sticky_failure"]
-        await self.db.flush()
-        if self.db.info.get("composition_sticky_failure") is not None:
-            raise self.db.info["composition_sticky_failure"]
+    async def _prepare_publication(self):
         connection = await self.db.connection()
         def checked_snapshot(conn):
             if self.header_budget is None:
@@ -2833,8 +2848,7 @@ class CompositionSessionGuard:
                 accounting = {"base": prior.get("base"), "account": prior["account"],
                     "operations": [], "witness": witness, "secret_values_included": False}
         if target == self.base and not self.db.info.get("composition_accounting_payload"):
-            self.prepared_commit = True
-            return
+            return target, None, None
         if len(delta) + len(accounting.get("operations", [])) > 128:
             raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
         checkpoint = {**accounting, "schema_version": 2, "composition_base": self.base,
@@ -2848,8 +2862,122 @@ class CompositionSessionGuard:
         if (len(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")).encode()) > MAX_ACCOUNTING_CHECKPOINT_BYTES
             or len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()) > MAX_LIFECYCLE_RECEIPT_BYTES):
             raise ProductionWorkspaceReconciliationError("composition_publication_size_exceeded")
-        write_accounting_checkpoint(self.workspace, checkpoint)
-        write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True)
+        return target, checkpoint, receipt
+
+    async def reserve_session_mutation(self, record, changes):
+        """Reserve resources for one resolved original Auth mutation, not authority."""
+        from sqlalchemy.dialects.sqlite import dialect
+        from src.db.models import OperatorSession
+        from src.memory.header_bounds import (OPERATOR_SESSION, _SessionNumericReservation,
+            _trace_memory_numeric_charges, _native_memory_projected_header_upper, HeaderBoundsError)
+        from src.workspace.production import read_accounting_checkpoint
+        if (type(record) is not OperatorSession or self._session_reservation is not None
+                or self.db.new or self.db.deleted or self.db.dirty
+                or not changes or set(changes) - {"last_seen_at", "idle_expires_at", "revoked_at"}):
+            raise HeaderBoundsError("session_mutation_unavailable")
+        connection = await self.db.connection()
+        binding = await connection.run_sync(lambda conn: self._native_writer_fields(conn, self.header_budget, "finite_service"))
+        await connection.run_sync(self._ensure_programme_writer)
+        selected_dialect = dialect()
+        row, original_row = {}, {}
+        for name in OPERATOR_SESSION.columns:
+            value = changes.get(name, getattr(record, name))
+            processor = OperatorSession.__table__.columns[name].type.dialect_impl(selected_dialect).bind_processor(selected_dialect)
+            row[name] = processor(value) if processor is not None else value
+            old = getattr(record, name)
+            original_row[name] = processor(old) if processor is not None else old
+        original_upper = _native_memory_projected_header_upper(OPERATOR_SESSION, record.id, original_row)
+        resolved = tuple(row.items())
+        # Charge numerical forecast storage before constructing target bytes.
+        upper = _native_memory_projected_header_upper(OPERATOR_SESSION, record.id, row)
+        self.header_budget.debit(upper, appearance=("session-forecast", record.id))
+        if ("operator_sessions", record.id) in self.members:
+            await connection.run_sync(lambda conn: self._touch(conn, "operator_sessions", record.id))
+        previous_selection, previous_leaves = self._selection, self._programme_current_leaves
+        token = _SESSION_ROW_FORECAST.set((self, record.id, resolved))
+        try:
+            with _trace_memory_numeric_charges(self.header_budget) as trace:
+                expected = await self._prepare_publication()
+                # These are precisely the existing writer's repeated prior reads.
+                if expected[1] is not None:
+                    prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
+                    if prior is not None and prior.get("schema_version") == 2:
+                        read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+                    read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+        finally:
+            _SESSION_ROW_FORECAST.reset(token)
+            self._selection, self._programme_current_leaves = previous_selection, previous_leaves
+        entries = []
+        for appearance, amount in trace:
+            if appearance == ("body", "operator_sessions", record.id):
+                amount = upper
+            elif isinstance(appearance, tuple) and appearance[:2] == ("complete-headers", "operator_sessions"):
+                # Forecast full header appearances at an upper bound for only
+                # this resolved change; unrelated certified rows stay unchanged.
+                amount = amount - original_upper + upper
+            elif isinstance(appearance, tuple) and appearance[:2] == ("table-body", "operator_sessions") and record.id in appearance[2]:
+                amount = amount - original_upper + upper
+            entries.append((appearance, amount))
+        if expected[1] is not None:
+            for label, payload in (("checkpoint", expected[1]), ("receipt", expected[2])):
+                encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                entries.extend([(("session-output", label), len(encoded)), (None, len(encoded) + 1)])
+        reservation = _SessionNumericReservation(self, binding, entries)
+        self._session_reservation = reservation
+        self._session_expected = tuple(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+            for value in expected)
+        self._session_instance = (record, tuple(changes.items()), resolved)
+
+    def _validate_session_reservation(self):
+        record, changes, resolved = self._session_instance
+        if self.db.new or self.db.deleted or any(value is not record for value in self.db.dirty):
+            raise ProductionWorkspaceReconciliationError("session_mutation_changed")
+        from sqlalchemy.dialects.sqlite import dialect
+        selected_dialect = dialect()
+        actual = []
+        for name, expected_value in resolved:
+            column = record.__table__.columns[name]
+            processor = column.type.dialect_impl(selected_dialect).bind_processor(selected_dialect)
+            value = getattr(record, name)
+            actual.append((name, processor(value) if processor is not None else value))
+        if tuple(actual) != resolved:
+            raise ProductionWorkspaceReconciliationError("session_mutation_changed")
+
+    async def publish(self):
+        from src.workspace.production import (write_accounting_checkpoint, write_lifecycle_receipt,
+            _verify_composition_publication_bytes)
+        if self.db.info.get("composition_sticky_failure") is not None:
+            raise self.db.info["composition_sticky_failure"]
+        reservation = self._session_reservation
+        if reservation is not None:
+            self._validate_session_reservation()
+        await self.db.flush()
+        if self.db.info.get("composition_sticky_failure") is not None:
+            raise self.db.info["composition_sticky_failure"]
+        if reservation is None:
+            prepared = await self._prepare_publication()
+            target, checkpoint, receipt = prepared
+            if checkpoint is not None:
+                write_accounting_checkpoint(self.workspace, checkpoint)
+                write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True)
+        else:
+            with reservation.reads():
+                prepared = await self._prepare_publication()
+                if tuple(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                        for value in prepared) != self._session_expected:
+                    raise ProductionWorkspaceReconciliationError("session_publication_target_changed")
+                target, checkpoint, receipt = prepared
+                if checkpoint is not None:
+                    for label, payload in (("checkpoint", checkpoint), ("receipt", receipt)):
+                        self.header_budget.debit(len(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()),
+                            appearance=("session-output", label))
+                    write_accounting_checkpoint(self.workspace, checkpoint, header_budget=self.header_budget)
+                    write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True, header_budget=self.header_budget)
+                    _verify_composition_publication_bytes(self.workspace, checkpoint, receipt,
+                        header_budget=self.header_budget)
+            if any(reservation.entries.values()):
+                raise ProductionWorkspaceReconciliationError("session_publication_appearance_missing")
+            reservation.close()
         self.prepared_commit = True
 
     def close(self):
@@ -2858,6 +2986,10 @@ class CompositionSessionGuard:
             event.remove(self.db.sync_session, name, callback)
         for connection, callback in self.connection_listeners:
             event.remove(connection, "before_cursor_execute", callback)
+        if self._session_reservation is not None:
+            self._session_reservation.close()
+        self._session_instance = None
+        self._session_expected = None
         self._retention_closed = True
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
@@ -2873,6 +3005,9 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         raise ProductionWorkspaceReconciliationError("composition_lock_before_writer_required")
     exists = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'"))
     populated = await db.scalar(text("SELECT 1 FROM runtime_composition_states LIMIT 1")) if exists else None
+    if header_budget is not None:
+        from src.memory.composition_headers import _metadata_cost
+        header_budget.debit(_metadata_cost([exists, populated]), appearance=("composition-inventory-probes",))
     await db.rollback()
     if not populated and not fresh:
         return None

@@ -1972,13 +1972,27 @@ async def close_db() -> None:
     await engine.dispose()
 
 
+_auth_header_budget = ContextVar("original_auth_header_budget", default=None)
+
+
+@contextmanager
+def original_auth_header_budget(budget):
+    """Pass one original Auth frame through legacy session-factory wrappers."""
+    token = _auth_header_budget.set(budget)
+    try:
+        yield
+    finally:
+        _auth_header_budget.reset(token)
+
+
 @asynccontextmanager
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_session(*, header_budget=None) -> AsyncGenerator[AsyncSession, None]:
     """Yield an async DB session."""
+    header_budget = header_budget if header_budget is not None else _auth_header_budget.get()
     factory = _session_factory_override.get() or async_session_factory
     async with factory() as session:
         from src.workspace.accounting_witness import prepare_composition_read_session
-        read_guard = await prepare_composition_read_session(session)
+        read_guard = await prepare_composition_read_session(session, header_budget=header_budget)
         composition_guard = None
         try:
             yield session

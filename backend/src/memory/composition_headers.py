@@ -193,7 +193,7 @@ def validate_descriptor_schema(connection, descriptor):
     return _metadata_cost([list(r) for r in schema])
 
 
-def _validate_locator(connection, table, column, model=None):
+def _validate_locator(connection, table, column, model=None, *, budget=None):
     model = model or _COMPOSITION_MODELS[table]
     source = [i for i in model.__table__.indexes if i.unique and tuple(c.name for c in i.columns)==(column,)]
     if len(source) != 1:
@@ -201,10 +201,14 @@ def _validate_locator(connection, table, column, model=None):
     name = source[0].name
     rows = list(_sql(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?',
                      (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1)))
+    if budget is not None:
+        budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
     match = [r for r in rows if r[0] == name]
     if len(match) != 1 or tuple(match[0][1:]) != (1,"c",0):
         raise HeaderBoundsError("header_locator_changed")
     parts = list(_sql(connection,'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3',(name,)))
+    if budget is not None:
+        budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
     keys = [r for r in parts if r[3]==1]
     if len(parts)!=2 or len(keys)!=1 or tuple(keys[0][:4])!=(column,"BINARY",0,1):
         raise HeaderBoundsError("header_locator_changed")
@@ -287,6 +291,28 @@ async def locate_exact_rows(db, descriptor, identity, budget):
     if type(budget) is not HeaderReadBudget or not any(descriptor is d for d in COMPOSITION_DESCRIPTORS.values()):
         raise HeaderBoundsError("header_descriptor_unavailable")
     return await (await db.connection()).run_sync(lambda c:_discover(c,descriptor,budget,key=identity))
+
+
+async def locate_operator_token(db, token_hash, budget):
+    """Resolve the original unique bearer locator before any Root body."""
+    from src.memory.header_bounds import OPERATOR_SESSION
+    from src.db.models import OperatorSession
+    if (type(budget) is not HeaderReadBudget or type(token_hash) is not str
+            or len(token_hash) != 64 or any(c not in "0123456789abcdef" for c in token_hash)):
+        raise HeaderBoundsError("header_request_bound")
+    def locate(connection):
+        budget.debit(validate_descriptor_schema(connection, OPERATOR_SESSION),
+            appearance=("operator-token-schema",))
+        name = _validate_locator(connection, "operator_sessions", "token_hash", OperatorSession, budget=budget)
+        rows = list(_sql(connection, 'SELECT _rowid_,typeof(id),octet_length(id),'
+            'CASE WHEN typeof(id)=\'text\' AND octet_length(id) BETWEEN 1 AND 512 THEN id END '
+            f'FROM operator_sessions INDEXED BY "{name}" WHERE token_hash=? LIMIT 2', (token_hash,)))
+        budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-locator",))
+        if len(rows) > 1 or any(type(r[0]) is not int or r[1] != "text" or not r[3] for r in rows):
+            raise HeaderBoundsError("header_row_unavailable")
+        budget.enroll(("operator_sessions", r[0]) for r in rows)
+        return tuple(r[3] for r in rows)
+    return await (await db.connection()).run_sync(locate)
 
 
 async def locate_tombstones(db, memory_id, budget):

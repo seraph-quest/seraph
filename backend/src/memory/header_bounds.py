@@ -153,6 +153,9 @@ class HeaderReadBudget:
         return certificate
 
     def available(self, appearance=None):
+        session = _SESSION_NUMERIC_READS.get()
+        if session is not None and session.budget is self:
+            return self.remaining + session.available(appearance)
         active = _MEMORY_LEDGER_PHASE.get()
         if active is not None and active[0].budget is self:
             return self.remaining + active[0].available(active[1], appearance)
@@ -162,6 +165,10 @@ class HeaderReadBudget:
         trace = _MEMORY_CHARGE_TRACE.get()
         if trace is not None and trace[0] is self:
             trace[1].append((appearance, amount))
+        session = _SESSION_NUMERIC_READS.get()
+        if session is not None and session.budget is self:
+            session.consume(appearance, amount)
+            return
         active = _MEMORY_LEDGER_PHASE.get()
         if active is not None and active[0].budget is self and active[0].consume(active[1], appearance, amount):
             return
@@ -429,6 +436,56 @@ async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, ap
     _MEMORY_LEDGERS[id(ledger)] = ledger
     await ledger.bind(db, "effect")
     return ledger
+
+
+_SESSION_NUMERIC_READS = ContextVar("original_session_numeric_reads", default=None)
+
+
+class _SessionNumericReservation:
+    """One original guard's prepaid read appearances; never row authority."""
+    def __init__(self, guard, binding, entries):
+        self.guard, self.binding, self.budget = guard, binding, guard.header_budget
+        self.entries = {}
+        self.consumed = []
+        self.closed = False
+        total = 0
+        for appearance, amount in entries:
+            if type(amount) is not int or not 0 <= amount <= MAX_BYTES:
+                raise HeaderBoundsError("session_reservation_cost_invalid")
+            self.entries.setdefault(appearance, []).append(amount)
+            total += amount
+        self.budget.debit(total, appearance=("session-publication-reservation",))
+
+    def _checked(self):
+        if (self.closed or self.guard._session_reservation is not self
+                or self.guard._native_writer_fields(self.binding[5], self.budget, "finite_service") != self.binding):
+            raise HeaderBoundsError("session_reservation_owner_changed")
+
+    def available(self, appearance):
+        self._checked()
+        pending = self.entries.get(appearance, ())
+        return pending[0] if pending else 0
+
+    def consume(self, appearance, amount):
+        self._checked()
+        pending = self.entries.get(appearance)
+        if not pending or type(amount) is not int or not 0 <= amount <= pending[0]:
+            raise HeaderBoundsError("session_reservation_appearance_changed")
+        self.consumed.append((appearance, pending.pop(0), amount))
+
+    @contextmanager
+    def reads(self):
+        self._checked()
+        if _SESSION_NUMERIC_READS.get() is not None:
+            raise HeaderBoundsError("session_reservation_nested")
+        token = _SESSION_NUMERIC_READS.set(self)
+        try:
+            yield
+        finally:
+            _SESSION_NUMERIC_READS.reset(token)
+
+    def close(self):
+        self.closed = True
 
 
 @dataclass(frozen=True, eq=False)

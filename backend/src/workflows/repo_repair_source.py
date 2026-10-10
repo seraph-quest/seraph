@@ -168,7 +168,7 @@ async def stage_repository_stop_original_producer_witnesses(service, jobs, *, co
     dispatched = any(_repository_record(run, "repository:execution:" + iteration_identity(
         run.run_identity, original["repository_attempt_id"], _source_digest(original["original_input"]), index))
         is not None for index in range(1, work.limits.max_iterations + 1))
-    if read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3" or not dispatched:
+    if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"} or not dispatched:
         if completion_witness is not None:
             from src.workflows.job_runtime import DurableJobLeaseError
             raise DurableJobLeaseError("actual dispatched repository completion required")
@@ -190,7 +190,7 @@ async def _validate_repository_completion_post_context_sql(db, service, jobs, *,
     cas = repository_completion_post_cas(witness)
     run = context["run"]
     stop = _repository_record(run, "repository:stop-intent:v1")
-    if (read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3"
+    if (read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
             or run.run_identity != before["run"].run_identity
             or context["owner"] != before["owner"]
             or type(cas["before_revision"]) is not int or type(cas["post_revision"]) is not int
@@ -330,6 +330,13 @@ def _checked_uncertainty_columns(value):
                 raise DurableJobLeaseError("original uncertainty timestamp projection changed")
 
 
+def _repository_root_static_digest(run, values):
+    if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4":
+        from src.workflows.repo_repair_stop import _static_digest_v4
+        return _static_digest_v4(values, "WorkflowRunState", "root")
+    return _source_digest({key: value for key, value in values.items() if key not in _ROOT_BOOKKEEPING})
+
+
 def _validate_repository_unknown_root_projection(run, stop, successor):
     """Verify recorded pre-erasure values against the immutable original hash."""
     from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest
@@ -340,8 +347,8 @@ def _validate_repository_unknown_root_projection(run, stop, successor):
     root_key = type(run).__tablename__ + ":" + str(run.id)
     if (type(stop) is not dict or type(stop.get("static_rows")) is not dict
             or type(successor) is not dict or set(successor) != keys
-            or successor["schema"] != "repository.stop_uncertainty_successor.v1"
-            or inventory["schema"] not in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
+            or successor["schema"] != ("repository.stop_uncertainty_successor.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_uncertainty_successor.v1")
+            or inventory["schema"] not in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
             or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
             or successor["stop_digest"] != _source_digest(stop)
             or successor["authority_digest"] != run.authority_digest
@@ -374,8 +381,8 @@ def _validate_repository_unknown_root_projection(run, stop, successor):
     if {key: current[key] for key in _UNCERTAINTY_COLUMNS} != following:
         raise DurableJobLeaseError("current original uncertainty projection changed")
     old_candidate = {**current, **predecessor}
-    predecessor_digest = _source_digest({key: item for key, item in old_candidate.items() if key not in _ROOT_BOOKKEEPING})
-    current_digest = _source_digest({key: item for key, item in current.items() if key not in _ROOT_BOOKKEEPING})
+    predecessor_digest = _repository_root_static_digest(run, old_candidate)
+    current_digest = _repository_root_static_digest(run, current)
     if (predecessor_digest != successor["predecessor_digest"]
             or predecessor_digest != stop["static_rows"].get(root_key)
             or current_digest != successor["successor_digest"]):
@@ -676,7 +683,7 @@ async def stage_repository_completion_appends(service, jobs, *, stage, owner, fe
     if stage in _COMPLETION_APPEND_STAGES:
         raise DurableJobLeaseError("original completion append constructor already issued")
     from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
-    if (read_repository_inventory(binding["root"])["schema"] != "repository.checkpoint_inventory.v3"
+    if (read_repository_inventory(binding["root"])["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
             or _canonical(binding["root"].model_dump(mode="json")) != binding["root_json"]
             or read_registered_repository_producer(binding["root"], iteration_index=binding["iteration_index"])
                 != binding["registration"]):
@@ -1026,6 +1033,16 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
         attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
         envelope = await verify_general_task_manifest(db, parent, task, attempt, read_manifest(parent))
+        artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+        manifest = read_manifest(parent)
+        if (artifact is None or task.input_artifact_id != manifest.original_envelope_artifact_id
+                or task.typed_input_digest != manifest.original_envelope_digest
+                or artifact.payload_sha256 != task.typed_input_digest or artifact.typed_input_ref != task.typed_input_ref
+                or artifact.bound_task_id != task.task_id
+                or (artifact.owner_principal_id, artifact.owner_session_id) != (task.owner_principal_id, task.owner_session_id)
+                or (artifact.goal_id, artifact.goal_revision) != (task.goal_id, task.goal_revision)
+                or artifact.capability_id != task.capability_id or artifact.capability_version != "1"):
+            raise DurableJobLeaseError("original repository parent input changed")
         if envelope.repository_source != source or envelope.proposal_group != group:
             raise DurableJobLeaseError("original scoped Task source changed")
         authority = await service._resolve_canonical_authority(db, owner=owner,
@@ -1039,7 +1056,7 @@ async def _repository_precontact(service, jobs, *, job_id, owner):
                    _as_utc(child.lease_expires_at) > binding.native_deadline_at):
             raise DurableJobLeaseError("original running repository claims required")
         await validate_group_owner(db, group)
-        originals = [run, child, parent, task, attempt, authority.task, authority.attempt,
+        originals = [run, parent, child, task, attempt, artifact, authority.task, authority.attempt,
             goal, await db.get(OperatorSession, group.owner_session_id),
             await db.get(WorkBoardInputArtifact, authority.task.input_artifact_id)]
         from sqlalchemy import inspect as inspect_mapper
@@ -1341,12 +1358,12 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
         "snapshot_artifact_ref", "snapshot_artifact_digest", "no_learning"}
     if automatic:
         expected_stop |= {"limit_evidence", "limit_evidence_digest"}
-    if (set(stop) != expected_stop or stop.get("schema") != "repository.stop_intent.v1"
+    if (set(stop) != expected_stop or stop.get("schema") != ("repository.stop_intent.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_intent.v1")
             or reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS
             or stop.get("native_binding_digest") != _source_digest(binding.model_dump(mode="json"))
             or stop.get("no_learning") is not True or not isinstance(stop.get("static_rows"), dict)
             or stop.get("snapshot_artifact_ref") != "workspace-json:artifacts/repo-repair/stop-" + _source_digest(run.run_identity) + ".json"
-            or stop.get("snapshot_artifact_digest") != _source_digest({"schema": "repository.stop_snapshot.v1",
+            or stop.get("snapshot_artifact_digest") != _source_digest({"schema": ("repository.stop_snapshot.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_snapshot.v1"),
                 "static_rows": stop["static_rows"], "repository_job_id": run.run_identity,
                 "source_checkpoint_digest": _source_digest(original)})):
         raise DurableJobLeaseError("original repository stop discovery binding changed")
@@ -1649,7 +1666,7 @@ async def _repository_operator_projection_sql(db, service, jobs, *, job_id, owne
                 # A partial closure is recovery metadata, never a complete
                 # RepoIteration or a fabricated failed requested check.
                 from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
-                if read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3":
+                if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
                     raise DurableJobLeaseError("original registered partial closure required")
                 read_registered_repository_producer(run, iteration_index=index)
                 if cleanup.get("status") != "held_partial" or readback.get("command_results") != []:
@@ -2507,7 +2524,7 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         def before_dispatch():
             future = asyncio.run_coroutine_threadsafe(dispatch_sql_guard(), loop)
             future.result(timeout=min(10, max(1, remaining)))
-        if read_repository_inventory(context["run"])["schema"] == "repository.checkpoint_inventory.v3":
+        if read_repository_inventory(context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
             from src.workflows.repo_repair_source_recovery import issue_repository_source_producer
             producer_owner = await issue_repository_source_producer(service, jobs, job, owner=owner)
             # Registration advances the canonical epoch before ACK. Each real
@@ -3350,15 +3367,17 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
         checks_passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
             and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
             and manifest.get("test_args") == check_args)
-    if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+    if read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
         from src.workflows.repo_repair_source_recovery import (
             assert_repository_completion_witness, repository_completion_result,
-            repository_completion_post_cas, repository_completion_cleanup_envelope)
+            repository_completion_post_cas, repository_completion_cleanup_envelope,
+            _cleanup_artifact_keys, _validate_cleanup_artifact_version)
         assert_repository_completion_witness(completion_witness, service=service, jobs=jobs)
         actual_result = repository_completion_result(completion_witness)
         cas = repository_completion_post_cas(completion_witness)
         recorded_projection = json.loads(cleanup_bytes)
         actual_envelope = repository_completion_cleanup_envelope(completion_witness)
+        _validate_cleanup_artifact_version(run, actual_envelope)
         from src.workflows.general_task_guard import _history
         from src.workflows.job_runtime import _digest
         metadata = actual_envelope.get("source_append_metadata", [])
@@ -3371,7 +3390,7 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
             and readback.get("source_completion_cas") == cas
             and actual_result["manifest"] == manifest
             and _canonical(recorded_projection) == _canonical(actual_envelope)
-            and set(actual_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
+            and set(actual_envelope) == _cleanup_artifact_keys(run)
             and _canonical(actual_envelope["physical_projection"]) == _canonical(actual_projection)
             and actual_envelope["source_completion_cas"] == cas
             and len(metadata) == 2 and [item.get("checkpoint_id") for item in metadata] == expected_ids

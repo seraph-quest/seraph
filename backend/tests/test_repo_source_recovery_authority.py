@@ -288,9 +288,10 @@ async def test_actual_canonical_producer_registration_rejects_rehashed_scope_tam
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("language", ["python", "node"])
+@pytest.mark.parametrize("language,auth_event", [("python", "unchanged"), ("node", "unchanged"),
+    ("python", "touch"), ("python", "refresh")])
 async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_retries_same_result(
-        accounting_db, monkeypatch, repository_admission_signer, language):
+        accounting_db, monkeypatch, repository_admission_signer, language, auth_event):
     from src.workflows.job_runtime import _canonical
     from src.workflows import repo_repair_source as source
     from src.workflows import repo_repair_source_recovery as recovery
@@ -325,7 +326,12 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
     prefix = "artifacts/repo-repair/model/iteration-" + registration["iteration_id"]
     before_artifact = (captured["service"]._workspace() / (prefix + "-cleanup.json")).read_bytes()
     original_envelope = json.loads(before_artifact)
-    assert set(original_envelope) == {"physical_projection", "source_completion_cas", "source_append_metadata"}
+    assert source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4"
+    assert registration["schema"] == "repository.original_producer.v2"
+    assert set(original_envelope) == {"schema", "physical_projection", "source_completion_cas", "source_append_metadata", "recovery_commitment"}
+    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v2"
+    assert len(original_envelope["recovery_commitment"]["non_root_static"]) == 10
+    assert original_envelope["recovery_commitment"]["non_root_static"][4]["slot"] == "parent_input"
     assert len(original_envelope["source_append_metadata"]) == 2
     monkeypatch.setattr(source, "_append_repository_record", real_append)
     artifact_path = captured["service"]._workspace() / (prefix + "-cleanup.json")
@@ -349,6 +355,76 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
             assert artifact_path.read_bytes() == altered_bytes
         finally:
             artifact_path.write_bytes(before_artifact)
+    # An authentic v4 Root cannot upgrade a legacy three-key artifact in place.
+    legacy_envelope = {key: original_envelope[key] for key in (
+        "physical_projection", "source_completion_cas", "source_append_metadata")}
+    legacy_bytes = _canonical(legacy_envelope).encode()
+    artifact_path.write_bytes(legacy_bytes)
+    try:
+        with pytest.raises(RepositorySourceRecoveryError, match="original_producer_artifact_changed"):
+            await real_publish(captured["service"], jobs, **kwargs)
+        assert artifact_path.read_bytes() == legacy_bytes
+        async with jobs._session() as db:
+            current = await jobs._fetch(db, kwargs["job_id"])
+            assert current.model_dump(mode="json") == captured["before"]
+            assert jobs._repo_repair_reservation_state(current)["status"] == "held"
+    finally:
+        artifact_path.write_bytes(before_artifact)
+    from datetime import datetime, timezone, timedelta
+    from src.db.models import OperatorSession
+    from src.auth import service as auth
+    from src.workflows.job_runtime import _as_utc
+    async with jobs._session() as db:
+        session = await db.get(OperatorSession, kwargs["owner"].session_id)
+        old_auth = session.model_dump(mode="json")
+        until_due = max(0, (auth._AUTH_TOUCH_INTERVAL - (datetime.now(timezone.utc)
+            - _as_utc(session.last_seen_at))).total_seconds())
+    if auth_event == "touch":
+        import asyncio
+        assert until_due <= 30
+        assert (_as_utc(run.deadline_at) - datetime.now(timezone.utc)).total_seconds() > until_due + 5
+        await asyncio.sleep(until_due + 0.02)
+        current_operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
+        assert current_operator.session_id == kwargs["owner"].session_id
+    elif auth_event == "refresh":
+        current_operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=False)
+        token, refreshed = await auth.create_session(replace_session_id=current_operator.session_id,
+            expected_token_hash=current_operator._token_hash)
+        assert refreshed.session_id == current_operator.session_id
+        assert (await auth.authenticate_token(token, touch=False)).session_id == current_operator.session_id
+    if auth_event != "unchanged":
+        async with jobs._session() as db:
+            current_auth = (await db.get(OperatorSession, kwargs["owner"].session_id)).model_dump(mode="json")
+            assert current_auth != old_auth
+            for key in ("id", "principal_id", "created_at", "absolute_expires_at"):
+                assert current_auth[key] == old_auth[key]
+            assert (await jobs._fetch(db, kwargs["job_id"])).model_dump(mode="json") == captured["before"]
+    # The immutable commitment, rather than a mixed audit hash, rejects the
+    # exact historical timestamp holes after genuine auth activity.
+    from sqlalchemy import update
+    for changed in ("updated_at", "wrapper_created_at"):
+        async with jobs._session() as db:
+            current = await jobs._fetch(db, kwargs["job_id"])
+            if changed == "updated_at":
+                await db.execute(update(type(current)).where(type(current).id == current.id)
+                    .values(updated_at=current.updated_at + timedelta(microseconds=1)))
+            else:
+                history = json.loads(current.checkpoint_receipts_json)
+                history[0]["created_at"] = (datetime.fromisoformat(history[0]["created_at"]) + timedelta(microseconds=1)).isoformat()
+                await db.execute(update(type(current)).where(type(current).id == current.id)
+                    .values(checkpoint_receipts_json=_canonical(history), updated_at=current.updated_at))
+            await db.commit()
+        try:
+            with pytest.raises(RepositorySourceRecoveryError, match="original_producer_orphan_epoch_changed"):
+                await real_publish(captured["service"], jobs, **kwargs)
+            assert artifact_path.read_bytes() == before_artifact
+        finally:
+            async with jobs._session() as db:
+                current = await jobs._fetch(db, kwargs["job_id"])
+                await db.execute(update(type(current)).where(type(current).id == current.id).values(
+                    updated_at=datetime.fromisoformat(captured["before"]["updated_at"]),
+                    checkpoint_receipts_json=captured["before"]["checkpoint_receipts_json"]))
+                await db.commit()
     # Retry uses the SAME actual originally registered producer result and
     # private owner. It creates no replacement job, channel or physical run.
     witness = await real_publish(captured["service"], jobs, **kwargs)
@@ -567,6 +643,14 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
     path = service._workspace() / ("artifacts/repo-repair/model/iteration-" + registration["iteration_id"] + "-cleanup.json")
     original_bytes = path.read_bytes()
     original_envelope = json.loads(original_bytes)
+    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v2"
+    from src.workflows.repo_repair_stop import _static_digest_v4
+    commitment = original_envelope["recovery_commitment"]
+    actual_unknown = captured["before_root"]
+    assert commitment["root_static_digest"] == _static_digest_v4(actual_unknown, "WorkflowRunState", "root")
+    predecessor = next(item["payload"]["predecessor_projection"] for item in json.loads(actual_unknown["checkpoint_receipts_json"])
+        if item["checkpoint_id"] == "repository:stop-uncertainty-successor:v1")
+    assert commitment["root_static_digest"] != _static_digest_v4({**actual_unknown, **predecessor}, "WorkflowRunState", "root")
     await asyncio.sleep(until_due + 0.02)
     operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
     assert operator.session_id == kwargs["owner"].session_id
@@ -602,3 +686,41 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
         else:
             recovery._assert_source_completion_append_metadata(root, registration["iteration_id"],
                 original_envelope["source_append_metadata"])
+
+
+@pytest.mark.parametrize("name", ["WorkflowRunState", "WorkBoardTask", "WorkBoardAttempt", "WorkBoardInputArtifact", "Goal", "OperatorSession"])
+def test_v4_static_projection_rejects_unknown_declared_fields(name):
+    from src.db import models
+    from src.workflows.repo_repair_stop import _V4_STATIC_FIELDS, _static_projection_v4
+    from src.workflows.job_runtime import DurableJobLeaseError
+    model = getattr(models, name)
+    assert set(model.model_fields) == _V4_STATIC_FIELDS[name]
+    values = {key: None for key in model.model_fields}
+    values["unreviewed_column"] = "new"
+    with pytest.raises(DurableJobLeaseError, match="field inventory changed"):
+        _static_projection_v4(values, name, "root" if name == "WorkflowRunState" else "row")
+
+
+@pytest.mark.parametrize("kind", ["bool_revision", "bool_count", "extra", "owner_extra", "missing_slot", "duplicate_slot", "foreign_table"])
+def test_v4_commitment_closed_reader_denies_invalid_evidence(kind):
+    from src.workflows.repo_repair_source_recovery import _validate_recovery_commitment, _COMMITMENT_SLOTS
+    # This is parser input only; it has no Source/physical registration and
+    # cannot issue a witness. Native/current-owner positives stay genuine.
+    value = {"schema": "repository.recovery_commitment.v1", "domain": "repository.source_recovery_immutable.v1",
+        "root_key": "workflow_run_states:1", "before_revision": 1, "root_static_digest": "a" * 64,
+        "root_updated_at": "2026-10-10T00:00:00+00:00", "journal_prefix_count": 1,
+        "journal_prefix_digest": "b" * 64, "owner_identity": {"id": "owner", "principal_id": "principal",
+            "created_at": "2026-10-10T00:00:00+00:00", "absolute_expires_at": "2026-10-11T00:00:00+00:00"},
+        "non_root_static": [{"slot": slot, "table": table, "key": str(index), "digest": "c" * 64}
+            for index, (slot, table, _) in enumerate(_COMMITMENT_SLOTS)],
+        "producer_registration_digest": "d" * 64, "producer_completion_digest": "e" * 64,
+        "stop_digest": None, "unknown_projection_digest": None}
+    if kind == "bool_revision": value["before_revision"] = True
+    elif kind == "bool_count": value["journal_prefix_count"] = True
+    elif kind == "extra": value["extra"] = "unreviewed"
+    elif kind == "owner_extra": value["owner_identity"]["token_hash"] = "credential"
+    elif kind == "missing_slot": value["non_root_static"].pop()
+    elif kind == "duplicate_slot": value["non_root_static"][1] = dict(value["non_root_static"][0])
+    elif kind == "foreign_table": value["non_root_static"][4]["table"] = "workflow_run_states"
+    with pytest.raises(RepositorySourceRecoveryError, match="original_recovery_commitment_changed"):
+        _validate_recovery_commitment(value)

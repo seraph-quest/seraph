@@ -42,6 +42,11 @@ This ADR supersedes only the following ADR-030 clauses:
    registration on an undispatched v3 Root”.
 3. **Existing cleanup artifact and committed-Unknown verification**, only for the
    additional immutable retry commitment and its versioned artifact grammar.
+4. **Pure Unknown projection and independent cleanup authority**, only to permit
+   NEW v4 original producers to reach the SAME existing registered private Source
+   cleanup-publication witness through authentic v2 registration/completion and
+   the required durability proof. Historical v3 rules and every current authority,
+   physical, fence, full-row and liability check remain unchanged.
 
 All other ADR-030 rules remain authoritative: one physical repair lane and shared
 serial inference lane; original Task/Attempt/Root/Goal/owner and reservations;

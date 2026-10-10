@@ -182,8 +182,11 @@ successor_digest. Original Stop bytes/digest, authority/fence/Root key and all
 non-Root hashes remain exact. Changed nonstatus fields cannot be excused by
 recomputed successor hashes. Never restore P to the database or ORM object.
 
-Only a NEW registered private Source completion witness from authentic
-originally registered v3 producer evidence grants cleanup publication. It
+For historical v3, only a NEW registered private Source completion witness from
+authentic originally registered v3 producer evidence grants cleanup publication.
+For NEW v4 Roots, ADR-032 permits the SAME existing private witness only through
+authentic v2 registration/completion and its required durability proof, with all
+current authority and physical checks preserved. The witness
 binds producer registration/completion/output, Stop/projection digests and full
 current Root/non-Root/authority/reservation rows. Copied JSON, deserialized
 witnesses and v2 Pending metadata cannot construct it. One Source owner serves

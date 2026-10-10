@@ -62,7 +62,7 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
     stop = source._repository_record(run, STOP_ID)
     if witness is None:
         if stop is not None and source.read_repository_inventory(run)["schema"] in {
-                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}:
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
             raise DurableJobLeaseError("original pending uncertainty owner witness required")
         return
     if type(witness) is not _RepositoryUncertainty or witness not in _UNCERTAINTY:
@@ -74,7 +74,7 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
             or run.status != "running" or to_status != "unknown_external_effect" or reason not in reasons
             or stop is None or source._source_digest(stop) != stop_digest
             or source.read_repository_inventory(run)["schema"] not in {
-                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
             or not isinstance(result, dict) or set(result) != {"no_learning", "operator_action", "iteration_id"}
             or result["no_learning"] is not True or result["operator_action"] != reasons[reason]):
         raise DurableJobLeaseError("original uncertainty projection changed")
@@ -95,7 +95,7 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
         raise DurableJobLeaseError("original uncertainty held reservation changed")
     successor = run.model_copy(update={**values, "revision": run.revision + 1})
     predecessor_json, successor_json = run.model_dump(mode="json"), successor.model_dump(mode="json")
-    payload = {"schema": "repository.stop_uncertainty_successor.v1", "job_id": run.run_identity,
+    payload = {"schema": _stop_schema(run, "stop_uncertainty_successor"), "job_id": run.run_identity,
         "stop_digest": stop_digest, "root_key": type(run).__tablename__ + ":" + str(_key(run)),
         "predecessor_digest": _static(run, context), "successor_digest": _static(successor, context),
         "authority_digest": run.authority_digest, "fencing_token": run.fencing_token,
@@ -128,10 +128,60 @@ def _committed_stop_row_json(row):
     return _canonical(values)
 
 
+# ADR032 freezes the baseline fields; future model columns require review.
+_V4_STATIC_FIELDS = {
+    'WorkBoardTask': frozenset(('creation_sequence', 'task_id', 'owner_principal_id', 'owner_session_id', 'origin_session_id', 'origin_thread_id', 'goal_id', 'goal_revision', 'title', 'body', 'capability_id', 'input_artifact_id', 'pipeline_operation_id', 'pipeline_slot', 'typed_input_ref', 'typed_input_digest', 'executor_id', 'assignee_id', 'priority', 'priority_explicit', 'admitted_method_json', 'idempotency_scope', 'idempotency_key', 'idempotency_payload_digest', 'idempotency_binding', 'scheduled_at', 'status', 'block_kind', 'block_reason', 'block_source_status', 'requires_review', 'reviewer_id', 'review_expires_at', 'review_request_attempt_id', 'review_request_fence', 'review_request_revision', 'review_request_digest', 'review_request_evidence_json', 'review_requested_at', 'task_revision', 'result_refs_json', 'artifact_refs_json', 'created_at', 'updated_at', 'completed_at', 'archived_at')),
+    'WorkBoardInputArtifact': frozenset(('artifact_id', 'owner_principal_id', 'owner_session_id', 'goal_id', 'goal_revision', 'capability_id', 'capability_version', 'idempotency_key', 'payload_sha256', 'typed_input_ref', 'size_bytes', 'state', 'bound_task_id', 'bound_task_revision', 'created_at', 'expires_at', 'consumed_at', 'revision', 'metadata_digest', 'document_metadata_json', 'document_reserved_bytes')),
+    'WorkBoardAttempt': frozenset(('attempt_id', 'task_id', 'workflow_run_id', 'task_revision_at_claim', 'admitted_method_json', 'lease_owner', 'lease_expires_at', 'heartbeat_at', 'fencing_token', 'executor_id', 'started_at', 'ended_at', 'cancel_requested_at', 'outcome', 'parent_handoff_context_json', 'parent_handoff_digest', 'receipt_refs_json', 'created_at', 'updated_at')),
+    'WorkflowRunState': frozenset(('id', 'run_identity', 'root_run_identity', 'parent_run_identity', 'workflow_name', 'tool_name', 'session_id', 'conversation_id', 'operator_session_id', 'status', 'branch_kind', 'branch_depth', 'run_fingerprint', 'arguments_json', 'approval_context_json', 'checkpoint_context_json', 'artifact_paths_json', 'continued_error_steps_json', 'last_completed_step_id', 'error', 'heartbeat_at', 'started_at', 'updated_at', 'finished_at', 'metadata_json', 'record_schema_version', 'parent_job_id', 'parent_fencing_token', 'job_kind', 'owner_kind', 'owner_principal_id', 'service_id', 'goal_id', 'goal_revision', 'plan_revision', 'candidate_id', 'source_task_id', 'selected_context_reserved_bytes', 'capability_version', 'input_digest', 'authority_digest', 'budget_digest', 'idempotency_scope', 'idempotency_key', 'idempotency_binding', 'priority', 'dependencies_json', 'resource_claims_json', 'declared_authority_json', 'deadline_at', 'lease_owner', 'lease_expires_at', 'fencing_token', 'revision', 'attempt_count', 'max_attempts', 'failure_reason', 'checkpoint_receipts_json', 'artifact_receipts_json', 'effect_receipts_json', 'github_read_revision_json', 'github_read_observation_history_json', 'github_capacity_closure_json', 'result_digest', 'result_summary')),
+    'Goal': frozenset(('id', 'parent_id', 'path', 'level', 'title', 'description', 'status', 'domain', 'start_date', 'due_date', 'sort_order', 'revision', 'success_criterion_json', 'proactive_enabled', 'owner_principal_id', 'owner_session_id', 'admission_budget_json', 'guardian_policy_json', 'guardian_policy_revision', 'goal_programmes_json', 'created_at', 'updated_at')),
+    'OperatorSession': frozenset(('id', 'token_hash', 'principal_id', 'legacy_owner_principal_id', 'operator_identity_id', 'created_at', 'last_seen_at', 'idle_expires_at', 'absolute_expires_at', 'revoked_at', 'replaced_by_id', 'is_bearer_tombstone')),
+}
+
+
+def _static_projection_v4(values, model_name, role):
+    if type(values) is not dict or model_name not in _V4_STATIC_FIELDS or set(values) != _V4_STATIC_FIELDS[model_name]:
+        raise DurableJobLeaseError("original v4 static field inventory changed")
+    if model_name == "OperatorSession":
+        projection = {key: values[key] for key in ("id", "principal_id", "created_at", "absolute_expires_at")}
+        if any(type(value) is not str or not value for value in projection.values()):
+            raise DurableJobLeaseError("original v4 owner identity changed")
+        return projection
+    mutable = {"updated_at"}
+    if model_name == "WorkflowRunState":
+        if role == "root":
+            mutable |= {"revision", "checkpoint_receipts_json", "heartbeat_at"}
+        elif role == "original_parent":
+            mutable |= {"revision", "checkpoint_receipts_json"}
+        elif role == "native_invocation":
+            mutable |= {"revision", "status", "failure_reason", "heartbeat_at"}
+        else:
+            raise DurableJobLeaseError("original v4 static Root role changed")
+    return {key: value for key, value in values.items() if key not in mutable}
+
+
+def _static_digest_v4(values, model_name, role):
+    import hashlib
+    return hashlib.sha256(b"repository.stop_static.v2\0" +
+        _canonical(_static_projection_v4(values, model_name, role)).encode()).hexdigest()
+
+
+def _stop_schema(run, kind):
+    version = "v2" if _source().read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4" else "v1"
+    return "repository." + kind + "." + version
+
+
 def _static(row, context):
     """Only original, explicitly known callback/cleanup successor columns."""
     source = _source()
     values = row.model_dump(mode="json")
+    if source.read_repository_inventory(context["run"])["schema"] == "repository.checkpoint_inventory.v4":
+        role = "row"
+        if isinstance(row, WorkflowRunState):
+            role = ("root" if row.run_identity == context["run"].run_identity else
+                "original_parent" if row.run_identity == context["binding"].parent_job_id else
+                "native_invocation" if row.run_identity == context["binding"].invocation_id else "foreign")
+        return _static_digest_v4(values, type(row).__name__, role)
     mutable = {"updated_at"}
     if isinstance(row, WorkflowRunState):
         if row.run_identity == context["run"].run_identity:
@@ -321,7 +371,7 @@ async def _stage_repository_stop_context_artifacts(service, context, *, stop, ex
     if stop is not None:
         snapshot = json.loads(service._read_private_artifact(stop["snapshot_artifact_ref"],
             expected_digest=stop["snapshot_artifact_digest"]))
-        if snapshot != {"schema": "repository.stop_snapshot.v1", "static_rows": stop["static_rows"],
+        if snapshot != {"schema": _stop_schema(run, "stop_snapshot"), "static_rows": stop["static_rows"],
                 "repository_job_id": run.run_identity, "source_checkpoint_digest": source._source_digest(original)}:
             raise DurableJobLeaseError("literal original stop snapshot changed")
     if expired_cleanup and (artifact.state != "bound" or artifact.bound_task_id != task.task_id
@@ -489,7 +539,7 @@ def assert_repository_stop_witness(witness):
     if (type(witness) is not _RepositoryStopWitness or _ISSUED.get(witness) is not witness.service
             or type(witness.context) is not _RepositoryStopContext or _STAGED.get(witness.context) is not witness.service):
         raise DurableJobLeaseError("actual source-owned repository stop witness required")
-    if _source().read_repository_inventory(witness.context["run"])["schema"] == "repository.checkpoint_inventory.v3":
+    if _source().read_repository_inventory(witness.context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
         from src.workflows.repo_repair_source_recovery import (
             assert_repository_recovery_fence, assert_repository_original_stop_completion)
         assert_repository_recovery_fence(witness.fence, service=witness.service, jobs=witness.jobs,
@@ -546,7 +596,7 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
             manifest = json.loads(service._read_private_artifact(readback["artifact_ref"],
                 expected_digest=readback["artifact_digest"]))
             transport = manifest.get("supervisor_transport", {})
-            if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+            if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
                 from src.workflows.repo_repair_source_recovery import (
                     assert_repository_original_stop_completion, repository_original_stop_completion_result,
                     repository_original_stop_completion_cleanup_envelope)
@@ -557,8 +607,10 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
                     original_completion, iteration_id=identity)
                 if _canonical(cleanup_body) != _canonical(authenticated_cleanup):
                     raise DurableJobLeaseError("literal original cleanup envelope changed")
+                from src.workflows.repo_repair_source_recovery import _cleanup_artifact_keys, _validate_cleanup_artifact_version
                 if "physical_projection" in authenticated_cleanup:
-                    if (set(authenticated_cleanup) != {"physical_projection", "source_completion_cas", "source_append_metadata"}
+                    _validate_cleanup_artifact_version(run, authenticated_cleanup)
+                    if (set(authenticated_cleanup) != _cleanup_artifact_keys(run)
                             or authenticated_cleanup["source_completion_cas"] != cleanup.get("source_completion_cas")
                             or authenticated_cleanup["source_completion_cas"] != readback.get("source_completion_cas")):
                         raise DurableJobLeaseError("literal original cleanup envelope changed")
@@ -584,9 +636,9 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
                         or marker.get("cleanup_proven") is not True
                         or marker.get("terminal_receipt", {}).get("readback_sha256") != readback["artifact_digest"]):
                     raise DurableJobLeaseError("original full physical stop marker binding changed")
-                if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v3":
+                if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
                     if marker.get("process_cleanup") != {
-                            "transport_kind": "original_producer_durable_v1",
+                            "transport_kind": ("original_producer_durable_v2" if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4" else "original_producer_durable_v1"),
                             "completion_digest": source._source_digest(actual["original_producer_completion"])}:
                         raise DurableJobLeaseError("original producer marker differs from active signed completion")
                 elif work.language_profile == "test_node":
@@ -729,7 +781,7 @@ async def _persist_repository_stop_intent_locked(service, jobs, *, context, owne
         raise DurableJobLeaseError("closed original repository stop reason required")
     existing_stop = source._repository_record(context["run"], STOP_ID)
     if existing_stop is None:
-        snapshot = {"schema": "repository.stop_snapshot.v1", "static_rows": context["static_rows"],
+        snapshot = {"schema": _stop_schema(run, "stop_snapshot"), "static_rows": context["static_rows"],
             "repository_job_id": job_id, "source_checkpoint_digest": source._source_digest(context["original"])}
         encoded = _canonical(snapshot).encode()
         if len(encoded) > 1024 * 1024:
@@ -747,7 +799,7 @@ async def _persist_repository_stop_intent_locked(service, jobs, *, context, owne
         run = await jobs._fetch(db, job_id)
         stop = source._repository_record(run, STOP_ID)
         if stop is None:
-            stop = {"schema": "repository.stop_intent.v1", "stop_reason": reason,
+            stop = {"schema": _stop_schema(run, "stop_intent"), "stop_reason": reason,
                 "native_binding_digest": source._source_digest(context["binding"].model_dump(mode="json")),
                 "static_rows": context["static_rows"], "snapshot_artifact_ref": snapshot_ref,
                 "snapshot_artifact_digest": snapshot_digest, "no_learning": True}

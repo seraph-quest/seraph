@@ -38,6 +38,64 @@ def _one_scalar(connection, query, parameters=()):
         raise HeaderBoundsError("header_scalar_unavailable")
     return rows[0][0]
 
+def _metadata_upper(rows, widths):
+    """JSON byte bound for closed rows; text widths include quotes/escaping."""
+    if type(rows) is not int or rows < 0 or any(type(size) is not int or size < 0 for size in widths):
+        raise HeaderBoundsError("header_metadata_bound")
+    row = 2 + sum(widths) + max(0, len(widths) - 1)
+    return 2 + rows * row + max(0, rows - 1)
+
+
+def _metadata_precharge(connection, budget, upper, appearance):
+    if budget is None:
+        return
+    from src.memory.header_bounds import _SESSION_NUMERIC_READS, _MEMORY_LEDGER_PHASE
+    if (type(budget) is not HeaderReadBudget or type(upper) is not int or upper < 0
+            or _SESSION_NUMERIC_READS.get() is not None or _MEMORY_LEDGER_PHASE.get() is not None):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    if not connection.in_transaction() or not connection.connection.driver_connection.in_transaction:
+        raise HeaderBoundsError("header_metadata_transaction_required")
+    current = _CURRENT.get()
+    if current is not None and (current.connection is not connection or current.budget is not budget):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    budget.debit(upper, appearance=("metadata-prequery", *appearance))
+
+
+def _metadata_size(value):
+    # No JSON/output object is built while validating the delivered bound.
+    if value is None: return 4
+    if type(value) is bool: return 4 if value else 5
+    if type(value) is int:
+        if not -(2**63) <= value < 2**63: raise HeaderBoundsError("header_metadata_bound")
+        return 20
+    if type(value) is float: return 64
+    if type(value) is str:
+        return 2 + sum(2 if char in '\"\\' else (6 if ord(char) < 32 or 127 <= ord(char) <= 65535
+            else (12 if ord(char) > 65535 else 1)) for char in value)
+    return 2 + sum(_metadata_size(item) for item in value) + max(0, len(value) - 1)
+
+
+def _metadata_rows(connection, query, parameters, *, _header_budget, upper, appearance, bounded_query=None):
+    if _header_budget is None:
+        return list(_sql(connection, query, parameters))
+    # Delivery, original list-of-row copy and JSON metadata copy are distinct.
+    for stage in ("delivery", "row-copy", "encoded-copy"):
+        _metadata_precharge(connection, _header_budget, upper, (*appearance, stage))
+    rows = list(_sql(connection, bounded_query or query, parameters))
+    if _metadata_size(rows) > upper:
+        raise HeaderBoundsError("header_metadata_bound")
+    return rows
+
+
+def _metadata_scalar(connection, query, parameters=(), *, _header_budget, width, appearance, bounded_query=None):
+    if _header_budget is None:
+        return _one_scalar(connection, query, parameters)
+    rows = _metadata_rows(connection, query, parameters, _header_budget=_header_budget,
+        upper=_metadata_upper(2, (width,)), appearance=appearance, bounded_query=bounded_query)
+    if len(rows) != 1 or len(rows[0]) != 1:
+        raise HeaderBoundsError("header_scalar_unavailable")
+    return rows[0][0]
+
 
 _SNAPSHOT_SCOPE_SEAL = object()
 _SNAPSHOT_SCOPES = WeakValueDictionary()
@@ -96,29 +154,34 @@ def _memory_current_snapshot_scope(budget):
         _CURRENT_SNAPSHOT_SCOPE.reset(token)
 
 
-def _snapshot_schema_cookies(connection, budget):
-    cookies = (_one_scalar(connection, "PRAGMA main.schema_version"),
-               _one_scalar(connection, "PRAGMA temp.schema_version"))
+def _snapshot_schema_cookies(connection, budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    cookies = (_metadata_scalar(connection, "PRAGMA main.schema_version", _header_budget=_header_budget, width=20, appearance=("schema-main",)),
+               _metadata_scalar(connection, "PRAGMA temp.schema_version", _header_budget=_header_budget, width=20, appearance=("schema-temp",)))
     if any(type(value) is not int or not 0 <= value < 2**31 for value in cookies):
         raise HeaderBoundsError("header_schema_cookie_unavailable")
-    budget.debit(_metadata_cost(cookies), appearance=("schema-cookies",))
+    if _header_budget is None:
+        budget.debit(_metadata_cost(cookies), appearance=("schema-cookies",))
     return cookies
 
 
-def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_owner=None):
+def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_owner=None, _header_budget=None):
     """Reuse only an original issued certificate for this exact live snapshot."""
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
     scope = _checked_current_snapshot_scope(budget)
     if scope is None:
-        return preflight_composition_superset(connection, budget, raw_owner=raw_owner)
+        return preflight_composition_superset(connection, budget, raw_owner=raw_owner, _header_budget=_header_budget)
     current = scope.certificates.get(connection)
     if current is not None:
         certificate, cookies = current
         if (type(certificate) is not CompositionHeaderCertificate
                 or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate
                 or certificate.budget is not budget or certificate.connection is not connection
-                or certificate.raw_owner is not raw_owner):
+                or certificate.raw_owner is not raw_owner or certificate.metadata_budget is not _header_budget):
             raise HeaderBoundsError("header_certificate_unavailable")
         try:
             _validate(connection, certificate)
@@ -126,11 +189,11 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
             if str(error) != "header_certificate_stale":
                 raise
         else:
-            if _snapshot_schema_cookies(connection, budget) == cookies:
+            if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) == cookies:
                 return certificate
-    cookies = _snapshot_schema_cookies(connection, budget)
-    certificate = preflight_composition_superset(connection, budget, raw_owner=raw_owner)
-    if _snapshot_schema_cookies(connection, budget) != cookies:
+    cookies = _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget)
+    certificate = preflight_composition_superset(connection, budget, raw_owner=raw_owner, _header_budget=_header_budget)
+    if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) != cookies:
         raise HeaderBoundsError("header_schema_cookie_changed")
     _validate(connection, certificate)
     _SNAPSHOT_CERTIFICATES[id(certificate)] = certificate
@@ -138,16 +201,18 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
     return certificate
 
 
-async def _certify_current_memory_snapshot(db, budget):
+async def _certify_current_memory_snapshot(db, budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     return await (await db.connection()).run_sync(
-        lambda connection: _certify_current_memory_snapshot_on_connection(connection, budget))
+        lambda connection: _certify_current_memory_snapshot_on_connection(connection, budget, _header_budget=_header_budget))
 
 
 def _metadata_cost(rows):
     return len(json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode())
 
 
-def _state(connection, *, raw_owner=None):
+def _state(connection, *, raw_owner=None, _header_budget=None):
     if raw_owner is not None:
         from src.workspace.accounting_continuity import _RawRollbackConnection
         if type(raw_owner) is not _RawRollbackConnection:
@@ -158,10 +223,10 @@ def _state(connection, *, raw_owner=None):
     driver = connection.connection.driver_connection
     if not driver.in_transaction:
         raise HeaderBoundsError("header_sqlite_transaction_required")
-    return connection.get_transaction(), driver, _one_scalar(connection, "SELECT total_changes()")
+    return connection.get_transaction(), driver, _metadata_scalar(connection, "SELECT total_changes()", _header_budget=_header_budget, width=20, appearance=("state-changes",))
 
 
-def validate_descriptor_schema(connection, descriptor):
+def validate_descriptor_schema(connection, descriptor, *, _header_budget=None):
     model = _COMPOSITION_MODELS.get(descriptor.table)
     if model is None:
         # Original byte-only legacy descriptors use the same actual mapped table.
@@ -170,9 +235,9 @@ def validate_descriptor_schema(connection, descriptor):
                       and getattr(c, "__tablename__", None) == descriptor.table), None)
     if model is None:
         raise HeaderBoundsError("header_descriptor_unavailable")
-    schema = list(_sql(connection, 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,'
+    schema = _metadata_rows(connection, 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,'
         'CASE WHEN octet_length(type)<=128 THEN type END,"notnull",pk,hidden '
-        'FROM pragma_table_xinfo(?) LIMIT ?', (descriptor.table, len(descriptor.columns)+1)))
+        'FROM pragma_table_xinfo(?) LIMIT ?', (descriptor.table, len(descriptor.columns)+1), _header_budget=_header_budget, upper=_metadata_upper((len(descriptor.columns)+1), (770,770,20,20,20)), appearance=('descriptor-xinfo',))
     expected = model.__table__
     if (len(schema) != len(descriptor.columns) or {r[0] for r in schema} != set(descriptor.columns)
             or any(r[4] != 0 or r[0] in {"rowid", "_rowid_", "oid"} for r in schema)):
@@ -185,46 +250,57 @@ def validate_descriptor_schema(connection, descriptor):
         if (sql_type != column.type.compile(dialect=dialect()).upper()
                 or notnull != int(not column.nullable)):
             raise HeaderBoundsError("header_schema_changed")
-    table = list(_sql(connection, 'SELECT wr FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2', (descriptor.table,)))
+    table = _metadata_rows(connection, 'SELECT wr FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2', (descriptor.table,), _header_budget=_header_budget, upper=_metadata_upper(2, (20,)), appearance=('descriptor-table',))
     if len(table) != 1 or table[0][0] != 0:
         raise HeaderBoundsError("header_schema_changed")
     if pk != (descriptor.key,):
-        _validate_locator(connection, descriptor.table, descriptor.key, model)
+        _validate_locator(connection, descriptor.table, descriptor.key, model, budget=_header_budget, _header_budget=_header_budget)
     return _metadata_cost([list(r) for r in schema])
 
 
-def _validate_locator(connection, table, column, model=None, *, budget=None):
+def _validate_locator(connection, table, column, model=None, *, budget=None, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     model = model or _COMPOSITION_MODELS[table]
     source = [i for i in model.__table__.indexes if i.unique and tuple(c.name for c in i.columns)==(column,)]
     if len(source) != 1:
         raise HeaderBoundsError("header_locator_unsupported")
     name = source[0].name
-    rows = list(_sql(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?',
-                     (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1)))
+    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770,20,14,20)), appearance=('locator-indexes',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?')
     if budget is not None:
-        budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
+        if _header_budget is None:
+            budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
     match = [r for r in rows if r[0] == name]
     if len(match) != 1 or tuple(match[0][1:]) != (1,"c",0):
         raise HeaderBoundsError("header_locator_changed")
-    parts = list(_sql(connection,'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3',(name,)))
+    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770,770,20,20,20)), appearance=('locator-parts',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3')
     if budget is not None:
-        budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
+        if _header_budget is None:
+            budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
     keys = [r for r in parts if r[3]==1]
     if len(parts)!=2 or len(keys)!=1 or tuple(keys[0][:4])!=(column,"BINARY",0,1):
         raise HeaderBoundsError("header_locator_changed")
     return name
 
 
-def _headers(connection, descriptor, identities):
+def _headers(connection, descriptor, identities, *, _header_budget=None):
     fields=['_rowid_']
     for name in descriptor.columns:
         fields += [f'typeof("{name}")', f'octet_length("{name}")',
                    f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"]
     result={}
     for key in identities:
-        rows=list(_sql(connection,'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2',(key,)))
+        if _header_budget is not None and (type(key) not in {str, int}
+                or (type(key) is str and sum(1 if ord(char)<128 else 2 if ord(char)<2048
+                    else 3 if ord(char)<=65535 else 4 for char in key)>512)):
+            raise HeaderBoundsError("header_request_bound")
+        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
+        if _header_budget is not None:
+            copy_upper = 3074 + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
+            for stage in ("skeleton-copy", "header-fact-copy"):
+                _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", stage))
         skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
         cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
         for i,(kind,nullable) in enumerate(zip(descriptor.kinds,descriptor.nullable)):
@@ -244,10 +320,14 @@ def _headers(connection, descriptor, identities):
     return result
 
 
-def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None):
-    budget.debit(validate_descriptor_schema(connection,descriptor), appearance=("descriptor-schema", descriptor.table))
+def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    schema_cost = validate_descriptor_schema(connection, descriptor, _header_budget=_header_budget)
+    if _header_budget is None:
+        budget.debit(schema_cost, appearance=("descriptor-schema", descriptor.table))
     if tombstone:
-        name=_validate_locator(connection,descriptor.table,"memory_id")
+        name=_validate_locator(connection,descriptor.table,"memory_id",budget=_header_budget,_header_budget=_header_budget)
         suffix=f' INDEXED BY "{name}" WHERE memory_id=?'
         parameters=(key,2)
     elif key is not None:
@@ -256,9 +336,9 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
     else:
         suffix=''; parameters=((MAX_ROWS if remaining is None else remaining)+1,)
     column=descriptor.key
-    rows=list(_sql(connection,f'SELECT _rowid_,typeof("{column}"),octet_length("{column}"),'
+    rows=_metadata_rows(connection, f'SELECT _rowid_,typeof("{column}"),octet_length("{column}"),'
         f"CASE WHEN typeof(\"{column}\")='text' THEN CASE WHEN octet_length(\"{column}\") BETWEEN 1 AND 512 THEN \"{column}\" END END,"
-        f"CASE WHEN typeof(\"{column}\")='integer' THEN \"{column}\" END FROM \"{descriptor.table}\""+suffix+' ORDER BY _rowid_ LIMIT ?',parameters))
+        f"CASE WHEN typeof(\"{column}\")='integer' THEN \"{column}\" END FROM \"{descriptor.table}\""+suffix+' ORDER BY _rowid_ LIMIT ?', parameters, _header_budget=_header_budget, upper=_metadata_upper((2 if key is not None or tombstone else (MAX_ROWS if remaining is None else remaining)+1), (20,44,20,3074,20)), appearance=('row-locator',))
     if len(rows)>(MAX_ROWS if remaining is None else remaining) and key is None:
         raise HeaderBoundsError("header_reference_bound")
     ids=[]
@@ -275,39 +355,48 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
         budget.resolve_future(descriptor,identity,row[0],database_identity=database_identity)
     budget.enroll((descriptor.table,r[0]) if database_identity is None
         else (database_identity,descriptor.table,r[0]) for r in rows)
-    budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("locator-metadata", descriptor.table, key, tombstone, tuple(ids)))
+    if _header_budget is None:
+        budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("locator-metadata", descriptor.table, key, tombstone, tuple(ids)))
     return tuple(ids)
 
 
-async def discover_rows(db, descriptor, budget):
+async def discover_rows(db, descriptor, budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(budget) is not HeaderReadBudget or not any(descriptor is d for d in COMPOSITION_DESCRIPTORS.values()):
         raise HeaderBoundsError("header_descriptor_unavailable")
-    return await (await db.connection()).run_sync(lambda c:_discover(c,descriptor,budget))
+    return await (await db.connection()).run_sync(lambda c:_discover(c,descriptor,budget,_header_budget=_header_budget))
 
 
-async def locate_exact_rows(db, descriptor, identity, budget):
+async def locate_exact_rows(db, descriptor, identity, budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(identity) is not str or not 0<len(identity.encode())<=512:
         raise HeaderBoundsError("header_request_bound")
     if type(budget) is not HeaderReadBudget or not any(descriptor is d for d in COMPOSITION_DESCRIPTORS.values()):
         raise HeaderBoundsError("header_descriptor_unavailable")
-    return await (await db.connection()).run_sync(lambda c:_discover(c,descriptor,budget,key=identity))
+    return await (await db.connection()).run_sync(lambda c:_discover(c,descriptor,budget,key=identity,_header_budget=_header_budget))
 
 
-async def locate_operator_token(db, token_hash, budget):
+async def locate_operator_token(db, token_hash, budget, *, _header_budget=None):
     """Resolve the original unique bearer locator before any Root body."""
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     from src.memory.header_bounds import OPERATOR_SESSION
     from src.db.models import OperatorSession
     if (type(budget) is not HeaderReadBudget or type(token_hash) is not str
             or len(token_hash) != 64 or any(c not in "0123456789abcdef" for c in token_hash)):
         raise HeaderBoundsError("header_request_bound")
     def locate(connection):
-        budget.debit(validate_descriptor_schema(connection, OPERATOR_SESSION),
-            appearance=("operator-token-schema",))
-        name = _validate_locator(connection, "operator_sessions", "token_hash", OperatorSession, budget=budget)
-        rows = list(_sql(connection, 'SELECT _rowid_,typeof(id),octet_length(id),'
+        schema_cost = validate_descriptor_schema(connection, OPERATOR_SESSION, _header_budget=_header_budget)
+        if _header_budget is None:
+            budget.debit(schema_cost, appearance=("operator-token-schema",))
+        name = _validate_locator(connection, "operator_sessions", "token_hash", OperatorSession, budget=budget, _header_budget=_header_budget)
+        rows = _metadata_rows(connection, 'SELECT _rowid_,typeof(id),octet_length(id),'
             'CASE WHEN typeof(id)=\'text\' AND octet_length(id) BETWEEN 1 AND 512 THEN id END '
-            f'FROM operator_sessions INDEXED BY "{name}" WHERE token_hash=? LIMIT 2', (token_hash,)))
-        budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-locator",))
+            f'FROM operator_sessions INDEXED BY "{name}" WHERE token_hash=? LIMIT 2', (token_hash,), _header_budget=_header_budget, upper=_metadata_upper(2, (20,44,20,3074)), appearance=('token-locator',))
+        if _header_budget is None:
+            budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-locator",))
         if len(rows) > 1 or any(type(r[0]) is not int or r[1] != "text" or not r[3] for r in rows):
             raise HeaderBoundsError("header_row_unavailable")
         budget.enroll(("operator_sessions", r[0]) for r in rows)
@@ -315,10 +404,12 @@ async def locate_operator_token(db, token_hash, budget):
     return await (await db.connection()).run_sync(locate)
 
 
-async def locate_tombstones(db, memory_id, budget):
+async def locate_tombstones(db, memory_id, budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(memory_id) is not str or not 0<len(memory_id.encode())<=512 or type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
-    return await (await db.connection()).run_sync(lambda c:_discover(c,COMPOSITION_DESCRIPTORS["memory_tombstones"],budget,key=memory_id,tombstone=True))
+    return await (await db.connection()).run_sync(lambda c:_discover(c,COMPOSITION_DESCRIPTORS["memory_tombstones"],budget,key=memory_id,tombstone=True,_header_budget=_header_budget))
 
 
 @dataclass(frozen=True,eq=False)
@@ -336,16 +427,19 @@ class CompositionHeaderCertificate:
     common_certificate: object=None
     original_selection: object=None
     absent: tuple=()
+    metadata_budget: object=None
 
 
 def _validate(connection,certificate):
     if type(certificate) is not CompositionHeaderCertificate or certificate.seal is not _SEAL or certificate.issued_id!=id(certificate) or certificate.connection is not connection:
         raise HeaderBoundsError("header_certificate_unavailable")
+    if certificate.metadata_budget is not None and certificate.metadata_budget is not certificate.budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if certificate.raw_owner is not None:
         certificate.raw_owner._validate_budget(certificate.budget)
-    if _state(connection,raw_owner=certificate.raw_owner)!=(certificate.transaction,certificate.driver,certificate.changes):
+    if _state(connection,raw_owner=certificate.raw_owner,_header_budget=certificate.metadata_budget)!=(certificate.transaction,certificate.driver,certificate.changes):
         raise HeaderBoundsError("header_certificate_stale")
-    if certificate.schema_cookies is not None and _snapshot_schema_cookies(connection,certificate.budget)!=certificate.schema_cookies:
+    if certificate.schema_cookies is not None and _snapshot_schema_cookies(connection,certificate.budget,_header_budget=certificate.metadata_budget)!=certificate.schema_cookies:
         raise HeaderBoundsError("header_certificate_stale")
     if certificate.common_certificate is not None:
         _validate(connection, certificate.common_certificate)
@@ -368,27 +462,28 @@ def preflight_programme_identity_component(common33, *, original_selection):
     owner._validate_programme_selection(original_selection)
     namespace = common33.raw_owner._namespace if common33.raw_owner is not None else None
     descriptor = _descriptor(OperatorIdentity, "id", ("id", "created_at", "revoked_at"))
-    budget.debit(validate_descriptor_schema(connection, descriptor),
-        appearance=("programme-identity-schema",))
+    schema_cost = validate_descriptor_schema(connection, descriptor, _header_budget=common33.metadata_budget)
+    if common33.metadata_budget is None:
+        budget.debit(schema_cost, appearance=("programme-identity-schema",))
     # Validate the exact source-owned single text PK BINARY ascending locator.
-    indexes = list(_sql(connection, 'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 2',
-        (descriptor.table,)))
-    budget.debit(_metadata_cost([list(row) for row in indexes]), appearance=("programme-identity-indexes",))
+    indexes = _metadata_rows(connection, 'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 2', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(2, (20,770,20,14,20)), appearance=('identity-indexes',), bounded_query='SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT 2')
+    if common33.metadata_budget is None:
+        budget.debit(_metadata_cost([list(row) for row in indexes]), appearance=("programme-identity-indexes",))
     if len(indexes) != 1 or tuple(indexes[0]) != (0, "sqlite_autoindex_operator_identities_1", 1, "pk", 0):
         raise HeaderBoundsError("programme_identity_locator_changed")
-    parts = list(_sql(connection, 'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 3',
-        (indexes[0][1],)))
-    budget.debit(_metadata_cost([list(row) for row in parts]), appearance=("programme-identity-index-parts",))
+    parts = _metadata_rows(connection, 'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 3', (indexes[0][1],), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (20,20,770,20,770,20)), appearance=('identity-parts',), bounded_query='SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,desc,CASE WHEN octet_length(coll)<=128 THEN coll END,key FROM pragma_index_xinfo(?) LIMIT 3')
+    if common33.metadata_budget is None:
+        budget.debit(_metadata_cost([list(row) for row in parts]), appearance=("programme-identity-index-parts",))
     if [tuple(row) for row in parts] != [(0, 0, "id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0)]:
         raise HeaderBoundsError("programme_identity_locator_changed")
-    objects = list(_sql(connection, 'SELECT type,name FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3',
-        (descriptor.table,)))
-    budget.debit(_metadata_cost([list(row) for row in objects]), appearance=("programme-identity-objects",))
+    objects = _metadata_rows(connection, 'SELECT type,name FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (44,770)), appearance=('identity-objects',), bounded_query='SELECT CASE WHEN octet_length(type)<=7 THEN type END,CASE WHEN octet_length(name)<=128 THEN name END FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3')
+    if common33.metadata_budget is None:
+        budget.debit(_metadata_cost([list(row) for row in objects]), appearance=("programme-identity-objects",))
     if [tuple(row) for row in objects] != [("table", descriptor.table), ("index", indexes[0][1])]:
         raise HeaderBoundsError("programme_identity_schema_changed")
     present, absent = [], []
     for identity in original_selection.identity_ids:
-        ids = _discover(connection, descriptor, budget, key=identity, database_identity=namespace)
+        ids = _discover(connection, descriptor, budget, key=identity, database_identity=namespace,_header_budget=common33.metadata_budget)
         if not ids:
             if owner is original_selection.owner:
                 raise HeaderBoundsError("programme_source_identity_missing")
@@ -397,12 +492,12 @@ def preflight_programme_identity_component(common33, *, original_selection):
             raise HeaderBoundsError("programme_identity_locator_changed")
         else:
             present.append(identity)
-    rows = _headers(connection, descriptor, tuple(present))
+    rows = _headers(connection, descriptor, tuple(present), _header_budget=common33.metadata_budget)
     budget.debit(sum(cost for _, cost in rows.values()), appearance=("programme-identity-headers", tuple(present)))
-    state = _state(connection, raw_owner=common33.raw_owner)
+    state = _state(connection, raw_owner=common33.raw_owner, _header_budget=common33.metadata_budget)
     certificate = CompositionHeaderCertificate(connection, *state, MappingProxyType(rows), budget, _SEAL,
-        raw_owner=common33.raw_owner, schema_cookies=_snapshot_schema_cookies(connection, budget),
-        common_certificate=common33, original_selection=original_selection, absent=tuple(absent))
+        raw_owner=common33.raw_owner, schema_cookies=_snapshot_schema_cookies(connection, budget, _header_budget=common33.metadata_budget),
+        metadata_budget=common33.metadata_budget, common_certificate=common33, original_selection=original_selection, absent=tuple(absent))
     object.__setattr__(certificate, "issued_id", id(certificate))
     _validate(connection, certificate)
     return certificate
@@ -427,47 +522,55 @@ def read_programme_identity(certificate, identity):
 
 
 
-def _validate_fts_metadata(connection,budget,objects):
+def _validate_fts_metadata(connection,budget,objects, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     present={name for _rowid,_kind,name,_table in objects if name in _FTS_SQL}
     if not present:return  # An isolated pre-initialization/model-only schema.
     if present!=set(_FTS_SQL):raise HeaderBoundsError("header_fts_metadata_changed")
     for name,(kind,table,expected_sql) in _FTS_SQL.items():
-        header=list(_sql(connection,"SELECT typeof(sql),octet_length(sql) FROM sqlite_schema WHERE name=? LIMIT 2",(name,)))
+        header=_metadata_rows(connection, "SELECT typeof(sql),octet_length(sql) FROM sqlite_schema WHERE name=? LIMIT 2", (name,), _header_budget=_header_budget, upper=_metadata_upper(2, (44,20)), appearance=('fts-sql-header',))
         if len(header)!=1 or tuple(header[0])!=("text",len(expected_sql.encode("utf-8"))):
             raise HeaderBoundsError("header_fts_metadata_changed")
         budget.debit(6*header[0][1]+2, appearance=("fts-sql", name))
-        actual=_one_scalar(connection,"SELECT sql FROM sqlite_schema WHERE name=? LIMIT 2",(name,))
+        actual=_metadata_scalar(connection,"SELECT sql FROM sqlite_schema WHERE name=? LIMIT 2",(name,), _header_budget=_header_budget, width=6*len(expected_sql.encode("utf-8"))+2, appearance=("fts-sql-body",name), bounded_query="SELECT CASE WHEN octet_length(sql)<="+str(len(expected_sql.encode("utf-8")))+" THEN sql END FROM sqlite_schema WHERE name=? LIMIT 2")
         if actual!=expected_sql:raise HeaderBoundsError("header_fts_metadata_changed")
     for name,expected in _FTS_META.items():
-        columns=list(_sql(connection,'SELECT cid,CASE WHEN octet_length(name)<=128 THEN name END,'
+        columns=_metadata_rows(connection, 'SELECT cid,CASE WHEN octet_length(name)<=128 THEN name END,'
             'CASE WHEN octet_length(type)<=128 THEN type END,"notnull",'
             'CASE WHEN dflt_value IS NULL THEN NULL WHEN octet_length(dflt_value)<=128 THEN dflt_value END,'
-            'pk,hidden FROM pragma_table_xinfo(?) LIMIT ?',(name,len(expected["columns"])+1)))
-        layout=list(_sql(connection,'SELECT type,ncol,wr,strict FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2',(name,)))
-        indexes=list(_sql(connection,'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
-            'CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?',(name,len(expected["indexes"])+1)))
-        budget.debit(_metadata_cost([list(x) for x in (*columns,*layout,*indexes)]), appearance=("fts-schema", name))
+            'pk,hidden FROM pragma_table_xinfo(?) LIMIT ?', (name,len(expected["columns"])+1), _header_budget=_header_budget, upper=_metadata_upper((len(expected["columns"])+1), (20,770,770,20,770,20,20)), appearance=('fts-columns',))
+        layout=_metadata_rows(connection, 'SELECT type,ncol,wr,strict FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2', (name,), _header_budget=_header_budget, upper=_metadata_upper(2, (44,20,20,20)), appearance=('fts-layout',))
+        indexes=_metadata_rows(connection, 'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
+            'CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?', (name,len(expected["indexes"])+1), _header_budget=_header_budget, upper=_metadata_upper((len(expected["indexes"])+1), (20,770,20,14,20)), appearance=('fts-indexes',))
+        if _header_budget is None:
+            budget.debit(_metadata_cost([list(x) for x in (*columns,*layout,*indexes)]), appearance=("fts-schema", name))
         if ([list(x) for x in columns]!=expected["columns"] or [list(x) for x in layout]!=[expected["table"]]
                 or [list(x) for x in indexes]!=expected["indexes"]):
             raise HeaderBoundsError("header_fts_metadata_changed")
         for index,parts in expected["index_columns"].items():
-            actual=list(_sql(connection,'SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,'
-                'desc,CASE WHEN octet_length(coll)<=128 THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?',(index,len(parts)+1)))
-            budget.debit(_metadata_cost([list(x) for x in actual]), appearance=("fts-index", index))
+            actual=_metadata_rows(connection, 'SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,'
+                'desc,CASE WHEN octet_length(coll)<=128 THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?', (index,len(parts)+1), _header_budget=_header_budget, upper=_metadata_upper((len(parts)+1), (20,20,770,20,770,20)), appearance=('fts-index-parts',))
+            if _header_budget is None:
+                budget.debit(_metadata_cost([list(x) for x in actual]), appearance=("fts-index", index))
             if [list(x) for x in actual]!=parts:raise HeaderBoundsError("header_fts_metadata_changed")
 
 
-def preflight_composition_superset(connection,budget, *, raw_owner=None):
+def preflight_composition_superset(connection,budget, *, raw_owner=None, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(budget) is not HeaderReadBudget:raise HeaderBoundsError("header_request_bound")
-    state=_state(connection,raw_owner=raw_owner)
+    if raw_owner is not None and _header_budget is not None:
+        raise HeaderBoundsError("header_metadata_raw_owner_unavailable")
+    state=_state(connection,raw_owner=raw_owner,_header_budget=_header_budget)
     if raw_owner is not None:
         raw_owner._validate_budget(budget)
-    cookies=_snapshot_schema_cookies(connection,budget) if raw_owner is not None else None
-    if tuple(map(int,_one_scalar(connection,"SELECT sqlite_version()").split('.'))) < (3,43,0) or _one_scalar(connection,"PRAGMA encoding")!="UTF-8":
+    cookies=_snapshot_schema_cookies(connection,budget,_header_budget=_header_budget) if raw_owner is not None else None
+    if tuple(map(int,_metadata_scalar(connection,"SELECT sqlite_version()", _header_budget=_header_budget, width=770, appearance=("sqlite-version",), bounded_query="SELECT CASE WHEN octet_length(sqlite_version())<=128 THEN sqlite_version() END").split('.'))) < (3,43,0) or _metadata_scalar(connection,"PRAGMA encoding", _header_budget=_header_budget, width=32, appearance=("sqlite-encoding",))!="UTF-8":
         raise HeaderBoundsError("header_sqlite_version_unsupported")
-    objects=list(_sql(connection,'SELECT rowid,CASE WHEN octet_length(type)<=7 THEN type END,'
+    objects=_metadata_rows(connection, 'SELECT rowid,CASE WHEN octet_length(type)<=7 THEN type END,'
         'CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(tbl_name)<=128 THEN tbl_name END '
-        'FROM sqlite_schema ORDER BY rowid LIMIT 1360'))
+        'FROM sqlite_schema ORDER BY rowid LIMIT 1360', (), _header_budget=_header_budget, upper=_metadata_upper(1360, (20,44,770,770)), appearance=('complete-schema',))
     if len(objects)>_SCHEMA_LIMIT:raise HeaderBoundsError("header_schema_object_bound")
     for _id,kind,name,table in objects:
         if kind=="table":valid=name==table and name in {*_SCHEMA_TABLES,"sqlite_sequence","alembic_version",*_FTS_META}
@@ -483,26 +586,29 @@ def preflight_composition_superset(connection,budget, *, raw_owner=None):
         elif kind=="trigger":valid=(table=="operator_sessions" and name in {"operator_principal_required_insert","operator_principal_required_update"}) or (name in _FTS_SQL and _FTS_SQL[name][:2]==("trigger",table))
         else:valid=False
         if not valid:raise HeaderBoundsError("header_schema_object_unavailable")
-    budget.debit(_metadata_cost([list(r) for r in objects]), appearance=("complete-schema",))
-    _validate_fts_metadata(connection,budget,objects)
+    if _header_budget is None:
+        budget.debit(_metadata_cost([list(r) for r in objects]), appearance=("complete-schema",))
+    _validate_fts_metadata(connection,budget,objects,_header_budget=_header_budget)
     allrows={}
     for descriptor in COMPOSITION_DESCRIPTORS.values():
         ids=_discover(connection,descriptor,budget,remaining=MAX_ROWS-len(allrows),
-            database_identity=raw_owner._namespace if raw_owner is not None else None)
-        rows=_headers(connection,descriptor,ids)
+            database_identity=raw_owner._namespace if raw_owner is not None else None,_header_budget=_header_budget)
+        rows=_headers(connection,descriptor,ids,_header_budget=_header_budget)
         budget.debit(sum(cost for _,cost in rows.values()), appearance=("complete-headers", descriptor.table, tuple(ids)))
         allrows.update(rows)
-    if _state(connection,raw_owner=raw_owner)!=state:raise HeaderBoundsError("header_snapshot_changed")
-    if raw_owner is not None and _snapshot_schema_cookies(connection,budget)!=cookies:
+    if _state(connection,raw_owner=raw_owner,_header_budget=_header_budget)!=state:raise HeaderBoundsError("header_snapshot_changed")
+    if raw_owner is not None and _snapshot_schema_cookies(connection,budget,_header_budget=_header_budget)!=cookies:
         raise HeaderBoundsError("header_schema_cookie_changed")
     cert=CompositionHeaderCertificate(connection,*state,MappingProxyType(allrows),budget,_SEAL,
-        raw_owner=raw_owner,schema_cookies=cookies)
+        raw_owner=raw_owner,schema_cookies=cookies,metadata_budget=_header_budget)
     object.__setattr__(cert,"issued_id",id(cert))
     return cert
 
 
-async def certify_composition_superset(db,budget):
-    return await (await db.connection()).run_sync(lambda c:preflight_composition_superset(c,budget))
+async def certify_composition_superset(db,budget, *, _header_budget=None):
+    if _header_budget is not None and _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    return await (await db.connection()).run_sync(lambda c:preflight_composition_superset(c,budget,_header_budget=_header_budget))
 
 
 async def validate_composition_certificate(db,certificate):

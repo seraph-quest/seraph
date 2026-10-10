@@ -419,9 +419,10 @@ async def test_original_source_registers_actual_producer_before_native_command(
     async with flow["factory"]() as db:
         root = await flow["jobs"]._fetch(db, flow["root_id"])
         inventory = read_repository_inventory(root)
-        assert inventory["schema"] == "repository.checkpoint_inventory.v3"
+        assert inventory["schema"] == "repository.checkpoint_inventory.v4"
         assert len(inventory["identities"]) == 49
         registration = read_registered_repository_producer(root, iteration_index=1)
+        assert registration["schema"] == "repository.original_producer.v2"
         assert registration["ready"]["pid"] > 0
         assert registration["ready"]["public_key"]
 
@@ -452,3 +453,70 @@ async def test_selected_original_producer_prerequisites_block_new_root_visibly(
     async with factory() as db:
         assert list((await db.scalars(select(WorkflowRunState).where(
             WorkflowRunState.job_kind == "engineering.repo-repair.v1"))).all()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [1, 2, 3])
+async def test_new_original_v4_inventory_keeps_exact_v3_vector_and_bounds(
+        accounting_db, monkeypatch, repository_admission_signer, cap):
+    import json
+    from src.workflows import repo_repair_source as source
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest
+    from tests.test_repo_work_original_producer_startup import undispatched_original_source
+    flow = await undispatched_original_source(accounting_db, monkeypatch, work_limits={
+        "max_iterations": cap, "max_total_seconds": 900, "max_cost_usd": 0.000100})
+    async with flow["factory"]() as db:
+        root = await flow["jobs"]._fetch(db, flow["job_id"])
+        work = source.read_repository_original(root)[1]
+        inventory = read_repository_inventory(root)
+        assert inventory["schema"] == "repository.checkpoint_inventory.v4"
+        assert len(inventory["identities"]) == 10 + 13 * cap
+        assert len(set(inventory["identities"])) == len(inventory["identities"])
+        assert inventory["max_records"] == 50 and inventory["max_metadata_bytes_per_record"] == 16384
+        assert not any("durability" in identity for identity in inventory["identities"])
+        with pytest.raises(DurableJobLeaseError, match="sealed inventory cannot be upgraded"):
+            source.repository_checkpoint_inventory(root, work, _admission_schema="repository.checkpoint_inventory.v3")
+        # Pure historical grammar comparison only: detached local copies do not
+        # mutate a Root, issue a witness, supply startup authority or upgrade evidence.
+        local = root.model_copy(deep=True)
+        history = json.loads(local.checkpoint_receipts_json)
+        wrapper = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
+        wrapper["payload"]["schema"] = "repository.checkpoint_inventory.v3"
+        wrapper["state_digest"] = _digest(wrapper["payload"])
+        local.checkpoint_receipts_json = _canonical(history)
+        assert source.repository_checkpoint_inventory(local, work) == inventory["identities"]
+        assert read_repository_inventory(local)["identities"] == inventory["identities"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["missing_schema", "unknown_schema", "untyped_schema", "duplicate",
+    "subset", "superset", "foreign", "reordered", "bool_records", "bool_metadata", "extra_key"])
+async def test_original_inventory_closed_v4_reader_denies_local_tamper_without_mutation(
+        accounting_db, monkeypatch, repository_admission_signer, corruption):
+    import json
+    from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _digest
+    from tests.test_repo_work_original_producer_startup import undispatched_original_source
+    flow = await undispatched_original_source(accounting_db, monkeypatch)
+    async with flow["factory"]() as db:
+        root = await flow["jobs"]._fetch(db, flow["job_id"])
+        before = root.model_dump_json()
+        local = root.model_copy(deep=True)
+        history = json.loads(local.checkpoint_receipts_json)
+        wrapper = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
+        payload = wrapper["payload"]
+        if corruption == "missing_schema": payload.pop("schema")
+        elif corruption == "unknown_schema": payload["schema"] = "repository.checkpoint_inventory.v5"
+        elif corruption == "untyped_schema": payload["schema"] = {}
+        elif corruption == "duplicate": payload["identities"][-1] = payload["identities"][0]
+        elif corruption == "subset": payload["identities"].pop()
+        elif corruption == "superset": payload["identities"].append("repository:foreign")
+        elif corruption == "foreign": payload["identities"][-1] = "repository:foreign"
+        elif corruption == "reordered": payload["identities"].reverse()
+        elif corruption == "bool_records": payload["max_records"] = True
+        elif corruption == "bool_metadata": payload["max_metadata_bytes_per_record"] = True
+        else: payload["caller_version"] = 4
+        wrapper["state_digest"] = _digest(payload)
+        local.checkpoint_receipts_json = _canonical(history)
+        with pytest.raises(DurableJobLeaseError):
+            read_repository_inventory(local)
+        assert root.model_dump_json() == before

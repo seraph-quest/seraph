@@ -360,3 +360,103 @@ async def test_startup_retains_real_unknown_provider_debt_after_registered_itera
     assert await jobs.recover_inference_accounting(now=observed) == []
     assert await jobs.recover_stale_jobs(now=observed) == []
     assert await exact_canonical_bytes(factory) == before
+
+
+async def undispatched_original_source(accounting_db, monkeypatch, *, work_limits=None):
+    """Actual NEW admission/preparation; no producer registration or command."""
+    from src.auth.service import authenticate_session
+    from tests.test_repo_work_task_publication import actual_native_source
+    factory, owner, service, jobs, binding, _ = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=2, claim_child=False, work_limits=work_limits)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    prepared = await source.prepare_repository_native_source(service, jobs, binding,
+        child_owner="actual-undispatched-startup-worker", principal=operator.principal)
+    return {"factory": factory, "owner": owner, "service": service.repository_source_service,
+        "jobs": jobs, "job_id": prepared["repository_job_id"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatched", [False, True])
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_startup_protects_actual_v4_without_registration_before_any_mutation(
+        accounting_db, monkeypatch, repository_admission_signer, dispatched, unknown):
+    from src.workflows.job_runtime import _canonical
+    from src.work_board.repository import _begin_sqlite_immediate
+    captured = (await registered_running_source(accounting_db, monkeypatch) if dispatched else
+        await undispatched_original_source(accounting_db, monkeypatch))
+    jobs, service, job_id, owner = (captured[key] for key in ("jobs", "service", "job_id", "owner"))
+    factory = accounting_db[2]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        original, _, _, _, binding, _ = source.read_repository_original(root)
+        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v4"
+        history = json.loads(root.checkpoint_receipts_json)
+        registrations = [item for item in history if item["checkpoint_id"].startswith("repository:producer:")]
+        assert bool(registrations) is dispatched
+        # Erasure is a negative corruption of actual dispatched evidence, never
+        # a newly supplied registration or an assertion that dispatch did not occur.
+        if dispatched:
+            root.checkpoint_receipts_json = _canonical([item for item in history if item not in registrations])
+            db.add(root)
+            await db.commit()
+        lease_owner, fence = root.lease_owner, root.fencing_token
+        identity = source.iteration_identity(job_id, original["repository_attempt_id"],
+            source._source_digest(original["original_input"]), 1)
+    if unknown:
+        await source._quarantine_original_uncertainty(service, jobs, job_id=job_id, owner=owner,
+            lease_owner=lease_owner, fencing_token=fence, reason="repository_process_closure_unproven",
+            result={"no_learning": True, "operator_action": "reconcile_original_process", "iteration_id": identity})
+    before = await exact_canonical_bytes(factory)
+    async with source._repository_startup_mutation_fence():
+        async with factory() as db:
+            await _begin_sqlite_immediate(db)
+            assert await source._repository_startup_protected_lineage(db) == {
+                job_id, binding.invocation_id, binding.parent_job_id}
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    assert await jobs.recover_inference_accounting(now=observed) == []
+    assert await jobs.recover_stale_jobs(now=observed) == []
+    for protected_id in (job_id, binding.invocation_id, binding.parent_job_id):
+        result = await jobs.recover_stale_job(protected_id, now=observed)
+        assert result["receipt"]["reason"] == "original_repository_source_recovery_required"
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["missing_inventory", "missing_mode", "unknown_mode",
+    "ordinary_mode_with_producer_vector", "foreign_identity", "malformed_history"])
+async def test_startup_missing_or_corrupt_mode_holds_actual_undispatched_mapped_prefix(
+        accounting_db, monkeypatch, repository_admission_signer, corruption):
+    from src.workflows.job_runtime import _canonical, _digest
+    from src.work_board.repository import _begin_sqlite_immediate
+    captured = await undispatched_original_source(accounting_db, monkeypatch)
+    factory, jobs, job_id = (captured[key] for key in ("factory", "jobs", "job_id"))
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        binding = source.read_repository_original(root)[4]
+        history = json.loads(root.checkpoint_receipts_json)
+        inventory = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
+        if corruption == "missing_inventory":
+            history.remove(inventory)
+        elif corruption == "missing_mode":
+            inventory["payload"].pop("schema")
+        elif corruption == "unknown_mode":
+            inventory["payload"]["schema"] = "repository.checkpoint_inventory.v5"
+        elif corruption == "ordinary_mode_with_producer_vector":
+            inventory["payload"]["schema"] = "repository.checkpoint_inventory.v2"
+        elif corruption == "foreign_identity":
+            inventory["payload"]["identities"][-1] = "repository:physical-cleanup:foreign"
+        if corruption != "missing_inventory":
+            inventory["state_digest"] = _digest(inventory["payload"])
+        root.checkpoint_receipts_json = "not-json" if corruption == "malformed_history" else _canonical(history)
+        db.add(root)
+        await db.commit()
+    before = await exact_canonical_bytes(factory)
+    async with source._repository_startup_mutation_fence():
+        async with factory() as db:
+            await _begin_sqlite_immediate(db)
+            assert await source._repository_startup_protected_lineage(db) == {
+                job_id, binding.invocation_id, binding.parent_job_id}
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    assert await jobs.recover_inference_accounting(now=observed) == []
+    assert await jobs.recover_stale_jobs(now=observed) == []
+    assert await exact_canonical_bytes(factory) == before

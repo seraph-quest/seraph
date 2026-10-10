@@ -61,7 +61,7 @@ async def _repository_startup_protected_lineage(db):
     from sqlalchemy import select
     from src.db.models import WorkflowRunState
     from src.workflows.general_task_guard import child_binding, _history
-    from src.workflows.job_runtime import DurableJobLeaseError, _binding
+    from src.workflows.job_runtime import DurableJobLeaseError, _binding, _canonical, _digest
     from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
     held = _startup_fence.get()
     if held is None or held[0] is not asyncio.current_task():
@@ -77,16 +77,8 @@ async def _repository_startup_protected_lineage(db):
         for root in roots:
             after = root.id
             established = {root.run_identity}
-            present = False
+            ordinary = False
             try:
-                history = _history(root)
-                # Reserved-prefix corruption is present evidence. Validate its
-                # grammar only after proving the exact mapped lineage below.
-                markers = [item for item in history if isinstance(item.get("checkpoint_id"), str)
-                    and item["checkpoint_id"].startswith("repository:producer:")]
-                present = bool(markers)
-                if not present:
-                    continue
                 if (root.capability_version != "1" or root.root_run_identity != root.run_identity
                         or root.parent_job_id or root.idempotency_scope != "original-repository-child"
                         or not isinstance(root.idempotency_key, str) or not root.idempotency_key):
@@ -118,6 +110,11 @@ async def _repository_startup_protected_lineage(db):
                             binding.goal_id, binding.goal_revision)):
                     raise DurableJobLeaseError("original startup explicit parent changed")
                 established.add(parent.run_identity)
+                # Establish the exact mapped prefix before parsing possibly
+                # corrupt mode/history. Missing registration proves no absence.
+                history = _history(root)
+                markers = [item for item in history if isinstance(item.get("checkpoint_id"), str)
+                    and item["checkpoint_id"].startswith("repository:producer:")]
                 if (any(not re.fullmatch(r"repository:producer:[0-9a-f]{64}",
                             item["checkpoint_id"]) for item in markers)
                         or len({item["checkpoint_id"] for item in markers}) != len(markers)
@@ -126,9 +123,22 @@ async def _repository_startup_protected_lineage(db):
                 original, work, _, _, original_binding, _ = read_repository_original(root)
                 if original_binding != binding:
                     raise DurableJobLeaseError("original startup native provenance changed")
-                inventory = _repository_record(root, "repository:inventory:v1")
-                if inventory is None or inventory.get("schema") != "repository.checkpoint_inventory.v3":
-                    raise DurableJobLeaseError("original startup registered inventory changed")
+                inventory = read_repository_inventory(root)
+                identities = [item.get("checkpoint_id") for item in history]
+                if (len(history) > 50
+                        or any(not isinstance(identity, str) or not identity for identity in identities)
+                        or len(identities) != len(set(identities))
+                        or len(set(inventory["identities"]) | set(identities)) > 50
+                        or any(item.get("safe") is not True
+                            or not isinstance(item.get("payload"), dict)
+                            or item.get("state_digest") != _digest(item["payload"])
+                            or len(_canonical(item["payload"]).encode()) > 16384 for item in history)):
+                    raise DurableJobLeaseError("original startup protected history changed")
+                if inventory["schema"] in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2"}:
+                    if markers:
+                        raise DurableJobLeaseError("original startup ordinary mode contradicts producer marker")
+                    ordinary = True
+                    continue
                 for index in range(1, work.limits.max_iterations + 1):
                     identity = iteration_identity(root.run_identity, original["repository_attempt_id"],
                         _source_digest(original["original_input"]), index)
@@ -136,15 +146,12 @@ async def _repository_startup_protected_lineage(db):
                         read_registered_repository_producer(root, iteration_index=index)
                 read_repository_inventory(root)
             except Exception:
-                # Corrupt present metadata cannot be interpreted as absence.
-                # Only IDs already established by exact canonical mappings
-                # are retained; no foreign IDs are guessed from corruption.
-                if not present:
-                    raise
+                # Missing/corrupt mode retains only the actual mapped prefix.
+                # Deferral grants no cleanup, settlement or replacement owner.
                 logging.getLogger(__name__).warning(
                     "Repository original startup provenance blocked for %s; exact lineage retained",
                     root.run_identity, exc_info=True)
-            if present:
+            if not ordinary:
                 protected.update(established)
     return frozenset(protected)
 
@@ -500,7 +507,8 @@ def read_repository_inventory(run):
     if not isinstance(record, dict) or set(record) != expected_keys:
         raise DurableJobLeaseError("original repository limits inventory required")
     limits = record["original_limits"]
-    if (record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}
+    if (type(record["schema"]) is not str
+            or record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
             or record["identities"] != repository_checkpoint_inventory(run, work)
             or type(record["max_records"]) is not int or record["max_records"] != 50
             or type(record["max_metadata_bytes_per_record"]) is not int or record["max_metadata_bytes_per_record"] != 16384
@@ -579,14 +587,21 @@ def repository_checkpoint_inventory(run, work, *, _admission_schema=None):
                 "repo-repair-source:" + run.run_identity,
                 "repo-repair-execution-reservation", "repo-repair-execution-release"))
     reserved = _repository_record(run, "repository:inventory:v1")
+    if (_admission_schema is not None and reserved is not None
+            and _admission_schema != reserved.get("schema")):
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError("original repository sealed inventory cannot be upgraded")
     schema = _admission_schema if _admission_schema is not None else (
         reserved.get("schema") if reserved is not None else "repository.checkpoint_inventory.v1")
-    if schema in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3"}:
+    if type(schema) is not str:
+        from src.workflows.job_runtime import DurableJobLeaseError
+        raise DurableJobLeaseError("original repository inventory version changed")
+    if schema in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
         ids.append("repository:stop-uncertainty-successor:v1")
     elif schema != "repository.checkpoint_inventory.v1":
         from src.workflows.job_runtime import DurableJobLeaseError
         raise DurableJobLeaseError("original repository inventory version changed")
-    if schema == "repository.checkpoint_inventory.v3":
+    if schema in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
         ids.extend("repository:producer:" + iteration_identity(run.run_identity,
             original["repository_attempt_id"], _source_digest(original["original_input"]), index)
             for index in range(1, work.limits.max_iterations + 1))
@@ -4013,7 +4028,7 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         from src.execution.repo_original_producer import original_producer_service_enabled
         if not original_producer_service_enabled(service, service.jobs):
             raise DurableJobLeaseError("original producer admission owner changed")
-        inventory_schema = "repository.checkpoint_inventory.v3"
+        inventory_schema = "repository.checkpoint_inventory.v4"
         inventory = repository_checkpoint_inventory(run, work, _admission_schema=inventory_schema)
         _append_repository_record(run, "repository:inventory:v1",
             {"schema": inventory_schema, "identities": inventory,

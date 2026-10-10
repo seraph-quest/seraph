@@ -118,6 +118,16 @@ def _key(row):
     return values[0] if len(values) == 1 else values
 
 
+def _committed_stop_row_json(row):
+    from src.work_board.time import serialize_utc_datetime
+    # SQLite reloads UTC columns without tzinfo; retain every field and microsecond.
+    values = row.model_dump(mode="json")
+    for key, value in row.model_dump(mode="python").items():
+        if isinstance(value, datetime):
+            values[key] = serialize_utc_datetime(value)
+    return _canonical(values)
+
+
 def _static(row, context):
     """Only original, explicitly known callback/cleanup successor columns."""
     source = _source()
@@ -812,7 +822,7 @@ async def _complete_repository_stop_held(service, jobs, *, context, stop, origin
             for key in ("task", "attempt", "event"):
                 expected = result[key]
                 actual = await db.get(type(expected), _key(expected), populate_existing=True)
-                if actual is None or _canonical(actual.model_dump(mode="json")) != _canonical(expected.model_dump(mode="json")):
+                if actual is None or _committed_stop_row_json(actual) != _committed_stop_row_json(expected):
                     raise DurableJobLeaseError("committed original native Stop readback changed")
             repo_task = await db.get(WorkBoardTask, _key(context["repo_task"]), populate_existing=True)
             repo_attempt = await db.get(WorkBoardAttempt, _key(context["repo_attempt"]), populate_existing=True)

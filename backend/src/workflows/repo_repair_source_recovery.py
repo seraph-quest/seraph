@@ -289,7 +289,7 @@ def repository_knownpost_stage(stage):
         raise RepositorySourceRecoveryError("original_repository_knownpost_stage_required")
     assert_repository_knownpost_stage(stage, service=data["service"], jobs=data["jobs"])
     values = {key: data[key] for key in ("root_json", "job_id", "owner", "fence", "stop_digest",
-        "root_key", "current_static_digest", "result", "context_rows")}
+        "root_key", "current_static_digest", "result", "context_rows", "physical")}
     for key in ("cas", "registration", "unknown_projection", "cleanup_envelope"):
         values[key] = json.loads(data[key])
     return MappingProxyType(values)

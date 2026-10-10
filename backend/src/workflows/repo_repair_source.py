@@ -1905,6 +1905,7 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     from src.model_fabric.caller_context import build_canonical_inference_context
     from src.approval.runtime import set_runtime_context, reset_runtime_context, get_current_approval_mode
     from src.llm_runtime import build_model_kwargs
+    from src.model_fabric.effective_policy import configuration_mutation_lock
     if (approved_resume or type(repository_first_start) is not _RepositoryFirstStartTicket
             or repository_first_start._seal is not _SEAL or not repository_first_start.used
             or repository_first_start.source is not service or repository_first_start.binding != binding
@@ -1912,49 +1913,50 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
         raise DurableJobLeaseError("actual original consumed repository start required")
     ticket = repository_first_start
     owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
-    context = await _repository_precontact(service, jobs, job_id=ticket.job_id, owner=owner)
-    run = context["run"]
-    prepared = _repository_record(run, "repository:prepared:" + ticket.iteration_id)
-    if prepared["preparation_digest"] != ticket.preparation_digest:
-        raise DurableJobLeaseError("original callback preparation changed")
-    body = json.loads(service._read_private_artifact(prepared["request_body_artifact_ref"],
-        expected_digest=prepared["request_body_digest"]))
-    witness_payload = {"group": context["group"].model_dump(mode="json"),
-        "repository_job_id": ticket.job_id, "repository_attempt_id": prepared["repository_attempt_id"],
-        "repository_fence": prepared["repository_fence"], "parent_task_id": binding.task_id,
-        "parent_attempt_id": binding.attempt_id, "native_invocation_id": binding.invocation_id,
-        "iteration_index": prepared["iteration_index"], "iteration_id": ticket.iteration_id,
-        "operation_id": "remote:repo-work:" + ticket.iteration_id,
-        "original_deadline_at": context["original"]["original_deadline_at"],
-        "original_max_cost_microusd": context["original"]["original_max_cost_microusd"],
-        "source_checkpoint_digest": _digest(context["original"])}
-    async with jobs._session() as db:
-        await _begin_sqlite_immediate(db)
-        await _recheck_repository_sql(db, context)
-        await _repository_remaining(db, context)
-        current = await jobs._fetch(db, ticket.job_id)
-        _append_repository_record(current, "repository:iteration:" + ticket.iteration_id,
-            {"phase": "model_ready", "accounting_binding": witness_payload,
-             "payload_digest": prepared["request_body_digest"]},
-            inventory=repository_checkpoint_inventory(current, context["work"]))
-        _append_repository_record(current, "repository:request:" + ticket.iteration_id,
-            {"operation_id": witness_payload["operation_id"], "iteration_id": ticket.iteration_id,
-             "request_body_digest": prepared["request_body_digest"],
-             "request_route_digest": prepared["request_route_digest"],
-             "request_artifact_ref": prepared["request_body_artifact_ref"],
-             "consent_id": ticket.consent_id, "preparation_digest": ticket.preparation_digest},
-            inventory=repository_checkpoint_inventory(current, context["work"]))
-        current.revision += 1
-        await db.commit()
-    staged_policy = _repository_policy_limits()
-    async with jobs._session() as db:
-        canonical = await stage_repository_canonical_source(service, db,
-            repository_job_id=ticket.job_id, native_invocation_id=binding.invocation_id, consent_id=ticket.consent_id, staged_policy=staged_policy)
-    _recheck_repository_policy_limits(staged_policy)
-    witness = RepositoryIterationAccountingWitness(**{**witness_payload, "group": context["group"],
-        "original_deadline_at": _as_utc(context["run"].deadline_at)},
-        _request_body_digest=prepared["request_body_digest"], _request_route_digest=prepared["request_route_digest"],
-        _canonical_source=canonical, _seal=_SEAL)
+    async with configuration_mutation_lock:
+        context = await _repository_precontact(service, jobs, job_id=ticket.job_id, owner=owner)
+        run = context["run"]
+        prepared = _repository_record(run, "repository:prepared:" + ticket.iteration_id)
+        if prepared["preparation_digest"] != ticket.preparation_digest:
+            raise DurableJobLeaseError("original callback preparation changed")
+        body = json.loads(service._read_private_artifact(prepared["request_body_artifact_ref"],
+            expected_digest=prepared["request_body_digest"]))
+        witness_payload = {"group": context["group"].model_dump(mode="json"),
+            "repository_job_id": ticket.job_id, "repository_attempt_id": prepared["repository_attempt_id"],
+            "repository_fence": prepared["repository_fence"], "parent_task_id": binding.task_id,
+            "parent_attempt_id": binding.attempt_id, "native_invocation_id": binding.invocation_id,
+            "iteration_index": prepared["iteration_index"], "iteration_id": ticket.iteration_id,
+            "operation_id": "remote:repo-work:" + ticket.iteration_id,
+            "original_deadline_at": context["original"]["original_deadline_at"],
+            "original_max_cost_microusd": context["original"]["original_max_cost_microusd"],
+            "source_checkpoint_digest": _digest(context["original"])}
+        async with jobs._session() as db:
+            await _begin_sqlite_immediate(db)
+            await _recheck_repository_sql(db, context)
+            await _repository_remaining(db, context)
+            current = await jobs._fetch(db, ticket.job_id)
+            _append_repository_record(current, "repository:iteration:" + ticket.iteration_id,
+                {"phase": "model_ready", "accounting_binding": witness_payload,
+                 "payload_digest": prepared["request_body_digest"]},
+                inventory=repository_checkpoint_inventory(current, context["work"]))
+            _append_repository_record(current, "repository:request:" + ticket.iteration_id,
+                {"operation_id": witness_payload["operation_id"], "iteration_id": ticket.iteration_id,
+                 "request_body_digest": prepared["request_body_digest"],
+                 "request_route_digest": prepared["request_route_digest"],
+                 "request_artifact_ref": prepared["request_body_artifact_ref"],
+                 "consent_id": ticket.consent_id, "preparation_digest": ticket.preparation_digest},
+                inventory=repository_checkpoint_inventory(current, context["work"]))
+            current.revision += 1
+            await db.commit()
+        staged_policy = _repository_policy_limits()
+        async with jobs._session() as db:
+            canonical = await stage_repository_canonical_source(service, db,
+                repository_job_id=ticket.job_id, native_invocation_id=binding.invocation_id, consent_id=ticket.consent_id, staged_policy=staged_policy)
+        _recheck_repository_policy_limits(staged_policy)
+        witness = RepositoryIterationAccountingWitness(**{**witness_payload, "group": context["group"],
+            "original_deadline_at": _as_utc(context["run"].deadline_at)},
+            _request_body_digest=prepared["request_body_digest"], _request_route_digest=prepared["request_route_digest"],
+            _canonical_source=canonical, _seal=_SEAL)
     model = service.model_factory(**build_model_kwargs(temperature=0.2, max_tokens=4096,
         runtime_path="strategist_agent"))
     scoped_principal = replace(principal, job_id=ticket.job_id)
@@ -1991,11 +1993,6 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     from src.execution.repo_sandbox import _patch_paths_from_diff
     _patch_paths_from_diff(patch, context["work"].allowed_paths)
     patch_digest = _digest_bytes(patch)
-    response_ref, response_digest = service._write_private_artifact(
-        "artifacts/repo-repair/model/iteration-" + ticket.iteration_id + "-response.json",
-        _canonical_bytes({"content": content}))
-    patch_ref, _ = service._write_private_artifact(
-        "artifacts/repo-repair/patch/iteration-" + ticket.iteration_id + ".diff", patch)
     async with jobs._session() as db:
         cost = await db.get(InferenceCostReservation, witness.operation_id)
         if (cost is None or cost.state != "settled" or cost.contact_started_at is None
@@ -2008,89 +2005,114 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     posture = await asyncio.to_thread(_iterative_executor_preflight, service, context["compiled"])
     if not posture.ok or posture.posture_digest != prepared["executor_posture_digest"]:
         raise DurableJobLeaseError("fixed iterative executor is blocked")
-    proposal = RepoRepairProposal(proposal_id="repository-proposal:" + ticket.iteration_id,
-        operation_key="repository-proposal:" + ticket.iteration_id,
-        owner_principal_id=owner.principal_id, owner_session_id=owner.session_id,
-        work_board_task_id=prepared["repository_task_id"],
-        work_board_attempt_id=prepared["repository_attempt_id"], workflow_run_id=ticket.job_id,
-        goal_id=run.goal_id, goal_revision=run.goal_revision,
-        repository_ref=context["work"].repository_ref,
-        base_snapshot_digest=output.base_snapshot_sha256, source_packet_id=prepared["source_packet_id"],
-        source_digest=prepared["source_manifest_digest"], model_runtime_path="strategist_agent",
-        model_profile_id=cost.profile_id, model_request_digest=prepared["request_body_digest"],
-        model_output_digest=response_digest, model_response_artifact_id=response_ref.removeprefix("workspace-json:"),
-        model_response_artifact_sha256=response_digest, patch_artifact_id=patch_ref.removeprefix("workspace-json:"),
-        patch_sha256=patch_digest, allowed_paths_json=json.dumps(sorted(output.allowed_paths)),
-        test_args_json=json.dumps(list(_repair_test_args(tuple(output.test_args), output.allowed_paths))),
-        request_digest=_source_digest({"original": context["original"], "iteration": ticket.iteration_id,
-            "request": prepared["request_body_digest"], "response": response_digest, "patch": patch_digest}),
-        approval_id=approval_id, status="awaiting_approval", expires_at=_as_utc(run.deadline_at),
-        safe_metadata_json=json.dumps({"summary": output.summary, "expected_outcome": output.expected_outcome,
-            "memory_status": "no_learning", "iteration_id": ticket.iteration_id,
-            "source_checkpoint_digest": _digest(context["original"]),
-            "sandbox": _sandbox_authority_payload(service.sandbox, posture)}))
-    proposal.authority_digest = _authority_digest(_proposal_authority_payload(proposal))
-    approval_fingerprint = _repair_approval_fingerprint(proposal, _as_utc(run.deadline_at))
-    proposal.approval_fingerprint = approval_fingerprint
-    from src.approval.repository import approval_repository
-    approval = await approval_repository.get_or_create_pending(session_id=owner.session_id,
-        tool_name=REPO_REPAIR_APPROVAL_TOOL, risk_level="high", request_id=approval_id,
-        fingerprint=approval_fingerprint, summary="Review the exact bounded repository patch",
-        details={"action": REPO_REPAIR_APPROVAL_ACTION, "approval_owner_principal_id": owner.principal_id,
-            "approval_owner_operator_session_id": owner.session_id, "approval_execution_owner_principal_id": owner.principal_id,
-            "approval_execution_session_id": owner.session_id, "approval_operator_principal_id": owner.principal_id,
-            "approval_conversation_id": owner.session_id, "durable_job_id": ticket.job_id,
-            "iteration_id": ticket.iteration_id, "proposal_id": proposal.proposal_id,
-            "proposal_revision": proposal.revision, "authority_digest": proposal.authority_digest,
-            **_sandbox_authority_payload(service.sandbox, posture),
-            "patch_sha256": patch_digest,
-            "expires_at": _as_utc(run.deadline_at).timestamp(), "memory_status": "no_learning"})
-    async with jobs._session() as db:
-        await _begin_sqlite_immediate(db)
-        current = await jobs._fetch(db, ticket.job_id)
-        inventory = repository_checkpoint_inventory(current, context["work"])
-        if await db.get(RepoRepairProposal, proposal.proposal_id) is not None:
-            raise DurableJobLeaseError("original iteration proposal is single use")
-        db.add(proposal)
-        await db.flush()
-        closed = {"schema": "repository.model_response.v1", "operation_id": witness.operation_id,
-            "request_body_digest": prepared["request_body_digest"], "response_artifact_ref": response_ref,
-            "response_artifact_digest": response_digest, "callback_returned": True,
-            "accounting_digest": _source_digest(cost.model_dump(mode="json")), "returned_at": _utc_now().isoformat()}
-        closed["callback_quiescence_digest"] = _source_digest(closed)
-        _append_repository_record(current, "repository:response:" + ticket.iteration_id, closed, inventory=inventory)
-        _append_repository_record(current, "repository:accounting:" + ticket.iteration_id,
-            {"operation_id": cost.operation_id, "accounting_digest": closed["accounting_digest"],
-             "state": cost.state, "contact_started_at": _as_utc(cost.contact_started_at).isoformat(),
-             "actual_cost_microusd": cost.actual_cost_microusd, "bound_microusd": cost.bound_microusd,
-             "original_group_digest": prepared["original_group_digest"]}, inventory=inventory)
-        _append_repository_record(current, "repository:patch:" + ticket.iteration_id,
-            {"patch_artifact_ref": patch_ref, "patch_sha256": patch_digest,
-             "allowed_paths": output.allowed_paths, "test_args": output.test_args}, inventory=inventory)
-        _append_repository_record(current, "repository:approval:" + ticket.iteration_id,
-            {"approval_id": approval.id, "fingerprint": approval_fingerprint,
-             "expires_at": _as_utc(run.deadline_at).isoformat(), "patch_sha256": patch_digest}, inventory=inventory)
-        current.revision += 1
-        await db.commit()
-    staged_policy = _repository_policy_limits()
-    async with jobs._session() as db:
-        canonical = await stage_repository_canonical_source(service, db,
-            repository_job_id=ticket.job_id, native_invocation_id=binding.invocation_id, consent_id=ticket.consent_id, staged_policy=staged_policy)
-    _recheck_repository_policy_limits(staged_policy)
-    from src.workflows.general_task_guard import issue_repository_child_wait_witness
-    wait = issue_repository_child_wait_witness(native_binding=binding, source_binding=canonical,
-        repository_job_id=ticket.job_id, repository_attempt_id=prepared["repository_attempt_id"],
-        repository_fence=prepared["repository_fence"], iteration_index=prepared["iteration_index"],
-        iteration_id=ticket.iteration_id, source_checkpoint_digest=_digest(context["original"]),
-        request_body_digest=prepared["request_body_digest"], response_readback_digest=response_digest,
-        callback_quiescence_digest=closed["callback_quiescence_digest"])
-    return {"wait_witness": wait}
+    async with configuration_mutation_lock:
+        fresh = await _repository_precontact(service, jobs, job_id=ticket.job_id, owner=owner)
+        fresh_prepared = _repository_record(fresh["run"], "repository:prepared:" + ticket.iteration_id)
+        if (fresh["binding"] != binding or fresh["original"] != context["original"]
+                or fresh["work"] != context["work"] or fresh["compiled"] != context["compiled"]
+                or fresh["group"] != context["group"] or fresh["source"] != context["source"]
+                or fresh_prepared != prepared
+                or fresh_prepared["preparation_digest"] != ticket.preparation_digest
+                or fresh["run"].lease_owner != run.lease_owner
+                or fresh["run"].fencing_token != run.fencing_token):
+            raise DurableJobLeaseError("original callback preparation or source changed after provider return")
+        context, run, prepared = fresh, fresh["run"], fresh_prepared
+        # Revalidate the full fresh SQL binding before any response artifact,
+        # approval or proposal effect; close SQL before writing physical bytes.
+        async with jobs._session() as db:
+            await _begin_sqlite_immediate(db)
+            await _recheck_repository_sql(db, context)
+            await db.rollback()
+        response_ref, response_digest = service._write_private_artifact(
+            "artifacts/repo-repair/model/iteration-" + ticket.iteration_id + "-response.json",
+            _canonical_bytes({"content": content}))
+        patch_ref, _ = service._write_private_artifact(
+            "artifacts/repo-repair/patch/iteration-" + ticket.iteration_id + ".diff", patch)
+        proposal = RepoRepairProposal(proposal_id="repository-proposal:" + ticket.iteration_id,
+            operation_key="repository-proposal:" + ticket.iteration_id,
+            owner_principal_id=owner.principal_id, owner_session_id=owner.session_id,
+            work_board_task_id=prepared["repository_task_id"],
+            work_board_attempt_id=prepared["repository_attempt_id"], workflow_run_id=ticket.job_id,
+            goal_id=run.goal_id, goal_revision=run.goal_revision,
+            repository_ref=context["work"].repository_ref,
+            base_snapshot_digest=output.base_snapshot_sha256, source_packet_id=prepared["source_packet_id"],
+            source_digest=prepared["source_manifest_digest"], model_runtime_path="strategist_agent",
+            model_profile_id=cost.profile_id, model_request_digest=prepared["request_body_digest"],
+            model_output_digest=response_digest, model_response_artifact_id=response_ref.removeprefix("workspace-json:"),
+            model_response_artifact_sha256=response_digest, patch_artifact_id=patch_ref.removeprefix("workspace-json:"),
+            patch_sha256=patch_digest, allowed_paths_json=json.dumps(sorted(output.allowed_paths)),
+            test_args_json=json.dumps(list(_repair_test_args(tuple(output.test_args), output.allowed_paths))),
+            request_digest=_source_digest({"original": context["original"], "iteration": ticket.iteration_id,
+                "request": prepared["request_body_digest"], "response": response_digest, "patch": patch_digest}),
+            approval_id=approval_id, status="awaiting_approval", expires_at=_as_utc(run.deadline_at),
+            safe_metadata_json=json.dumps({"summary": output.summary, "expected_outcome": output.expected_outcome,
+                "memory_status": "no_learning", "iteration_id": ticket.iteration_id,
+                "source_checkpoint_digest": _digest(context["original"]),
+                "sandbox": _sandbox_authority_payload(service.sandbox, posture)}))
+        proposal.authority_digest = _authority_digest(_proposal_authority_payload(proposal))
+        approval_fingerprint = _repair_approval_fingerprint(proposal, _as_utc(run.deadline_at))
+        proposal.approval_fingerprint = approval_fingerprint
+        from src.approval.repository import approval_repository
+        approval = await approval_repository.get_or_create_pending(session_id=owner.session_id,
+            tool_name=REPO_REPAIR_APPROVAL_TOOL, risk_level="high", request_id=approval_id,
+            fingerprint=approval_fingerprint, summary="Review the exact bounded repository patch",
+            details={"action": REPO_REPAIR_APPROVAL_ACTION, "approval_owner_principal_id": owner.principal_id,
+                "approval_owner_operator_session_id": owner.session_id, "approval_execution_owner_principal_id": owner.principal_id,
+                "approval_execution_session_id": owner.session_id, "approval_operator_principal_id": owner.principal_id,
+                "approval_conversation_id": owner.session_id, "durable_job_id": ticket.job_id,
+                "iteration_id": ticket.iteration_id, "proposal_id": proposal.proposal_id,
+                "proposal_revision": proposal.revision, "authority_digest": proposal.authority_digest,
+                **_sandbox_authority_payload(service.sandbox, posture),
+                "patch_sha256": patch_digest,
+                "expires_at": _as_utc(run.deadline_at).timestamp(), "memory_status": "no_learning"})
+        async with jobs._session() as db:
+            await _begin_sqlite_immediate(db)
+            await _recheck_repository_sql(db, context)
+            current = await jobs._fetch(db, ticket.job_id)
+            inventory = repository_checkpoint_inventory(current, context["work"])
+            if await db.get(RepoRepairProposal, proposal.proposal_id) is not None:
+                raise DurableJobLeaseError("original iteration proposal is single use")
+            db.add(proposal)
+            await db.flush()
+            closed = {"schema": "repository.model_response.v1", "operation_id": witness.operation_id,
+                "request_body_digest": prepared["request_body_digest"], "response_artifact_ref": response_ref,
+                "response_artifact_digest": response_digest, "callback_returned": True,
+                "accounting_digest": _source_digest(cost.model_dump(mode="json")), "returned_at": _utc_now().isoformat()}
+            closed["callback_quiescence_digest"] = _source_digest(closed)
+            _append_repository_record(current, "repository:response:" + ticket.iteration_id, closed, inventory=inventory)
+            _append_repository_record(current, "repository:accounting:" + ticket.iteration_id,
+                {"operation_id": cost.operation_id, "accounting_digest": closed["accounting_digest"],
+                 "state": cost.state, "contact_started_at": _as_utc(cost.contact_started_at).isoformat(),
+                 "actual_cost_microusd": cost.actual_cost_microusd, "bound_microusd": cost.bound_microusd,
+                 "original_group_digest": prepared["original_group_digest"]}, inventory=inventory)
+            _append_repository_record(current, "repository:patch:" + ticket.iteration_id,
+                {"patch_artifact_ref": patch_ref, "patch_sha256": patch_digest,
+                 "allowed_paths": output.allowed_paths, "test_args": output.test_args}, inventory=inventory)
+            _append_repository_record(current, "repository:approval:" + ticket.iteration_id,
+                {"approval_id": approval.id, "fingerprint": approval_fingerprint,
+                 "expires_at": _as_utc(run.deadline_at).isoformat(), "patch_sha256": patch_digest}, inventory=inventory)
+            current.revision += 1
+            await db.commit()
+        staged_policy = _repository_policy_limits()
+        async with jobs._session() as db:
+            canonical = await stage_repository_canonical_source(service, db,
+                repository_job_id=ticket.job_id, native_invocation_id=binding.invocation_id, consent_id=ticket.consent_id, staged_policy=staged_policy)
+        _recheck_repository_policy_limits(staged_policy)
+        from src.workflows.general_task_guard import issue_repository_child_wait_witness
+        wait = issue_repository_child_wait_witness(native_binding=binding, source_binding=canonical,
+            repository_job_id=ticket.job_id, repository_attempt_id=prepared["repository_attempt_id"],
+            repository_fence=prepared["repository_fence"], iteration_index=prepared["iteration_index"],
+            iteration_id=ticket.iteration_id, source_checkpoint_digest=_digest(context["original"]),
+            request_body_digest=prepared["request_body_digest"], response_readback_digest=response_digest,
+            callback_quiescence_digest=closed["callback_quiescence_digest"])
+        return {"wait_witness": wait}
 
 
 async def certify_repository_callback_return(ticket, result, *, service, jobs):
     """Called by the fixed native owner only after its actual adapter await."""
     from src.workflows.job_runtime import DurableJobLeaseError, _utc_now, _digest
     from src.work_board.repository import _begin_sqlite_immediate
+    from src.model_fabric.effective_policy import configuration_mutation_lock
     from src.workflows.general_task_guard import (RepositoryChildWaitWitness,
         _assert_repository_child_wait_witness_shape, issue_repository_child_wait_witness)
     if (type(ticket) is not _RepositoryFirstStartTicket or ticket._seal is not _SEAL or not ticket.used
@@ -2102,56 +2124,57 @@ async def certify_repository_callback_return(ticket, result, *, service, jobs):
     callback = ticket.source._iterative_model_callbacks.get(ticket.iteration_id)
     if callback is None or not callback.done() or callback.cancelled() or callback.exception() is not None:
         raise DurableJobLeaseError("actual model callback is not quiescent")
-    staged_policy = _repository_policy_limits()
-    async with jobs._session() as db:
-        canonical = await stage_repository_canonical_source(ticket.source, db,
-            repository_job_id=ticket.job_id, native_invocation_id=ticket.binding.invocation_id,
-            consent_id=ticket.consent_id, staged_policy=staged_policy)
-    _recheck_repository_policy_limits(staged_policy)
-    from src.workflows.job_runtime import _canonical
-    canonical_ref, canonical_digest = ticket.source._write_private_artifact(
-        "artifacts/repo-repair/model/iteration-" + ticket.iteration_id + "-canonical-source.json",
-        _canonical(canonical.projection()).encode())
-    readback = ticket.source._read_private_artifact(canonical_ref, expected_digest=canonical_digest)
-    if readback != _canonical(canonical.projection()).encode():
-        raise DurableJobLeaseError("literal original canonical snapshot readback changed")
-    async with jobs._session() as db:
-        await _begin_sqlite_immediate(db)
-        run = await jobs._fetch(db, ticket.job_id)
-        original, work, *_ = read_repository_original(run)
-        response = _repository_record(run, "repository:response:" + ticket.iteration_id)
-        if (response is None or response["response_artifact_digest"] != provisional.response_readback_digest
-                or provisional.native_binding != ticket.binding):
-            raise DurableJobLeaseError("original adapter response readback changed")
-        closure = {"schema": "repository.adapter_return.v1", "iteration_id": ticket.iteration_id,
-            "native_invocation_id": ticket.binding.invocation_id, "child_fence": ticket.child_fence,
-            "preparation_digest": ticket.preparation_digest, "response_readback_digest": provisional.response_readback_digest,
-            "provider_callback_digest": response["callback_quiescence_digest"],
-            "canonical_source_artifact_ref": canonical_ref,
-            "canonical_source_artifact_digest": canonical_digest,
-            "original_parent_revision": canonical.parent_revision,
-            "original_child_revision": canonical.child_revision,
-            "parent_static_digest": _source_digest({k: v for k, v in json.loads(canonical.parent_row_json).items()
-                if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}),
-            "child_static_digest": _source_digest({k: v for k, v in json.loads(canonical.child_row_json).items()
-                if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}),
-            "returned_at": _utc_now().isoformat()}
-        _append_repository_record(run, "repository:proposal:" + ticket.iteration_id, closure,
-            inventory=repository_checkpoint_inventory(run, work))
-        run.revision += 1
-        await db.commit()
-    staged_policy = _repository_policy_limits()
-    async with jobs._session() as db:
-        canonical = await stage_repository_canonical_source(ticket.source, db,
-            repository_job_id=ticket.job_id, native_invocation_id=ticket.binding.invocation_id,
-            consent_id=ticket.consent_id, staged_policy=staged_policy)
-    _recheck_repository_policy_limits(staged_policy)
-    return {"wait_witness": issue_repository_child_wait_witness(native_binding=ticket.binding,
-        source_binding=canonical, repository_job_id=ticket.job_id,
-        repository_attempt_id=provisional.repository_attempt_id, repository_fence=provisional.repository_fence,
-        iteration_index=provisional.iteration_index, iteration_id=ticket.iteration_id,
-        source_checkpoint_digest=_digest(original), request_body_digest=provisional.request_body_digest,
-        response_readback_digest=provisional.response_readback_digest, callback_quiescence_digest=_source_digest(closure))}
+    async with configuration_mutation_lock:
+        staged_policy = _repository_policy_limits()
+        async with jobs._session() as db:
+            canonical = await stage_repository_canonical_source(ticket.source, db,
+                repository_job_id=ticket.job_id, native_invocation_id=ticket.binding.invocation_id,
+                consent_id=ticket.consent_id, staged_policy=staged_policy)
+        _recheck_repository_policy_limits(staged_policy)
+        from src.workflows.job_runtime import _canonical
+        canonical_ref, canonical_digest = ticket.source._write_private_artifact(
+            "artifacts/repo-repair/model/iteration-" + ticket.iteration_id + "-canonical-source.json",
+            _canonical(canonical.projection()).encode())
+        readback = ticket.source._read_private_artifact(canonical_ref, expected_digest=canonical_digest)
+        if readback != _canonical(canonical.projection()).encode():
+            raise DurableJobLeaseError("literal original canonical snapshot readback changed")
+        async with jobs._session() as db:
+            await _begin_sqlite_immediate(db)
+            run = await jobs._fetch(db, ticket.job_id)
+            original, work, *_ = read_repository_original(run)
+            response = _repository_record(run, "repository:response:" + ticket.iteration_id)
+            if (response is None or response["response_artifact_digest"] != provisional.response_readback_digest
+                    or provisional.native_binding != ticket.binding):
+                raise DurableJobLeaseError("original adapter response readback changed")
+            closure = {"schema": "repository.adapter_return.v1", "iteration_id": ticket.iteration_id,
+                "native_invocation_id": ticket.binding.invocation_id, "child_fence": ticket.child_fence,
+                "preparation_digest": ticket.preparation_digest, "response_readback_digest": provisional.response_readback_digest,
+                "provider_callback_digest": response["callback_quiescence_digest"],
+                "canonical_source_artifact_ref": canonical_ref,
+                "canonical_source_artifact_digest": canonical_digest,
+                "original_parent_revision": canonical.parent_revision,
+                "original_child_revision": canonical.child_revision,
+                "parent_static_digest": _source_digest({k: v for k, v in json.loads(canonical.parent_row_json).items()
+                    if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}),
+                "child_static_digest": _source_digest({k: v for k, v in json.loads(canonical.child_row_json).items()
+                    if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}),
+                "returned_at": _utc_now().isoformat()}
+            _append_repository_record(run, "repository:proposal:" + ticket.iteration_id, closure,
+                inventory=repository_checkpoint_inventory(run, work))
+            run.revision += 1
+            await db.commit()
+        staged_policy = _repository_policy_limits()
+        async with jobs._session() as db:
+            canonical = await stage_repository_canonical_source(ticket.source, db,
+                repository_job_id=ticket.job_id, native_invocation_id=ticket.binding.invocation_id,
+                consent_id=ticket.consent_id, staged_policy=staged_policy)
+        _recheck_repository_policy_limits(staged_policy)
+        return {"wait_witness": issue_repository_child_wait_witness(native_binding=ticket.binding,
+            source_binding=canonical, repository_job_id=ticket.job_id,
+            repository_attempt_id=provisional.repository_attempt_id, repository_fence=provisional.repository_fence,
+            iteration_index=provisional.iteration_index, iteration_id=ticket.iteration_id,
+            source_checkpoint_digest=_digest(original), request_body_digest=provisional.request_body_digest,
+            response_readback_digest=provisional.response_readback_digest, callback_quiescence_digest=_source_digest(closure))}
 
 
 async def validate_repository_child_wait_witness(db, witness, *, parent, task,

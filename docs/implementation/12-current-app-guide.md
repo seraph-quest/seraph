@@ -1159,14 +1159,14 @@ Typed MCP discovery uses the stock client's original advertised input and output
 schemas. The trusted declaration must exactly match the bounded closed input
 schema, and current connection/policy identity remains bound at approval and
 contact. Unsupported or changed metadata blocks the tool visibly. The
-[three-tool integration journey](../../backend/tests/test_general_task_native_full_journey.py)
+[three-tool integration journey](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_general_task_native_full_journey.py)
 exercises actual file read/write, stock MCP JSON-RPC discovery and one approved
 operation through an owned local HTTP transport, with physical private output
-readback. [API recovery tests](../../backend/tests/test_general_task_native_dispatch_api.py)
+readback. [API recovery tests](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_general_task_native_dispatch_api.py)
 cover paused full-Plan edits, original-child restart, held-callback cancellation,
 original returned-readback cleanup after a workspace settings change,
 full reserved history and corrupt-evidence recovery;
-[UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.test.tsx)
+[UI tests](https://github.com/seraph-quest/seraph/blob/develop/frontend/src/components/cockpit/GeneralTaskPanel.test.tsx)
 cover exact control bindings and truthful cancellation states. These isolated
 Linux receipts make no external provider call or quality claim. The contract is
 OS-agnostic; native macOS execution remains unverified.
@@ -1277,20 +1277,20 @@ stale-revision handling. Foreign or recovered read-only access cannot accept
 or replay private decisions; changed selections, stale source and mismatched
 bindings require inspection and recovery.
 
-[Native specialist journeys](../../backend/tests/test_specialist_delegation_runtime.py),
-[copied evidence tests](../../backend/tests/test_specialist_evidence_runtime.py),
-[durable wait tests](../../backend/tests/test_specialist_durable_wait.py),
-[stop tests](../../backend/tests/test_specialist_stop.py) and
-[authenticated partial-review tests](../../backend/tests/test_specialist_partial.py)
+[Native specialist journeys](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_delegation_runtime.py),
+[copied evidence tests](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_evidence_runtime.py),
+[durable wait tests](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_durable_wait.py),
+[stop tests](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_stop.py) and
+[authenticated partial-review tests](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_partial.py)
 exercise actual production owners and private physical outputs with only the
 final approved model/MCP transports scripted. The
-[partial UI tests](../../frontend/src/components/cockpit/GeneralTaskPanel.partial.test.tsx)
+[partial UI tests](https://github.com/seraph-quest/seraph/blob/develop/frontend/src/components/cockpit/GeneralTaskPanel.partial.test.tsx)
 cover inspection, exact replay, owner changes and truthful historical/current
 debt display. These isolated Linux receipts make no external provider call,
 quality or general callback-recovery claim. Native macOS execution remains
 unverified. The optional Cordis bridge remains separately owned by #1007.
 
-The [reviewed-method specialist journey](../../backend/tests/test_specialist_reviewed_method.py)
+The [reviewed-method specialist journey](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_specialist_reviewed_method.py)
 completes a real native source task and its operator review, derives and accepts
 its signed method, then executes a new parent under that immutable pin. Both
 narrower children reach Done with distinct physical outputs; the new parent
@@ -1427,11 +1427,11 @@ modes; aggregate encryption does not migrate that storage. No automatic TTL
 deletion exists. Same-user filesystem replacement between the final inode check
 and unlink remains a residual race; no atomic conditional unlink is claimed.
 
-The [native composition journey](../../backend/tests/test_communication_native.py)
+The [native composition journey](https://github.com/seraph-quest/seraph/blob/develop/backend/tests/test_communication_native.py)
 uses actual isolated authenticated tasks, source callbacks, encrypted physical
 readback, separate native Mail/Calendar effects and literal provider readbacks,
 with scripted inference only at its owned transport. The
-[communication UI tests](../../frontend/src/components/cockpit/CommunicationPlanPanel.test.tsx)
+[communication UI tests](https://github.com/seraph-quest/seraph/blob/develop/frontend/src/components/cockpit/CommunicationPlanPanel.test.tsx)
 cover independent selection, stale authority, response loss and cleanup states.
 Current Linux validation still retains unresolved native process crashes
 (ordinary exit 139 and guarded exit 245); one debugger run passing 24 tests does

@@ -12,7 +12,7 @@
 
 The `feat/751-ptt-audio-impl` branch adds a **Partial**, provider-free
 push-to-talk (PTT) vertical slice in
-[`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
+[`backend/src/guardian/audio_ingress.py`](https://github.com/seraph-quest/seraph/blob/develop/backend/src/guardian/audio_ingress.py).
 This is branch-local work and is not shipped `develop` truth. The authenticated
 `/api/audio/ptt` and `/api/audio/ingress` routes use #750 server-owned session,
 message, attachment, and request identities, persist one SQLite

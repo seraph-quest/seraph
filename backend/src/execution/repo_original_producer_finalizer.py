@@ -147,7 +147,7 @@ def finalize_original_outputs(payload, control):
         "iteration_binding": payload["iteration_binding"], "source_original_unchanged": True,
         "cleanup_proven": True, "stage_removed": True, "isolation_claim": "none", "network_isolation": "not_verified",
         "resource_enforcement": "admission_and_wall_timeout_only", "learning": "no_learning",
-        "supervisor_transport": {"transport_kind": "original_producer_durable_v1", "command_output_drained": True,
+        "supervisor_transport": {"transport_kind": "original_producer_durable_v2" if durable.get("schema") == "repository.original_producer.v2" else "original_producer_durable_v1", "command_output_drained": True,
             "command_descriptors_closed": True, "original_children_waited": True, "no_spawn": control.no_spawn},
         "supervisor_identity": {"pid": os.getpid(), "start_identity": raw["supervisor_start"],
             "source_sha256": durable["posture"]["supervisor_source_sha256"], "token": payload["token"]}}

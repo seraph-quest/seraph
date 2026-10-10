@@ -32,6 +32,13 @@ import weakref
 DOMAIN = b"seraph.repository.original_producer_completion.v1\0"
 PROFILE = "repository.original_producer.v1"
 COMPLETION = "repository.original_producer_completion.v1"
+DOMAIN_V2 = b"seraph.repository.original_producer_completion.v2\0"
+PROFILE_V2 = "repository.original_producer.v2"
+COMPLETION_V2 = "repository.original_producer_completion.v2"
+DURABILITY = "repository.original_producer_durability.v1"
+DURABILITY_DOMAIN = b"seraph.repository.original_producer_durability.v1\0"
+DURABILITY_FILE = "durability.json"
+MAX_DURABILITY = 16 * 1024
 MAX_MESSAGE = 16 * 1024
 MAX_ENVELOPE = 2 * 1024 * 1024
 _OWNERS = weakref.WeakKeyDictionary()
@@ -50,6 +57,74 @@ def canonical(value):
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def _closed_json(raw):
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("original_producer_duplicate_key")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=object_pairs)
+
+
+def _utc_observation(value):
+    if type(value) is not str:
+        raise ValueError("original_producer_durability_timestamp")
+    observed = datetime.fromisoformat(value)
+    if (observed.tzinfo is None or observed.utcoffset().total_seconds() != 0
+            or observed.isoformat() != value):
+        raise ValueError("original_producer_durability_timestamp")
+    return observed
+
+
+def _verify_durability(raw, completion_raw, registration, ready, admission_raw):
+    """Strict evidence parser; canonical Source/physical owners grant authority."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+    if len(raw) > MAX_DURABILITY:
+        raise ValueError("original_producer_durability_bound")
+    envelope = _closed_json(raw)
+    if type(envelope) is not dict or set(envelope) != {"durability", "signature"} or canonical(envelope) != raw:
+        raise ValueError("original_producer_durability_envelope")
+    body = envelope["durability"]
+    keys = {"schema", "completion_sha256", "registration_digest", "admission_digest", "ready_digest",
+        "boot_id", "nonce", "observed_after_fsync_monotonic", "deadline_monotonic",
+        "observed_after_fsync_wall", "execution_wall_cutoff", "original_deadline_at"}
+    if type(body) is not dict or set(body) != keys or body["schema"] != DURABILITY:
+        raise ValueError("original_producer_durability_schema")
+    expected = {"completion_sha256": digest(completion_raw), "registration_digest": digest(canonical(registration)),
+        "admission_digest": digest(admission_raw), "ready_digest": digest(canonical(ready.projection())),
+        "boot_id": ready.boot_id, "nonce": ready.nonce, "deadline_monotonic": registration["monotonic_deadline"],
+        "execution_wall_cutoff": registration["execution_deadline_at"],
+        "original_deadline_at": registration["original_deadline_at"]}
+    if (registration.get("schema") != PROFILE_V2 or registration.get("ready") != ready.projection()
+            or registration.get("ready_digest") != expected["ready_digest"]
+            or registration.get("admission_digest") != expected["admission_digest"]
+            or type(body["boot_id"]) is not str or not 0 < len(body["boot_id"]) <= 128
+            or any(type(body[name]) is not str or not re.fullmatch("[0-9a-f]{64}", body[name])
+                for name in ("completion_sha256", "registration_digest", "admission_digest", "ready_digest", "nonce"))
+            or any(body[name] != value for name, value in expected.items())
+            or any(type(body[name]) not in {int, float} or not math.isfinite(body[name]) or body[name] <= 0
+                for name in ("observed_after_fsync_monotonic", "deadline_monotonic"))
+            or body["observed_after_fsync_monotonic"] >= body["deadline_monotonic"]):
+        raise ValueError("original_producer_durability_binding")
+    try:
+        observed = _utc_observation(body["observed_after_fsync_wall"])
+        for name in ("execution_wall_cutoff", "original_deadline_at"):
+            cutoff = datetime.fromisoformat(body[name])
+            if cutoff.tzinfo is None or observed >= cutoff:
+                raise ValueError("late original durability observation")
+        signature = base64.b64decode(envelope["signature"], validate=True)
+        if len(signature) != 64 or base64.b64encode(signature).decode() != envelope["signature"]:
+            raise ValueError("noncanonical original durability signature")
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(ready.public_key, validate=True))
+        key.verify(signature, DURABILITY_DOMAIN + canonical(body))
+    except (ValueError, TypeError, AttributeError, InvalidSignature) as exc:
+        raise ValueError("original_producer_durability_invalid") from exc
+    return body
 
 
 def original_producer_sources():
@@ -217,7 +292,7 @@ def original_producer_completion_result(witness):
     stored = _PHYSICAL_COMPLETIONS.get(witness) if type(witness) is _OriginalProducerPhysicalCompletion else None
     if stored is None:
         raise ValueError("actual_original_producer_physical_completion_required")
-    descriptor, identity, result, completion_digest, output_digests = stored
+    descriptor, identity, result, completion_digest, output_digests, _ = stored
     metadata = os.fstat(descriptor)
     if (metadata.st_dev, metadata.st_ino) != identity:
         raise ValueError("original_producer_guard_changed")
@@ -227,6 +302,26 @@ def original_producer_completion_result(witness):
             or result["readback"] != result["manifest"]):
         raise ValueError("original_producer_staged_completion_changed")
     return result
+
+
+def original_producer_result_registration(result):
+    """Exact original result/scope identity only; no copied DTO lookup."""
+    if type(result) is not dict:
+        raise ValueError("actual_original_producer_result_required")
+    ready = result.get("original_producer_ready")
+    observed = _READIES.get(ready) if type(ready) is OriginalProducerReady else None
+    if observed is not None:
+        owner = observed[0]
+        live = _LIVE_COMPLETIONS.get(owner)
+        owned = _OWNERS.get(owner)
+        if live is not None and live[0] is result and owned is not None and owned[6] is not None:
+            assert_original_producer_live_completion(owner, result)
+            return json.loads(owned[6])
+    for witness, stored in list(_PHYSICAL_COMPLETIONS.items()):
+        if stored[2] is result:
+            original_producer_completion_result(witness)
+            return json.loads(stored[5])
+    raise ValueError("actual_original_producer_result_required")
 
 
 def _current_native_host_binding(binding):
@@ -310,7 +405,7 @@ def _read_registered_bundle(registration, ready):
         raise ValueError("original_producer_admission_changed")
     return verify_completion(registration["directory_path"], ready, digest(canonical(registration)),
         maximum_output=maximum, expected_deadline=registration["monotonic_deadline"],
-        expected_wall_cutoff=registration["execution_deadline_at"])
+        expected_wall_cutoff=registration["execution_deadline_at"], expected_registration=registration)
 
 
 def _recovered_result(registration, ready, body, outputs):
@@ -330,7 +425,9 @@ def stage_original_producer_related_completion(active_primary, registration):
     keys = ("job_id", "repository_attempt_id", "owner_principal_id", "owner_session_id",
         "root_fence", "root_authority_digest", "original_source_digest", "native_binding",
         "native_host_binding", "guard_path", "original_deadline_at", "producer_sources", "source_artifact_digest")
-    if (registration.get("schema") != PROFILE or any(registration.get(key) != anchor[key] for key in keys)
+    if (registration.get("schema") not in {PROFILE, PROFILE_V2}
+            or registration.get("schema") != anchor.get("schema")
+            or any(registration.get(key) != anchor[key] for key in keys)
             or type(registration.get("iteration_index")) is not int
             or not 1 <= registration["iteration_index"] <= 3
             or registration["iteration_id"] in scope["iterations"] or len(scope["iterations"]) >= 3):
@@ -353,10 +450,23 @@ def stage_original_producer_related_completion(active_primary, registration):
     _assert_registered_host(registration, ready)
     _assert_original_pid_absent(ready)
     body, outputs = _read_registered_bundle(registration, ready)
-    result = _recovered_result(registration, ready, body, outputs)
+    if registration["schema"] == PROFILE:
+        # Retain authentic historical live evidence, never infer old ownerless success.
+        result = None
+        for historical_owner, live in list(_LIVE_COMPLETIONS.items()):
+            owned = _OWNERS.get(historical_owner)
+            if (owned is not None and owned[6] == canonical(registration)
+                    and live[0]["original_producer_completion"] == body and live[0]["outputs"] == outputs):
+                assert_original_producer_live_completion(historical_owner, live[0])
+                result = live[0]
+                break
+        if result is None:
+            raise ValueError("original_producer_ownerless_v2_required")
+    else:
+        result = _recovered_result(registration, ready, body, outputs)
     witness = _OriginalProducerPhysicalCompletion()
     _PHYSICAL_COMPLETIONS[witness] = (scope["descriptor"], ready.guard_identity, result,
-        digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()})
+        digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()}, canonical(registration))
     _PHYSICAL_GROUPS[witness] = weakref.ref(active_primary)
     scope["members"].add(witness)
     scope["iterations"].add(registration["iteration_id"])
@@ -373,9 +483,11 @@ def stage_original_producer_completion(registration, *, owner=None, result=None)
     from src.execution.repo_sandbox import _open_trusted_directory
     from src.execution.repo_supervisor import platform_ready
     platform_ready()
-    if registration.get("schema") != PROFILE:
+    if registration.get("schema") not in {PROFILE, PROFILE_V2}:
         raise ValueError("original_producer_registration_required")
     live = owner is not None or result is not None
+    if not live and registration.get("schema") != PROFILE_V2:
+        raise ValueError("original_producer_ownerless_v2_required")
     if live:
         assert_original_producer_live_completion(owner, result)
         owned = _OWNERS[owner]
@@ -425,7 +537,7 @@ def stage_original_producer_completion(registration, *, owner=None, result=None)
             staged = _recovered_result(registration, ready, body, outputs)
         witness = _OriginalProducerPhysicalCompletion()
         _PHYSICAL_COMPLETIONS[witness] = (descriptor, ready.guard_identity, staged,
-            digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()})
+            digest(canonical(body)), {name: digest(raw) for name, raw in outputs.items()}, canonical(registration))
         _PHYSICAL_SCOPES[witness] = {"task": _physical_task(), "thread": threading.get_ident(),
             "descriptor": descriptor, "registration": canonical(registration),
             "owned_descriptor": owner.guard_fd if live else descriptor,
@@ -450,6 +562,7 @@ class OriginalProducerOwner:
     guard_fd: int
     register_ready: Callable = field(repr=False)
     authorize_command: Callable = field(repr=False)
+    registration_readback: Callable | None = field(default=None, repr=False)
 
 
 def _enable_original_producer_service(service, jobs):
@@ -483,24 +596,27 @@ def original_producer_preflight(executor):
     return original_producer_sources()
 
 
-async def issue_original_producer_owner(service, jobs, job, *, register_ready, authorize_command):
+async def issue_original_producer_owner(service, jobs, job, *, register_ready, authorize_command, registration_readback):
     """Source-only issuer. Activation is owned by the adopted ADR package."""
     from src.workflows.repo_repair import RepoRepairService
-    from src.workflows.repo_repair_source import assert_repo_iteration_process_binding, read_repository_inventory
+    from src.workflows.repo_repair_source import assert_repo_iteration_process_binding, read_repository_inventory, read_repository_original
     if (type(service) is not RepoRepairService or service.jobs is not jobs
             or _ENABLED_SERVICES.get(service) is not jobs):
         raise ValueError("original_producer_mode_not_enabled")
     assert_repo_iteration_process_binding(job.iteration_binding, job)
     async with jobs._session() as db:
         run = await jobs._fetch(db, job.job_id)
-        if read_repository_inventory(run)["schema"] != "repository.checkpoint_inventory.v3":
-            raise ValueError("original_producer_v3_inventory_required")
+        schema = read_repository_inventory(run)["schema"]
+        if schema not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+            raise ValueError("original_producer_inventory_required")
+        original_deadline = read_repository_original(run)[0]["original_deadline_at"]
     lane = service._iterative_lanes.get(job.job_id)
     if lane is None or lane._descriptor is None:
         raise ValueError("original_producer_owned_lane_required")
     owner = OriginalProducerOwner(job.job_id, job.iteration_binding.iteration_id,
-        lane._descriptor, register_ready, authorize_command)
-    _OWNERS[owner] = (service, jobs, str(lane.lock_path), str(lane.workspace_root))
+        lane._descriptor, register_ready, authorize_command, registration_readback)
+    _OWNERS[owner] = (service, jobs, str(lane.lock_path), str(lane.workspace_root),
+        PROFILE_V2 if schema == "repository.checkpoint_inventory.v4" else PROFILE, original_deadline, None)
     return owner
 
 
@@ -532,6 +648,9 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
         "patch_sha256": digest(job.patch_bytes), "posture": posture,
         "config": executor.config.model_dump(mode="json"),
         "stage_identity": [stage.stat().st_dev, stage.stat().st_ino]}
+    if _OWNERS[owner][4] == PROFILE_V2:
+        payload["original_producer"].update(schema=PROFILE_V2,
+            original_deadline_at=_OWNERS[owner][5], durability_filename=DURABILITY_FILE)
     admission = canonical(payload)
     write_once(directory, "admission.json", admission, maximum=MAX_ENVELOPE)
     os.fsync(directory)
@@ -621,6 +740,18 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
                 or ack.ready_digest != digest(canonical(ready.projection()))
                 or len(ack.registration_digest) != 64):
             raise ValueError("original_producer_actual_registration_ack_required")
+        registered = owner.registration_readback() if callable(owner.registration_readback) else None
+        if (type(registered) is not dict or registered.get("schema") != _OWNERS[owner][4]
+                or registered.get("job_id") != owner.job_id or registered.get("iteration_id") != owner.iteration_id
+                or registered.get("ready") != ready.projection()
+                or registered.get("ready_digest") != ack.ready_digest
+                or digest(canonical(registered)) != ack.registration_digest
+                or registered.get("admission_digest") != digest(admission)
+                or registered.get("monotonic_deadline") != payload["deadline_at"]
+                or registered.get("execution_deadline_at") != job.execution_deadline_at
+                or registered.get("original_deadline_at") != _OWNERS[owner][5]):
+            raise ValueError("original_producer_registration_readback_changed")
+        _OWNERS[owner] = (*_OWNERS[owner][:6], canonical(registered))
         send(parent, {"kind": "registered", "registration_digest": ack.registration_digest,
                       "ready_digest": ack.ready_digest})
         process.stdin.write((payload["token"] + "\n").encode())
@@ -650,7 +781,7 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
             raise ValueError("original_producer_completion_unproven")
         body, outputs = verify_completion(directory_path, ready, ack.registration_digest,
             maximum_output=executor.limits.max_output_bytes, expected_deadline=payload["deadline_at"],
-            expected_wall_cutoff=job.execution_deadline_at)
+            expected_wall_cutoff=job.execution_deadline_at, expected_registration=registered)
         observe_process(None)
         result = {"status": body["manifest"]["status"], "manifest": body["manifest"],
                 "readback": body["manifest"], "outputs": outputs,
@@ -725,6 +856,44 @@ def write_once(directory, name, raw, *, maximum):
         os.unlink(temporary, dir_fd=directory)
 
 
+def _proof_cutoff(deadline, execution_cutoff, original_cutoff):
+    now = time.monotonic()
+    wall = datetime.now(timezone.utc)
+    if now >= deadline or wall >= execution_cutoff or wall >= original_cutoff:
+        raise ValueError("original_producer_durability_deadline")
+
+
+def _write_durability_once(directory, raw, *, deadline, execution_cutoff, original_cutoff):
+    """No new proof syscall after expiry, including after an in-flight return."""
+    if len(raw) > MAX_DURABILITY:
+        raise ValueError("original_producer_durability_bound")
+    temporary = "." + secrets.token_hex(16)
+    _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600, dir_fd=directory)
+    try:
+        offset = 0
+        while offset < len(raw):
+            _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                raise ValueError("original_producer_durability_write")
+            offset += written
+        _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+        os.fsync(fd)
+        _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+        os.link(temporary, DURABILITY_FILE, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+        os.unlink(temporary, dir_fd=directory)
+        _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+        os.fsync(directory)
+        # A late final syscall may leave valid historical proof, never live success.
+        _proof_cutoff(deadline, execution_cutoff, original_cutoff)
+    finally:
+        # On expiry/error leave incomplete temporary evidence held; no proof retry.
+        os.close(fd)
+
+
 def send(control, value):
     raw = canonical(value)
     if len(raw) > MAX_MESSAGE or control.send(raw) != len(raw):
@@ -791,7 +960,7 @@ class ProducerControl:
 
 
 def verify_completion(directory_path, ready, registration_digest, *, maximum_output, expected_deadline=None,
-                      expected_wall_cutoff=None):
+                      expected_wall_cutoff=None, expected_registration=None):
     """Read original registered identity only; signature is never self-issued."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature
@@ -803,14 +972,22 @@ def verify_completion(directory_path, ready, registration_digest, *, maximum_out
         identity = os.fstat(directory)
         if (identity.st_dev, identity.st_ino) != ready.directory_identity or identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) != 0o700:
             raise ValueError("original_producer_directory_changed")
-        envelope = json.loads(read_file(directory, "completion.json", MAX_ENVELOPE))
+        completion_raw = read_file(directory, "completion.json", MAX_ENVELOPE)
+        envelope = _closed_json(completion_raw)
         if not isinstance(envelope, dict) or set(envelope) != {"completion", "signature"}:
             raise ValueError("original_producer_envelope_schema")
         body = envelope["completion"]
+        selected_v2 = expected_registration is not None and expected_registration.get("schema") == PROFILE_V2
+        if expected_registration is not None and (
+                expected_registration.get("schema") not in {PROFILE, PROFILE_V2}
+                or digest(canonical(expected_registration)) != registration_digest
+                or expected_registration.get("ready") != ready.projection()):
+            raise ValueError("original_producer_completion_registration")
         required = {"schema", "ready", "registration_digest", "admission_digest", "outcome",
                     "manifest", "outputs", "finished_monotonic", "deadline_monotonic",
                     "finished_wall", "execution_wall_cutoff"}
-        if (not isinstance(body, dict) or set(body) != required or body["schema"] != COMPLETION or body["ready"] != ready.projection()
+        if (not isinstance(body, dict) or set(body) != required
+                or body["schema"] != (COMPLETION_V2 if selected_v2 else COMPLETION) or body["ready"] != ready.projection()
                 or body["registration_digest"] != registration_digest
                 or body["admission_digest"] != ready.admission_digest
                 or any(type(body[name]) not in (int, float) or not math.isfinite(body[name])
@@ -833,7 +1010,11 @@ def verify_completion(directory_path, ready, registration_digest, *, maximum_out
             raise ValueError("original_producer_completion_schema")
         key = Ed25519PublicKey.from_public_bytes(base64.b64decode(ready.public_key, validate=True))
         try:
-            key.verify(base64.b64decode(envelope["signature"], validate=True), DOMAIN + canonical(body))
+            signature = base64.b64decode(envelope["signature"], validate=True)
+            if selected_v2 and (len(signature) != 64 or base64.b64encode(signature).decode() != envelope["signature"]):
+                raise ValueError("original_producer_completion_signature")
+            key.verify(signature,
+                (DOMAIN_V2 if selected_v2 else DOMAIN) + canonical(body))
         except InvalidSignature as exc:
             raise ValueError("original_producer_signature_invalid") from exc
         outputs = {}
@@ -853,6 +1034,19 @@ def verify_completion(directory_path, ready, registration_digest, *, maximum_out
                 or outputs["manifest.json"] != outputs["readback.json"]
                 or json.loads(outputs["manifest.json"]) != body["manifest"]):
             raise ValueError("original_producer_full_readback_required")
+        if selected_v2:
+            if (canonical(envelope) != completion_raw
+                    or body["manifest"].get("supervisor_transport", {}).get("transport_kind") != "original_producer_durable_v2"
+                    or body["deadline_monotonic"] != expected_registration["monotonic_deadline"]
+                    or body["execution_wall_cutoff"] != expected_registration["execution_deadline_at"]):
+                raise ValueError("original_producer_completion_version")
+            admission_raw = read_file(directory, "admission.json", MAX_ENVELOPE)
+            durable = _closed_json(admission_raw).get("original_producer", {})
+            if (durable.get("schema") != PROFILE_V2 or durable.get("durability_filename") != DURABILITY_FILE
+                    or durable.get("original_deadline_at") != expected_registration["original_deadline_at"]):
+                raise ValueError("original_producer_admission_version")
+            _verify_durability(read_file(directory, DURABILITY_FILE, MAX_DURABILITY),
+                completion_raw, expected_registration, ready, admission_raw)
         return body, outputs
     finally:
         os.close(directory)
@@ -866,6 +1060,11 @@ def child_main(request, control_fd, guard_fd):
     directory = _open_trusted_directory(Path(request).parent)
     job = json.loads(read_file(directory, Path(request).name, MAX_ENVELOPE))
     durable = job["original_producer"]
+    selected_v2 = durable.get("schema") == PROFILE_V2
+    if "schema" in durable and not selected_v2:
+        raise ValueError("original_producer_admission_version")
+    if selected_v2 and durable.get("durability_filename") != DURABILITY_FILE:
+        raise ValueError("original_producer_admission_version")
     if Path(durable["directory"]) != Path(request).parent:
         raise ValueError("original_producer_admission_directory")
     if durable["sources"] != original_producer_sources():
@@ -907,7 +1106,7 @@ def child_main(request, control_fd, guard_fd):
         finished = time.monotonic()
         if finished >= job["deadline_at"]:
             raise ValueError("original_producer_publication_deadline")
-        body = {"schema": COMPLETION, "ready": ready.projection(),
+        body = {"schema": COMPLETION_V2 if selected_v2 else COMPLETION, "ready": ready.projection(),
                 "registration_digest": ack["registration_digest"], "admission_digest": ready.admission_digest,
                 "outcome": outcome, "manifest": manifest,
                 "outputs": {name: {"sha256": digest(raw), "size_bytes": len(raw)} for name, raw in outputs.items()},
@@ -918,9 +1117,29 @@ def child_main(request, control_fd, guard_fd):
         if cutoff.tzinfo is None or datetime.fromisoformat(body["finished_wall"]) >= cutoff:
             raise ValueError("original_producer_wall_deadline")
         encoded = canonical({"completion": body,
-            "signature": base64.b64encode(key.sign(DOMAIN + canonical(body))).decode()})
+            "signature": base64.b64encode(key.sign((DOMAIN_V2 if selected_v2 else DOMAIN) + canonical(body))).decode()})
         write_once(directory, "completion.json", encoded, maximum=MAX_ENVELOPE)
         os.fsync(directory)
+        if selected_v2:
+            original_cutoff = datetime.fromisoformat(durable["original_deadline_at"])
+            if original_cutoff.tzinfo is None:
+                raise ValueError("original_producer_durability_timestamp")
+            # These observations follow the FINAL MATERIAL fsync, not proof persistence.
+            observed = time.monotonic()
+            observed_wall = datetime.now(timezone.utc)
+            if observed >= job["deadline_at"] or observed_wall >= cutoff or observed_wall >= original_cutoff:
+                raise ValueError("original_producer_durability_deadline")
+            proof = {"schema": DURABILITY, "completion_sha256": digest(encoded),
+                "registration_digest": ack["registration_digest"], "admission_digest": ready.admission_digest,
+                "ready_digest": ack["ready_digest"], "boot_id": ready.boot_id, "nonce": ready.nonce,
+                "observed_after_fsync_monotonic": observed, "deadline_monotonic": job["deadline_at"],
+                "observed_after_fsync_wall": observed_wall.isoformat(),
+                "execution_wall_cutoff": body["execution_wall_cutoff"],
+                "original_deadline_at": durable["original_deadline_at"]}
+            proof_raw = canonical({"durability": proof,
+                "signature": base64.b64encode(key.sign(DURABILITY_DOMAIN + canonical(proof))).decode()})
+            _write_durability_once(directory, proof_raw, deadline=job["deadline_at"],
+                execution_cutoff=cutoff, original_cutoff=original_cutoff)
         if time.monotonic() >= job["deadline_at"] or datetime.now(timezone.utc) >= cutoff:
             raise ValueError("original_producer_publication_deadline")
         return 0

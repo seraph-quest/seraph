@@ -522,10 +522,78 @@ def read_programme_identity(certificate, identity):
 
 
 
-def _validate_fts_metadata(connection,budget,objects, *, _header_budget=None):
+def _selected_schema_census_sql():
+    """Closed ORIGINAL schema policy; no caller SQL or schema-name input."""
+    def quote(value):
+        return "'" + value.replace("'", "''") + "'"
+    def members(values):
+        return ", ".join(quote(value) for value in sorted(values))
+    tables = {*_SCHEMA_TABLES, "alembic_version"}
+    auto_max = dict(_AUTO_MAX)
+    auto_max.setdefault("alembic_version", 1)
+    auto_cases = []
+    for table, bound in sorted(auto_max.items()):
+        prefix = "sqlite_autoindex_" + table + "_"
+        suffix = f"substr(name, {len(prefix) + 1})"
+        auto_cases.append(f"WHEN tbl_name = {quote(table)} THEN ("
+            f"{suffix} <> '' AND instr(name, char(0)) = 0 AND "
+            f"{suffix} NOT GLOB '*[^0-9]*' AND CAST({suffix} AS INTEGER) BETWEEN 1 AND {bound})")
+    auto = "CASE " + " ".join(auto_cases) + " ELSE 0 END"
+    prefix = "'sqlite_autoindex_' || tbl_name || '_'"
+    task_names = {"ix_task_method_active_goal_id", "ix_task_method_active_owner_identity_id"}
+    index = (f"CASE WHEN substr(name, 1, length({prefix})) = ({prefix}) COLLATE BINARY THEN ({auto}) "
+        f"WHEN tbl_name = 'task_method_active' OR name IN ({members(task_names)}) "
+        f"THEN (tbl_name = 'task_method_active' AND name IN ({members(task_names)})) "
+        f"ELSE (tbl_name IN ({members(tables)}) AND name IN ({members(_NAMED_INDEXES)})) END")
+    triggers = [f"(name = {quote(name)} AND tbl_name = {quote(spec[1])})"
+        for name, spec in _FTS_SQL.items() if spec[0] == "trigger"]
+    trigger = ("(tbl_name = 'operator_sessions' AND name IN "
+        "('operator_principal_required_insert', 'operator_principal_required_update')) OR "
+        + " OR ".join(triggers))
+    valid = (f"CASE type WHEN 'table' THEN (name = tbl_name COLLATE BINARY AND "
+        f"name IN ({members(tables | {'sqlite_sequence'} | set(_FTS_META))})) "
+        f"WHEN 'index' THEN ({index}) WHEN 'trigger' THEN ({trigger}) ELSE 0 END")
+    ordinal = "CASE name " + " ".join(f"WHEN {quote(name)} THEN {index}"
+        for index, name in enumerate(_FTS_SQL, 1)) + " ELSE 0 END"
+    return ("WITH capped AS (SELECT rowid, "
+        "CASE WHEN octet_length(type) <= 7 THEN type END AS type, "
+        "CASE WHEN octet_length(name) <= 128 THEN name END AS name, "
+        "CASE WHEN octet_length(tbl_name) <= 128 THEN tbl_name END AS tbl_name "
+        "FROM sqlite_schema ORDER BY rowid LIMIT 1360) "
+        f"SELECT rowid, CASE WHEN ({valid}) THEN 1 ELSE 0 END AS original_object_valid, "
+        f"{ordinal} AS original_fts_name_ordinal FROM capped ORDER BY rowid LIMIT 1360")
+
+
+def _projected_schema_objects(connection, budget, *, _header_budget):
+    if type(budget) is not HeaderReadBudget or _header_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    rows = _metadata_rows(connection, _selected_schema_census_sql(), (),
+        _header_budget=_header_budget, upper=_metadata_upper(1360, (20, 20, 20)),
+        appearance=("complete-schema",))
+    if any(len(row) != 3 or any(type(value) is not int for value in row)
+            or not -(2**63) <= row[0] < 2**63 or row[1] not in (0, 1)
+            or not 0 <= row[2] <= len(_FTS_SQL) for row in rows):
+        raise HeaderBoundsError("header_schema_object_unavailable")
+    if len(rows) > _SCHEMA_LIMIT:
+        raise HeaderBoundsError("header_schema_object_bound")
+    if any(row[1] != 1 for row in rows):
+        raise HeaderBoundsError("header_schema_object_unavailable")
+    for phase in ("source-name-delivery", "name-list-copy", "name-set-copy"):
+        _metadata_precharge(connection, budget, _metadata_upper(15, (770,)),
+            ("complete-schema-fts-decoding", phase))
+    for phase in ("ordinal-visits", "ordinal-set-copy", "ordinal-sorted-copy"):
+        _metadata_precharge(connection, budget, _metadata_upper(1360, (20,)),
+            ("complete-schema-fts-decoding", phase))
+    ordinals = sorted({ordinal for _rowid, _valid, ordinal in rows if ordinal})
+    names = tuple(_FTS_SQL)
+    return {names[ordinal - 1] for ordinal in ordinals}
+
+
+def _validate_fts_metadata(connection,budget,objects, *, _header_budget=None, _present_fts=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
-    present={name for _rowid,_kind,name,_table in objects if name in _FTS_SQL}
+    present=({name for _rowid,_kind,name,_table in objects if name in _FTS_SQL}
+        if _present_fts is None else _present_fts)
     if not present:return  # An isolated pre-initialization/model-only schema.
     if present!=set(_FTS_SQL):raise HeaderBoundsError("header_fts_metadata_changed")
     for name,(kind,table,expected_sql) in _FTS_SQL.items():
@@ -568,27 +636,31 @@ def preflight_composition_superset(connection,budget, *, raw_owner=None, _header
     cookies=_snapshot_schema_cookies(connection,budget,_header_budget=_header_budget) if raw_owner is not None else None
     if tuple(map(int,_metadata_scalar(connection,"SELECT sqlite_version()", _header_budget=_header_budget, width=770, appearance=("sqlite-version",), bounded_query="SELECT CASE WHEN octet_length(sqlite_version())<=128 THEN sqlite_version() END").split('.'))) < (3,43,0) or _metadata_scalar(connection,"PRAGMA encoding", _header_budget=_header_budget, width=32, appearance=("sqlite-encoding",))!="UTF-8":
         raise HeaderBoundsError("header_sqlite_version_unsupported")
-    objects=_metadata_rows(connection, 'SELECT rowid,CASE WHEN octet_length(type)<=7 THEN type END,'
-        'CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(tbl_name)<=128 THEN tbl_name END '
-        'FROM sqlite_schema ORDER BY rowid LIMIT 1360', (), _header_budget=_header_budget, upper=_metadata_upper(1360, (20,44,770,770)), appearance=('complete-schema',))
-    if len(objects)>_SCHEMA_LIMIT:raise HeaderBoundsError("header_schema_object_bound")
-    for _id,kind,name,table in objects:
-        if kind=="table":valid=name==table and name in {*_SCHEMA_TABLES,"sqlite_sequence","alembic_version",*_FTS_META}
-        elif kind=="index":
-            valid=table in {*_SCHEMA_TABLES,"alembic_version"} and name in _NAMED_INDEXES
-            task_method_indexes={"ix_task_method_active_goal_id","ix_task_method_active_owner_identity_id"}
-            if table=="task_method_active" or name in task_method_indexes:
-                valid=table=="task_method_active" and name in task_method_indexes
-            prefix="sqlite_autoindex_"+str(table)+"_"
-            if isinstance(name,str) and name.startswith(prefix):
-                suffix=name[len(prefix):]
-                valid=suffix.isascii() and suffix.isdecimal() and 1<=int(suffix)<=_AUTO_MAX.get(table,1 if table=="alembic_version" else 0)
-        elif kind=="trigger":valid=(table=="operator_sessions" and name in {"operator_principal_required_insert","operator_principal_required_update"}) or (name in _FTS_SQL and _FTS_SQL[name][:2]==("trigger",table))
-        else:valid=False
-        if not valid:raise HeaderBoundsError("header_schema_object_unavailable")
     if _header_budget is None:
-        budget.debit(_metadata_cost([list(r) for r in objects]), appearance=("complete-schema",))
-    _validate_fts_metadata(connection,budget,objects,_header_budget=_header_budget)
+        objects=_metadata_rows(connection, 'SELECT rowid,CASE WHEN octet_length(type)<=7 THEN type END,'
+            'CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(tbl_name)<=128 THEN tbl_name END '
+            'FROM sqlite_schema ORDER BY rowid LIMIT 1360', (), _header_budget=_header_budget, upper=_metadata_upper(1360, (20,44,770,770)), appearance=('complete-schema',))
+        if len(objects)>_SCHEMA_LIMIT:raise HeaderBoundsError("header_schema_object_bound")
+        for _id,kind,name,table in objects:
+            if kind=="table":valid=name==table and name in {*_SCHEMA_TABLES,"sqlite_sequence","alembic_version",*_FTS_META}
+            elif kind=="index":
+                valid=table in {*_SCHEMA_TABLES,"alembic_version"} and name in _NAMED_INDEXES
+                task_method_indexes={"ix_task_method_active_goal_id","ix_task_method_active_owner_identity_id"}
+                if table=="task_method_active" or name in task_method_indexes:
+                    valid=table=="task_method_active" and name in task_method_indexes
+                prefix="sqlite_autoindex_"+str(table)+"_"
+                if isinstance(name,str) and name.startswith(prefix):
+                    suffix=name[len(prefix):]
+                    valid=suffix.isascii() and suffix.isdecimal() and 1<=int(suffix)<=_AUTO_MAX.get(table,1 if table=="alembic_version" else 0)
+            elif kind=="trigger":valid=(table=="operator_sessions" and name in {"operator_principal_required_insert","operator_principal_required_update"}) or (name in _FTS_SQL and _FTS_SQL[name][:2]==("trigger",table))
+            else:valid=False
+            if not valid:raise HeaderBoundsError("header_schema_object_unavailable")
+        if _header_budget is None:
+            budget.debit(_metadata_cost([list(r) for r in objects]), appearance=("complete-schema",))
+        _validate_fts_metadata(connection,budget,objects,_header_budget=_header_budget)
+    else:
+        present = _projected_schema_objects(connection, budget, _header_budget=_header_budget)
+        _validate_fts_metadata(connection, budget, None, _header_budget=_header_budget, _present_fts=present)
     allrows={}
     for descriptor in COMPOSITION_DESCRIPTORS.values():
         ids=_discover(connection,descriptor,budget,remaining=MAX_ROWS-len(allrows),

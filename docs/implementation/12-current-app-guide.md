@@ -1786,13 +1786,18 @@ validation.
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
 Bounded iterative repository work and original-producer recovery are **Planned**
-branch-local targets under [ADR-030](./decisions/030-bounded-iterative-repository-work.md).
-Only new originally registered v3 producers can authorize its bounded cleanup
-mode; read-only Unknown projections and historical inventories cannot.
+branch-local targets under [ADR-030](./decisions/030-bounded-iterative-repository-work.md)
+and its [ADR-032 recovery amendment](./decisions/032-repository-crash-recovery-evidence.md).
+New v4 admissions require proof that the saved work was flushed before the
+original deadline and a stable task identity independent of login refresh.
+Missing producer registration keeps uncertain v3/v4 work on hold; it never
+authorizes a retry. Older records cannot acquire the new proof retrospectively.
 Same-boot producer loss retains visible held debt. Separately gated actual
 same-host boot settlement changes only the physical hold, preserving Unknown
 task/result and contacted costs. This accepted target does not enable recovery
-or establish implementation receipts; ordinary repair behavior below is unchanged.
+or establish implementation receipts. The public recovery action stays unavailable
+until implementation and actual crash/restart acceptance; ordinary repair behavior
+below is unchanged.
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

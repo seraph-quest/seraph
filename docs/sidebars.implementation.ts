@@ -23,6 +23,8 @@ const sidebars: SidebarsConfig = {
             'decisions/evidence-bound-guardian-opportunities',
             'decisions/purpose-specific-openrouter-routes',
             'decisions/all-plugin-cordis-architecture',
+            'decisions/bounded-iterative-repository-work',
+            'decisions/repository-crash-recovery-evidence',
           ],
         },
         'docs-contract',

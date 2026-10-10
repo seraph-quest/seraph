@@ -23,14 +23,18 @@ adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
 **Bounded iterative repository work and original-producer recovery: Planned.**
-[ADR-030](./decisions/030-bounded-iterative-repository-work.md) accepts a
-branch-local target with original v3 producer registration before dispatch,
-authenticated durable cleanup, exact Source/current-row CAS and protected
-startup lineage. Architecture acceptance supplies no implementation or recovery
-activation proof. Same-boot producer loss remains held Unknown; a separately
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md), amended by
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md), defines the
+branch-local target. New v4 admissions require original producer registration,
+proof recorded after material-bundle fsync, a separate immutable recovery
+commitment and fresh Source/current-row CAS. Startup protects uncertain v3/v4
+lineage even when registration is missing. These are target rules, with no
+implementation or recovery activation proof. Same-boot producer loss without
+authentic closure remains held Unknown; a separately
 gated actual same-host boot can settle only physical cleanup, preserving
 task/result uncertainty and contacted cost debt under `isolation_claim=none`.
-Historical v1/v2 authority and ordinary executor/publication behavior remain.
+Historical v1/v2 authority and ordinary executor/publication behavior remain;
+v3 records cannot be retroactively upgraded to v4 proof.
 
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate

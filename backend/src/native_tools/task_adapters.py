@@ -331,6 +331,42 @@ class ToolRegistry:
     def start(self):
         self.started = True
 
+    def _repository_runtime_block_reason(self, mode):
+        """Pure stock-owner availability, never physical readiness or a grant."""
+        reason = _repository_work_block_reason(mode)
+        if reason is not None or type(self) is not ToolRegistry:
+            return reason
+        from config.settings import settings
+        from src.work_board.general_task import GeneralTaskService
+        from src.workflows.repo_repair import RepoRepairService
+        from src.execution.repo_sandbox import LocalRepoRepairExecutor
+        from src.execution.repo_node import NodeRepoRepairExecutor
+        from pathlib import Path
+        service, dispatcher = self.delegation_service, self.communication_dispatcher
+        if (type(service) is not GeneralTaskService or not service.started or service.registry is not self
+                or dispatcher is None or getattr(dispatcher, "general_tasks", None) is not service):
+            return "repository_source_unavailable"
+        source = service.repository_source_service
+        adapter = service.repository_work_adapter
+        if (type(source) is not RepoRepairService or getattr(source, "jobs", None) is None
+                or source.jobs is not getattr(dispatcher, "jobs", None)
+                or not callable(getattr(source, "session_factory", None))
+                or getattr(source, "session_factory", None) is not getattr(dispatcher, "session_provider", None)
+                or getattr(adapter, "__self__", None) is not source
+                or getattr(adapter, "__func__", None) is not RepoRepairService.native_iteration_adapter):
+            return "repository_source_unavailable"
+        selected = settings.repo_sandbox
+        executor_type = NodeRepoRepairExecutor if selected.profile == "repo-node24-npm-v1" else LocalRepoRepairExecutor
+        executor = getattr(source, "sandbox", None)
+        if (type(executor) is not executor_type or getattr(executor, "config", None) != selected
+                or getattr(source, "workspace_dir", None) != settings.workspace_dir
+                # Match the executor constructor's lexical normalization; do
+                # not resolve or probe the filesystem during enumeration.
+                or str(getattr(executor, "workspace_dir", "")) !=
+                    str(Path(source.workspace_dir).expanduser().absolute())):
+            return "repository_configuration_changed"
+        return None
+
     def compile_capacity(self, descriptor):
         from src.tools.approval import ApprovalTool
         entry = self._entries().get(descriptor.tool_id)
@@ -387,7 +423,7 @@ class ToolRegistry:
         mode = policy_snapshot["tool_mode"]
         mcp_mode = policy_snapshot["mcp_mode"]
         entries = {}
-        if _repository_work_block_reason(mode) is None:
+        if self._repository_runtime_block_reason(mode) is None:
             repository = repository_work_descriptor()
             entries[repository.tool_id] = (repository, None, False)
         from config.settings import settings
@@ -442,7 +478,7 @@ class ToolRegistry:
         if "repository_work" not in active:
             from src.tools.policy import get_task_policy_snapshot
             blocked.append({"tool_id": "repository_work",
-                "reason": _repository_work_block_reason(get_task_policy_snapshot()["tool_mode"])
+                "reason": self._repository_runtime_block_reason(get_task_policy_snapshot()["tool_mode"])
                     or "repository_configuration_changed"})
         if self.mcp_runtime is not None:
             from src.tools.policy import get_tool_source_context

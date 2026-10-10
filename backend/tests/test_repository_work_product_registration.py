@@ -1,5 +1,7 @@
 """Stock catalog and original Python lifecycle; no fixture registry authority."""
 import socket
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,61 @@ from src.work_board.general_task import current_task_service, digest
 from src.workflows.job_runtime import durable_job_repository
 from tests.test_inference_accounting import accounting_db
 from tests.test_repo_work_contracts import selection
+
+
+async def canonical_selector_update(**changes):
+    """The actual existing settings writer, under its original short fence."""
+    from src.api.settings import RepoSandboxSettingsRequest, _persist_repo_sandbox_selector_update
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        _persist_repo_sandbox_selector_update(RepoSandboxSettingsRequest(**changes))
+
+
+async def canonical_rows(dispatcher):
+    from sqlalchemy import select
+    from sqlmodel import SQLModel
+    async with dispatcher.session_provider() as db:
+        return {table.name: tuple(tuple(row) for row in (await db.execute(select(table))).all())
+            for table in SQLModel.metadata.sorted_tables}
+
+
+def owned_runtime(source):
+    return (source, source.sandbox, source.jobs, source.session_factory,
+        source._iterative_lanes, source._iterative_model_callbacks,
+        source._iterative_process_callbacks, source._iterative_process_jobs)
+
+
+def metadata_projection(service, monkeypatch, engine):
+    """Deny effect/physical probes only while enumerating the existing catalog."""
+    from src.execution.repo_sandbox import LocalRepoRepairExecutor, RootlessDockerRepoSandbox
+    from src.execution.repo_node import NodeRepoRepairExecutor
+    from src.workflows.repo_repair import RepoRepairService
+    from src.workflows import repo_repair_source
+    from sqlalchemy import event
+    def deny(*args, **kwargs):
+        raise AssertionError('runtime catalog must not perform physical/provider/SQL work')
+    # Deny SQL without replacing the original provider identity being checked.
+    with monkeypatch.context() as metadata:
+        metadata.setattr(Path, 'open', deny)
+        metadata.setattr(Path, 'read_text', deny)
+        metadata.setattr(Path, 'stat', deny)
+        metadata.setattr(subprocess, 'Popen', deny)
+        metadata.setattr(subprocess, 'run', deny)
+        metadata.setattr(RootlessDockerRepoSandbox, 'preflight', deny)
+        metadata.setattr(LocalRepoRepairExecutor, 'preflight', deny)
+        metadata.setattr(LocalRepoRepairExecutor, 'iterative_preflight', deny)
+        metadata.setattr(NodeRepoRepairExecutor, 'preflight', deny)
+        metadata.setattr(RepoRepairService, '_workspace', deny)
+        metadata.setattr(repo_repair_source, '_assert_task_publication_configuration', deny)
+        metadata.setattr('src.workflows.repo_repair.FallbackLiteLLMModel', deny)
+        source = service.repository_source_service
+        if source is not None:
+            metadata.setattr(source, 'model_factory', deny)
+        event.listen(engine.sync_engine, 'before_cursor_execute', deny)
+        try:
+            return ({item.tool_id for item in service.registry.descriptors()}, service.registry.blocked_tools())
+        finally:
+            event.remove(engine.sync_engine, 'before_cursor_execute', deny)
 
 
 @pytest.fixture(autouse=True)
@@ -220,3 +277,147 @@ async def test_nested_stock_owner_denies_before_selector_restore(accounting_db, 
     assert dispatcher.general_tasks is None
     assert not service.started and not registry.started
     assert registry.communication_dispatcher is None
+
+
+async def test_live_enable_after_disabled_startup_keeps_absent_source_blocked(accounting_db, monkeypatch):
+    workspace, engine, _ = accounting_db
+    workspace.chmod(0o700)
+    persist_repo_sandbox_settings(RepoSandboxSettings())
+    dispatcher = dispatcher_for(accounting_db)
+    with current_task_service(dispatcher=dispatcher) as service:
+        assert service.repository_source_service is None
+        before = await canonical_rows(dispatcher)
+        await canonical_selector_update(enabled=True)
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' not in tools
+        assert {'tool_id': 'repository_work', 'reason': 'repository_source_unavailable'} in blocked
+        assert service.repository_source_service is None and service.repository_work_adapter is None
+        assert dispatcher.general_tasks is service and service.started
+        await canonical_selector_update(enabled=False)
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' not in tools
+        assert {'tool_id': 'repository_work', 'reason': 'repository_executor_disabled'} in blocked
+        assert await canonical_rows(dispatcher) == before
+
+
+@pytest.mark.parametrize('profile', ['repo-python-pytest-v1', 'repo-node24-npm-v1'])
+async def test_live_disable_restore_and_profile_change_preserve_original_owner(accounting_db, monkeypatch, profile):
+    workspace, engine, _ = accounting_db
+    workspace.chmod(0o700)
+    selected = RepoSandboxSettings(enabled=True, profile=profile)
+    persist_repo_sandbox_settings(selected)
+    dispatcher = dispatcher_for(accounting_db)
+    with current_task_service(dispatcher=dispatcher) as service:
+        source = service.repository_source_service
+        original = owned_runtime(source)
+        original_adapter = service.repository_work_adapter
+        maps = tuple(dict(item) for item in original[4:])
+        before = await canonical_rows(dispatcher)
+        tools, _ = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' in tools
+        await canonical_selector_update(enabled=False)
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' not in tools
+        assert {'tool_id': 'repository_work', 'reason': 'repository_executor_disabled'} in blocked
+        await canonical_selector_update(enabled=True)
+        tools, _ = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' in tools
+        changed_profile = 'repo-node24-npm-v1' if profile == 'repo-python-pytest-v1' else 'repo-python-pytest-v1'
+        await canonical_selector_update(profile=changed_profile)
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' not in tools
+        assert {'tool_id': 'repository_work', 'reason': 'repository_configuration_changed'} in blocked
+        await canonical_selector_update(profile=profile, node_runtime_path='/original-owner-stale-node')
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' not in tools
+        assert {'tool_id': 'repository_work', 'reason': 'repository_configuration_changed'} in blocked
+        await canonical_selector_update(node_runtime_path=selected.node_runtime_path)
+        tools, _ = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' in tools
+        assert all(actual is expected for actual, expected in zip(owned_runtime(source), original))
+        assert service.repository_work_adapter is original_adapter
+        assert tuple(dict(item) for item in original[4:]) == maps
+        assert await canonical_rows(dispatcher) == before
+
+
+@pytest.mark.parametrize('drift', ['source', 'jobs', 'session', 'adapter', 'service', 'dispatcher', 'dispatcher_reference',
+    'executor', 'workspace', 'executor_workspace'])
+async def test_stock_catalog_blocks_original_owner_drift_without_effects(accounting_db, monkeypatch, drift):
+    workspace, engine, _ = accounting_db
+    workspace.chmod(0o700)
+    persist_repo_sandbox_settings(RepoSandboxSettings(enabled=True))
+    dispatcher = dispatcher_for(accounting_db)
+    with current_task_service(dispatcher=dispatcher) as service:
+        source = service.repository_source_service
+        original = owned_runtime(source)
+        before = await canonical_rows(dispatcher)
+        target, attribute = {
+            'source': (service, 'repository_source_service'), 'jobs': (source, 'jobs'),
+            'session': (source, 'session_factory'), 'adapter': (service, 'repository_work_adapter'),
+            'service': (service.registry, 'delegation_service'), 'dispatcher': (dispatcher, 'general_tasks'),
+            'dispatcher_reference': (service.registry, 'communication_dispatcher'),
+            'executor': (source, 'sandbox'), 'workspace': (source, 'workspace_dir'),
+            'executor_workspace': (source.sandbox, 'workspace_dir'),
+        }[drift]
+        with monkeypatch.context() as corrupt:
+            corrupt.setattr(target, attribute, object() if drift == 'dispatcher_reference' else
+                '/foreign-workspace' if drift in {'workspace', 'executor_workspace'} else None)
+            tools, blocked = metadata_projection(service, monkeypatch, engine)
+            assert 'repository_work' not in tools
+            reason = ('repository_configuration_changed' if drift in {'executor', 'workspace', 'executor_workspace'}
+                else 'repository_source_unavailable')
+            assert {'tool_id': 'repository_work', 'reason': reason} in blocked
+            # Existing policy and disabled-selector reasons retain precedence
+            # even when an original owner/configuration negative also exists.
+            corrupt.setattr(context_manager.get_context(), 'tool_policy_mode', 'safe')
+            _, blocked = metadata_projection(service, monkeypatch, engine)
+            assert {'tool_id': 'repository_work', 'reason': 'tool_policy_denied'} in blocked
+        assert all(actual is expected for actual, expected in zip(owned_runtime(source), original))
+        assert await canonical_rows(dispatcher) == before
+
+
+async def test_custom_registry_lifecycle_remains_descriptor_owned(accounting_db):
+    class CustomRegistry:
+        def __init__(self):
+            self.started = False
+            self.descriptor_reads = 0
+        def start(self):
+            self.started = True
+        def stop(self):
+            self.started = False
+        def descriptors(self):
+            self.descriptor_reads += 1
+            return []
+    registry = CustomRegistry()
+    dispatcher = dispatcher_for(accounting_db)
+    with current_task_service(registry=registry, dispatcher=dispatcher) as service:
+        assert service.registry is registry and service.started
+        assert service.repository_source_service is None and service.repository_work_adapter is None
+        assert registry.descriptor_reads == 1
+        assert registry.communication_dispatcher is dispatcher
+    assert dispatcher.general_tasks is None and not service.started and not registry.started
+    assert registry.communication_dispatcher is None
+
+
+async def test_stock_owner_trailing_slash_workspace_remains_available_without_probes(accounting_db, monkeypatch):
+    workspace, engine, _ = accounting_db
+    workspace.chmod(0o700)
+    configured_workspace = str(workspace) + '/'
+    monkeypatch.setattr(settings, 'workspace_dir', configured_workspace)
+    persist_repo_sandbox_settings(RepoSandboxSettings(enabled=True))
+    dispatcher = dispatcher_for(accounting_db)
+    with current_task_service(dispatcher=dispatcher) as service:
+        source = service.repository_source_service
+        original = owned_runtime(source)
+        before = await canonical_rows(dispatcher)
+        assert source.workspace_dir == settings.workspace_dir == configured_workspace
+        assert source.sandbox.workspace_dir == workspace
+        tools, blocked = metadata_projection(service, monkeypatch, engine)
+        assert 'repository_work' in tools
+        assert not [item for item in blocked if item['tool_id'] == 'repository_work']
+        descriptor = repository_descriptor(service.registry)
+        witness = service.registry.compile_capacity(descriptor)
+        assert verify_task_tool_capacity(witness,
+            descriptor_digest=digest(descriptor.model_dump(mode='json')))[0] is True
+        assert all(actual is expected for actual, expected in zip(owned_runtime(source), original))
+        assert await canonical_rows(dispatcher) == before

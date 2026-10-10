@@ -53,7 +53,15 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     try:
         registry.communication_dispatcher = dispatcher
         registry.start()
-        if any(item.tool_id == "repository_work" for item in registry.descriptors()):
+        from src.native_tools.task_adapters import ToolRegistry, _repository_work_block_reason
+        from src.tools.policy import get_task_policy_snapshot
+        # Stock runtime descriptors require the owner composed below. Select
+        # this cold startup owner from the original policy/selector instead of
+        # asking the runtime catalog before its service has been bound.
+        repository_selected = (_repository_work_block_reason(get_task_policy_snapshot()["tool_mode"]) is None
+            if type(registry) is ToolRegistry else
+            any(item.tool_id == "repository_work" for item in registry.descriptors()))
+        if repository_selected:
             from src.workflows.repo_repair import RepoRepairService
             source = RepoRepairService(session_factory=dispatcher.session_provider, jobs=dispatcher.jobs)
             service.repository_source_service = source

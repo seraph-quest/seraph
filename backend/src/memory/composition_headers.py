@@ -320,6 +320,35 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
     return result
 
 
+def _selected_whole_locator_bound(connection, descriptor, budget, *, remaining):
+    """Paid numeric envelope for the original ordered locator prefix only."""
+    if type(budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    if type(remaining) is not int or not 0 <= remaining <= MAX_ROWS:
+        raise HeaderBoundsError("header_metadata_bound")
+    # This new private numeric tuple is a separate appearance from SQL rows.
+    _metadata_precharge(connection, budget, 43, ("row-locator-numeric", "facts-copy"))
+    column = descriptor.key
+    rows = _metadata_rows(connection,
+        f'SELECT COUNT(*),COALESCE(SUM(90 + CASE WHEN typeof("{column}")=\'text\' '
+        f'AND octet_length("{column}") BETWEEN 1 AND 512 '
+        f'THEN 6*octet_length("{column}")+2 ELSE 4 END '
+        f'+ CASE WHEN typeof("{column}")=\'integer\' THEN 20 ELSE 4 END),0) '
+        f'FROM (SELECT "{column}" FROM "{descriptor.table}" ORDER BY _rowid_ LIMIT ?)',
+        (remaining + 1,), _header_budget=budget,
+        upper=_metadata_upper(2, (20, 20)), appearance=("row-locator-numeric",))
+    if len(rows) != 1 or len(rows[0]) != 2:
+        raise HeaderBoundsError("header_metadata_bound")
+    count, summed_width = rows[0]
+    if (type(count) is not int or type(summed_width) is not int
+            or not 0 <= count <= remaining + 1 or not 0 <= summed_width <= count * 3184
+            or count == 0 and summed_width != 0):
+        raise HeaderBoundsError("header_metadata_bound")
+    if count > remaining:
+        raise HeaderBoundsError("header_reference_bound")
+    return count, 2 + summed_width + max(0, count - 1)
+
+
 def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None, _header_budget=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
@@ -335,12 +364,26 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
         parameters=(key,2)
     else:
         suffix=''; parameters=((MAX_ROWS if remaining is None else remaining)+1,)
+    selected_whole = _header_budget is not None and key is None and not tombstone
+    if selected_whole:
+        locator_state = _state(connection, _header_budget=_header_budget)
+        locator_cookies = _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget)
+        locator_count, locator_upper = _selected_whole_locator_bound(connection, descriptor, budget,
+            remaining=MAX_ROWS if remaining is None else remaining)
+    else:
+        locator_upper = _metadata_upper((2 if key is not None or tombstone else
+            (MAX_ROWS if remaining is None else remaining)+1), (20,44,20,3074,20))
     column=descriptor.key
     rows=_metadata_rows(connection, f'SELECT _rowid_,typeof("{column}"),octet_length("{column}"),'
         f"CASE WHEN typeof(\"{column}\")='text' THEN CASE WHEN octet_length(\"{column}\") BETWEEN 1 AND 512 THEN \"{column}\" END END,"
-        f"CASE WHEN typeof(\"{column}\")='integer' THEN \"{column}\" END FROM \"{descriptor.table}\""+suffix+' ORDER BY _rowid_ LIMIT ?', parameters, _header_budget=_header_budget, upper=_metadata_upper((2 if key is not None or tombstone else (MAX_ROWS if remaining is None else remaining)+1), (20,44,20,3074,20)), appearance=('row-locator',))
+        f"CASE WHEN typeof(\"{column}\")='integer' THEN \"{column}\" END FROM \"{descriptor.table}\""+suffix+' ORDER BY _rowid_ LIMIT ?', parameters, _header_budget=_header_budget, upper=locator_upper, appearance=('row-locator',))
     if len(rows)>(MAX_ROWS if remaining is None else remaining) and key is None:
         raise HeaderBoundsError("header_reference_bound")
+    if selected_whole:
+        if len(rows) != locator_count or _state(connection, _header_budget=_header_budget) != locator_state:
+            raise HeaderBoundsError("header_snapshot_changed")
+        if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) != locator_cookies:
+            raise HeaderBoundsError("header_schema_cookie_changed")
     ids=[]
     for rowid,kind,_size,string,integer in rows:
         if descriptor.table=="work_board_events":

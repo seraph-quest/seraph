@@ -421,21 +421,29 @@ async def _operator_from_record(
 
 
 @asynccontextmanager
-async def _original_session_operation():
+async def _original_session_operation(*, touch_writer=False):
     """Original Auth lifetime, one frame before inventory or any Root body."""
     from src.memory.header_bounds import HeaderReadBudget
     from src.runtime_plugins.ownership import begin_native_writer
     budget = HeaderReadBudget()
-    async with _auth_touch_lock():
+    touch_lock = None
+    try:
         with original_auth_header_budget(budget):
             async with get_session() as db:
-                if db.info.get("composition_read_guard") is not None:
+                composed = db.info.get("composition_read_guard") is not None
+                if composed or touch_writer:
+                    selected_lock = _auth_touch_lock()
+                    await selected_lock.acquire()
+                    touch_lock = selected_lock
+                if composed:
                     guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
                     db.info["auth_session_budget"] = budget
                     if guard is None:
                         raise RuntimeError("composition_native_writer_required")
                 yield db
-
+    finally:
+        if touch_lock is not None:
+            touch_lock.release()
 
 async def _session_body_cover(db, *, session_id=None, token_hash=None):
     budget = db.info.get("auth_session_budget")
@@ -531,7 +539,7 @@ async def _find_session_record(
 
 
 async def _touch_token(token_hash: str) -> AuthenticatedOperator:
-    async with _original_session_operation() as db:
+    async with _original_session_operation(touch_writer=True) as db:
         now = datetime.now(timezone.utc)
         record, error = await _find_token_record(db, token_hash, now)
         operator = await _operator_from_record(db, record, token_hash=token_hash) if record is not None else None
@@ -635,7 +643,7 @@ async def _authenticate_session(
 
 
 async def _touch_session(session_id: str, *, follow_replacements: bool = False) -> AuthenticatedOperator:
-    async with _original_session_operation() as db:
+    async with _original_session_operation(touch_writer=True) as db:
         now = datetime.now(timezone.utc)
         record, error = await _find_session_record(db, session_id, now, follow_replacements=follow_replacements)
         operator = await _operator_from_record(db, record) if record is not None else None

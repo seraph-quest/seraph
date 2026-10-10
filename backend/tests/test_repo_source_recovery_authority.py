@@ -26,6 +26,80 @@ from tests.test_repo_work_task_publication import _actual_source_callback_journe
 from src.workflows.job_runtime import _digest
 
 
+def _capture_original_issued_bearer(monkeypatch):
+    """Retain only the genuine fixture issuer's in-memory return, never SQL credentials."""
+    from src.auth import service as auth
+    issued = []
+    original = auth.create_session
+
+    async def capture(*args, **kwargs):
+        actual = await original(*args, **kwargs)
+        issued.append(actual)
+        return actual
+
+    monkeypatch.setattr(auth, "create_session", capture)
+    return issued, original
+
+
+async def _refresh_original_bearer_http(monkeypatch, issued, original_issuer, *, owner, jobs, job_id):
+    """Actual app middleware/router refresh; no fake Request, hash or principal."""
+    import httpx
+    from config.settings import settings
+    from src.auth import service as auth
+    from src.db.models import InferenceCostReservation
+    from sqlalchemy import select
+    if len(issued) != 1:
+        pytest.fail("Expected exactly one genuine original session issue")
+    token, original_operator = issued[0]
+    assert original_operator.session_id == owner.session_id
+    assert original_operator.principal.principal_id == owner.principal_id
+    # End the observation before the router's independent genuine refresh call.
+    monkeypatch.setattr(auth, "create_session", original_issuer)
+    from src.app import create_app
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "planner-disposable-password")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    async with jobs._session() as db:
+        before_root = (await jobs._fetch(db, job_id)).model_dump(mode="json")
+        reservations = sorted(row.model_dump_json() for row in
+            (await db.scalars(select(InferenceCostReservation))).all())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app()),
+            base_url="http://localhost", headers={"Origin": "http://localhost:3001"}) as client:
+        client.cookies.set(settings.operator_auth_cookie_name, token)
+        before = await client.get("/api/auth/session")
+        assert before.status_code == 200
+        previous = before.json()
+        assert previous["session_id"] == owner.session_id
+        assert previous["principal_id"] == owner.principal_id
+        refreshed = await client.post("/api/auth/refresh")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["session_id"] == previous["session_id"]
+        assert refreshed.json()["principal_id"] == previous["principal_id"]
+        assert refreshed.json()["absolute_expires_at"] == previous["absolute_expires_at"]
+        new_token = refreshed.cookies.get(settings.operator_auth_cookie_name)
+        if not new_token or new_token == token:
+            pytest.fail("Original HTTP refresh did not rotate its bearer")
+        client.cookies.clear()
+        client.cookies.set(settings.operator_auth_cookie_name, token)
+        retired = await client.get("/api/auth/session")
+        assert retired.status_code == 401
+        assert retired.json() == {"detail": {"code": "session_revoked"}}
+        client.cookies.clear()
+        client.cookies.set(settings.operator_auth_cookie_name, new_token)
+        current = await client.get("/api/auth/session")
+        assert current.status_code == 200
+        for key in ("session_id", "principal_id", "absolute_expires_at"):
+            assert current.json()[key] == previous[key]
+    async with jobs._session() as db:
+        assert (await jobs._fetch(db, job_id)).model_dump(mode="json") == before_root
+        assert sorted(row.model_dump_json() for row in
+            (await db.scalars(select(InferenceCostReservation))).all()) == reservations
+    return reservations
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
 async def test_actual_ownerless_bundle_derives_exact_existing_native_projection(
@@ -296,6 +370,8 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
     from src.workflows import repo_repair_source as source
     from src.workflows import repo_repair_source_recovery as recovery
     captured = {}
+    issued, original_issuer = _capture_original_issued_bearer(monkeypatch) if auth_event == "refresh" else (None, None)
+    refresh_reservations = None
     real_publish = recovery.publish_original_repository_completion
     real_append = source._append_repository_record
 
@@ -387,11 +463,8 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
         current_operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
         assert current_operator.session_id == kwargs["owner"].session_id
     elif auth_event == "refresh":
-        current_operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=False)
-        token, refreshed = await auth.create_session(replace_session_id=current_operator.session_id,
-            expected_token_hash=current_operator._token_hash)
-        assert refreshed.session_id == current_operator.session_id
-        assert (await auth.authenticate_token(token, touch=False)).session_id == current_operator.session_id
+        refresh_reservations = await _refresh_original_bearer_http(monkeypatch, issued, original_issuer,
+            owner=kwargs["owner"], jobs=jobs, job_id=kwargs["job_id"])
     if auth_event != "unchanged":
         async with jobs._session() as db:
             current_auth = (await db.get(OperatorSession, kwargs["owner"].session_id)).model_dump(mode="json")
@@ -447,6 +520,11 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
         assert {key: value for key, value in after.items() if key not in {"revision", "checkpoint_receipts_json"}} == {
             key: value for key, value in captured["before"].items() if key not in {"revision", "checkpoint_receipts_json"}}
         assert jobs._repo_repair_reservation_state(run)["status"] == "held"
+        if refresh_reservations is not None:
+            from sqlalchemy import select
+            from src.db.models import InferenceCostReservation
+            assert sorted(row.model_dump_json() for row in
+                (await db.scalars(select(InferenceCostReservation))).all()) == refresh_reservations
 
 
 @pytest.mark.parametrize("kind", ["fifo", "symlink", "hardlink", "directory", "oversize"])
@@ -686,6 +764,145 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
         else:
             recovery._assert_source_completion_append_metadata(root, registration["iteration_id"],
                 original_envelope["source_append_metadata"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version,event", [("v4", "first"), ("v4", "refresh_retry"),
+    ("v4", "cost_changed"), ("v4", "revoked"), ("v3", "first")])
+async def test_actual_unknown_cleanup_dispatch_preserves_original_stop_and_liabilities(
+        accounting_db, monkeypatch, repository_admission_signer, version, event):
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation, OperatorSession, WorkBoardEvent
+    from src.workflows import repo_repair_source as source, repo_repair_source_recovery as recovery
+    from src.workflows import repo_repair_stop as stop
+    from src.workflows.job_runtime import DurableJobLeaseError
+    from tests.test_repo_source_recovered_finalizer import _signed_ownerless_fixture, _rows
+    real_append = source._append_repository_record
+
+    issued, original_issuer = _capture_original_issued_bearer(monkeypatch) if event == "refresh_retry" else (None, None)
+
+    if version == "v3":
+        def select_original_legacy(run, identity, payload, **kwargs):
+            if identity == "repository:inventory:v1":
+                # Narrow first-seal selector regression, not whole historical
+                # startup/old-source acceptance or a sealed-inventory rewrite.
+                assert source._repository_record(run, identity) is None
+                payload = {**payload, "schema": "repository.checkpoint_inventory.v3"}
+            return real_append(run, identity, payload, **kwargs)
+        monkeypatch.setattr(source, "_append_repository_record", select_original_legacy)
+    # Actual completed producer bundle, authentic Stop/P/Q and original Unknown
+    # writer. The helper disposes only its real fixture lane and creates the
+    # original cold service; it does not fabricate a witness or canonical row.
+    flow = await _signed_ownerless_fixture(accounting_db, monkeypatch, "test_python", unknown=True)
+    service, jobs, kwargs = flow["service"], flow["jobs"], flow["kwargs"]
+    identity, job_id = flow["registration"]["iteration_id"], kwargs["job_id"]
+    async with jobs._session() as db:
+        root = await jobs._fetch(db, job_id)
+        before = root.model_dump(mode="json")
+        original_stop = source._repository_record(root, stop.STOP_ID)
+        assert original_stop is not None and _source_record_absent(root, identity)
+        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory." + version
+        events = sorted(row.model_dump_json() for row in (await db.scalars(select(WorkBoardEvent))).all())
+        liabilities = sorted(row.model_dump_json() for row in (await db.scalars(select(InferenceCostReservation))).all())
+        session = await db.get(OperatorSession, kwargs["owner"].session_id)
+        absolute_expiry = session.absolute_expires_at
+    path = service._workspace() / ("artifacts/repo-repair/model/iteration-" + identity + "-cleanup.json")
+    assert not path.exists()
+
+    async def reconcile():
+        return await recovery._reconcile_original_repository_cleanup(service, jobs,
+            job_id=job_id, owner=kwargs["owner"], expected_job_revision=before["revision"])
+
+    if version == "v3":
+        async def forbid_publication(*args, **kwargs):
+            pytest.fail("Historical Unknown acquired new cleanup publication authority")
+        monkeypatch.setattr(recovery, "stage_original_repository_completion_publication", forbid_publication)
+        snapshot = await _rows(jobs)
+        projection = await reconcile()
+        assert projection["status"] == "unknown_external_effect"
+        assert projection["revision"] == before["revision"]
+        assert projection["recovery_action"] == "repository_stop_pending"
+        assert projection["source_recovery"]["state"] == "held_unknown"
+        assert projection["source_recovery"]["physical_hold"] is True
+        assert await _rows(jobs) == snapshot
+        assert not path.exists()
+        return
+
+    if event != "first":
+        def rollback_readback(run, checkpoint_id, payload, **options):
+            if checkpoint_id == "repository:readback:" + identity:
+                raise RuntimeError("actual_unknown_dispatch_readback_rollback")
+            return real_append(run, checkpoint_id, payload, **options)
+        monkeypatch.setattr(source, "_append_repository_record", rollback_readback)
+        snapshot = await _rows(jobs)
+        with pytest.raises(RuntimeError, match="actual_unknown_dispatch_readback_rollback"):
+            await reconcile()
+        assert await _rows(jobs) == snapshot
+        artifact = path.read_bytes()
+        envelope = json.loads(artifact)
+        assert envelope["recovery_commitment"]["before_revision"] == before["revision"]
+        monkeypatch.setattr(source, "_append_repository_record", real_append)
+        if event == "refresh_retry":
+            await _refresh_original_bearer_http(monkeypatch, issued, original_issuer,
+                owner=kwargs["owner"], jobs=jobs, job_id=job_id)
+        else:
+            async with jobs._session() as db:
+                if event == "cost_changed":
+                    cost = await db.get(InferenceCostReservation, "remote:repo-work:" + identity)
+                    assert cost is not None
+                    assert cost.operation_id == "remote:repo-work:" + identity
+                    assert cost.job_id == job_id
+                    assert cost.state == "settled" and cost.contact_started_at is not None
+                    assert type(cost.actual_cost_microusd) is int and cost.actual_cost_microusd == 0
+                    cost.actual_cost_microusd += 1
+                    assert cost.actual_cost_microusd == 1
+                else:
+                    from datetime import datetime, timezone
+                    session = await db.get(OperatorSession, kwargs["owner"].session_id)
+                    session.revoked_at = datetime.now(timezone.utc)
+                await db.commit()
+            snapshot = await _rows(jobs)
+            if event == "cost_changed":
+                with pytest.raises(RepositorySourceRecoveryError,
+                        match="^original_producer_accounting_changed$") as denied:
+                    await reconcile()
+                assert type(denied.value) is RepositorySourceRecoveryError
+                assert denied.value.code == "original_producer_accounting_changed"
+                assert denied.value.status_code == 409
+            else:
+                with pytest.raises(DurableJobLeaseError,
+                        match="^original repository stop metadata changed:session$") as denied:
+                    await reconcile()
+                assert type(denied.value) is DurableJobLeaseError
+            assert await _rows(jobs) == snapshot
+            assert path.read_bytes() == artifact
+            return
+
+    def forbid_second_stop(*args, **kwargs):
+        pytest.fail("Cleanup reused Stop request writer instead of authentic context")
+    monkeypatch.setattr(stop, "_persist_repository_stop_intent_locked", forbid_second_stop)
+    projection = await reconcile()
+    assert projection["status"] == "unknown_external_effect"
+    if event == "refresh_retry":
+        assert path.read_bytes() == artifact
+    async with jobs._session() as db:
+        root = await jobs._fetch(db, job_id)
+        after = root.model_dump(mode="json")
+        assert root.revision == before["revision"] + 1
+        assert {key: value for key, value in after.items() if key not in {"revision", "checkpoint_receipts_json"}} == {
+            key: value for key, value in before.items() if key not in {"revision", "checkpoint_receipts_json"}}
+        assert source._repository_record(root, stop.STOP_ID) == original_stop
+        assert not _source_record_absent(root, identity)
+        assert jobs._repo_repair_reservation_state(root)["status"] == "held"
+        assert sorted(row.model_dump_json() for row in (await db.scalars(select(WorkBoardEvent))).all()) == events
+        assert sorted(row.model_dump_json() for row in (await db.scalars(select(InferenceCostReservation))).all()) == liabilities
+        assert (await db.get(OperatorSession, kwargs["owner"].session_id)).absolute_expires_at == absolute_expiry
+    assert not service._iterative_lanes and not service._iterative_process_callbacks
+    snapshot = await _rows(jobs)
+    repeated = await recovery._reconcile_original_repository_cleanup(service, jobs,
+        job_id=job_id, owner=kwargs["owner"], expected_job_revision=before["revision"] + 1)
+    assert repeated["status"] == "unknown_external_effect"
+    assert await _rows(jobs) == snapshot
 
 
 @pytest.mark.parametrize("name", ["WorkflowRunState", "WorkBoardTask", "WorkBoardAttempt", "WorkBoardInputArtifact", "Goal", "OperatorSession"])

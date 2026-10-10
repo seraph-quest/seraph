@@ -50,6 +50,99 @@ async def _repository_startup_mutation_fence():
             _startup_fence.reset(token)
 
 
+def _read_historical_source_checkpoint_pair(run, original, work, group, original_source,
+        history, packet):
+    """Recognize only the two original compact-state checkpoint constructors.
+
+    Historical lease fields are provenance from the full preparation record;
+    this reader cannot issue a lease, recreate a Source or change the journal.
+    """
+    import uuid
+    from src.workflows.job_runtime import DurableJobLeaseError, _digest
+    from src.workflows.repo_repair import REPO_REPAIR_SOURCE_ROOT
+    def deny():
+        raise DurableJobLeaseError("original historical Source checkpoint changed")
+    packet_id = uuid.uuid5(uuid.UUID("7bf8e5c0-bf9a-50ad-a56d-1029c48eeb69"),
+        f"{run.run_identity}:{run.input_digest}").hex
+    if (packet is None or packet.state != "verified" or packet.id != packet_id
+            or packet.artifact_id != packet_id
+            or (packet.workflow_run_id, packet.owner_principal_id, packet.owner_session_id,
+                packet.work_board_task_id, packet.work_board_attempt_id, packet.goal_id,
+                packet.goal_revision, packet.input_digest, packet.repository_ref) !=
+               (run.run_identity, run.owner_principal_id, run.operator_session_id,
+                original["repository_task_id"], original["repository_attempt_id"], run.goal_id,
+                run.goal_revision, run.input_digest, work.repository_ref)
+            or any(not isinstance(value, str) or not _SHA.fullmatch(value) for value in
+                (packet.artifact_sha256, packet.base_snapshot_digest, packet.source_manifest_digest))):
+        deny()
+    iteration = iteration_identity(run.run_identity, original["repository_attempt_id"],
+        _source_digest(original["original_input"]), 1)
+    prepared = _repository_record(run, "repository:prepared:" + iteration)
+    if (prepared is None or prepared.get("schema") != "seraph.repository_precontact_preparation.v1"
+            or type(prepared.get("iteration_index")) is not int or prepared["iteration_index"] != 1
+            or prepared.get("iteration_id") != iteration
+            or prepared.get("original_checkpoint_digest") != _digest(original)
+            or prepared.get("native_binding_digest") != _source_digest(original["native_binding"])
+            or prepared.get("original_source_binding_digest") != original_source.binding_digest
+            or prepared.get("original_group_digest") != _source_digest(group.model_dump(mode="json"))
+            or prepared.get("original_deadline_at") != original["original_deadline_at"]
+            or prepared.get("repository_task_id") != original["repository_task_id"]
+            or prepared.get("repository_attempt_id") != original["repository_attempt_id"]
+            or prepared.get("source_packet_id") != packet_id
+            or prepared.get("source_packet_artifact_digest") != packet.artifact_sha256
+            or prepared.get("source_manifest_digest") != packet.source_manifest_digest
+            or not isinstance(prepared.get("repository_attempt_owner"), str)
+            or not prepared["repository_attempt_owner"]
+            or type(prepared.get("repository_attempt_fence")) is not int
+            or prepared["repository_attempt_fence"] <= 0
+            or prepared.get("preparation_digest") != _source_digest(
+                {key: value for key, value in prepared.items() if key != "preparation_digest"})):
+        deny()
+    identities = set()
+    for prefix, kind, status in (
+            ("repo-repair-source-intent:", "repo_repair_source_packet_intent", "publication_pending"),
+            ("repo-repair-source:", "repo_repair_source_packet", "row_flushed")):
+        identity = prefix + run.run_identity
+        matches = [item for item in history if item.get("checkpoint_id") == identity]
+        if len(matches) != 1:
+            deny()
+        record = matches[0]
+        payload = record.get("payload")
+        try:
+            recorded = datetime.fromisoformat(record["recorded_at"])
+            if recorded.tzinfo is None or recorded.utcoffset() is None:
+                deny()
+        except (KeyError, TypeError, ValueError):
+            deny()
+        if (set(record) != {"checkpoint_id", "state_digest", "state_keys", "safe",
+                "recorded_at", "fencing_token", "payload"}
+                or record["safe"] is not True or not isinstance(payload, dict)
+                or not isinstance(record["recorded_at"], str) or not record["recorded_at"]
+                or type(record["fencing_token"]) is not int or record["fencing_token"] <= 0):
+            deny()
+        expected = {"kind": kind, "workflow_run_id": run.run_identity,
+            "attempt_id": original["repository_attempt_id"],
+            "lease_owner": prepared["repository_attempt_owner"],
+            "lease_fence": prepared["repository_attempt_fence"], "packet_id": packet_id,
+            "artifact_ref": f"workspace-json:{REPO_REPAIR_SOURCE_ROOT}/{packet_id}.json",
+            "artifact_sha256": packet.artifact_sha256, "input_digest": run.input_digest,
+            "source_manifest_digest": packet.source_manifest_digest, "learning": "no_learning"}
+        if prefix == "repo-repair-source-intent:":
+            expected.update(owner_principal_id=run.owner_principal_id,
+                owner_session_id=run.operator_session_id, work_board_task_id=original["repository_task_id"],
+                goal_id=run.goal_id, goal_revision=run.goal_revision, repository_ref=work.repository_ref,
+                base_snapshot_digest=packet.base_snapshot_digest)
+        state = {"kind": kind, "status": status, "packet_id": packet_id,
+            "artifact_sha256": packet.artifact_sha256}
+        if (payload != expected or type(payload.get("lease_fence")) is not int
+                or payload["lease_fence"] != record["fencing_token"]
+                or prefix == "repo-repair-source-intent:" and type(payload.get("goal_revision")) is not int
+                or record["state_keys"] != sorted(state) or record["state_digest"] != _digest(state)):
+            deny()
+        identities.add(identity)
+    return identities
+
+
 async def _repository_startup_protected_lineage(db):
     """Classify exact original IDs in the caller's IMMEDIATE SQL epoch.
 
@@ -59,7 +152,7 @@ async def _repository_startup_protected_lineage(db):
     import asyncio
     import logging
     from sqlalchemy import select
-    from src.db.models import WorkflowRunState
+    from src.db.models import WorkflowRunState, RepoRepairSourcePacket
     from src.workflows.general_task_guard import child_binding, _history
     from src.workflows.job_runtime import DurableJobLeaseError, _binding, _canonical, _digest
     from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
@@ -120,7 +213,7 @@ async def _repository_startup_protected_lineage(db):
                         or len({item["checkpoint_id"] for item in markers}) != len(markers)
                         or any(item.get("safe") is not True for item in markers)):
                     raise DurableJobLeaseError("original startup producer marker changed")
-                original, work, _, _, original_binding, _ = read_repository_original(root)
+                original, work, _, group, original_binding, original_source = read_repository_original(root)
                 if original_binding != binding:
                     raise DurableJobLeaseError("original startup native provenance changed")
                 inventory = read_repository_inventory(root)
@@ -128,11 +221,21 @@ async def _repository_startup_protected_lineage(db):
                 if (len(history) > 50
                         or any(not isinstance(identity, str) or not identity for identity in identities)
                         or len(identities) != len(set(identities))
+                        or not set(identities).issubset(inventory["identities"])
                         or len(set(inventory["identities"]) | set(identities)) > 50
                         or any(item.get("safe") is not True
                             or not isinstance(item.get("payload"), dict)
-                            or item.get("state_digest") != _digest(item["payload"])
                             or len(_canonical(item["payload"]).encode()) > 16384 for item in history)):
+                    raise DurableJobLeaseError("original startup protected history changed")
+                legacy_ids = set()
+                if inventory["schema"] in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2"}:
+                    packet = (await db.execute(select(RepoRepairSourcePacket).where(
+                        RepoRepairSourcePacket.workflow_run_id == root.run_identity,
+                        RepoRepairSourcePacket.input_digest == root.input_digest))).scalar_one_or_none()
+                    legacy_ids = _read_historical_source_checkpoint_pair(root, original, work,
+                        group, original_source, history, packet)
+                if any(item["checkpoint_id"] not in legacy_ids
+                        and item.get("state_digest") != _digest(item["payload"]) for item in history):
                     raise DurableJobLeaseError("original startup protected history changed")
                 if inventory["schema"] in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2"}:
                     if markers:

@@ -16,6 +16,7 @@ from src.work_board.contracts import (
 )
 from src.workflows.general_task_guard import read_manifest
 from src.workflows.job_runtime import DurableJobLeaseError
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_general_task_native_guard import running_task
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import OWNER, SESSION, isolated_runtime
@@ -128,7 +129,7 @@ def test_repository_closure_is_closed_metadata_only_and_binds_original_child():
     assert payload["repository_closure"]["schema_version"] == "repository.native_stop_closure.v1"
     assert payload["repository_closure"]["original_binding"] == binding.model_dump(mode="json")
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError, match="repository stop closure cannot carry another callback closure"):
         _child(binding=binding, closure=_ordinary_closure(binding), repository_closure=_stop(binding))
 
     foreign = binding.model_copy(update={"task_id": "foreign-task"})
@@ -152,7 +153,7 @@ async def _actual_zero_claim_child(task_runtime):
 
 
 @pytest.mark.asyncio
-async def test_public_repository_stop_projection_fails_closed_without_cas(task_runtime, monkeypatch):
+async def test_public_repository_stop_projection_fails_closed_without_cas(task_runtime, monkeypatch, native_admission_lifecycle):
     """A copied/public DTO cannot activate generic cancellation."""
     sessions, jobs, binding, manifest = await _actual_zero_claim_child(task_runtime)
     before_parent = await jobs.get_job(binding.parent_job_id)
@@ -176,7 +177,7 @@ async def test_public_repository_stop_projection_fails_closed_without_cas(task_r
 
 
 @pytest.mark.asyncio
-async def test_repository_stop_current_sql_binding_is_rechecked_before_cas(task_runtime, monkeypatch):
+async def test_repository_stop_current_sql_binding_is_rechecked_before_cas(task_runtime, monkeypatch, native_admission_lifecycle):
     """A source-shaped witness with a foreign current binding cannot fence rows."""
     from src.workflows import repo_repair_source
 

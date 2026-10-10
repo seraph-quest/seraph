@@ -121,6 +121,13 @@ and slot release, not hostile host-user effects.
 
 ### Branch-local original-producer recovery amendment
 
+[ADR-032](./032-repository-crash-recovery-evidence.md) amends the ADR-030
+protocol summarized below: new admissions use v4 with post-material-fsync proof
+and a separate immutable retry commitment. Startup also protects historical v3
+producer-mode lineage when registration is missing. The v3 transport description
+below is historical; it does not authorize new admission or upgrade old evidence.
+All unaffected supervision, authority and physical-only settlement limits remain.
+
 [ADR-030](./030-bounded-iterative-repository-work.md) accepts a separate Planned
 mode for NEW originally sealed v3 iterative repository Roots. Before command
 ACK, the original trusted supervisor registers its public verification identity

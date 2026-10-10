@@ -10,6 +10,13 @@ title: "ADR-030: Bounded iterative repository work and original-producer recover
 
 **Owning work:** [#1009](https://github.com/seraph-quest/seraph/issues/1009)
 
+**Recovery amendment:** [ADR-032](./032-repository-crash-recovery-evidence.md)
+supersedes startup classification by registration absence, ownerless deadline
+evidence, and mutable-row retry identity. Its v4 protocol governs new admissions;
+the v1/v2/v3 grammars below remain versioned historical contracts, not upgrade
+instructions. All other bounded-work, authority, accounting, publication and
+physical-closure requirements remain in force. Capability status stays Planned.
+
 ## Context
 
 Bounded repository work extends the existing authenticated repository repair
@@ -291,8 +298,11 @@ Reserved debt is not relabeled never-contacted/released. Unrelated account
 updates reflect only unrelated changes; wholly protected accounts stay exact.
 Incomplete/ambiguous provenance blocks mutation of already established exact
 lineage and exposes diagnostics; it never supplies guessed foreign IDs.
-Absent registration on an undispatched v3 Root and historical v1/v2 keep
-ordinary generic recovery; corrupt present registration is not absence.
+The former exception for absent registration on an allegedly undispatched v3
+Root is superseded by ADR-032: absence cannot prove that execution never started.
+Protect sealed producer-mode v3/v4 lineage even without registration; preserve
+ordinary historical v1/v2 recovery only under ADR-032's positive classification.
+Corrupt or contradictory evidence is never absence.
 
 ### Explicit Source recovery and held debt
 
@@ -355,13 +365,13 @@ Recovery attempts are bounded and operator-visible while unresolved debt can
 remain held indefinitely. Durable transport can survive lost parent notification
 without manufacturing process ownership. Exact read-only Unknown metadata
 preserves immutable Stop linkage but cannot substitute for physical proof.
-New v3 admission cannot improve old historical authority. Status and Guide
+New v4 admission under ADR-032 cannot improve old historical authority. Status and Guide
 describe this capability as Planned until its implementation and receipts land.
 The adopted same-receipt rollback retry must survive a legitimate auth touch
-with all fresh current checks. The isolated committed-Unknown refinement does
-not resolve the Running orphan retry when its original mixed audit digest
-changes; that case remains an acceptance gap, not a narrowed target or successful
-fallback. Public Source recovery actions remain fail-closed 503 until acceptance.
+with all fresh current checks. ADR-032 defines the separate immutable commitment
+for new v4 Running and Unknown retries; the old mixed audit digest cannot supply
+that authority. Implementation and acceptance of this amendment remain required.
+Public Source recovery actions remain fail-closed 503 until acceptance.
 Actual same-database managed backend kill/restart and API/UI recovery are still
 unproved; branch-local mechanical receipts do not enable these actions.
 

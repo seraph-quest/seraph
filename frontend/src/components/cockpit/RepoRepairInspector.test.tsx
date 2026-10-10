@@ -831,7 +831,7 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     ['invented result', { ...recovery, original_result: 'verified' }],
     ['array result', { ...recovery, original_result: ['succeeded'] }],
     ['caller enablement', { ...recovery, public_actions: 'available' }],
-    ['premature cleanup action', { ...recovery, public_actions: 'reconcile_original_cleanup' }],
+    ['unproved host-boot action', { ...recovery, public_actions: 'settle_original_host_boot_cleanup' }],
   ])('rejects %s without retaining controls', async (_label, source_recovery) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery })));
     render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
@@ -847,6 +847,86 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expectNoRepositoryEffects();
+  });
+
+  it('posts only the named original action and displays the subsequent GET', async () => {
+    const initial = { ...repositorySourceStatus(), source_recovery: { ...recovery, public_actions: 'reconcile_original_cleanup' } };
+    const final = { ...initial, revision: 7, source_recovery: { ...recovery, public_actions: 'unavailable',
+      state: 'original_cleanup_committed', original_result: 'succeeded', physical_hold: false } };
+    const fetch = vi.fn().mockResolvedValueOnce(response(initial))
+      // A POST body claiming something else is deliberately not rendered.
+      .mockResolvedValueOnce(response({ untrusted: 'post does not prove closure' }))
+      .mockResolvedValueOnce(response(final));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const button = await screen.findByRole('button', { name: 'Reconcile original cleanup' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText('Original physical hold: released')).toBeInTheDocument();
+    expect(screen.getByText('Original result: succeeded')).toBeInTheDocument();
+    expect(fetch.mock.calls[1][0]).toContain('/source-recovery');
+    expect(fetch.mock.calls[1][1].method).toBe('POST');
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ expected_job_revision: 6, action: 'reconcile_original_cleanup' });
+    expect(fetch.mock.calls[2][1]?.method ?? 'GET').toBe('GET');
+    expect(screen.queryByRole('button', { name: 'Reconcile original cleanup' })).not.toBeInTheDocument();
+  });
+
+  it('keeps a committed failed cleanup on the next-iteration path without another cleanup action', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: {
+      ...recovery, state: 'continuation_ready', reason: 'original_next_review_ready', original_result: 'failed',
+    } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original recovery: continuation ready')).toBeInTheDocument();
+    expect(screen.getByText('Original result: failed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconcile original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer cleanup for an original Unknown without Stop', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(),
+      status: 'unknown_external_effect', recovery_action: 'reconcile_original_repository',
+      source_recovery: { ...recovery } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original physical hold: held')).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconcile original cleanup' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the original ordered Stop gate when committed cleanup still has a pending Stop', async () => {
+    const initial = { ...repositorySourceStatus(), source_recovery: { ...recovery,
+      state: 'original_cleanup_committed', reason: 'original_stop_pending', original_result: 'failed',
+      public_actions: 'reconcile_original_cleanup' } };
+    const fetch = vi.fn().mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response({ ignored: true }))
+      .mockResolvedValueOnce(response({ ...initial, revision: 7, source_recovery: { ...initial.source_recovery,
+        state: 'original_stop_committed', physical_hold: false, public_actions: 'unavailable' } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const button = await screen.findByRole('button', { name: 'Reconcile original cleanup' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText('Original recovery: original stop committed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconcile original cleanup' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('refreshes held status after a rejected action without retrying it', async () => {
+    const initial = { ...repositorySourceStatus(), source_recovery: { ...recovery, public_actions: 'reconcile_original_cleanup' } };
+    const fetch = vi.fn().mockResolvedValueOnce(response(initial))
+      .mockResolvedValueOnce(response({ detail: { code: 'repository_source_recovery_stale' } }, false, 409))
+      .mockResolvedValueOnce(response(initial));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const button = await screen.findByRole('button', { name: 'Reconcile original cleanup' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/uncertain or rejected/);
+    expect(screen.getByText('Original physical hold: held')).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1);
   });
 });
 

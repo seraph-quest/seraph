@@ -8049,7 +8049,8 @@ async def _repo_repair_public_recovery_projection(tasks, source, jobs, *, job_id
             return projection
         parsed = RepositorySourceRecoveryProjection.model_validate(packet)
         if (current is None or parsed.physical_hold != current["physical_hold"]
-                or parsed.original_result != current["original_result"]):
+                or parsed.original_result != current["original_result"]
+                or parsed.public_actions != current["public_actions"]):
             raise RepositorySourceRecoveryError("original_producer_registration_changed")
         # A physical Pending proof may be stronger than durable discovery;
         # its original state/reason remain untouched by this metadata helper.

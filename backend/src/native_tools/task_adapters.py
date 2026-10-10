@@ -29,7 +29,7 @@ def _producer_digest(function):
 
 
 def repository_work_descriptor():
-    """Fixed bundled descriptor data; not registered until its owner is ready."""
+    """Fixed bundled descriptor data for the original native Source owner."""
     from config.settings import settings
     from src.workflows.repo_repair import (RepoWorkInput, RepoWorkLimits,
         RepoWorkVerifiedResult, RepoIteration)
@@ -63,6 +63,22 @@ def repository_work_descriptor():
             "source_owner": "RepoRepairService", "max_iterations": 3,
             "max_total_seconds": 900, "source_input_bytes": 65536,
             "optional_publication": "separate_exact_approval"}))
+
+
+def _repository_work_block_reason(mode):
+    """Pure selector eligibility; physical execution still needs its owner."""
+    from config.settings import settings
+    from src.tools.policy import is_tool_allowed
+    if not is_tool_allowed("repository_work", mode):
+        return "tool_policy_denied"
+    selected = settings.repo_sandbox
+    if not selected.enabled:
+        return "repository_executor_disabled"
+    if selected.executor_kind != "local" or selected.profile not in {
+        "repo-python-pytest-v1", "repo-python-pytest-publication-v1", "repo-node24-npm-v1",
+    }:
+        return "repository_executor_unsupported"
+    return None
 
 
 @dataclass(frozen=True)
@@ -371,6 +387,9 @@ class ToolRegistry:
         mode = policy_snapshot["tool_mode"]
         mcp_mode = policy_snapshot["mcp_mode"]
         entries = {}
+        if _repository_work_block_reason(mode) is None:
+            repository = repository_work_descriptor()
+            entries[repository.tool_id] = (repository, None, False)
         from config.settings import settings
         if (settings.use_delegation and self.delegation_service is not None
             and self.delegation_service.started and is_tool_allowed("delegate_task", mode)):
@@ -420,6 +439,11 @@ class ToolRegistry:
         active = self._entries()
         blocked = [{"tool_id": name, "reason": "tool_policy_denied"}
                    for name in _NATIVE if name not in active]
+        if "repository_work" not in active:
+            from src.tools.policy import get_task_policy_snapshot
+            blocked.append({"tool_id": "repository_work",
+                "reason": _repository_work_block_reason(get_task_policy_snapshot()["tool_mode"])
+                    or "repository_configuration_changed"})
         if self.mcp_runtime is not None:
             from src.tools.policy import get_tool_source_context
             for tool in self.mcp_runtime.get_tools():
@@ -450,6 +474,8 @@ class ToolRegistry:
         if current is None or not procedure_execution_descriptor_matches(current[0], descriptor):
             raise PermissionError("task tool contract changed or unavailable")
         validate_schema(descriptor.input_schema, inputs)
+        if descriptor.tool_id == "repository_work":
+            raise PermissionError("repository native Source owner required")
         _, tool, _ = current
         arguments = json.loads(encoded_inputs)
         context = _tool_approval_context(tool, arguments)
@@ -482,6 +508,8 @@ class ToolRegistry:
         if entry is None or not procedure_execution_descriptor_matches(entry[0], descriptor):
             raise PermissionError("task tool contract changed or unavailable")
         validate_schema(descriptor.input_schema, inputs)
+        if descriptor.tool_id == "repository_work":
+            raise PermissionError("repository native Source owner required")
         if descriptor.tool_id == "write_file" and len(inputs["content"].encode()) > 60000:
             raise ValueError("workspace content exceeds task byte limit")
         if descriptor.tool_id in {"document_prepare", "document_build", "delegate_task"}:

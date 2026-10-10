@@ -1,7 +1,7 @@
 """Genuine authenticated SQLite Task publication, without tool execution.
 
-The registered descriptor data comes from the fixed bundled factory; production
-registration remains inactive. Explicit reviewed plans incur no planning call.
+This supplemental fixture uses the fixed bundled descriptor factory; stock
+registration has separate lifecycle coverage. Reviewed plans incur no planning call.
 """
 import json
 import asyncio

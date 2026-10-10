@@ -32,7 +32,14 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     if dispatcher is None:
         from src.work_board.dispatcher import _dispatcher
         dispatcher = _dispatcher
+    if dispatcher.general_tasks is not None:
+        raise RuntimeError("general task lifecycle already owned")
     if registry is None:
+        # Restore the canonical selector before the stock catalog and Source
+        # observe it. Untrusted persisted state yields the original disabled DTO.
+        from config.settings import settings
+        from src.execution.repo_sandbox import load_persisted_repo_sandbox_settings
+        settings.repo_sandbox, _selector_error = load_persisted_repo_sandbox_settings()
         from src.native_tools.registry import ToolRegistry
         from src.tools.mcp_manager import mcp_manager
         from src.extensions.registry import extension_registry
@@ -43,8 +50,6 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     from src.memory.task_methods import current_method, TaskMethodStrategyResolver
     service = GeneralTaskService(registry, planner=planner,
         strategy_resolver=TaskMethodStrategyResolver(current_method))
-    if dispatcher.general_tasks is not None:
-        raise RuntimeError("general task lifecycle already owned")
     try:
         registry.communication_dispatcher = dispatcher
         registry.start()

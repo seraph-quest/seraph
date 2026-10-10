@@ -14,6 +14,8 @@ from src.tools.mcp_manager import MCPManager
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch, async_db):
+    from config.settings import RepoSandboxSettings
+    monkeypatch.setattr(settings, "repo_sandbox", RepoSandboxSettings())
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     # Never let these checks accidentally contact a provider or external host.
     import socket
@@ -287,7 +289,8 @@ def test_mcp_unknown_missing_changed_contracts_are_excluded(mcp_registry):
     tool.output_schema = None
     assert not [item for item in registry.descriptors() if item.server_id]
     assert registry.blocked_tools() == [{"tool_id": "mcp:local:repo_read",
-        "reason": "trusted_typed_contract_or_policy_unavailable"}]
+        "reason": "trusted_typed_contract_or_policy_unavailable"},
+        {"tool_id": "repository_work", "reason": "repository_executor_disabled"}]
     tool.output_schema = declaration["output_schema"]
     manager._status["local"] = {"status": "error", "error": "reconnect failed"}
     assert not [item for item in registry.descriptors() if item.server_id]
@@ -320,4 +323,5 @@ def test_sessionful_transport_exclusion_has_operator_visible_reason(mcp_registry
     manager._task_output_guards["local"].inline_supported = False
     assert not [item for item in registry.descriptors() if item.server_id]
     assert registry.blocked_tools() == [{"tool_id": "mcp:local:repo_read",
-        "reason": "mcp_task_stateless_inline_transport_required"}]
+        "reason": "mcp_task_stateless_inline_transport_required"},
+        {"tool_id": "repository_work", "reason": "repository_executor_disabled"}]

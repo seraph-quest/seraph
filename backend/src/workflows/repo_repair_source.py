@@ -2109,6 +2109,8 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
         session_id=scoped_principal.session_id, job_id=ticket.job_id,
         transformation_digest=_source_digest({"preparation": prepared["preparation_digest"], "consent": ticket.consent_id}),
         redaction_applied=True)
+    inference_context = replace(inference_context, deadline_at=min(
+        inference_context.deadline_at, witness.original_deadline_at.timestamp()))
     tokens = set_runtime_context(scoped_principal.session_id, get_current_approval_mode(), trust_principal=scoped_principal)
     try:
         with bind_remote_inference_receipt(repository=jobs, job_id=ticket.job_id,

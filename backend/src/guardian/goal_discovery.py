@@ -6,6 +6,8 @@ planner authority. The scheduler invokes one current-slot admission pass.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 import hashlib
 import inspect
@@ -42,6 +44,28 @@ def discovery_external_effect_state(run):
     return "settled" if effects else "none"
 
 
+_original_admission_task = ContextVar("original_goal_discovery_admission_task", default=None)
+
+
+def _original_admission_entry(method):
+    @wraps(method)
+    async def owned(self, *args, **kwargs):
+        self._ready()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("programme_original_admission_owner_unavailable")
+        already_owned = task in self._tasks
+        self._tasks.add(task)
+        token = _original_admission_task.set((self, task))
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            _original_admission_task.reset(token)
+            if not already_owned:
+                self._tasks.discard(task)
+    return owned
+
+
 class GoalDiscoveryService:
     def __init__(self, *, jobs=None, search=None, strategy_resolver=None, resolver=None, transport=None):
         self.jobs = jobs or DurableJobRepository()
@@ -50,6 +74,8 @@ class GoalDiscoveryService:
         self.resolver, self.transport = resolver, transport
         self.started = False
         self._tasks = set()
+        self._lifecycle_dispatcher = None
+        self._lifecycle_host = None
 
     async def start(self):
         if self.started:
@@ -67,6 +93,26 @@ class GoalDiscoveryService:
     def _ready(self):
         if not self.started:
             raise RuntimeError("goal_discovery_service_unavailable")
+
+    def _validate_original_admission_owner(self, *, jobs, host, task):
+        """Authenticate this live original task; return no execution permission."""
+        from src.work_board.dispatcher import _dispatcher
+        from src.runtime_plugins.bridge import CordisHost, cordis_host
+        from src.runtime_plugins.dispatch import NativeServiceDispatcher
+        if (type(self) is not GoalDiscoveryService or self is not goal_discovery_service
+                or not self.started or self._lifecycle_dispatcher is not _dispatcher
+                or _dispatcher.goal_discovery is not self or jobs is not self.jobs
+                or jobs is not _dispatcher.jobs or task is not asyncio.current_task()
+                or task is None or task not in self._tasks
+                or _original_admission_task.get() != (self, task)
+                or host is not cordis_host or host is not self._lifecycle_host
+                or type(host) is not CordisHost or not host.admitting
+                or host.reviewed is None or not isinstance(host.boot_nonce, str)
+                or len(host.boot_nonce) != 64
+                or type(host.service_dispatch) is not NativeServiceDispatcher
+                or host.service_dispatch.jobs is not jobs):
+            raise RuntimeError("programme_original_admission_owner_unavailable")
+        return task
 
     async def _strategy(self, binding):
         """Select the current method only for a new occurrence admission."""
@@ -109,6 +155,7 @@ class GoalDiscoveryService:
         await validated_discovery_strategy(result)
         return result
 
+    @_original_admission_entry
     async def admit(self, *, goal_id, programme_id, grant_revision):
         self._ready()
         programme = await goal_programme_service.assert_authority(goal_id=goal_id,
@@ -648,8 +695,16 @@ async def current_goal_discovery(*, dispatcher=None):
         dispatcher = _dispatcher
     if dispatcher.goal_discovery is not None:
         raise RuntimeError("public discovery lifecycle already bound")
+    from src.runtime_plugins.bridge import cordis_host
     service = goal_discovery_service
+    if service.started:
+        raise RuntimeError("public discovery lifecycle already owned")
+    previous = (service.jobs, service.strategy_resolver,
+        service._lifecycle_dispatcher, service._lifecycle_host)
+    service.jobs = dispatcher.jobs
     service.strategy_resolver = dispatcher.strategy_resolver
+    service._lifecycle_dispatcher = dispatcher
+    service._lifecycle_host = cordis_host
     try:
         await service.start()
         dispatcher.goal_discovery = service
@@ -660,6 +715,8 @@ async def current_goal_discovery(*, dispatcher=None):
         finally:
             if dispatcher.goal_discovery is service:
                 dispatcher.goal_discovery = None
+            (service.jobs, service.strategy_resolver,
+                service._lifecycle_dispatcher, service._lifecycle_host) = previous
 
 
 async def run_goal_discovery_tick():

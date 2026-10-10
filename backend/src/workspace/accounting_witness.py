@@ -2273,6 +2273,9 @@ class CompositionSessionGuard:
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
         self._selection = None
+        self._prospective_admission = None
+        self._prospective_admission_facts = None
+        self._prospective_admission_finished = False
         self._programme_snapshot_owner = None
         self._programme_current_leaves = {}
         self._programme_base_leaves = {}
@@ -2325,16 +2328,93 @@ class CompositionSessionGuard:
         import threading
         from src.workspace.accounting_continuity import _ProgrammeSelection, _PROGRAMME_SELECTION_SEAL
         from src.memory.composition_headers import _validate
+        prospective = self._prospective_admission
+        is_prospective = prospective is not None and prospective[0] is selection
         if (type(selection) is not _ProgrammeSelection or selection.seal is not _PROGRAMME_SELECTION_SEAL
                 or selection.issued_id != id(selection) or selection.owner is not self
-                or self._selection is not selection or self._retention_closed
+                or (self._selection is not selection and not is_prospective) or self._retention_closed
                 or self.db.info.get("composition_guard") is not self
-                or self._programme_snapshot_owner is None
-                or self._programme_snapshot_owner != (asyncio.current_task(), threading.get_ident())
+                or (prospective[1] if is_prospective else self._programme_snapshot_owner)
+                    != (asyncio.current_task(), threading.get_ident())
                 or self.db.sync_session.connection() is not selection.common33.connection
                 or selection.common33.budget is not self.header_budget):
             raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
         _validate(selection.common33.connection, selection.common33)
+        if is_prospective:
+            service, host, operation = prospective[2:5]
+            if self._original_programme_admission_owner(service, host) is not operation:
+                raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+            reviewed, boot, process, dispatcher, jobs = prospective[5]
+            if (host.reviewed is not reviewed or host.boot_nonce != boot or host.process is not process
+                    or host.service_dispatch is not dispatcher or service.jobs is not jobs):
+                raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+
+    def _original_programme_admission_owner(self, service, host):
+        """Only the actual lifecycle/admission owner can bind capacity selection."""
+        import asyncio
+        from src.guardian.goal_discovery import GoalDiscoveryService, goal_discovery_service
+        from src.runtime_plugins.bridge import CordisHost, cordis_host
+        if (type(service) is not GoalDiscoveryService or service is not goal_discovery_service
+                or type(host) is not CordisHost or host is not cordis_host):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        validator = getattr(GoalDiscoveryService, "_validate_original_admission_owner", None)
+        if validator is None:
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        operation = validator(service, jobs=service.jobs, host=host, task=asyncio.current_task())
+        if operation is None or operation is not asyncio.current_task():
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        return operation
+
+    def _select_programme_admission(self, connection, common33, *, service, host,
+                                   goal_id, programme_id, grant_revision):
+        """Private ADR-034 capacity selection, never admission or publication."""
+        import asyncio
+        import threading
+        from types import MappingProxyType
+        from src.workspace.accounting_continuity import _ProgrammeSelection, _derive_programme_admission_rows
+        from src.memory.composition_headers import _validate, preflight_programme_identity_component
+        def fail(code):
+            raise ProductionWorkspaceReconciliationError(code)
+        if (not self._programme_tables() or self.db.info.get("composition_guard") is not self
+                or self._retention_closed or self._prospective_admission_finished or common33.raw_owner is not None
+                or common33.connection is not connection or common33.budget is not self.header_budget
+                or self.db.sync_session.connection() is not connection):
+            fail("programme_original_selection_unavailable")
+        _validate(connection, common33)
+        operation = self._original_programme_admission_owner(service, host)
+        owner = (host.reviewed, host.boot_nonce, host.process, host.service_dispatch, service.jobs)
+        # A failed rederivation never leaves a previous prospective certificate usable.
+        self._prospective_admission = None
+        programme, binding, goals, issuers = _derive_programme_admission_rows(connection, common33,
+            goal_id=goal_id, programme_id=programme_id, grant_revision=grant_revision, fail=fail)
+        facts = (operation, owner, binding, goals, issuers)
+        previous = self._prospective_admission_facts
+        if previous is not None:
+            old = previous[1]
+            if (previous[0] is not operation or old[0] is not owner[0] or old[1] != owner[1]
+                    or any(old[index] is not owner[index] for index in (2, 3, 4))):
+                fail("programme_original_selection_unavailable")
+            if previous[2:] != facts[2:]:
+                fail("programme_original_generation_changed")
+        selection = _ProgrammeSelection(self, common33, MappingProxyType(goals), MappingProxyType(issuers),
+            MappingProxyType({}), (binding.owner_identity_id,))
+        object.__setattr__(selection, "issued_id", id(selection))
+        self._prospective_admission = (selection, (asyncio.current_task(), threading.get_ident()),
+            service, host, operation, owner)
+        try:
+            self._validate_programme_selection(selection)
+            identity = preflight_programme_identity_component(common33, original_selection=selection)
+        except BaseException:
+            self._prospective_admission = None
+            raise
+        self._prospective_admission_facts = facts
+        return programme, binding, common33, identity
+
+    def _finish_programme_admission_selection(self):
+        """Original insertion/unwind ends the capacity-only prospective lifetime."""
+        self._prospective_admission = None
+        self._prospective_admission_facts = None
+        self._prospective_admission_finished = True
 
     def _select_programmes(self, connection, common33):
         import asyncio
@@ -2991,6 +3071,7 @@ class CompositionSessionGuard:
         self._session_instance = None
         self._session_expected = None
         self._retention_closed = True
+        self._finish_programme_admission_selection()
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
         _HELD_COMPOSITION_WORKSPACE.reset(self.token)

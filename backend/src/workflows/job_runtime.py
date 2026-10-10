@@ -2381,6 +2381,246 @@ def _validate_approval_resume_receipt(
     }
 
 
+def _discovery_strategy_independent_widths(*, programme, binding, identifier, now,
+                                         deadline, composition_binding):
+    """Partial resource description; never read or invent a strategy binding.
+
+    None means unresolved, not zero bytes. This description cannot certify a
+    row, seal a continuation or authorize a read, constructor or file effect.
+    The existing complete-width helper and actual bind verifier remain separate.
+    """
+    from types import MappingProxyType
+    from uuid import UUID
+    from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
+    from src.guardian.research_plan_contracts import (STAGES, ArtifactRef, GoalResearchPlanSpecV1,
+        OutputRef, OutputSlot, ResearchStep, ResearchLimits)
+    from src.work_board.research_parent import GoalDiscoveryAuthority, DISCOVERY_KIND, DISCOVERY_SERVICE, DISCOVERY_CAPABILITY
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.work_board.input_artifacts import INPUT_ARTIFACT_MAX_BYTES
+    if (type(programme) is not GoalProgramme or type(binding) is not GoalProgrammeAuthorityBinding
+            or type(identifier) is not UUID or type(composition_binding) is not RuntimeCompositionBinding
+            or GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != binding
+            or composition_binding.origin_method != "research.executeAccepted"
+            or composition_binding.native_branch != "public_research"
+            or type(now) is not datetime or type(deadline) is not datetime
+            or now.tzinfo is None or deadline.tzinfo is None
+            or now.utcoffset() != timedelta(0) or deadline.utcoffset() != timedelta(0)
+            or not now < deadline <= programme.expires_at
+            or deadline != min(programme.expires_at, now + timedelta(seconds=300))):
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    encoded = lambda value: len(_canonical(value).encode("utf-8"))
+    def object_bytes(fields):
+        return 2 + sum(encoded(key) + 1 + size for key, size in fields.items()) + max(0, len(fields) - 1)
+    def array_bytes(sizes):
+        return 2 + sum(sizes) + max(0, len(sizes) - 1)
+    from typing import Annotated, Literal
+    from pydantic import Field, StrictInt, TypeAdapter
+    from pydantic.fields import FieldInfo
+    from src.work_board.contracts import TaskStrategyBinding
+    stages = Literal["plan_queries", "search_public", "extract_sources", "prepare_brief"]
+    positive = Annotated[StrictInt, Field(ge=1)]
+    digest_type = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    slot_type = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[a-z_]+$")]
+    shapes = (
+        (ArtifactRef, {"artifact_id": Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9:_-]+$")],
+            "digest": digest_type, "schema_version": Literal[1]}, {"integer_version"}, set()),
+        (OutputRef, {"producer_step_id": stages, "output_slot": slot_type,
+            "json_pointer": Annotated[str, Field(max_length=256)]}, {"finite_pointer"}, set()),
+        (OutputSlot, {"slot": slot_type, "artifact_type": Annotated[str, Field(min_length=1, max_length=64)],
+            "max_bytes": Annotated[StrictInt, Field(ge=1, le=1048576)]}, set(), set()),
+        (ResearchStep, {"step_id": stages, "capability_id": str, "capability_version": Literal[1],
+            "input_refs": Annotated[list[ArtifactRef | OutputRef], Field(min_length=1, max_length=8)],
+            "output_slots": Annotated[list[OutputSlot], Field(min_length=1, max_length=2)]}, {"strict_version"}, set()),
+        (ResearchLimits, {name: Annotated[StrictInt, Field(ge=low, **({"le": high} if high is not None else {}))]
+            for name, low, high in (("max_queries", 1, 3), ("max_results", 1, 15), ("max_sources", 1, 4),
+                ("max_inference_requests", 0, 4), ("max_wall_seconds", 1, 300), ("max_search_seconds", 1, 20),
+                ("max_search_bytes", 1, 524288), ("max_source_bytes", 1, 262144),
+                ("max_output_bytes", 1, 1048576), ("cost_limit_microusd", 0, None))}, set(), set()),
+        (GoalResearchPlanSpecV1, {"schema_version": Literal[1], "plan_id": UUID, "programme_id": UUID,
+            "programme_revision": positive, "goal_id": Annotated[str, Field(min_length=1, max_length=128)],
+            "goal_revision": positive, "grant_id": str, "grant_revision": positive, "public_brief_digest": digest_type,
+            "route_epoch": positive, "strategy_binding": TaskStrategyBinding, "issued_at": datetime,
+            "deadline_at": datetime, "idempotency_key": UUID, "limits": ResearchLimits,
+            "steps": Annotated[list[ResearchStep], Field(min_length=4, max_length=4)]},
+            {"strict_version", "canonical_goal_id", "utc_timestamp"}, {"fixed_contract"}),
+        (GoalDiscoveryAuthority, {"authority_type": Literal["goal_programme_discovery_v1"],
+            "principal": Literal["service:guardian-goal-programmes"], "owner_kind": Literal["service"],
+            "service_id": Literal["service:guardian-goal-programmes"], "capability_id": Literal["guardian.goal-discovery.v1"],
+            "capability_version": Literal["1"], "goal_owner_principal_id": str, "goal_owner_session_id": str,
+            "programme_binding": GoalProgrammeAuthorityBinding, "plan_ref": ArtifactRef,
+            "occurrence_day": Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")], "original_job_id": str,
+            "budget_microusd": Annotated[int, Field(strict=True, ge=0)], "no_learning": Literal[True]},
+            {"explicit_no_learning"}, {"immutable_owner"}))
+    validator_shapes = {
+        ArtifactRef: ({"integer_version": (("schema_version",), "before")}, {}),
+        OutputRef: ({"finite_pointer": (("json_pointer",), "after")}, {}),
+        OutputSlot: ({}, {}),
+        ResearchStep: ({"strict_version": (("capability_version",), "before")}, {}),
+        ResearchLimits: ({}, {}),
+        GoalResearchPlanSpecV1: ({"strict_version": (("schema_version",), "before"),
+            "canonical_goal_id": (("goal_id",), "after"),
+            "utc_timestamp": (("issued_at", "deadline_at"), "after")}, {"fixed_contract": "after"}),
+        GoalDiscoveryAuthority: ({"explicit_no_learning": (("no_learning",), "before")},
+            {"immutable_owner": "after"})}
+    def metadata_shape(items):
+        from dataclasses import fields, is_dataclass
+        result = []
+        for item in items:
+            values = ({field.name: getattr(item, field.name) for field in fields(item)}
+                if is_dataclass(item) else vars(item))
+            if any(type(value) not in {str, int, bool, type(None)} for value in values.values()):
+                raise HeaderBoundsError("programme_constructor_schema_changed")
+            # General pattern metadata has identity equality in Pydantic;
+            # compare the exact original class, order, keys and typed values.
+            result.append((type(item), tuple((name, type(value), value) for name, value in sorted(values.items()))))
+        return tuple(result)
+    def core_shape(schema, definitions=None):
+        definitions = {} if definitions is None else definitions
+        kind = schema.get("type")
+        if kind == "definitions":
+            definitions = {**definitions, **{item["ref"]: item for item in schema["definitions"]}}
+            return core_shape(schema["schema"], definitions)
+        if kind == "definition-ref":
+            return core_shape(definitions[schema["schema_ref"]], definitions)
+        if kind in {"function-before", "function-after"}:
+            return core_shape(schema["schema"], definitions)
+        if kind == "model":
+            return ("model", schema["cls"])
+        if kind == "list":
+            return ("list", schema.get("min_length"), schema.get("max_length"), core_shape(schema["items_schema"], definitions))
+        if kind == "union":
+            return ("union", tuple(core_shape(item, definitions) for item in schema["choices"]))
+        return {key: value for key, value in schema.items() if key not in {"metadata", "ref"}}
+    def model_fields_core(schema):
+        definitions = {}
+        if schema.get("type") == "definitions":
+            definitions = {item["ref"]: item for item in schema["definitions"]}
+            schema = schema["schema"]
+        while schema.get("type") in {"function-before", "function-after"}:
+            schema = schema["schema"]
+        if schema.get("type") == "definition-ref":
+            schema = definitions[schema["schema_ref"]]
+        if schema.get("type") != "model":
+            raise HeaderBoundsError("programme_constructor_schema_changed")
+        schema = schema["schema"]
+        while schema.get("type") in {"function-before", "function-after"}:
+            schema = schema["schema"]
+        if schema.get("type") != "model-fields":
+            raise HeaderBoundsError("programme_constructor_schema_changed")
+        return schema["fields"], definitions
+    def has_custom_serialization(schema, ancestors=()):
+        if type(schema) in {dict, tuple, list}:
+            if id(schema) in ancestors:
+                return True
+            ancestors = (*ancestors, id(schema))
+        if type(schema) is dict:
+            return "serialization" in schema or any(has_custom_serialization(value, ancestors) for value in schema.values())
+        if type(schema) in {tuple, list}:
+            return any(has_custom_serialization(value, ancestors) for value in schema)
+        return False
+    for model, expected, validators, model_validators in shapes:
+        decorators = model.__pydantic_decorators__
+        if (set(model.model_fields) != set(expected) or model.model_computed_fields
+                or decorators.field_serializers or decorators.model_serializers
+                or set(decorators.model_validators) != model_validators
+                or set(decorators.field_validators) != validators
+                or {name: (item.info.fields, item.info.mode) for name, item in decorators.field_validators.items()}
+                    != validator_shapes[model][0]
+                or {name: item.info.mode for name, item in decorators.model_validators.items()}
+                    != validator_shapes[model][1]
+                or model.model_config.get("extra") != "forbid" or model.model_config.get("frozen") is not True
+                or model.model_config.get("alias_generator") is not None
+                or has_custom_serialization(model.__pydantic_core_schema__)):
+            raise HeaderBoundsError("programme_constructor_schema_changed")
+        compiled_fields, definitions = model_fields_core(model.__pydantic_core_schema__)
+        if set(compiled_fields) != set(expected):
+            raise HeaderBoundsError("programme_constructor_schema_changed")
+        for name, annotation in expected.items():
+            field = model.model_fields[name]
+            original = FieldInfo.from_annotation(annotation)
+            if (not field.is_required() or field.annotation != original.annotation or metadata_shape(field.metadata) != metadata_shape(original.metadata)
+                    or field.alias is not None or field.validation_alias is not None or field.serialization_alias is not None
+                    or field.exclude is not None or getattr(field, "exclude_if", None) is not None
+                    or core_shape(compiled_fields[name]["schema"], definitions) != core_shape(TypeAdapter(annotation).core_schema)):
+                raise HeaderBoundsError("programme_constructor_schema_changed")
+    if type(INPUT_ARTIFACT_MAX_BYTES) is not int or INPUT_ARTIFACT_MAX_BYTES != 65536:
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    if STAGES != (("plan_queries", "guardian.query-plan.v1", (("queries", "QueryPlan.v1"),)),
+            ("search_public", "guardian.public-search.v1", (("manifest", "SearchManifest.v1"), ("selection", "SourceSelection.v1"))),
+            ("extract_sources", "source.public-extract.v1", (("snapshots", "PublicSnapshots.v1"),)),
+            ("prepare_brief", "guardian.prepare-brief.v1", (("brief", "DiscoveryBrief.v1"),))):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    reference = object_bytes({"artifact_id": 30, "digest": 66, "schema_version": 1})
+    path = len("goal-programmes/") + 32 + 1 + 64 + 1 + 64 + len(".json") + 2
+    job_id = "goal-discovery:" + identifier.hex
+    issued, expires = encoded(now.isoformat()), encoded(deadline.isoformat())
+    refs = [array_bytes([reference]),
+        encoded([{"producer_step_id": "plan_queries", "output_slot": "queries", "json_pointer": ""}]),
+        encoded([{"producer_step_id": "search_public", "output_slot": name, "json_pointer": ""}
+            for name in ("manifest", "selection")]),
+        encoded([{"producer_step_id": "extract_sources", "output_slot": "snapshots", "json_pointer": ""}])]
+    caps = {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}
+    steps = [object_bytes({"step_id": encoded(name), "capability_id": encoded(capability),
+        "capability_version": 1, "input_refs": refs[index],
+        "output_slots": encoded([{"slot": slot, "artifact_type": kind, "max_bytes": caps[slot]}
+            for slot, kind in outputs])}) for index, (name, capability, outputs) in enumerate(STAGES)]
+    # The strategy value is absent from these widths. Its key, colon and
+    # separator are known; its body/material cost remains unresolved.
+    plan_fields = {"schema_version": 1, "plan_id": 38, "programme_id": 38,
+        "programme_revision": encoded(programme.grant_revision), "goal_id": encoded(binding.goal_id),
+        "goal_revision": encoded(binding.goal_revision), "grant_id": encoded(programme.id),
+        "grant_revision": encoded(programme.grant_revision), "public_brief_digest": 66,
+        "route_epoch": encoded(programme.route_epoch),
+        "issued_at": issued, "deadline_at": expires, "idempotency_key": 38,
+        "limits": encoded({"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
+            "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
+            "max_source_bytes": 262144, "max_output_bytes": 65536,
+            "cost_limit_microusd": programme.budget.max_inference_microusd}), "steps": array_bytes(steps)}
+    if set(plan_fields) | {"strategy_binding"} != set(GoalResearchPlanSpecV1.model_fields):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    brief = len(programme.public_brief.encode("utf-8"))
+    if not 0 < brief <= 8000:
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    inputs = object_bytes({"plan_ref": reference, "plan_file_path": path,
+        "public_brief_ref": reference, "public_brief_file_path": path, "no_learning": 4})
+    authority_fields = {"authority_type": encoded("goal_programme_discovery_v1"),
+        "principal": encoded(DISCOVERY_SERVICE), "owner_kind": encoded("service"),
+        "service_id": encoded(DISCOVERY_SERVICE), "capability_id": encoded(DISCOVERY_CAPABILITY),
+        "capability_version": encoded("1"), "goal_owner_principal_id": encoded(binding.issuer_principal_id),
+        "goal_owner_session_id": encoded(binding.issuer_root_id), "programme_binding": encoded(binding.model_dump(mode="json")),
+        "plan_ref": reference, "occurrence_day": 12, "original_job_id": encoded(job_id),
+        "budget_microusd": encoded(binding.cost_ceiling_microusd), "no_learning": 4}
+    if set(authority_fields) != set(GoalDiscoveryAuthority.model_fields):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    authority = object_bytes(authority_fields)
+    effects = [object_bytes({"effect_id": len("discovery-artifact:") + 30,
+        "receipt_kind": encoded("readback"), "effect_type": encoded("research_artifact_readback"),
+        "status": encoded("succeeded"), "target_path": path, "content_sha256": 66,
+        "target_digest": 66, "verified_at": issued, "readback_id": len("discovery-readback-") + 30,
+        "reconciled": 4, "reconciliation_status": encoded("resolved"),
+        "details": encoded({"verified": True, "no_learning": True})}) for _kind in ("public_brief", "plan")]
+    # Each scalar is one width, not a claim about unresolved caller repetition.
+    plan_fixed = object_bytes(plan_fields) + 1 + encoded("strategy_binding") + 1
+    units = MappingProxyType({"brief_content": brief, "reference_json": reference,
+        "path_json": path, "input_material": inputs, "authority_material": authority,
+        "fingerprint_material": object_bytes({"inputs": inputs, "authority": authority}),
+        "effect_material": array_bytes(effects), "composition_binding": len(composition_binding.to_json().encode()),
+        "plan_fixed_material": plan_fixed})
+    # These are original stager branch formulas, not a file-state guess. Its
+    # no-clobber collision allowance and actual readback remain fully paid.
+    stager_terms = MappingProxyType({"brief_existing_read": brief + 1,
+        "brief_missing_write_readback": 3 * brief + INPUT_ARTIFACT_MAX_BYTES + 3,
+        "plan_existing_read": (plan_fixed + 1, "strategy_binding_bytes"),
+        "plan_missing_write_readback": (3 * plan_fixed + INPUT_ARTIFACT_MAX_BYTES + 3, "3*strategy_binding_bytes")})
+    return MappingProxyType({"job_id": job_id, "known_widths": units,
+        "stager_branch_terms": stager_terms,
+        "unresolved_widths": ("strategy_binding", "plan_material", "checkpoint_material",
+            "plan_byte_count_digits", "artifact_material", "row_header", "operator_projection",
+            "strategy_traversals", "caller_occurrence_schedule"),
+        "plan_bytes": None, "row_header_bytes": None, "complete": False})
+
+
 def _discovery_constructor_numeric_bounds(*, programme, binding, identifier, now,
                                           deadline, strategy, composition_binding):
     """Original constructor sizes only: no future ref, authority, spec or row.

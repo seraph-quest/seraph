@@ -339,6 +339,58 @@ def _native_memory_projected_superset_charges(certificate, trace, new_rows, upda
     return tuple(result), headers
 
 
+def _discovery_strategy_independent_trace(trace, *, job_id):
+    """Describe actual trace occurrences without guessing the future row width.
+
+    No certificate validation, read, debit or permission occurs here. The
+    original owner must authenticate any trace before eventual use; these
+    partial numeric facts cannot seal a continuation or supply that authority.
+    """
+    from types import MappingProxyType
+    from src.memory.composition_headers import _metadata_cost
+    if (type(job_id) is not str or not job_id.startswith("goal-discovery:")
+            or len(job_id) != len("goal-discovery:") + 32
+            or any(char not in "0123456789abcdef" for char in job_id[len("goal-discovery:"):])
+            or type(trace) not in {tuple, list}):
+        raise HeaderBoundsError("programme_numeric_trace_changed")
+    original, additions, unresolved = [], [], []
+    for index, entry in enumerate(trace):
+        if type(entry) is not tuple or len(entry) != 2:
+            raise HeaderBoundsError("programme_numeric_trace_changed")
+        appearance, amount = entry
+        if (type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                or (appearance is not None and type(appearance) is not tuple)):
+            raise HeaderBoundsError("programme_numeric_trace_changed")
+        original.append((appearance, amount))
+        if type(appearance) is not tuple or len(appearance) < 2 or appearance[1] != WRS_BY_RUN.table:
+            continue
+        kind = appearance[0]
+        if kind == "locator-metadata":
+            if len(appearance) != 5 or appearance[2] is not None or appearance[3] is not False:
+                raise HeaderBoundsError("programme_numeric_trace_changed")
+            ids = appearance[4]
+        elif kind in {"complete-headers", "table-body"}:
+            if len(appearance) != 3:
+                raise HeaderBoundsError("programme_numeric_trace_changed")
+            ids = appearance[2]
+        else:
+            continue
+        if (type(ids) is not tuple or len(ids) >= MAX_ROWS
+                or any(type(key) is not str or not 0 < len(key.encode()) <= 512 for key in ids)
+                or len(set(ids)) != len(ids)
+                or job_id in ids):
+            raise HeaderBoundsError("programme_numeric_trace_changed")
+        if kind == "locator-metadata":
+            additions.append((index, "future-locator-metadata",
+                _metadata_cost([[2**63 - 1, "text", len(job_id.encode()), job_id, None]])))
+        else:
+            unresolved.append((index, kind, "future-row-header-bytes"))
+    return MappingProxyType({"original_occurrences": tuple(original),
+        "known_additions": tuple(additions), "unresolved_occurrences": tuple(unresolved),
+        "unresolved": ("strategy-traversals", "future-row-header-bytes", "caller-occurrence-schedule"),
+        "complete": False})
+
+
 def _discovery_projected_superset_charges(certificate, trace, *, job_id, row_upper):
     """Numeric common33 appearances for ONE original future discovery address.
 

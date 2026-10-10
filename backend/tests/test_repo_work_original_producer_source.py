@@ -1,6 +1,8 @@
 """Actual original Source admissions and registered native producer journeys."""
 import pytest
 
+from src.db.models import WorkflowRunState
+
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
@@ -287,17 +289,17 @@ async def test_original_completion_pending_appends_are_exact_source_tickets(
                     inventory=inventory, _completion_append=pending[0])
             with pytest.raises(DurableJobLeaseError):
                 original_append(run, identity, payload, inventory=inventory, _completion_append=copy.copy(pending[0]))
-            foreign = run.model_copy(update={"run_identity": "foreign-original-root"})
+            foreign = WorkflowRunState(**(run.model_dump() | {"run_identity": "foreign-original-root"}))
             with pytest.raises(DurableJobTransitionError):
                 original_append(foreign, identity, payload, inventory=inventory, _completion_append=pending[0])
             for fields in ({"revision": run.revision + 1},
                     {"updated_at": run.updated_at + timedelta(microseconds=1)},
                     {"failure_reason": "caller changed noncleanup Root field"}):
-                changed_root = run.model_copy(update=fields)
+                changed_root = WorkflowRunState(**(run.model_dump() | fields))
                 with pytest.raises(DurableJobTransitionError):
                     original_append(changed_root, identity, payload, inventory=inventory,
                         _completion_append=pending[0])
-            changed_prefix = run.model_copy(update={"checkpoint_receipts_json": _canonical([])})
+            changed_prefix = WorkflowRunState(**(run.model_dump() | {"checkpoint_receipts_json": _canonical([])}))
             with pytest.raises(DurableJobTransitionError):
                 original_append(changed_prefix, identity, payload, inventory=inventory, _completion_append=pending[0])
             with pytest.raises(DurableJobTransitionError):
@@ -469,6 +471,7 @@ async def test_new_original_v4_inventory_keeps_exact_v3_vector_and_bounds(
         root = await flow["jobs"]._fetch(db, flow["job_id"])
         work = source.read_repository_original(root)[1]
         inventory = read_repository_inventory(root)
+        before = root.model_dump_json()
         assert inventory["schema"] == "repository.checkpoint_inventory.v4"
         assert len(inventory["identities"]) == 10 + 13 * cap
         assert len(set(inventory["identities"])) == len(inventory["identities"])
@@ -478,7 +481,8 @@ async def test_new_original_v4_inventory_keeps_exact_v3_vector_and_bounds(
             source.repository_checkpoint_inventory(root, work, _admission_schema="repository.checkpoint_inventory.v3")
         # Pure historical grammar comparison only: detached local copies do not
         # mutate a Root, issue a witness, supply startup authority or upgrade evidence.
-        local = root.model_copy(deep=True)
+        local = WorkflowRunState(**root.model_dump())
+        assert local.model_dump() == root.model_dump()
         history = json.loads(local.checkpoint_receipts_json)
         wrapper = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
         wrapper["payload"]["schema"] = "repository.checkpoint_inventory.v3"
@@ -486,6 +490,7 @@ async def test_new_original_v4_inventory_keeps_exact_v3_vector_and_bounds(
         local.checkpoint_receipts_json = _canonical(history)
         assert source.repository_checkpoint_inventory(local, work) == inventory["identities"]
         assert read_repository_inventory(local)["identities"] == inventory["identities"]
+        assert root.model_dump_json() == before
 
 
 @pytest.mark.asyncio
@@ -500,7 +505,8 @@ async def test_original_inventory_closed_v4_reader_denies_local_tamper_without_m
     async with flow["factory"]() as db:
         root = await flow["jobs"]._fetch(db, flow["job_id"])
         before = root.model_dump_json()
-        local = root.model_copy(deep=True)
+        local = WorkflowRunState(**root.model_dump())
+        assert local.model_dump() == root.model_dump()
         history = json.loads(local.checkpoint_receipts_json)
         wrapper = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
         payload = wrapper["payload"]

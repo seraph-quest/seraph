@@ -1531,6 +1531,19 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
     if unknown and committed:
         # The Source GET owns its one registered knownpost fence/primary.
         return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
+    if unknown and _v4_root(run) and stopping is not None:
+        # NEW v4 may publish this authentic registered Source completion while
+        # retaining Unknown and its original Stop/P/Q liabilities. The existing
+        # publication owner acquires its own single fence and fresh physical and
+        # current-row scopes; no finalizer or lane-release consumer runs here.
+        async with stage_original_repository_completion_publication(service, jobs,
+                job_id=job_id, owner=owner, iteration_index=index,
+                expected_job_revision=expected_job_revision) as completion:
+            repository_completion_outcome(completion)
+            repository_completion_context(completion)
+        # Read the exact committed R+1 through the registered knownpost owner
+        # only after the first publication's fence/physical scope has exited.
+        return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
     if unknown:
         # Ordinary discovery retains its exact Unknown successor predicate.
         # The separately registered known-post verifier cannot be replaced by
@@ -1983,8 +1996,9 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
             reason = existing_stop["stop_reason"] if existing_stop else "deadline_exhausted"
             staged_stop = await stop_owner._context(service, jobs, job_id=job_id, owner=owner,
                 limit_reason=reason if reason in stop_owner.AUTOMATIC_REASONS else None)
-            staged_stop = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
-                context=staged_stop, owner=owner, reason=reason, fence=fence)
+            if existing_stop is None:
+                staged_stop = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
+                    context=staged_stop, owner=owner, reason=reason, fence=fence)
             context = staged_stop.data
         elif run.status == "unknown_external_effect":
             context = (await stop_owner._context(service, jobs, job_id=job_id, owner=owner)).data

@@ -184,6 +184,17 @@ async def test_actual_source_bundle_staging_holds_guard_and_revokes_physical_wit
     # Physical staging alone supplies no current Source/SQL authority.
     with producer.stage_original_producer_completion(registration) as witness:
         result = producer.original_producer_completion_result(witness)
+        assert registration["schema"] == producer.PROFILE_V2
+        assert result["original_producer_completion"]["schema"] == producer.COMPLETION_V2
+        proof = json.loads((Path(registration["directory_path"]) / producer.DURABILITY_FILE).read_bytes())
+        assert proof["durability"]["registration_digest"] == producer.digest(producer.canonical(registration))
+        assert proof["durability"]["completion_sha256"] == producer.digest(
+            (Path(registration["directory_path"]) / "completion.json").read_bytes())
+        assert result["original_producer_completion"]["finished_monotonic"] <= proof["durability"]["observed_after_fsync_monotonic"] < registration["monotonic_deadline"]
+        assert producer._utc_observation(proof["durability"]["observed_after_fsync_wall"]) < producer.datetime.fromisoformat(registration["original_deadline_at"])
+        assert producer.original_producer_result_registration(result) == registration
+        with pytest.raises(ValueError, match="actual_original_producer_result_required"):
+            producer.original_producer_result_registration(dict(result))
         assert result["original_producer_completion"]["outcome"] == "completed_requested_checks"
         assert result["status"] == "succeeded"
         assert "live_parent_transport" not in result
@@ -196,6 +207,27 @@ async def test_actual_source_bundle_staging_holds_guard_and_revokes_physical_wit
             os.close(contender)
     with pytest.raises(ValueError, match="actual_original_producer_physical_completion_required"):
         producer.original_producer_completion_result(witness)
+    with pytest.raises(ValueError, match="actual_original_producer_result_required"):
+        producer.original_producer_result_registration(result)
+    proof_path = Path(registration["directory_path"]) / producer.DURABILITY_FILE
+    proof_raw = proof_path.read_bytes()
+    hidden = proof_path.with_name("missing-durability-for-negative")
+    try:
+        proof_path.rename(hidden)
+        with pytest.raises(FileNotFoundError):
+            with producer.stage_original_producer_completion(registration):
+                pytest.fail("missing original proof accepted")
+    finally:
+        hidden.rename(proof_path)
+    try:
+        changed = json.loads(proof_raw)
+        changed["durability"]["nonce"] = "f" * 64
+        proof_path.write_bytes(producer.canonical(changed))
+        with pytest.raises(ValueError, match="original_producer_durability"):
+            with producer.stage_original_producer_completion(registration):
+                pytest.fail("changed original proof accepted")
+    finally:
+        proof_path.write_bytes(proof_raw)
     # Replacing a signed original output cannot mint another physical witness.
     output = Path(registration["directory_path"]) / "pytest.stdout"
     original = output.read_bytes()
@@ -460,3 +492,186 @@ def test_original_finalizer_cannot_start_in_serialization_reserve(monkeypatch, n
     # No stage/runtime DTO can authorize physical work after D-1.
     with pytest.raises(ValueError, match='original_producer_cleanup_deadline'):
         finalizer.finalize_original_outputs({'deadline_at': 10.0}, None)
+
+
+def _durability_parser_case():
+    """Local signer ONLY for schema/I/O mechanics; no Source/SQL authority."""
+    from datetime import datetime, timezone, timedelta
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    key = Ed25519PrivateKey.generate()
+    wall = datetime.now(timezone.utc)
+    cutoff = wall + timedelta(days=1)
+    admission = b"original parser-only admission"
+    material = producer.canonical({"completion": "parser-only material", "signature": "not authority"})
+    ready = producer.OriginalProducerReady(producer.digest(admission),
+        base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode(),
+        "a" * 64, 1, "1", "parser-boot", (1, 2), (3, 4))
+    registration = {"schema": producer.PROFILE_V2, "ready": ready.projection(),
+        "ready_digest": producer.digest(producer.canonical(ready.projection())),
+        "admission_digest": producer.digest(admission), "monotonic_deadline": 10.0,
+        "execution_deadline_at": cutoff.isoformat(), "original_deadline_at": cutoff.isoformat()}
+    body = {"schema": producer.DURABILITY, "completion_sha256": producer.digest(material),
+        "registration_digest": producer.digest(producer.canonical(registration)),
+        "admission_digest": producer.digest(admission), "ready_digest": registration["ready_digest"],
+        "boot_id": ready.boot_id, "nonce": ready.nonce, "observed_after_fsync_monotonic": 2.0,
+        "deadline_monotonic": 10.0, "observed_after_fsync_wall": wall.isoformat(),
+        "execution_wall_cutoff": cutoff.isoformat(), "original_deadline_at": cutoff.isoformat()}
+    return key, body, registration, ready, admission, material, cutoff
+
+
+def _parser_signed_proof(key, body, *, domain=None):
+    return producer.canonical({"durability": body,
+        "signature": base64.b64encode(key.sign((domain or producer.DURABILITY_DOMAIN) + producer.canonical(body))).decode()})
+
+
+def test_durability_parser_accepts_exact_evidence_without_issuing_authority():
+    key, body, registration, ready, admission, material, _ = _durability_parser_case()
+    raw = _parser_signed_proof(key, body)
+    assert producer._verify_durability(raw, material, registration, ready, admission) == body
+    with pytest.raises(ValueError, match="actual_original_producer_result_required"):
+        producer.original_producer_result_registration({"original_producer_ready": ready})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema", "repository.original_producer_durability.v2"), ("extra", "unexpected"),
+    ("completion_sha256", "f" * 64), ("registration_digest", "f" * 64),
+    ("admission_digest", "f" * 64), ("ready_digest", "f" * 64), ("nonce", "f" * 64),
+    ("boot_id", "foreign"), ("boot_id", ""), ("boot_id", "b" * 129),
+    ("observed_after_fsync_monotonic", True), ("observed_after_fsync_monotonic", float("nan")),
+    ("observed_after_fsync_monotonic", float("inf")), ("observed_after_fsync_monotonic", 0),
+    ("observed_after_fsync_monotonic", 10.0), ("deadline_monotonic", True),
+    ("deadline_monotonic", 11.0), ("observed_after_fsync_wall", "2026-01-01T00:00:00"),
+    ("observed_after_fsync_wall", "2026-01-01T00:00:00Z"),
+    ("observed_after_fsync_wall", "2999-01-01T00:00:00+00:00"),
+    ("execution_wall_cutoff", "2999-01-01T00:00:00+00:00"),
+    ("original_deadline_at", "2999-01-01T00:00:00+00:00"),
+])
+def test_durability_parser_rejects_signed_schema_binding_or_late_observation(field, value):
+    key, body, registration, ready, admission, material, _ = _durability_parser_case()
+    body[field] = value
+    with pytest.raises(ValueError, match="original_producer_durability"):
+        producer._verify_durability(_parser_signed_proof(key, body), material, registration, ready, admission)
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate", "noncanonical", "wrong_domain", "wrong_key", "short_signature", "oversize"])
+def test_durability_parser_rejects_envelope_and_signer_substitution(change):
+    key, body, registration, ready, admission, material, _ = _durability_parser_case()
+    raw = _parser_signed_proof(key, body)
+    if change == "missing":
+        del body["nonce"]
+        raw = _parser_signed_proof(key, body)
+    elif change == "duplicate":
+        raw = raw[:-1] + b',"signature":"duplicate"}'
+    elif change == "noncanonical":
+        raw = b" " + raw
+    elif change == "wrong_domain":
+        raw = _parser_signed_proof(key, body, domain=producer.DOMAIN_V2)
+    elif change == "wrong_key":
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        raw = _parser_signed_proof(Ed25519PrivateKey.generate(), body)
+    elif change == "short_signature":
+        envelope = json.loads(raw)
+        envelope["signature"] = base64.b64encode(b"short").decode()
+        raw = producer.canonical(envelope)
+    else:
+        raw = b" " * (producer.MAX_DURABILITY + 1)
+    with pytest.raises(ValueError, match="original_producer"):
+        producer._verify_durability(raw, material, registration, ready, admission)
+
+
+@pytest.mark.parametrize("late_operation", ["open", "write", "file_fsync", "link", "unlink", "directory_fsync"])
+def test_durability_writer_never_initiates_next_proof_syscall_after_late_return(tmp_path, monkeypatch, late_operation):
+    key, body, registration, ready, admission, material, cutoff = _durability_parser_case()
+    raw = _parser_signed_proof(key, body)
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    clock = {"now": 1.0}
+    operations = []
+    monkeypatch.setattr(producer.time, "monotonic", lambda: clock["now"])
+    originals = {name: getattr(os, name) for name in ("open", "write", "fsync", "link", "unlink")}
+    def observe(name, *args, **kwargs):
+        label = ("directory_fsync" if args[0] == directory else "file_fsync") if name == "fsync" else name
+        operations.append(label)
+        returned = originals[name](*args, **kwargs)
+        if label == late_operation:
+            clock["now"] = 10.0
+        return returned
+    for name in originals:
+        monkeypatch.setattr(producer.os, name, lambda *args, _name=name, **kwargs: observe(_name, *args, **kwargs))
+    try:
+        with pytest.raises(ValueError, match="original_producer_durability_deadline"):
+            producer._write_durability_once(directory, raw, deadline=10.0,
+                execution_cutoff=cutoff, original_cutoff=cutoff)
+        expected = ["open", "write", "file_fsync", "link", "unlink", "directory_fsync"]
+        assert operations == expected[:expected.index(late_operation) + 1]
+        if late_operation in {"unlink", "directory_fsync"}:
+            # Historical observation is timely even though LIVE persistence returns late.
+            literal = (tmp_path / producer.DURABILITY_FILE).read_bytes()
+            assert producer._verify_durability(literal, material, registration, ready, admission) == body
+            assert (tmp_path / producer.DURABILITY_FILE).stat().st_nlink == 1
+        elif late_operation in {"open", "write", "file_fsync"}:
+            assert not (tmp_path / producer.DURABILITY_FILE).exists()
+        else:
+            assert (tmp_path / producer.DURABILITY_FILE).stat().st_nlink == 2
+    finally:
+        os.close(directory)
+
+
+def test_durability_writer_timely_single_write_does_not_replace_or_retry(tmp_path):
+    key, body, _, _, _, _, cutoff = _durability_parser_case()
+    raw = _parser_signed_proof(key, body)
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        deadline = time.monotonic() + 5
+        producer._write_durability_once(directory, raw, deadline=deadline, execution_cutoff=cutoff, original_cutoff=cutoff)
+        assert producer.read_file(directory, producer.DURABILITY_FILE, producer.MAX_DURABILITY) == raw
+        with pytest.raises(FileExistsError):
+            producer._write_durability_once(directory, raw, deadline=deadline, execution_cutoff=cutoff, original_cutoff=cutoff)
+        assert producer.read_file(directory, producer.DURABILITY_FILE, producer.MAX_DURABILITY) == raw
+    finally:
+        os.close(directory)
+
+
+@pytest.mark.parametrize("expired_bound", ["execution", "root"])
+def test_durability_writer_checks_both_wall_cutoffs_before_first_proof_io(tmp_path, monkeypatch, expired_bound):
+    from datetime import datetime, timezone, timedelta
+    key, body, _, _, _, _, future = _durability_parser_case()
+    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    calls = []
+    def forbidden_open(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("expired proof initiated I/O")
+    monkeypatch.setattr(producer.os, "open", forbidden_open)
+    try:
+        with pytest.raises(ValueError, match="original_producer_durability_deadline"):
+            producer._write_durability_once(directory, _parser_signed_proof(key, body), deadline=time.monotonic() + 5,
+                execution_cutoff=expired if expired_bound == "execution" else future,
+                original_cutoff=expired if expired_bound == "root" else future)
+        assert calls == []
+    finally:
+        os.close(directory)
+
+
+@pytest.mark.parametrize("failed_operation", ["write", "file_fsync", "link", "unlink", "directory_fsync"])
+def test_durability_writer_storage_failure_stops_without_retry(tmp_path, monkeypatch, failed_operation):
+    key, body, _, _, _, _, cutoff = _durability_parser_case()
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    operations = []
+    originals = {name: getattr(os, name) for name in ("write", "fsync", "link", "unlink")}
+    def observe(name, *args, **kwargs):
+        label = ("directory_fsync" if args[0] == directory else "file_fsync") if name == "fsync" else name
+        operations.append(label)
+        if label == failed_operation:
+            raise OSError("original proof storage fault")
+        return originals[name](*args, **kwargs)
+    for name in originals:
+        monkeypatch.setattr(producer.os, name, lambda *args, _name=name, **kwargs: observe(_name, *args, **kwargs))
+    try:
+        with pytest.raises(OSError, match="original proof storage fault"):
+            producer._write_durability_once(directory, _parser_signed_proof(key, body), deadline=time.monotonic() + 5,
+                execution_cutoff=cutoff, original_cutoff=cutoff)
+        sequence = ["write", "file_fsync", "link", "unlink", "directory_fsync"]
+        assert operations == sequence[:sequence.index(failed_operation) + 1]
+    finally:
+        os.close(directory)

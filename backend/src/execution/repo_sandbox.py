@@ -2620,12 +2620,13 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         manifest = result["manifest"]
         proof = manifest.get("process_cleanup") or {}
         transport = manifest.get("supervisor_transport") or {}
-        durable_transport = transport.get("transport_kind") == "original_producer_durable_v1"
+        durable_transport = transport.get("transport_kind") in {"original_producer_durable_v1", "original_producer_durable_v2"}
         if durable_transport:
-            from src.execution.repo_original_producer import verify_completion
+            from src.execution.repo_original_producer import verify_completion, original_producer_result_registration
             body, outputs = verify_completion(result["original_producer_directory"],
                 result["original_producer_ready"], result["original_producer_registration"].registration_digest,
-                maximum_output=self.limits.max_output_bytes)
+                maximum_output=self.limits.max_output_bytes,
+                expected_registration=original_producer_result_registration(result))
             if (body != result["original_producer_completion"] or outputs != result["outputs"]
                     or body["manifest"] != manifest
                     or any(transport.get(name) is not True for name in (
@@ -2663,7 +2664,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             raise RepoSandboxError("original producer marker binding changed")
         marker.update(phase="iteration_cleanup_verified", cleanup_proven=True,
             status="iteration_failed_quiescent" if result["status"] == "failed" else result["status"],
-            process_cleanup={"transport_kind": "original_producer_durable_v1",
+            process_cleanup={"transport_kind": manifest["supervisor_transport"]["transport_kind"],
                 "completion_digest": hashlib.sha256(json.dumps(result["original_producer_completion"],
                     sort_keys=True, separators=(",", ":")).encode()).hexdigest()},
             terminal_receipt={"status": result["status"],

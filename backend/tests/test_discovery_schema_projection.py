@@ -184,8 +184,8 @@ async def test_census_query_paid_before_delivery_and_repeats_without_refund(mode
     event.listen(connection.sync_connection, "before_cursor_execute", observe)
     # Independent compact grammar/allocation ledger; all three result fields
     # and original decoder appearances remain paid. No helper prices this oracle.
-    input_upper, output_upper, decoder_upper = 233138, 48, 1488
-    call_upper = 234674
+    input_upper, output_upper, decoder_upper = 216532, 48, 1488
+    call_upper = 218068
     assert input_upper + output_upper + decoder_upper == call_upper
     constructors = []
     real_constructor = headers._selected_schema_census_aggregate_sql
@@ -200,8 +200,8 @@ async def test_census_query_paid_before_delivery_and_repeats_without_refund(mode
             assert observed[-1][1] == before - index * call_upper - input_upper - output_upper - decoder_upper
             assert constructors[-1] == observed[-1][1]
             assert budget.remaining == before - (index + 1) * call_upper
-        assert before - budget.remaining == 469348
-        assert budget.remaining == 579228
+        assert before - budget.remaining == 436136
+        assert budget.remaining == 612440
         budget.debit(budget.remaining - (input_upper - 1))
         spent = budget.remaining
         def forbidden(*_args, **_kwargs):

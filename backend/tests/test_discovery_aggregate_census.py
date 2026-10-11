@@ -24,7 +24,7 @@ async def test_summary_delivery_denies_malformed_shapes_types_and_ranges(model_d
     budget = HeaderReadBudget()
     with pytest.raises(HeaderBoundsError, match="^header_schema_object_unavailable$"):
         await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=budget))
-    assert budget.remaining == 1048576 - 234674
+    assert budget.remaining == 1048576 - 218068
 
 
 @pytest.mark.parametrize("summary,error", [
@@ -62,7 +62,7 @@ async def test_actual_sql_domain_flag_matches_original_integer_validator(model_d
     await connection.run_sync(check)
 
 
-@pytest.mark.parametrize("remaining", [233138 + 48 + 1259, 234673])
+@pytest.mark.parametrize("remaining", [216532 + 48 + 1259, 218067])
 async def test_decoder_reservations_deny_before_any_constructor_or_query(model_db, monkeypatch, remaining):
     connection = await model_db.connection()
     budget = HeaderReadBudget()
@@ -94,5 +94,5 @@ async def test_empty_and_complete_fts_membership_matches_original_rows(model_db,
             actual = headers._projected_schema_objects(conn, budget, _header_budget=budget)
             assert actual == expected_names
             assert len(actual) == (0 if mode == "empty" else 15)
-            assert budget.remaining == 1048576 - 234674
+            assert budget.remaining == 1048576 - 218068
     await connection.run_sync(check)

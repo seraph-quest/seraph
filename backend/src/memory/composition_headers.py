@@ -583,6 +583,10 @@ def _census_source_leaves():
                 raise HeaderBoundsError("header_schema_source_unavailable")
     keys(_SCHEMA_TABLES)
     keys(_NAMED_INDEXES)
+    # Exact streamed token membership requires delimiter-free source leaves.
+    for name in _NAMED_INDEXES:
+        if "|" in name:
+            raise HeaderBoundsError("header_schema_source_unavailable")
     keys(_AUTO_MAX)
     keys(_FTS_SQL)
     keys(_FTS_META)
@@ -634,30 +638,24 @@ def _selected_schema_census_parts(*, numeric):
         yield part("'")
         yield part(value)
         yield part("'")
-    def members(values):
+    def members(values, *, source_order=False):
         first = True
-        for value in values if numeric else sorted(values):
+        for value in values if numeric or source_order else sorted(values):
             if not first:
                 yield part(", ")
             first = False
             yield from quote(value)
     def tables(extra=False):
-        # The unpaid pass counts each unique source leaf without constructing sets.
-        if numeric:
-            yield from _SCHEMA_TABLES
-            if "alembic_version" not in _SCHEMA_TABLES:
-                yield "alembic_version"
-            if extra:
-                if "sqlite_sequence" not in _SCHEMA_TABLES:
-                    yield "sqlite_sequence"
-                for name in _FTS_META:
-                    if name not in _SCHEMA_TABLES and name not in ("alembic_version", "sqlite_sequence"):
-                        yield name
-        else:
-            values = {*_SCHEMA_TABLES, "alembic_version"}
-            if extra:
-                values |= {"sqlite_sequence"} | set(_FTS_META)
-            yield from values
+        # Both passes traverse original leaves; neither builds a set/sorted list.
+        yield from _SCHEMA_TABLES
+        if "alembic_version" not in _SCHEMA_TABLES:
+            yield "alembic_version"
+        if extra:
+            if "sqlite_sequence" not in _SCHEMA_TABLES:
+                yield "sqlite_sequence"
+            for name in _FTS_META:
+                if name not in _SCHEMA_TABLES and name not in ("alembic_version", "sqlite_sequence"):
+                    yield name
     def auto_keys():
         if numeric:
             yield from _AUTO_MAX
@@ -706,18 +704,15 @@ def _selected_schema_census_parts(*, numeric):
                         yield part(") = '")
                         yield part(kind)
                         yield part(table)
-                        yield part("_' COLLATE BINARY AND substr(name, ")
-                        yield number(offset + 1)
-                        yield part(") IN (")
-                    else:
-                        yield part(", ")
+                        yield part("_' COLLATE BINARY AND instr('")
                     first = False
-                    yield part("'")
+                    yield part("|")
                     # Sizing never slices a source name; the paid pass does once.
                     yield len(value) - offset if numeric else value[offset:]
-                    yield part("'")
                 if not first:
-                    yield part("))")
+                    yield part("|', '|' || substr(name, ")
+                    yield number(offset + 1)
+                    yield part(") || '|') > 0)")
         first = True
         for value in _NAMED_INDEXES:
             if _census_named_group_table(value) is not None:
@@ -743,9 +738,9 @@ def _selected_schema_census_parts(*, numeric):
         yield part(") THEN (tbl_name = 'task_method_active' AND name IN (")
         yield from members(task)
         yield part(")) ELSE (tbl_name IN (")
-        yield from members(tables())
+        yield from members(tables(), source_order=True)
         # SUBSTR stops at embedded NUL; original full-name IN never accepts it.
-        yield part(") AND instr(name, char(0)) = 0 AND (")
+        yield part(") AND instr(name, char(0)) = 0 AND instr(name, '|') = 0 AND (")
         yield from named_indexes()
         yield part(")) END")
     def trigger():
@@ -764,7 +759,7 @@ def _selected_schema_census_parts(*, numeric):
             yield from quote(spec[1])
             yield part(")")
     yield part("WITH capped AS (SELECT rowid, CASE WHEN octet_length(type) <= 7 THEN type END AS type, CASE WHEN octet_length(name) <= 128 THEN name END AS name, CASE WHEN octet_length(tbl_name) <= 128 THEN tbl_name END AS tbl_name FROM sqlite_schema ORDER BY rowid LIMIT 1360) SELECT rowid, CASE WHEN (CASE type WHEN 'table' THEN (name = tbl_name COLLATE BINARY AND name IN (")
-    yield from members(tables(True))
+    yield from members(tables(True), source_order=True)
     yield part(")) WHEN 'index' THEN (")
     yield from index()
     yield part(") WHEN 'trigger' THEN (")
@@ -791,9 +786,9 @@ def _selected_schema_census_input_upper():
     # One join frontier, final SQL and original driver's input copy.
     upper = 2 + length + 2 * count + max(0, count - 1) + 2 * (length + 2) + 6
     # Container slots/aliases are charged too, including original FTS DDL refs.
-    # Tables occur in two independent branches: source/numeric aliases, set slots,
-    # union/update slots and sorted member lists. Eight covers that full frontier.
-    upper += 8 * (2 + sum(len(value) + 3 for value in _SCHEMA_TABLES))
+    # Two table branches now stream: remove ONLY their two set and two sorted
+    # list appearances (4*2230). Retain the other four source/union alias reserves.
+    upper += 4 * (2 + sum(len(value) + 3 for value in _SCHEMA_TABLES))
     # Groups stream original leaves: no named sort/list/dict/prefix allocation.
     # Every matched name is sliced once in the paid fragment stream.
     for name in _NAMED_INDEXES:

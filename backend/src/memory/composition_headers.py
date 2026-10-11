@@ -564,25 +564,243 @@ def _selected_schema_census_sql():
         f"{ordinal} AS original_fts_name_ordinal FROM capped ORDER BY rowid LIMIT 1360")
 
 
+def _census_decimal_width(value):
+    if type(value) is not int or not 0 <= value < 2**63:
+        raise HeaderBoundsError("header_schema_object_unavailable")
+    width = 1
+    while value >= 10:
+        value //= 10
+        width += 1
+    return width
+
+
+def _census_source_leaves():
+    # Source aliases only: no runtime roster tuple, item pairs or body copies.
+    def keys(roster):
+        for value in roster:
+            if (type(value) is not str or not value or len(value) > 128
+                    or any(not 32 <= ord(char) < 127 or char in "'\\\"" for char in value)):
+                raise HeaderBoundsError("header_schema_source_unavailable")
+    keys(_SCHEMA_TABLES)
+    keys(_NAMED_INDEXES)
+    keys(_AUTO_MAX)
+    keys(_FTS_SQL)
+    keys(_FTS_META)
+    for table in _AUTO_MAX:
+        _census_decimal_width(_AUTO_MAX[table])
+    for name in _FTS_SQL:
+        spec = _FTS_SQL[name]
+        if type(spec) is not tuple or len(spec) != 3 or type(spec[2]) is not str:
+            raise HeaderBoundsError("header_schema_source_unavailable")
+        kind = spec[0]
+        table = spec[1]
+        if (type(kind) is not str or kind not in ("table", "trigger")
+                or type(table) is not str or not table or len(table) > 128
+                or any(not 32 <= ord(char) < 127 or char in "'\\\"" for char in table)):
+            raise HeaderBoundsError("header_schema_source_unavailable")
+    if len(_FTS_SQL) != 15:
+        raise HeaderBoundsError("header_schema_source_unavailable")
+
+
+def _selected_schema_census_parts(*, numeric):
+    # Numeric mode emits widths only, and never sorts, formats or builds SQL.
+    def part(value):
+        return len(value) if numeric else value
+    def number(value):
+        return _census_decimal_width(value) if numeric else str(value)
+    def quote(value):
+        yield part("'")
+        yield part(value)
+        yield part("'")
+    def members(values):
+        first = True
+        for value in values if numeric else sorted(values):
+            if not first:
+                yield part(", ")
+            first = False
+            yield from quote(value)
+    def tables(extra=False):
+        # The unpaid pass counts each unique source leaf without constructing sets.
+        if numeric:
+            yield from _SCHEMA_TABLES
+            if "alembic_version" not in _SCHEMA_TABLES:
+                yield "alembic_version"
+            if extra:
+                if "sqlite_sequence" not in _SCHEMA_TABLES:
+                    yield "sqlite_sequence"
+                for name in _FTS_META:
+                    if name not in _SCHEMA_TABLES and name not in ("alembic_version", "sqlite_sequence"):
+                        yield name
+        else:
+            values = {*_SCHEMA_TABLES, "alembic_version"}
+            if extra:
+                values |= {"sqlite_sequence"} | set(_FTS_META)
+            yield from values
+    def auto_keys():
+        if numeric:
+            yield from _AUTO_MAX
+            if "alembic_version" not in _AUTO_MAX:
+                yield "alembic_version"
+        else:
+            values = dict(_AUTO_MAX)
+            values.setdefault("alembic_version", 1)
+            yield from sorted(values)
+    def suffix(table):
+        yield part("substr(name, ")
+        yield number(len("sqlite_autoindex_") + len(table) + 2)
+        yield part(")")
+    def auto():
+        yield part("CASE ")
+        first = True
+        for table in auto_keys():
+            bound = _AUTO_MAX.get(table, 1)
+            if not first:
+                yield part(" ")
+            first = False
+            yield part("WHEN tbl_name = ")
+            yield from quote(table)
+            yield part(" THEN (")
+            yield from suffix(table)
+            yield part(" <> '' AND instr(name, char(0)) = 0 AND ")
+            yield from suffix(table)
+            yield part(" NOT GLOB '*[^0-9]*' AND CAST(")
+            yield from suffix(table)
+            yield part(" AS INTEGER) BETWEEN 1 AND ")
+            yield number(bound)
+            yield part(")")
+        yield part(" ELSE 0 END")
+    def index():
+        yield part("CASE WHEN substr(name, 1, length('sqlite_autoindex_' || tbl_name || '_')) = ('sqlite_autoindex_' || tbl_name || '_') COLLATE BINARY THEN (")
+        yield from auto()
+        yield part(") WHEN tbl_name = 'task_method_active' OR name IN (")
+        task = ("ix_task_method_active_goal_id", "ix_task_method_active_owner_identity_id")
+        yield from members(task)
+        yield part(") THEN (tbl_name = 'task_method_active' AND name IN (")
+        yield from members(task)
+        yield part(")) ELSE (tbl_name IN (")
+        yield from members(tables())
+        yield part(") AND name IN (")
+        yield from members(_NAMED_INDEXES)
+        yield part(")) END")
+    def trigger():
+        yield part("(tbl_name = 'operator_sessions' AND name IN ('operator_principal_required_insert', 'operator_principal_required_update')) OR ")
+        first = True
+        for name in _FTS_SQL:
+            spec = _FTS_SQL[name]
+            if spec[0] != "trigger":
+                continue
+            if not first:
+                yield part(" OR ")
+            first = False
+            yield part("(name = ")
+            yield from quote(name)
+            yield part(" AND tbl_name = ")
+            yield from quote(spec[1])
+            yield part(")")
+    yield part("WITH capped AS (SELECT rowid, CASE WHEN octet_length(type) <= 7 THEN type END AS type, CASE WHEN octet_length(name) <= 128 THEN name END AS name, CASE WHEN octet_length(tbl_name) <= 128 THEN tbl_name END AS tbl_name FROM sqlite_schema ORDER BY rowid LIMIT 1360) SELECT rowid, CASE WHEN (CASE type WHEN 'table' THEN (name = tbl_name COLLATE BINARY AND name IN (")
+    yield from members(tables(True))
+    yield part(")) WHEN 'index' THEN (")
+    yield from index()
+    yield part(") WHEN 'trigger' THEN (")
+    yield from trigger()
+    yield part(") ELSE 0 END) THEN 1 ELSE 0 END AS original_object_valid, CASE name ")
+    ordinal = 0
+    for name in _FTS_SQL:
+        ordinal += 1
+        if ordinal != 1:
+            yield part(" ")
+        yield part("WHEN ")
+        yield from quote(name)
+        yield part(" THEN ")
+        yield number(ordinal)
+    yield part(" ELSE 0 END AS original_fts_name_ordinal FROM capped ORDER BY rowid LIMIT 1360")
+
+
+def _selected_schema_census_input_upper():
+    _census_source_leaves()
+    length = count = 0
+    for width in _selected_schema_census_parts(numeric=True):
+        length += width
+        count += 1
+    # One join frontier, final SQL and original driver's input copy.
+    upper = 2 + length + 2 * count + max(0, count - 1) + 2 * (length + 2) + 6
+    # Container slots/aliases are charged too, including original FTS DDL refs.
+    # Tables occur in two independent branches: source/numeric aliases, set slots,
+    # union/update slots and sorted member lists. Eight covers that full frontier.
+    upper += 8 * (2 + sum(len(value) + 3 for value in _SCHEMA_TABLES))
+    # Named indexes materialize one paid sorted member list; validation/numeric
+    # walks reuse source leaves, and emitted fragments are paid above.
+    upper += 2 + sum(len(value) + 3 for value in _NAMED_INDEXES)
+    # Other source rosters retain their existing conservative slot appearances.
+    upper += 6 * (2 + sum(len(value) + 3 for value in _AUTO_MAX))
+    upper += 6 * (2 + sum(len(value) + 3 for value in _FTS_META))
+    upper += 3 * (2 + sum(3 + len(name) + 2 + _metadata_size(_FTS_SQL[name]) + 1 for name in _FTS_SQL))
+    upper += 3 * (2 + sum(len(table) + 3 + 20 for table in _AUTO_MAX))
+    # Every offset occurs three times; bounds and ordinals are formatted once.
+    for table in _AUTO_MAX:
+        bound = _AUTO_MAX[table]
+        upper += 3 * (_census_decimal_width(len("sqlite_autoindex_") + len(table) + 2) + 2)
+        upper += _census_decimal_width(bound) + 2
+    upper += 3 * (_census_decimal_width(len("sqlite_autoindex_") + len("alembic_version") + 2) + 2) + 3
+    for ordinal in range(1, len(_FTS_SQL) + 1):
+        upper += _census_decimal_width(ordinal) + 2
+    # Literal task/default/union slots, not retained new source authority.
+    upper += 6 * (2 + len("alembic_version") + 3 + len("sqlite_sequence") + 3)
+    upper += 3 * (2 + len("ix_task_method_active_goal_id") + 3
+        + len("ix_task_method_active_owner_identity_id") + 3)
+    return upper
+
+
+def _selected_schema_census_flat_sql():
+    return "".join(_selected_schema_census_parts(numeric=False))
+
+
+def _selected_census_owner(connection, budget):
+    # Zero-debit owner check, before ANY source sizing/generator traversal.
+    from src.memory.header_bounds import _SESSION_NUMERIC_READS, _MEMORY_LEDGER_PHASE
+    if (type(budget) is not HeaderReadBudget or _SESSION_NUMERIC_READS.get() is not None
+            or _MEMORY_LEDGER_PHASE.get() is not None):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    if not connection.in_transaction() or not connection.connection.driver_connection.in_transaction:
+        raise HeaderBoundsError("header_metadata_transaction_required")
+    current = _CURRENT.get()
+    if current is not None and (current.connection is not connection or current.budget is not budget):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+
+
+def _selected_census_rows(connection, budget):
+    _selected_census_owner(connection, budget)
+    upper = _selected_schema_census_input_upper()
+    _metadata_precharge(connection, budget, upper, ("complete-schema-flat-construction",))
+    # Pay ALL result copies before the join or query; no partial construction on exhaustion.
+    for stage in ("delivery", "row-copy", "encoded-copy"):
+        _metadata_precharge(connection, budget, _metadata_upper(1360, (20, 1, 2)),
+            ("complete-schema", stage))
+    query = _selected_schema_census_flat_sql()
+    rows = list(_sql(connection, query, ()))
+    if len(rows) > 1360:
+        raise HeaderBoundsError("header_schema_object_bound")
+    for row in rows:
+        if (len(row) != 3 or any(type(value) is not int for value in row)
+                or not -(2**63) <= row[0] < 2**63 or row[1] not in (0, 1)
+                or not 0 <= row[2] <= 15):
+            raise HeaderBoundsError("header_schema_object_unavailable")
+    return rows
+
+
 def _projected_schema_objects(connection, budget, *, _header_budget):
     if type(budget) is not HeaderReadBudget or _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
-    rows = _metadata_rows(connection, _selected_schema_census_sql(), (),
-        _header_budget=_header_budget, upper=_metadata_upper(1360, (20, 20, 20)),
-        appearance=("complete-schema",))
-    if any(len(row) != 3 or any(type(value) is not int for value in row)
-            or not -(2**63) <= row[0] < 2**63 or row[1] not in (0, 1)
-            or not 0 <= row[2] <= len(_FTS_SQL) for row in rows):
-        raise HeaderBoundsError("header_schema_object_unavailable")
+    rows = _selected_census_rows(connection, budget)
     if len(rows) > _SCHEMA_LIMIT:
         raise HeaderBoundsError("header_schema_object_bound")
     if any(row[1] != 1 for row in rows):
         raise HeaderBoundsError("header_schema_object_unavailable")
     for phase in ("source-name-delivery", "name-list-copy", "name-set-copy"):
-        _metadata_precharge(connection, budget, _metadata_upper(15, (770,)),
+        _metadata_precharge(connection, budget, 2 + sum(len(name) + 3 for name in _FTS_SQL) - 1,
             ("complete-schema-fts-decoding", phase))
     for phase in ("ordinal-visits", "ordinal-set-copy", "ordinal-sorted-copy"):
-        _metadata_precharge(connection, budget, _metadata_upper(1360, (20,)),
+        _metadata_precharge(connection, budget, _metadata_upper(1360, (2,)),
             ("complete-schema-fts-decoding", phase))
     ordinals = sorted({ordinal for _rowid, _valid, ordinal in rows if ordinal})
     names = tuple(_FTS_SQL)

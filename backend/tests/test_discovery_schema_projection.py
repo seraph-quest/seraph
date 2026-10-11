@@ -143,13 +143,22 @@ async def test_original_model_schema_matches_without_issuing_certificate(model_d
 
 
 @pytest.mark.parametrize("mode", ["foreign", "none", "exhausted"])
-async def test_wrong_payer_or_insufficient_budget_denies_before_query(model_db, mode):
+async def test_wrong_payer_or_insufficient_budget_denies_before_query(model_db, mode, monkeypatch):
     connection = await model_db.connection()
     budget = HeaderReadBudget()
     payer = HeaderReadBudget() if mode == "foreign" else None if mode == "none" else budget
     if mode == "exhausted":
         budget.debit(budget.remaining)
     before = budget.remaining
+    reached = []
+    if mode in ("foreign", "none"):
+        def forbidden(*_args, **_kwargs):
+            reached.append(True)
+            raise AssertionError("Wrong payer reached sizing/allocation/construction")
+        for name in ("_selected_schema_census_input_upper", "_census_source_leaves",
+                "_selected_schema_census_parts", "_census_decimal_width",
+                "_selected_schema_census_flat_sql", "_selected_census_rows", "_sql"):
+            monkeypatch.setattr(headers, name, forbidden)
     queries = []
     def observe(*args):
         queries.append(args[2])
@@ -159,30 +168,53 @@ async def test_wrong_payer_or_insufficient_budget_denies_before_query(model_db, 
             await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=payer))
     finally:
         event.remove(connection.sync_connection, "before_cursor_execute", observe)
-    assert queries == [] and budget.remaining == before
+    assert not reached and queries == [] and budget.remaining == before
     assert budget.physical_references == frozenset()
 
 
-async def test_census_query_paid_before_delivery_and_repeats_without_refund(model_db):
+async def test_census_query_paid_before_delivery_and_repeats_without_refund(model_db, monkeypatch):
     connection = await model_db.connection()
     budget = HeaderReadBudget()
     before = budget.remaining
+    assert before == 1048576
     observed = []
     def observe(_conn, _cursor, statement, _parameters, _context, _many):
         observed.append((statement, budget.remaining))
     event.listen(connection.sync_connection, "before_cursor_execute", observe)
+    # Independent R193 source ledger: one sorted named roster; all other
+    # input/result/decoder charges retained. No candidate helper prices this oracle.
+    input_upper, output_upper, decoder_upper = 357891, 114243, 21663
+    call_upper = 493797
+    assert input_upper + output_upper + decoder_upper == call_upper
+    constructors = []
+    real_constructor = headers._selected_schema_census_flat_sql
+    def construct():
+        constructors.append(budget.remaining)
+        return real_constructor()
+    monkeypatch.setattr(headers, "_selected_schema_census_flat_sql", construct)
+    reached = []
     try:
-        for _ in range(2):
+        for index in range(2):
             assert await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=budget)) == set()
+            assert observed[-1][1] == before - index * call_upper - input_upper - output_upper
+            assert constructors[-1] == observed[-1][1]
+            assert budget.remaining == before - (index + 1) * call_upper
+        assert before - budget.remaining == 987594
+        assert budget.remaining == 60982 and budget.remaining < input_upper
+        spent = budget.remaining
+        def forbidden(*_args, **_kwargs):
+            reached.append(True)
+            raise AssertionError("Third census reached unpaid constructor/query")
+        monkeypatch.setattr(headers, "_selected_schema_census_flat_sql", forbidden)
+        monkeypatch.setattr(headers, "_sql", forbidden)
+        with pytest.raises(HeaderBoundsError):
+            await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=budget))
     finally:
         event.remove(connection.sync_connection, "before_cursor_execute", observe)
-    assert len(observed) == 2
-    assert [value for _, value in observed] == [before - 265203, before - 393834 - 265203]
-    assert budget.remaining == before - 2 * 393834
+    assert not reached and len(observed) == len(constructors) == 2
+    assert budget.remaining == spent  # Failed next input reserve has no debit/refund.
     assert budget.physical_references == frozenset()
-    with pytest.raises(HeaderBoundsError):
-        await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=budget))
-    assert budget.remaining < before - 2 * 393834
+
 
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)

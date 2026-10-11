@@ -56,9 +56,11 @@ def original_selection_accounting_setup():
 
 @pytest_asyncio.fixture
 async def genuine_live_selection(tmp_path, monkeypatch, request):
+    from src.memory.task_methods import current_method
     callspec = getattr(request.node, "callspec", None)
     scenario = "positive" if callspec is None else callspec.params.get("scenario", "positive")
     host_start_attempted = False
+    method_start_attempted = False
     original_host_process = cordis_host.process
     original_host_boot = cordis_host.boot_nonce
     # Imported users of this fixture need no new fixture dependency. Only the
@@ -125,6 +127,13 @@ async def genuine_live_selection(tmp_path, monkeypatch, request):
                     public_web_acknowledged=True, local_artifacts_acknowledged=True,
                     inference_ceiling_acknowledged=True))
             assert accepted["state"] == "active"
+            # Own the actual method-reader lifecycle before composition and
+            # discovery activation. No pointer, baseline or signature is made
+            # by the fixture; never-selected absence remains an original read.
+            assert not current_method._started
+            method_start_attempted = True
+            await current_method.start()
+            assert current_method._started
             if scenario == "goal_revision":
                 changed = await GoalRepository().update(goal.id, title="Changed by original Goal owner",
                     expected_revision=goal.revision, expected_owner_principal_id=operator.principal.principal_id,
@@ -168,9 +177,14 @@ async def genuine_live_selection(tmp_path, monkeypatch, request):
                 assert not cordis_host.admitting
                 assert cordis_host.snapshot()["cleanup"]["resources_remaining"] == 0
         finally:
-            await goal_programme_service.stop()
-            await engine.dispose()
-            assert contacts == []
+            try:
+                if method_start_attempted:
+                    await current_method.stop()
+                    assert not current_method._started and current_method._key is None
+            finally:
+                await goal_programme_service.stop()
+                await engine.dispose()
+                assert contacts == []
 
 
 @contextmanager

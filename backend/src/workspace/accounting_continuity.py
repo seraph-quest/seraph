@@ -35,6 +35,13 @@ def _derive_programme_rows(connection, common33, *, fail):
     from src.workflows.job_runtime import _digest
     from src.runtime_plugins.ownership import RuntimeCompositionBinding
     _validate(connection, common33)
+    def pay(table, key, *appearances):
+        upper = common33.rows[(table, key)][1]
+        for appearance in appearances:
+            common33.budget.debit(upper, appearance=("programme-selector", appearance, table, key))
+    def generation(value, key):
+        pay("goals", key, "generation-model")
+        return GoalProgramme.model_validate(value)
     goals, issuers, runs, identities = {}, {}, {}, set()
     def full(table, key):
         with snapshot_reads(common33):
@@ -45,9 +52,13 @@ def _derive_programme_rows(connection, common33, *, fail):
         run = full(table, key)
         if run["job_kind"] != DISCOVERY_KIND or run["composition_binding_json"] is None:
             continue
+        pay("workflow_run_states", key, "authority-json", "authority-model")
         authority = discovery_authority(run["declared_authority_json"])
         binding = authority.programme_binding
+        pay("workflow_run_states", key, "composition-json", "composition-model", "composition-dependencies")
         composition = RuntimeCompositionBinding.from_json(run["composition_binding_json"])
+        pay("workflow_run_states", key, "authority-digest-json", "authority-digest-canonical",
+            "authority-digest-encoded", "input-digest-json", "input-digest-canonical", "input-digest-encoded")
         if (run["owner_kind"] != "service" or run["service_id"] != DISCOVERY_SERVICE
                 or run["owner_principal_id"] != DISCOVERY_SERVICE
                 or any(run[name] is not None for name in ("session_id", "conversation_id", "operator_session_id"))
@@ -62,15 +73,20 @@ def _derive_programme_rows(connection, common33, *, fail):
                 or run["input_digest"] != _digest(json.loads(run["arguments_json"]))):
             fail("programme_original_lineage_changed")
         goal = full("goals", binding.goal_id)
+        pay("goals", binding.goal_id, "programme-namespace", "programme-json", "programme-envelope", "generation-list")
         stored = _load(SimpleNamespace(**goal))
-        matching = [GoalProgramme.model_validate(generation) for generation in stored["generations"]
-            if generation["id"] == binding.programme_id and generation["grant_revision"] == binding.grant_revision]
+        matching = [generation(value, binding.goal_id) for value in stored["generations"]
+            if value["id"] == binding.programme_id and value["grant_revision"] == binding.grant_revision]
+        pay("goals", binding.goal_id, "programme-binding-model")
         if len(matching) != 1 or GoalProgrammeAuthorityBinding.from_programme(matching[0], authority.capability_id) != binding:
             fail("programme_original_generation_changed")
         issuer = full("operator_sessions", binding.issuer_root_id)
         if (issuer["operator_identity_id"] != binding.owner_identity_id
                 or issuer["principal_id"] != binding.issuer_principal_id):
             fail("programme_original_issuer_changed")
+        pay("goals", binding.goal_id, "goal-map-entry")
+        pay("operator_sessions", binding.issuer_root_id, "issuer-map-entry", "identity-set-entry")
+        pay("workflow_run_states", key, "run-map-entry")
         goals[binding.goal_id], issuers[binding.issuer_root_id] = goal, issuer
         runs[key] = run
         identities.add(binding.owner_identity_id)
@@ -79,6 +95,7 @@ def _derive_programme_rows(connection, common33, *, fail):
         key = pending.pop()
         parent = goals[key]["parent_id"]
         if parent is not None and parent not in goals:
+            pay("goals", parent, "ancestor-map-entry")
             goals[parent] = full("goals", parent)
             pending.append(parent)
     for key in goals:
@@ -88,27 +105,38 @@ def _derive_programme_rows(connection, common33, *, fail):
                 fail("programme_goal_parent_cycle")
             seen.add(current)
             current = goals[current]["parent_id"]
+    identity_upper = 2 + sum(6 * len(value.encode("utf-8")) + 3 for value in identities)
+    for appearance in ("identity-order", "identity-return"):
+        common33.budget.debit(identity_upper, appearance=("programme-selector", appearance))
     return goals, issuers, runs, tuple(sorted(identities))
 
 
 def _derive_programme_admission_rows(connection, common33, *, goal_id, programme_id,
                                     grant_revision, fail):
     """Canonical first-admission capacity facts; no Identity body or grant."""
-    from src.memory.composition_headers import _validate, snapshot_reads, _metadata_cost
+    from src.memory.composition_headers import _validate, snapshot_reads
     from src.workspace.accounting_witness import _programme_reference_row_on_connection
     from src.guardian.goal_programmes import _load
     from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
     from src.work_board.research_parent import DISCOVERY_CAPABILITY
     _validate(connection, common33)
+    def pay(*appearances):
+        upper = common33.rows[("goals", goal_id)][1]
+        for appearance in appearances:
+            common33.budget.debit(upper,
+                appearance=("programme-prospective-selector", appearance, goal_id))
+    def generation(value):
+        pay("generation-model")
+        return GoalProgramme.model_validate(value)
     if (any(type(value) is not str or not 0 < len(value.encode("utf-8")) <= 512
             for value in (goal_id, programme_id))
             or type(grant_revision) is not int or grant_revision < 1):
         fail("programme_original_generation_changed")
     with snapshot_reads(common33):
         _, goal, goal_bytes = _programme_reference_row_on_connection(connection, "goals", goal_id)
+    pay("programme-namespace", "programme-json", "programme-envelope", "generation-list")
     stored = _load(SimpleNamespace(**goal))
-    matching = [GoalProgramme.model_validate(generation) for generation in stored["generations"]
-        if generation["id"] == programme_id]
+    matching = [generation(value) for value in stored["generations"] if value["id"] == programme_id]
     if len(matching) != 1:
         fail("programme_original_generation_changed")
     programme = matching[0]
@@ -116,6 +144,7 @@ def _derive_programme_admission_rows(connection, common33, *, goal_id, programme
             or programme.goal_id != goal_id or programme.goal_revision != goal["revision"]
             or DISCOVERY_CAPABILITY not in programme.capability_ids):
         fail("programme_original_generation_changed")
+    pay("programme-binding-model")
     binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
     with snapshot_reads(common33):
         _, issuer, issuer_bytes = _programme_reference_row_on_connection(connection, "operator_sessions", binding.issuer_root_id)
@@ -124,8 +153,11 @@ def _derive_programme_admission_rows(connection, common33, *, goal_id, programme
         fail("programme_original_issuer_changed")
     # Pay canonical retained facts and typed return appearances in the same frame
     # before issuing/storing the private selection or delivering its outputs.
+    # Both typed model dumps and their returned maps are separate from the
+    # canonical raw tuple delivery, and paid before constructing those copies.
+    pay("programme-output-model", "binding-output-model")
     common33.budget.debit(len(goal_bytes) + len(issuer_bytes)
-        + _metadata_cost([programme.model_dump(mode="json"), binding.model_dump(mode="json")]),
+        + 2 * common33.rows[("goals", goal_id)][1],
         appearance=("programme-admission-output", goal_id, programme_id, grant_revision))
     return programme, binding, {goal_id: MappingProxyType(goal)}, {
         binding.issuer_root_id: MappingProxyType(issuer)}

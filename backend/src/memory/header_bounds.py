@@ -137,22 +137,28 @@ class HeaderReadBudget:
         self.physical_references = set()
         self.future_references = set()
 
-    async def certify(self, db, descriptor, row_ids):
+    async def certify(self, db, descriptor, row_ids, *, _header_budget=None):
+        if _header_budget is not None and _header_budget is not self:
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
         if not any(descriptor is item for item in _DESCRIPTORS):
             raise HeaderBoundsError("header_descriptor_unavailable")
         refs = {(descriptor.table, descriptor.key, identity) for identity in row_ids}
         appearance = ("exact-header", descriptor.table, descriptor.key, tuple(row_ids))
-        certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.available(appearance))
+        certificate = await preflight_exact_rows(db, descriptor, tuple(row_ids), self.available(appearance),
+            _header_budget=_header_budget)
         physical = {(descriptor.table, rowid) for rowid in certificate.rowids}
         for identity,rowid in zip(certificate.row_ids,certificate.rowids):
             self.resolve_future(descriptor,identity,rowid)
         self.enroll(physical)
         self.references |= refs
         self.debit(certificate.upper_bytes, appearance=appearance)
-        await validate_certificate(db, certificate)
+        await validate_certificate(db, certificate, _header_budget=_header_budget)
         return certificate
 
     def available(self, appearance=None):
+        discovery = _DISCOVERY_NUMERIC_READS.get()
+        if discovery is not None and discovery.budget is self:
+            return self.remaining + discovery.available(appearance)
         session = _SESSION_NUMERIC_READS.get()
         if session is not None and session.budget is self:
             return self.remaining + session.available(appearance)
@@ -165,6 +171,10 @@ class HeaderReadBudget:
         trace = _MEMORY_CHARGE_TRACE.get()
         if trace is not None and trace[0] is self:
             trace[1].append((appearance, amount))
+        discovery = _DISCOVERY_NUMERIC_READS.get()
+        if discovery is not None and discovery.budget is self:
+            discovery.consume(appearance, amount)
+            return
         session = _SESSION_NUMERIC_READS.get()
         if session is not None and session.budget is self:
             session.consume(appearance, amount)
@@ -240,10 +250,10 @@ class HeaderReadBudget:
             self.physical_references.add((descriptor.table,rowid) if database_identity is None
                 else (database_identity,descriptor.table,rowid))
 
-    async def certify_all(self, db, descriptor):
+    async def certify_all(self, db, descriptor, *, _header_budget=None):
         from src.memory.composition_headers import discover_rows
-        ids = await discover_rows(db, descriptor, self)
-        return await self.certify(db, descriptor, ids)
+        ids = await discover_rows(db, descriptor, self, _header_budget=_header_budget)
+        return await self.certify(db, descriptor, ids, _header_budget=_header_budget)
 
 
 @contextmanager
@@ -339,6 +349,122 @@ def _native_memory_projected_superset_charges(certificate, trace, new_rows, upda
     return tuple(result), headers
 
 
+_DISCOVERY_NUMERIC_READS = ContextVar("original_discovery_numeric_reads", default=None)
+
+
+class _DiscoveryNumericReservation:
+    """Paid appearances for one genuine original selected-candidate continuation."""
+    def __init__(self, guard, discovery_session, constructor, entries):
+        import inspect
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        if (inspect.currentframe().f_back.f_code not in {
+                CompositionSessionGuard._reserve_original_discovery_admission.__code__,
+                CompositionSessionGuard._reserve_original_discovery_queue.__code__}
+                or type(guard) is not CompositionSessionGuard
+                or _DISCOVERY_NUMERIC_READS.get() is not None
+                or _SESSION_NUMERIC_READS.get() is not None
+                or _MEMORY_LEDGER_PHASE.get() is not None):
+            raise HeaderBoundsError("programme_numeric_reservation_unavailable")
+        discovery_session.validate(db=guard.db, header_budget=guard.header_budget)
+        self.guard, self.owner = guard, discovery_session
+        self.budget, self.constructor = guard.header_budget, constructor
+        self.candidate = discovery_session._candidate
+        self.issued_id, self.closed, self.active_phase = id(self), False, None
+        if type(entries) is not tuple:
+            raise HeaderBoundsError("programme_numeric_schedule_invalid")
+        total = 0
+        for phase, appearance, upper in entries:
+            if (phase not in {"staging", "admission", "queue", "publication-admission", "publication-queue"}
+                    or (appearance is not None and type(appearance) is not tuple)
+                    or type(upper) is not int or not 0 <= upper <= MAX_BYTES):
+                raise HeaderBoundsError("programme_numeric_schedule_invalid")
+            total += upper
+        from src.workspace.production import _publication_json_upper
+        # Check the complete numerical map and all future appearances before
+        # allocating the retained map. Neither failed fit nor unused entries
+        # refund the original frame.
+        # The consumed log retains phase/appearance/max/actual for each real
+        # appearance. It needs one further int64 field and separator per entry
+        # beyond the schedule's triples; all of it is prepaid as well.
+        storage_upper = 2 * _publication_json_upper(entries) + 21 * len(entries) + 4
+        self.budget.debit(total + storage_upper,
+            appearance=("discovery-full-continuation-reservation", constructor["job_id"]))
+        self.entries, self.consumed = {}, []
+        for phase, appearance, upper in entries:
+            self.entries.setdefault((phase, appearance), []).append(upper)
+
+    def _checked(self):
+        self.owner.validate(db=self.guard.db, header_budget=self.budget)
+        if (type(self) is not _DiscoveryNumericReservation or self.issued_id != id(self)
+                or self.closed or self.guard._discovery_reservation is not self
+                or self.owner._candidate is not self.candidate
+                or self.owner._constructor_bounds is not self.constructor):
+            raise HeaderBoundsError("programme_numeric_reservation_owner_changed")
+
+    def available(self, appearance):
+        self._checked()
+        pending = self.entries.get((self.active_phase, appearance))
+        return max(pending) if pending else 0
+
+    def consume(self, appearance, amount):
+        self._checked()
+        if (type(appearance) is tuple and len(appearance) == 4
+                and appearance[0] == "discovery-staging-reservation"):
+            import inspect
+            from src.work_board.research_artifacts import _DiscoveryStagingReservation, discovery_prefix
+            caller = inspect.currentframe().f_back.f_back
+            stager = caller.f_locals.get("self")
+            if (caller.f_code is not _DiscoveryStagingReservation.__init__.__code__
+                    or type(stager) is not _DiscoveryStagingReservation
+                    or self.active_phase != "staging"
+                    or stager.programme_id != self.candidate[1].programme_id
+                    or stager.kind not in {"public_brief", "plan"}
+                    or stager.reference != appearance[1] or stager.digest != appearance[2]
+                    or stager.size != appearance[3]
+                    or not stager.reference.startswith(discovery_prefix(stager.programme_id))
+                    or stager.size > self.constructor[
+                        "brief_bytes" if stager.kind == "public_brief" else "plan_bytes"]):
+                raise HeaderBoundsError("programme_numeric_stager_changed")
+            appearance = ("discovery-staging-reservation", stager.kind)
+        pending = self.entries.get((self.active_phase, appearance))
+        if (type(amount) is not int or amount < 0 or not pending or amount > max(pending)):
+            raise HeaderBoundsError("programme_numeric_appearance_unreserved")
+        # Current and future owner traces can share a metadata appearance while
+        # its genuine finite width grows. Consume one sufficient reservation;
+        # every unused or excess byte remains spent in the original frame.
+        index = min((index for index, upper in enumerate(pending) if upper >= amount),
+            key=lambda index: pending[index])
+        maximum = pending.pop(index)
+        self.consumed.append((self.active_phase, appearance, maximum, amount))
+
+    @contextmanager
+    def phase(self, phase):
+        self._checked()
+        existing = _DISCOVERY_NUMERIC_READS.get()
+        if phase in {"publication-admission", "publication-queue"}:
+            from src.db.engine import _get_original_discovery_exit_completion
+            _get_original_discovery_exit_completion(self.owner,
+                phase.removeprefix("publication-"), self.candidate[0])
+        if existing is not None:
+            writer_phase = phase.removeprefix("publication-")
+            if (existing is not self or phase not in {"publication-admission", "publication-queue"}
+                    or self.active_phase != writer_phase):
+                raise HeaderBoundsError("programme_numeric_phase_unavailable")
+        if (phase not in {"staging", "admission", "queue", "publication-admission", "publication-queue"}
+                or _SESSION_NUMERIC_READS.get() is not None or _MEMORY_LEDGER_PHASE.get() is not None):
+            raise HeaderBoundsError("programme_numeric_phase_unavailable")
+        previous, self.active_phase = self.active_phase, phase
+        token = _DISCOVERY_NUMERIC_READS.set(self)
+        try:
+            yield
+        finally:
+            _DISCOVERY_NUMERIC_READS.reset(token)
+            self.active_phase = previous
+
+    def close(self):
+        self.closed = True
+
+
 def _discovery_projected_superset_charges(certificate, trace, *, job_id, row_upper):
     """Numeric common33 appearances for ONE original future discovery address.
 
@@ -346,7 +472,7 @@ def _discovery_projected_superset_charges(certificate, trace, *, job_id, row_upp
     binds, fresh certificate and current owner are independently mandatory.
     This helper neither reserves capacity nor authorizes any SQL/file effect.
     """
-    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_cost
+    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_cost, _metadata_upper
     if type(certificate) is not CompositionHeaderCertificate:
         raise HeaderBoundsError("header_certificate_unavailable")
     _validate(certificate.connection, certificate)
@@ -358,24 +484,50 @@ def _discovery_projected_superset_charges(certificate, trace, *, job_id, row_upp
             or len(certificate.rows) + 1 > MAX_ROWS):
         raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
     old_ids = tuple(key for table, key in certificate.rows if table == WRS_BY_RUN.table)
+    if any(rowid == 2**63 - 1 for (table, _key), (rowid, _upper) in certificate.rows.items()
+            if table == WRS_BY_RUN.table):
+        # SQLite cannot promise the appended physical locator at its int64
+        # ceiling. Do not stage against an unknown future locator ordering.
+        raise HeaderBoundsError("programme_constructor_rowid_bound")
     new_ids = (*old_ids, job_id)
     entries = []
+    current_descriptor = None
     for appearance, amount in trace:
         if ((appearance is not None and type(appearance) is not tuple)
                 or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
             raise HeaderBoundsError("programme_numeric_trace_changed")
+        if (type(appearance) is tuple and len(appearance) == 3
+                and appearance[:2] == ("metadata-prequery", "descriptor-compiler")):
+            current_descriptor = appearance[2]
+        if (current_descriptor == WRS_BY_RUN.table and type(appearance) is tuple
+                and appearance[:2] == ("metadata-prequery", "row-locator")
+                and appearance[-1] in {"delivery", "row-copy", "encoded-copy"}):
+            # Original selected-whole locator arithmetic (90 + escaped text
+            # width + NULL integer alias), plus its actual new separator.
+            amount += 90 + 6 * len(job_id) + 2 + 4 + int(bool(old_ids))
         if type(appearance) is tuple and appearance[:2] == ("locator-metadata", WRS_BY_RUN.table):
             if appearance != ("locator-metadata", WRS_BY_RUN.table, None, False, old_ids):
                 raise HeaderBoundsError("programme_numeric_trace_changed")
             # Generated physical rowid is not an authority locator. Only its
             # original finite int64 width is forecast; actual order is checked.
-            amount += _metadata_cost([[2**63 - 1, "text", len(job_id.encode()), job_id, None]])
+            amount += _metadata_cost([[2**63 - 1, "text", len(job_id), job_id, None]])
             appearance = ("locator-metadata", WRS_BY_RUN.table, None, False, new_ids)
         elif type(appearance) is tuple and appearance[:2] == ("complete-headers", WRS_BY_RUN.table):
             if appearance != ("complete-headers", WRS_BY_RUN.table, old_ids):
                 raise HeaderBoundsError("programme_numeric_trace_changed")
             amount += row_upper
             appearance = ("complete-headers", WRS_BY_RUN.table, new_ids)
+            if certificate.metadata_budget is not None:
+                # Exactly one future physical row adds the original _headers
+                # query's three output appearances and two stored copies.
+                header_upper = _metadata_upper(2, (20, *([44, 20, 64] * len(WRS_BY_RUN.columns))))
+                for stage in ("delivery", "row-copy", "encoded-copy"):
+                    entries.append((("metadata-prequery", "row-header", stage), header_upper))
+                entries.append((("metadata-prequery", "row-header", "skeleton-copy"),
+                    6 * len(job_id) + 2 + 6 * len(WRS_BY_RUN.table)
+                    + sum(6 * len(name) + 12 for name in WRS_BY_RUN.columns) + 256))
+                entries.append((("metadata-prequery", "row-header", "header-fact-copy"),
+                    6 * len(job_id) + 2 + 6 * len(WRS_BY_RUN.table) + 256))
         elif type(appearance) is tuple and appearance[:2] == ("table-body", WRS_BY_RUN.table):
             if appearance != ("table-body", WRS_BY_RUN.table, old_ids):
                 raise HeaderBoundsError("programme_numeric_trace_changed")
@@ -562,10 +714,12 @@ async def _connection_state(db):
     return transaction, driver, changes
 
 
-async def validate_certificate(db, certificate):
+async def validate_certificate(db, certificate, *, _header_budget=None):
     if (type(certificate) is not HeaderCertificate or certificate._seal is not _SEAL
             or certificate._issued_id != id(certificate) or certificate._db is not db):
         raise HeaderBoundsError("header_certificate_unavailable")
+    if _header_budget is not None:
+        _header_budget.debit(20, appearance=("exact-metadata", "validation-state"))
     transaction, driver, changes = await _connection_state(db)
     if (transaction is not certificate._transaction or driver is not certificate._driver
             or changes != certificate._changes):
@@ -577,7 +731,7 @@ def _quoted(identifier):
     return '"' + identifier + '"'
 
 
-async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
+async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes, *, _header_budget=None):
     if not any(descriptor is item for item in _DESCRIPTORS):
         raise HeaderBoundsError("header_descriptor_unavailable")
     if (type(exact_row_ids) is not tuple or len(exact_row_ids) > MAX_ROWS
@@ -591,15 +745,26 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
         valid_ids = False
     if not valid_ids:
         raise HeaderBoundsError("header_request_bound")
+    if _header_budget is not None:
+        _header_budget.debit(20, appearance=("exact-metadata", "initial-state"))
     transaction, driver, changes = await _connection_state(db)
-    from src.memory.composition_headers import validate_descriptor_schema
-    schema_cost = await (await db.connection()).run_sync(lambda c: validate_descriptor_schema(c, descriptor))
+    from src.memory.composition_headers import validate_descriptor_schema, _metadata_upper
+    schema_cost = await (await db.connection()).run_sync(lambda c: validate_descriptor_schema(c, descriptor,
+        _header_budget=_header_budget))
+    if _header_budget is not None:
+        _header_budget.debit(770, appearance=("exact-metadata", "sqlite-version"))
     version = await db.scalar(text("SELECT sqlite_version()"))
     if tuple(map(int, version.split("."))) < (3, 43, 0):
         raise HeaderBoundsError("header_sqlite_version_unsupported")
+    if _header_budget is not None:
+        _header_budget.debit(32, appearance=("exact-metadata", "encoding"))
     if await db.scalar(text("PRAGMA encoding")) != "UTF-8":
         raise HeaderBoundsError("header_encoding_unsupported")
     # The virtual pragma returns only bounded schema metadata, never defaults.
+    if _header_budget is not None:
+        for appearance in ("delivery", "row-copy", "encoded-copy"):
+            _header_budget.debit(_metadata_upper(len(descriptor.columns) + 1, (770, 770, 20, 20, 20)),
+                appearance=("exact-metadata", "schema", descriptor.table, appearance))
     schema = list(await db.execute(text(
         "SELECT CASE WHEN typeof(name)='text' THEN CASE WHEN octet_length(name)<=128 THEN name END END, "
         "CASE WHEN typeof(type)='text' THEN CASE WHEN octet_length(type)<=128 THEN type END END, "
@@ -625,6 +790,10 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
     rowids, costs = [], []
     total = schema_cost
     for identity in exact_row_ids:
+        if _header_budget is not None:
+            for appearance in ("delivery", "row-copy", "encoded-copy"):
+                _header_budget.debit(_metadata_upper(2, (20, *([44, 20, 64] * len(descriptor.columns)))),
+                    appearance=("exact-metadata", "row-header", descriptor.table, identity, appearance))
         rows = list(await db.execute(statement, {"key": identity}))
         if len(rows) != 1:
             raise HeaderBoundsError("header_row_unavailable")
@@ -663,6 +832,8 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes):
         rowids.append(row[0])
         costs.append(cost)
     # All headers fit before any private tuple/body SELECT is permitted.
+    if _header_budget is not None:
+        _header_budget.debit(20, appearance=("exact-metadata", "final-state"))
     if await db.scalar(text("SELECT total_changes()")) != changes:
         raise HeaderBoundsError("header_snapshot_changed")
     certificate = HeaderCertificate(descriptor, exact_row_ids, tuple(rowids), tuple(costs), total,

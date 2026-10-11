@@ -145,11 +145,111 @@ async def discovery_writer_scope(*, witness=None):
             _programme_policy.reset(token)
 
 
-async def assert_discovery_authority(db, value, *, run=None):
+def _discovery_guard_numeric_entries(job_id, widths, row_upper, *, part):
+    """Original authority/model and persisted readback construction grammar.
+
+    A raw UTF-8 JSON byte contributes at most six ASCII canonical units after
+    parsing/escaping. The fixed models retain no additional source body. Each
+    parser, nested model, canonical string, encoding and digest is a separate
+    paid appearance; this function builds numbers and labels only.
+    """
+    entries = []
+    def add(name, upper):
+        entries.append((("discovery-research-guard", job_id, name), upper))
+    if part == "authority":
+        upper = 6 * widths["declared_authority_json"] + 2
+        for name in ("authority-json", "authority-model", "programme-binding-model",
+                "plan-ref-model", "authority-return"):
+            add(name, upper)
+        add("occurrence-date", 12)
+    elif part == "lookup":
+        add("lookup-model", row_upper)
+        add("lookup-result", row_upper + 2)
+    elif part == "readback":
+        for field in ("checkpoint_receipts_json", "artifact_receipts_json"):
+            upper = 6 * widths[field] + 2
+            for operation in ("json", "canonical", "encoded"):
+                add((field, operation), upper)
+            add((field, "digest"), 66)
+    else:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("programme_research_guard_numeric_part_invalid")
+    return tuple(entries)
+
+
+def original_discovery_research_guard_numeric_schedule(discovery_session, *, constructor):
+    """Closed two-A/one-B owner schedule, or accepted-B only; no body read."""
+    from src.memory.header_bounds import HeaderBoundsError
+    owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+    if (constructor is not owned._constructor_bounds or owned._candidate is None
+            or constructor["job_id"] != owned._candidate[0]):
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    widths, row_upper, job_id = constructor["text_bytes"], constructor["row_header_bytes"], constructor["job_id"]
+    entries = []
+    for phase, count in (("admission", 0 if constructor.get("persisted_queue_only") is True else 2),
+            ("queue", 1)):
+        for _ in range(count):
+            for part in ("authority", "lookup", "readback"):
+                entries.extend((phase, appearance, upper) for appearance, upper in
+                    _discovery_guard_numeric_entries(job_id, widths, row_upper, part=part))
+            # Run=None selects the genuine current WRS when present. Absence
+            # consumes no body fee; the unused future allowance stays spent.
+            entries.append((phase, ("body", "workflow_run_states", job_id), row_upper))
+    return tuple(entries)
+
+
+def _discovery_guard_prepay(owned, *, part, value=None, run=None, row_upper=None):
+    """Use authenticated owner numbers before original parser/model effects."""
+    from src.memory.header_bounds import _DISCOVERY_NUMERIC_READS, HeaderBoundsError
+    from src.workflows.job_runtime import _discovery_utf8_width, _discovery_encoded_upper
+    owned.jobs._validate_discovery_session(owned)
+    if owned._candidate is None:
+        raise HeaderBoundsError("programme_research_guard_numeric_owner_changed")
+    active = _DISCOVERY_NUMERIC_READS.get()
+    if active is not None:
+        if active.owner is not owned or active.budget is not owned.header_budget:
+            raise HeaderBoundsError("programme_research_guard_numeric_owner_changed")
+        active._checked()
+        widths = active.constructor["text_bytes"]
+        upper = active.constructor["row_header_bytes"]
+    else:
+        # Current reads use the genuine paid source values, never a projected
+        # authority, grant or certificate. Counting text creates no encoding.
+        widths = {}
+        upper = row_upper or 0
+        if value is not None:
+            widths["declared_authority_json"] = (_discovery_utf8_width(value)
+                if type(value) is str else _discovery_encoded_upper(value))
+        if run is not None:
+            for name in ("checkpoint_receipts_json", "artifact_receipts_json"):
+                widths[name] = _discovery_utf8_width(getattr(run, name))
+    if value is not None:
+        actual = (_discovery_utf8_width(value) if type(value) is str else _discovery_encoded_upper(value))
+        # Dict input is already materialized by its original caller, but the
+        # model construction remains this owner's next appearance.
+        ceiling = (widths["declared_authority_json"] if type(value) is str
+            else 6 * widths["declared_authority_json"] + 2)
+        if actual > ceiling:
+            raise HeaderBoundsError("programme_research_guard_numeric_body_changed")
+    if run is not None:
+        if run.run_identity != owned._candidate[0]:
+            raise HeaderBoundsError("programme_research_guard_numeric_body_changed")
+        for name in ("checkpoint_receipts_json", "artifact_receipts_json"):
+            if _discovery_utf8_width(getattr(run, name)) > widths[name]:
+                raise HeaderBoundsError("programme_research_guard_numeric_body_changed")
+    for appearance, amount in _discovery_guard_numeric_entries(owned._candidate[0], widths, upper, part=part):
+        owned.header_budget.debit(amount, appearance=appearance)
+
+
+async def assert_discovery_authority(db, value, *, run=None, discovery_session=None):
     """DB-only programme validation in the existing original job writer."""
     from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
     from src.guardian.goal_programmes import goal_programme_service
     from src.workflows.job_runtime import DurableJobTransitionError
+    owned = (discovery_session.jobs._validate_discovery_session(discovery_session, db=db)
+        if discovery_session is not None else None)
+    if owned is not None:
+        _discovery_guard_prepay(owned, part="authority", value=value)
     authority = discovery_authority(value)
     import asyncio
     held = _programme_policy.get()
@@ -157,8 +257,26 @@ async def assert_discovery_authority(db, value, *, run=None):
         raise DurableJobTransitionError("programme transition requires its native configuration writer scope")
     policy = held[1]
     binding = authority.programme_binding
+    if owned is not None and (owned._candidate is None or authority.original_job_id != owned._candidate[0]
+            or binding != owned._candidate[1]):
+        raise DurableJobTransitionError("programme original discovery candidate changed")
     if run is None:
-        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == authority.original_job_id))
+        if owned is None:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == authority.original_job_id))
+        else:
+            from src.memory.composition_headers import snapshot_reads_async, charge_row
+            common = await owned.guard._original_discovery_common(owned)
+            async with snapshot_reads_async(db, common):
+                row = common.rows.get(("workflow_run_states", authority.original_job_id))
+                if row is not None:
+                    connection = await db.connection()
+                    await connection.run_sync(lambda current: charge_row(
+                        current, "workflow_run_states", authority.original_job_id))
+                    _discovery_guard_prepay(owned, part="lookup", row_upper=row[1])
+                run = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == authority.original_job_id))
+                if (run is None) != (row is None):
+                    raise DurableJobTransitionError("programme original discovery row changed")
     if run is not None and (run.job_kind != DISCOVERY_KIND or run.owner_kind != "service"
             or run.service_id != DISCOVERY_SERVICE or run.owner_principal_id != DISCOVERY_SERVICE
             or run.session_id is not None or run.operator_session_id is not None
@@ -170,13 +288,23 @@ async def assert_discovery_authority(db, value, *, run=None):
         from src.workflows.research_sources import DiscoveryInputWitness
         from src.workflows.job_runtime import _digest
         witness = held[2]
+        if owned is not None:
+            _discovery_guard_prepay(owned, part="readback", run=run)
         if (not isinstance(witness, DiscoveryInputWitness) or witness.job_id != run.run_identity
                 or witness.input_digest != run.input_digest or witness.authority_digest != run.authority_digest
                 or witness.checkpoint_digest != _digest(json.loads(run.checkpoint_receipts_json))
                 or witness.artifact_digest != _digest(json.loads(run.artifact_receipts_json))):
             raise DurableJobTransitionError("programme physical readback is not current at this writer")
-    programme = await goal_programme_service.validate_current_binding(db=db, binding=binding, policy=policy)
+    programme = await goal_programme_service.validate_current_binding(db=db, binding=binding, policy=policy,
+        **({"discovery_session": discovery_session} if discovery_session is not None else {}))
     from src.guardian.research_plan_contracts import STAGES
-    if not {capability for _, capability, _ in STAGES} <= set(programme.capability_ids):
-        raise DurableJobTransitionError("programme fixed stage capability grant changed")
+    if owned is None:
+        if not {capability for _, capability, _ in STAGES} <= set(programme.capability_ids):
+            raise DurableJobTransitionError("programme fixed stage capability grant changed")
+    else:
+        # Same fixed-stage subset predicate over the validator's paid original
+        # list. Membership does not materialize another copy of its grants.
+        for _, capability, _ in STAGES:
+            if capability not in programme.capability_ids:
+                raise DurableJobTransitionError("programme fixed stage capability grant changed")
     return programme

@@ -224,13 +224,38 @@ class GoalProgrammeService:
             return _projection(programme)
 
     async def assert_authority(self, *, goal_id: str, programme_id: str, grant_revision: int, capability_id: str,
-                               route_epoch: int | None = None) -> GoalProgramme:
+                               route_epoch: int | None = None, discovery_session=None) -> GoalProgramme:
         """Preflight snapshot ONLY; native CAS must validate_current_binding.
 
         Never treat this read-return as atomic permission to contact a provider
         or publish output. The existing job/effect owner owns those transitions.
         """
         self._ready()
+        if discovery_session is not None:
+            from src.guardian.goal_discovery import _OwnedDiscoverySession
+            from src.memory.composition_headers import certify_composition_superset
+            from src.workflows.research_guard import discovery_writer_scope
+            from src.work_board.research_parent import DISCOVERY_CAPABILITY
+            if type(discovery_session) is not _OwnedDiscoverySession or capability_id != DISCOVERY_CAPABILITY:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            owned = discovery_session.validate()
+            # The continuation, not a caller-provided db/frame, owns this read.
+            # Recertification spends the already-used original frame.
+            async with discovery_writer_scope() as policy:
+                owned.validate()
+                common = await certify_composition_superset(owned.db, owned.header_budget)
+                connection = await owned.db.connection()
+                _, binding, _, identity = await connection.run_sync(lambda conn:
+                    owned.guard._select_programme_admission(conn, common,
+                        service=owned.service, host=owned.host, goal_id=goal_id,
+                        programme_id=programme_id, grant_revision=grant_revision))
+                owned.validate()
+                programme = await self.validate_current_binding(db=owned.db, binding=binding,
+                    policy=policy, original_admission_guard=owned.guard,
+                    identity_certificate=identity, discovery_session=owned)
+                if route_epoch is not None and programme.route_epoch != route_epoch:
+                    raise GoalProgrammeError("programme_route_changed")
+                return programme
         epoch, digest, policy_blocked = _policy_binding()
         async with database.get_session() as db:
             goal = await db.get(Goal, goal_id)
@@ -256,9 +281,45 @@ class GoalProgrammeService:
         programme = await self.assert_authority(**kwargs)
         return GoalProgrammeAuthorityBinding.from_programme(programme, kwargs["capability_id"])
 
+    async def prepay_discovery_binding_copy(self, discovery_session):
+        """One original caller binding DTO, paid before its construction.
+
+        This returns no binding and grants no authority. Its only numeric
+        source is the already authenticated selected Goal in the same frame.
+        """
+        self._ready()
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.composition_headers import snapshot_reads, charge_row
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise GoalProgrammeError("programme_original_selection_unavailable")
+        owned = discovery_session.validate()
+        guard = owned.guard
+        prospective = guard._prospective_admission
+        if prospective is not None:
+            selection = prospective[0]
+            binding = guard._prospective_admission_facts[2]
+        elif guard._selection is not None and owned._candidate is not None:
+            selection = guard._selection
+            binding = owned._candidate[1]
+        else:
+            raise GoalProgrammeError("programme_original_selection_unavailable")
+        connection = await owned.db.connection()
+        def pay(conn):
+            owned.validate()
+            guard._validate_programme_selection(selection)
+            prospective = guard._prospective_admission
+            if prospective is not None and (prospective[0] is not selection
+                    or guard._original_programme_admission_owner(prospective[2], prospective[3]) is not prospective[4]):
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            if selection.common33.budget is not owned.header_budget:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            with snapshot_reads(selection.common33):
+                charge_row(conn, "goals", binding.goal_id)
+        await connection.run_sync(pay)
+
     async def validate_current_binding(self, *, db, binding: GoalProgrammeAuthorityBinding,
                                        policy: ProgrammePolicySnapshot, original_admission_guard=None,
-                                       identity_certificate=None) -> GoalProgramme:
+                                       identity_certificate=None, discovery_session=None) -> GoalProgramme:
         """DB-ONLY validation within the existing native contact/adoption CAS.
 
         Caller owns the short writer transaction and the original durable
@@ -273,6 +334,46 @@ class GoalProgrammeService:
         this SAME transaction. Output must be staged before adoption validation.
         """
         self._ready()
+        owned = None
+        selection = None
+        if discovery_session is not None:
+            from src.guardian.goal_discovery import _OwnedDiscoverySession
+            from src.memory.composition_headers import (
+                certify_composition_superset, preflight_programme_identity_component)
+            from src.work_board.research_parent import DISCOVERY_CAPABILITY, discovery_authority
+            if type(discovery_session) is not _OwnedDiscoverySession or binding.capability_id != DISCOVERY_CAPABILITY:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            owned = discovery_session.validate(db=db)
+            if owned._candidate is not None and binding != owned._candidate[1]:
+                raise GoalProgrammeError("programme_binding_stale")
+            if original_admission_guard is not None and original_admission_guard is not owned.guard:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            if original_admission_guard is None:
+                if identity_certificate is not None:
+                    raise GoalProgrammeError("programme_original_selection_unavailable")
+                common = await certify_composition_superset(db, owned.header_budget)
+                connection = await db.connection()
+                def current_selection(conn):
+                    owned.validate(db=db)
+                    if owned.guard._prospective_admission is not None:
+                        _, selected_binding, _, identity = owned.guard._select_programme_admission(
+                            conn, common, service=owned.service, host=owned.host,
+                            goal_id=binding.goal_id, programme_id=binding.programme_id,
+                            grant_revision=binding.grant_revision)
+                        if selected_binding != binding:
+                            raise GoalProgrammeError("programme_binding_stale")
+                        return owned.guard._prospective_admission[0], identity
+                    selected = owned.guard._select_programmes(conn, common)
+                    # Only a canonically authenticated original persisted job
+                    # may select the post-insertion Identity body. Possession
+                    # of a matching-looking binding is not a selection issuer.
+                    if not any(discovery_authority(run["declared_authority_json"]).programme_binding == binding
+                            for run in selected.runs.values()):
+                        raise GoalProgrammeError("programme_original_selection_unavailable")
+                    return selected, preflight_programme_identity_component(common,
+                        original_selection=selected)
+                selection, identity_certificate = await connection.run_sync(current_selection)
+                original_admission_guard = owned.guard
         selected = original_admission_guard is not None
         if not selected and identity_certificate is not None:
             raise GoalProgrammeError("programme_original_selection_unavailable")
@@ -281,34 +382,48 @@ class GoalProgrammeService:
             from src.memory.composition_headers import CompositionHeaderCertificate, _validate, snapshot_reads, charge_row
             guard = original_admission_guard
             prospective = guard._prospective_admission if type(guard) is CompositionSessionGuard else None
-            if (prospective is None or guard.db is not db or db.info.get("composition_guard") is not guard
+            if selection is None and prospective is not None:
+                selection = prospective[0]
+            if (selection is None or guard.db is not db or db.info.get("composition_guard") is not guard
                     or type(identity_certificate) is not CompositionHeaderCertificate
-                    or identity_certificate.original_selection is not prospective[0]
-                    or identity_certificate.common_certificate is not prospective[0].common33
+                    or identity_certificate.original_selection is not selection
+                    or identity_certificate.common_certificate is not selection.common33
                     or identity_certificate.budget is not guard.header_budget
-                    or guard._prospective_admission_facts is None
-                    or guard._prospective_admission_facts[2] != binding):
+                    or (prospective is not None and (guard._prospective_admission_facts is None
+                        or guard._prospective_admission_facts[2] != binding))
+                    or (prospective is None and owned is None)):
                 raise GoalProgrammeError("programme_original_selection_unavailable")
             connection = await db.connection()
             def pay_goal(conn):
-                guard._validate_programme_selection(prospective[0])
-                if guard._original_programme_admission_owner(prospective[2], prospective[3]) is not prospective[4]:
+                if owned is not None:
+                    owned.validate(db=db)
+                guard._validate_programme_selection(selection)
+                if prospective is not None and guard._original_programme_admission_owner(prospective[2], prospective[3]) is not prospective[4]:
                     raise GoalProgrammeError("programme_original_selection_unavailable")
                 _validate(conn, identity_certificate)
-                with snapshot_reads(prospective[0].common33):
+                with snapshot_reads(selection.common33):
                     charge_row(conn, "goals", binding.goal_id)
             await connection.run_sync(pay_goal)
         goal = await db.get(Goal, binding.goal_id, populate_existing=True)
         if goal is None:
             raise GoalProgrammeError("goal_not_found")
+        if selected:
+            # Each parser and typed copy is a new appearance in the same
+            # original frame. The certified full Goal covers its selected
+            # programme JSON; charge before constructing that object graph.
+            await connection.run_sync(pay_goal)
         raw = next((item for item in _load(goal)["generations"] if item["id"] == binding.programme_id), None)
         if raw is None:
             raise GoalProgrammeError("programme_not_found")
+        if selected:
+            await connection.run_sync(pay_goal)
         programme = GoalProgramme.model_validate(raw)
         if selected:
             def pay_issuer(conn):
+                if owned is not None:
+                    owned.validate(db=db)
                 _validate(conn, identity_certificate)
-                with snapshot_reads(prospective[0].common33):
+                with snapshot_reads(selection.common33):
                     charge_row(conn, "operator_sessions", programme.issuer_root_id)
             await connection.run_sync(pay_issuer)
         root = await db.get(OperatorSession, programme.issuer_root_id, populate_existing=True)
@@ -324,13 +439,15 @@ class GoalProgrammeService:
         reason = self._reason(programme, goal, root, identity, policy.epoch, policy.digest, policy.blocked_reason)
         if reason:
             raise GoalProgrammeError(reason)
+        if selected:
+            await connection.run_sync(pay_goal)
         if (binding.capability_id not in CAPABILITY_IDS or binding.capability_id not in programme.capability_ids
                 or GoalProgrammeAuthorityBinding.from_programme(programme, binding.capability_id) != binding):
             raise GoalProgrammeError("programme_binding_stale")
         if selected:
-            from src.memory.composition_headers import _metadata_cost
-            guard.header_budget.debit(_metadata_cost(programme.model_dump(mode="json")),
-                appearance=("programme-admission-current-output", binding.goal_id, binding.programme_id, binding.grant_revision))
+            # Return the already validated programme only after its output
+            # appearance is prepaid; never serialize first to discover a fee.
+            await connection.run_sync(pay_goal)
         return programme
 
     async def inspect(self, *, operator, goal_id: str) -> dict:
@@ -422,3 +539,60 @@ class GoalProgrammeService:
 
 
 goal_programme_service = GoalProgrammeService()
+
+
+async def original_discovery_authority_numeric_schedule(discovery_session, *, constructor):
+    """Original validator appearances for two A calls and one persisted B call.
+
+    Measures current genuine reads on the spent frame, then retains both the
+    current and future numeric appearances. No future record or certificate is
+    created. Jobs' canonical fence and the insertion callback own the two A
+    calls; the queue canonical fence owns B. Strategy's additional validator
+    appearances are assembled by its own fixed source schedule.
+    """
+    from types import MappingProxyType
+    from src.guardian.goal_discovery import _OwnedDiscoverySession
+    from src.memory.header_bounds import _trace_memory_numeric_charges
+    from src.workflows.research_guard import discovery_writer_scope
+    if type(discovery_session) is not _OwnedDiscoverySession:
+        raise GoalProgrammeError("programme_original_selection_unavailable")
+    owned = discovery_session.validate()
+    guard = owned.guard
+    if (type(constructor) is not MappingProxyType or constructor is not owned._constructor_bounds
+            or owned._candidate is None or constructor["job_id"] != owned._candidate[0]):
+        raise GoalProgrammeError("programme_numeric_trace_changed")
+    if constructor.get("persisted_queue_only") is True:
+        if guard._prospective_admission is not None:
+            raise GoalProgrammeError("programme_numeric_trace_changed")
+        # Accepted B owns a current persisted selector. It neither constructs
+        # a prospective A nor forecasts an absent WorkflowRunState address.
+        with _trace_memory_numeric_charges(owned.header_budget) as trace:
+            async with discovery_writer_scope() as policy:
+                await goal_programme_service.validate_current_binding(db=owned.db,
+                    binding=owned._candidate[1], policy=policy, discovery_session=owned)
+        owned.validate()
+        selection = guard._selection
+        guard._validate_programme_selection(selection)
+        if (selection.common33.budget is not owned.header_budget
+                or constructor["job_id"] not in selection.runs):
+            raise GoalProgrammeError("programme_numeric_trace_changed")
+        return tuple(("queue", appearance, upper) for appearance, upper in trace)
+    if (guard._prospective_admission is None or guard._prospective_admission_facts is None
+            or owned._candidate[1] != guard._prospective_admission_facts[2]):
+        raise GoalProgrammeError("programme_numeric_trace_changed")
+    binding = guard._prospective_admission_facts[2]
+    with _trace_memory_numeric_charges(owned.header_budget) as trace:
+        async with discovery_writer_scope() as policy:
+            await goal_programme_service.validate_current_binding(db=owned.db,
+                binding=binding, policy=policy, discovery_session=owned)
+    owned.validate()
+    certificate = guard._prospective_admission[0].common33
+    measured = tuple(trace)
+    projected = await guard._original_discovery_persisted_authority_charges(owned,
+        constructor=constructor, trace=measured, certificate=certificate)
+    # Each real call may observe either current A or the inserted B membership.
+    # Keep both exact appearance lists; an unused upper is never refunded.
+    per_call = measured + projected
+    return tuple((phase, appearance, upper)
+        for phase, repeats in (("admission", 2), ("queue", 1))
+        for _ in range(repeats) for appearance, upper in per_call)

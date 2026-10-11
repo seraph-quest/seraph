@@ -5,7 +5,7 @@ from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
@@ -1985,40 +1985,120 @@ def original_auth_header_budget(budget):
         _auth_header_budget.reset(token)
 
 
+_original_discovery_exit_completion = ContextVar("original_discovery_exit_completion", default=None)
+
+
+def _get_original_discovery_exit_completion(owned, phase, job_id):
+    import asyncio
+    current = _original_discovery_exit_completion.get()
+    if (current is None or current[0] is not owned or current[1:3] != (phase, job_id)
+            or current[3] is not asyncio.current_task()):
+        raise RuntimeError("goal_discovery_original_exit_unavailable")
+    owned.validate(db=owned.db, header_budget=owned.header_budget, jobs=owned.jobs)
+    return current
+
+
+async def _commit_original_session_owner(session):
+    """The original engine's publication, commit and after-commit event order."""
+    guard = session.info.get("composition_guard")
+    if guard is not None:
+        await guard.publish()
+    await session.commit()
+    pending = session.info.pop("work_board_events_after_commit", [])
+    if pending:
+        from src.work_board.events import publish_work_board_events
+        await publish_work_board_events(pending)
+
+
+async def _exit_owned_discovery_writer(owned, *, phase, job_id):
+    import asyncio
+    from src.guardian.goal_discovery import _OwnedDiscoverySession
+    if type(owned) is not _OwnedDiscoverySession or phase not in {"admission", "queue"}:
+        raise RuntimeError("goal_discovery_original_exit_unavailable")
+    owned.validate(db=owned.db, header_budget=owned.header_budget, jobs=owned.jobs)
+    connection = owned.db.info.get("owned_discovery_connection")
+    if (type(connection) is not AsyncConnection or connection.closed
+            or not owned.db.info.get("native_writer_started")
+            or not owned.db.in_transaction() or await owned.db.connection() is not connection
+            or _original_discovery_exit_completion.get() is not None):
+        raise RuntimeError("goal_discovery_original_exit_unavailable")
+    token = _original_discovery_exit_completion.set((owned, phase, job_id, asyncio.current_task()))
+    committed = False
+    try:
+        with owned.guard._discovery_reservation.phase("publication-" + phase):
+            await _commit_original_session_owner(owned.db)
+            committed = True
+            await owned.guard._complete_original_discovery_writer_exit(owned, phase, job_id)
+    except BaseException:
+        # The guard's listener records the exact engine context only after
+        # the real original commit. A later event/rebase failure does not
+        # undo that durable insertion or CAS and must retain that liability.
+        if not committed and owned.guard._discovery_commit_exit is not _original_discovery_exit_completion.get():
+            await owned.db.rollback()
+            owned.db.info.pop("work_board_events_after_commit", None)
+        raise
+    finally:
+        _original_discovery_exit_completion.reset(token)
+
+
 @asynccontextmanager
-async def get_session(*, header_budget=None) -> AsyncGenerator[AsyncSession, None]:
-    """Yield an async DB session."""
+async def _retain_discovery_connection(session, service, header_budget):
+    if service is None:
+        yield
+        return
+    from src.approval.runtime import _get_current_discovery_invocation
+    from src.memory.header_bounds import HeaderReadBudget
+    marker = _get_current_discovery_invocation(service)
+    marker.validate(service=service)
+    if type(header_budget) is not HeaderReadBudget or session.in_transaction():
+        raise RuntimeError("goal_discovery_original_connection_unavailable")
+    original_bind = session.bind
+    if not isinstance(original_bind, AsyncEngine):
+        raise RuntimeError("goal_discovery_original_connection_unavailable")
+    # Bind the same factory-issued session before its first read. An externally
+    # retained connection survives Session.commit instead of returning to pool.
+    async with original_bind.connect() as connection:
+        session.bind = connection
+        session.sync_session.bind = connection.sync_connection
+        session.info["owned_discovery_connection"] = connection
+        try:
+            yield
+        finally:
+            session.info.pop("owned_discovery_connection", None)
+            session.bind = original_bind
+            session.sync_session.bind = original_bind.sync_engine
+
+
+@asynccontextmanager
+async def get_session(*, header_budget=None, discovery_service=None) -> AsyncGenerator[AsyncSession, None]:
+    """Yield the original factory session; discovery retains its connection."""
     header_budget = header_budget if header_budget is not None else _auth_header_budget.get()
     factory = _session_factory_override.get() or async_session_factory
     async with factory() as session:
-        from src.workspace.accounting_witness import prepare_composition_read_session
-        read_guard = await prepare_composition_read_session(session, header_budget=header_budget)
-        composition_guard = None
-        try:
-            yield session
-            composition_guard = session.info.get("composition_guard", composition_guard)
-            if composition_guard is not None:
-                await composition_guard.publish()
-            await session.commit()
-            pending_work_board_events = session.info.pop(
-                "work_board_events_after_commit", []
-            )
-            if pending_work_board_events:
-                # The durable row is authoritative.  Queue a safe live update
-                # only after commit so sockets never observe rolled-back state.
-                from src.work_board.events import publish_work_board_events
-
-                await publish_work_board_events(pending_work_board_events)
-        except BaseException:
-            await session.rollback()
-            session.info.pop("work_board_events_after_commit", None)
-            raise
-        finally:
-            composition_guard = session.info.get("composition_guard", composition_guard)
-            if composition_guard is not None:
-                composition_guard.close()
-            if read_guard is not None:
-                read_guard.close()
+        async with _retain_discovery_connection(session, discovery_service, header_budget):
+            from src.workspace.accounting_witness import prepare_composition_read_session
+            read_guard = await prepare_composition_read_session(session, header_budget=header_budget)
+            composition_guard = None
+            try:
+                yield session
+                if discovery_service is None:
+                    await _commit_original_session_owner(session)
+                else:
+                    owned = discovery_service._owned_discovery_session
+                    if owned is None or owned.db is not session:
+                        raise RuntimeError("goal_discovery_original_exit_unavailable")
+                    await owned.guard._finish_original_discovery_owner(owned)
+            except BaseException:
+                if discovery_service is None or session.in_transaction():
+                    await session.rollback()
+                session.info.pop("work_board_events_after_commit", None)
+                raise
+            finally:
+                composition_guard = session.info.get("composition_guard", composition_guard)
+                if composition_guard is not None:
+                    composition_guard.close()
+                if read_guard is not None:
+                    read_guard.close()
 
 
 async def check_required_tables(required_tables: Iterable[str]) -> dict[str, object]:

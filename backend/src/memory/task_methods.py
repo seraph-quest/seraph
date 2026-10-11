@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -28,7 +29,7 @@ from src.db.models import (Goal, Memory, MemoryProposal, MemoryProposalStatus,
 from src.db.task_method_models import TaskMethodActive
 from src.memory.procedure_recommendations import canonical, digest, assert_current_root, read_private_proof
 from src.memory.task_lessons import Candidate, LessonScope, PROPOSAL_SCHEMA, ResearchStrategy, TaskMethod
-from src.work_board.contracts import TaskStrategyBinding
+from src.work_board.contracts import TaskStrategyBinding, WorkBoardOwner
 from src.work_board.repository import BoardError, _begin_sqlite_immediate
 
 MAX_VERSIONS = 16
@@ -37,6 +38,62 @@ ACTION_KIND = "task_method.review.v1"
 Id = Annotated[str, Field(min_length=1, max_length=128)]
 Sha = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 CANDIDATE = TypeAdapter(Candidate)
+_DISCOVERY_READ = ContextVar("owned_task_method_discovery_read", default=None)
+
+
+def _owned_method_selection(owned):
+    owned.validate()
+    selection = (owned.guard._prospective_admission[0]
+        if owned.guard._prospective_admission is not None else owned.guard._selection)
+    if selection is None:
+        _fail("method_original_session_unavailable")
+    owned.guard._validate_programme_selection(selection)
+    return selection
+
+
+async def _pay_owned_row(db, table, key):
+    state = _DISCOVERY_READ.get()
+    if state is None:
+        return
+    owned, certificate = state
+    owned.validate(db=db)
+    if (_owned_method_selection(owned).common33 is not certificate
+            or certificate.budget is not owned.header_budget):
+        _fail("method_original_session_unavailable")
+    from src.memory.composition_headers import charge_row, snapshot_reads
+    connection = await db.connection()
+    def pay(conn):
+        with snapshot_reads(certificate):
+            charge_row(conn, table, key)
+    await connection.run_sync(pay)
+
+
+async def _pay_owned_table_rows(db, table):
+    state = _DISCOVERY_READ.get()
+    if state is None:
+        return
+    # Prepay the certified finite superset before a bounded original query.
+    # Each appearance pays anew, even when the reference was already enrolled.
+    for name, key in state[1].rows:
+        if name == table:
+            await _pay_owned_row(db, table, key)
+
+
+def _pay_owned_baseline(binding=None):
+    state = _DISCOVERY_READ.get()
+    if state is None:
+        return
+    owned, _ = state
+    owned.validate()
+    reason = "baseline" if binding is None else binding.reason
+    skeleton = (b'{"schema_version":1,"status":"none","method_id":null,"version":null,'
+        b'"digest":null,"typed_data":null,"reason":null}')
+    upper = len(skeleton)
+    if reason is not None:
+        width = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else
+            3 if ord(c) < 65536 else 4 for c in reason)
+        upper += 6 * width + 2 - 4
+    owned.header_budget.debit(upper, appearance=("method-baseline-output",))
 
 
 class Closed(BaseModel):
@@ -123,6 +180,132 @@ def _pointer_valid(row, key):
         return False
 
 
+def _bounded_pointer_binding(raw):
+    """Lexical original closed shape before constructing a JSON object graph.
+
+    Three objects, eleven fields, scalar leaves only; no arrays, duplicate or
+    unknown keys. Tiny key decoding is bounded separately from the full parse.
+    Unicode escapes remain accepted. Ordinary non-composed reads are unchanged.
+    """
+    if type(raw) is not str:
+        _fail("method_pointer_invalid")
+    at = 0
+    shape = {"owner": {"identity_id": "str", "issuer_principal_id": "str", "issuer_root_id": "str"},
+        "scope": {"goal_id": "str", "goal_revision": "int", "family": "str"},
+        "version": "str", "digest": "str", "proposal_id": "str"}
+    def whitespace():
+        nonlocal at
+        while at < len(raw) and raw[at] in " \t\r\n":
+            at += 1
+    def string(limit):
+        nonlocal at
+        whitespace()
+        if at >= len(raw) or raw[at] != '"':
+            _fail("method_pointer_invalid")
+        start = at
+        at += 1
+        while at < len(raw):
+            if at - start > limit:
+                _fail("method_pointer_invalid")
+            char = raw[at]
+            at += 1
+            if char == '"':
+                return start, at
+            if ord(char) < 32:
+                _fail("method_pointer_invalid")
+            if char == "\\":
+                if at >= len(raw):
+                    _fail("method_pointer_invalid")
+                escape = raw[at]
+                at += 1
+                if escape == "u":
+                    if at + 4 > len(raw) or any(c not in "0123456789abcdefABCDEF" for c in raw[at:at + 4]):
+                        _fail("method_pointer_invalid")
+                    at += 4
+                elif escape not in '"\\/bfnrt':
+                    _fail("method_pointer_invalid")
+        _fail("method_pointer_invalid")
+    def object_shape(expected):
+        nonlocal at
+        whitespace()
+        if at >= len(raw) or raw[at] != "{":
+            _fail("method_pointer_invalid")
+        at += 1
+        seen = set()
+        while True:
+            start, end = string(12 * 32 + 2)
+            key = json.loads(raw[start:end])  # At most 386 source characters.
+            if key not in expected or key in seen:
+                _fail("method_pointer_invalid")
+            seen.add(key)
+            whitespace()
+            if at >= len(raw) or raw[at] != ":":
+                _fail("method_pointer_invalid")
+            at += 1
+            kind = expected[key]
+            if isinstance(kind, dict):
+                object_shape(kind)
+            elif kind == "str":
+                string(12 * 128 + 2)
+            else:
+                whitespace()
+                start = at
+                while at < len(raw) and raw[at] in "0123456789":
+                    at += 1
+                if not 1 <= at - start <= 20:
+                    _fail("method_pointer_invalid")
+            whitespace()
+            if at < len(raw) and raw[at] == ",":
+                at += 1
+                continue
+            if at >= len(raw) or raw[at] != "}" or seen != set(expected):
+                _fail("method_pointer_invalid")
+            at += 1
+            return
+    whitespace()
+    if raw[at:at + 4] == "null":
+        at += 4
+    else:
+        object_shape(shape)
+    whitespace()
+    if at != len(raw):
+        _fail("method_pointer_invalid")
+
+
+def _prepay_owned_pointer(row):
+    state = _DISCOVERY_READ.get()
+    if state is None:
+        return
+    owned, certificate = state
+    owned.validate()
+    if _owned_method_selection(owned).common33 is not certificate:
+        _fail("method_original_session_unavailable")
+    # Original encoded-JSON units, not a Python heap estimate. Six times UTF-8
+    # covers every ASCII escape, including a surrogate pair for an astral scalar.
+    # Count scalar widths without constructing an uncharged encoded copy.
+    def utf8_width(value):
+        return sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else
+            3 if ord(c) < 65536 else 4 for c in value)
+    source_upper = 6 * (utf8_width(row.binding_json) + utf8_width(row.previous_binding_json))
+    # Exact fixed punctuation/key skeleton, with each replaced null deducted.
+    skeleton = (b'{"schema_version":null,"owner_identity_id":null,"goal_id":null,'
+        b'"goal_revision":null,"family":null,"revision":null,"binding":null,'
+        b'"previous_binding":null,"baseline":null}')
+    envelope_upper = len(skeleton) - 9 * 4 + source_upper + 2 * 20 + 5
+    for value in ("task_method_pointer.v1", row.owner_identity_id, row.goal_id, row.family):
+        envelope_upper += 6 * utf8_width(value) + 2
+    owned.header_budget.debit(source_upper, appearance=("method-pointer-lexical-shape", row.id))
+    _bounded_pointer_binding(row.binding_json)
+    _bounded_pointer_binding(row.previous_binding_json)
+    # Reserve every subsequent caller appearance before the first full parse.
+    for label, upper in (("binding-json-parse", source_upper), ("previous-json-parse", source_upper),
+            ("hmac-payload-copy", envelope_upper), ("hmac-canonical", envelope_upper),
+            ("hmac-encoding", envelope_upper), ("pointer-valid-model", source_upper),
+            ("selected-binding-model", source_upper), ("selected-binding-copy", source_upper),
+            ("signing-key-id-digest", 64), ("signing-key-id-slice", 24), ("hmac-digest", 64)):
+        owned.header_budget.debit(upper, appearance=("method-pointer-owner", label, row.id))
+
+
 async def _pointer(db, identity_id, scope):
     rows = list((await db.execute(select(TaskMethodActive).where(
         TaskMethodActive.owner_identity_id == identity_id, TaskMethodActive.goal_id == scope.goal_id,
@@ -163,15 +346,29 @@ async def _context(db, owner, goal_ref, family, programme_grant=None):
 
 async def _source_metadata(db, proposal, scope):
     """Current canonical source metadata only; no browser revival or SourceIO."""
+    await _pay_owned_row(db, "memory_proposals", proposal.proposal_id)
     token = json.loads(proposal.provenance_json)["source_token"]
+    # Each of the two original digest calls constructs a canonical string and
+    # an encoded copy as well as its input appearance.
+    for _ in range(2 * 3):
+        await _pay_owned_row(db, "memory_proposals", proposal.proposal_id)
     if digest(token) != scope.source_context_digest or digest(token) != scope.source_token_digest:
         _fail("method_source_token_changed")
+    await _pay_owned_row(db, "work_board_tasks", proposal.source_task_id)
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.source_task_id))
+    await _pay_owned_row(db, "work_board_attempts", proposal.source_attempt_id)
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == proposal.source_attempt_id))
+    await _pay_owned_row(db, "workflow_run_states", proposal.workflow_run_id)
     run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == proposal.workflow_run_id))
+    await _pay_owned_row(db, "goals", proposal.goal_id)
     goal = await db.get(Goal, proposal.goal_id, populate_existing=True)
     if not all((task, attempt, run, goal)):
         _fail("method_source_missing")
+    for _ in range(3):
+        await _pay_owned_row(db, "work_board_tasks", proposal.source_task_id)
+        await _pay_owned_row(db, "work_board_attempts", proposal.source_attempt_id)
+    for _ in range(3 * 3):
+        await _pay_owned_row(db, "workflow_run_states", proposal.workflow_run_id)
     if (task.task_revision != proposal.source_task_revision or task.goal_id != scope.goal_id
         or task.goal_revision != scope.goal_revision or goal.revision != scope.goal_revision
         or (task.owner_principal_id, task.owner_session_id) !=
@@ -191,6 +388,7 @@ async def _source_metadata(db, proposal, scope):
         or digest(run.effect_receipts_json) != token["effects_digest"]
         or digest(attempt.receipt_refs_json) != token["receipt_digest"]):
         _fail("method_source_changed")
+    await _pay_owned_row(db, "workflow_run_states", proposal.workflow_run_id)
     if json.loads(run.declared_authority_json or "{}").get("source_learning_excluded") is True:
         _fail("method_source_excluded")
     if task.capability_id == "agent.task.v1":
@@ -200,6 +398,12 @@ async def _source_metadata(db, proposal, scope):
             _fail("method_native_source_changed")
     elif task.capability_id != "work.json-format.v1":
         from src.memory.task_lessons import _observed_method
+        # The original structured-research receipt has two digest calls and
+        # one returned dict. Its source is the already certified task/run.
+        if task.capability_id == "work.research-dossier.v1":
+            for _ in range(2 * 3 + 1):
+                await _pay_owned_row(db, "workflow_run_states", proposal.workflow_run_id)
+            await _pay_owned_row(db, "work_board_tasks", proposal.source_task_id)
         _, current_audit = await _observed_method(db, task, run, scope.family,
             structured_research=task.capability_id == "work.research-dossier.v1")
         if current_audit != token.get("method_receipt"):
@@ -210,6 +414,7 @@ async def _history(db, scope):
     # Malformed/unknown family metadata cannot establish never-selected absence.
     family = case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
         func.json_extract(MemoryProposal.memory_scope_json, "$.family")), else_=None)
+    await _pay_owned_table_rows(db, "memory_proposals")
     rows = list((await db.execute(select(MemoryProposal).where(
         MemoryProposal.schema_version == PROPOSAL_SCHEMA, MemoryProposal.goal_id == scope.goal_id,
         MemoryProposal.goal_revision == scope.goal_revision, MemoryProposal.accepted_memory_id.is_not(None),
@@ -237,47 +442,128 @@ class CurrentMethod:
         self._key = None
         self._started = False
 
-    async def resolve(self, owner, goal_ref, task_family, programme_grant=None):
+    async def resolve(self, owner, goal_ref, task_family, programme_grant=None, *, discovery_session=None):
         family = _family(task_family)
+        owned = None
         try:
             if not self._started:
                 _fail("method_lifecycle_not_started")
+            if discovery_session is not None:
+                from src.guardian.goal_discovery import _OwnedDiscoverySession
+                from src.guardian.goal_programmes import goal_programme_service
+                from src.work_board.research_parent import DISCOVERY_SERVICE, DISCOVERY_CAPABILITY
+                if (type(discovery_session) is not _OwnedDiscoverySession or family != "research"
+                        or owner.principal_id != DISCOVERY_SERVICE or owner.session_id != ""
+                        or programme_grant is None or programme_grant.goal_id != goal_ref
+                        or programme_grant.capability_id != DISCOVERY_CAPABILITY):
+                    _fail("method_programme_service_mismatch")
+                owned = discovery_session.validate()
+                programme = await goal_programme_service.assert_authority(goal_id=goal_ref,
+                    programme_id=programme_grant.programme_id,
+                    grant_revision=programme_grant.grant_revision,
+                    capability_id=DISCOVERY_CAPABILITY, discovery_session=owned)
+                from src.goals.contracts import GoalProgrammeAuthorityBinding
+                await goal_programme_service.prepay_discovery_binding_copy(owned)
+                if GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != programme_grant:
+                    _fail("method_programme_scope_mismatch")
+                owned.validate()
+                selection = owned.guard._prospective_admission[0]
+                token = _DISCOVERY_READ.set((owned, selection.common33))
+                try:
+                    await _pay_owned_row(owned.db, "goals", programme.goal_id)
+                    scope = LessonScope(goal_id=programme.goal_id,
+                        goal_revision=programme.goal_revision, family="research")
+                    return await self._resolve_current(owned.db, programme.owner_identity_id,
+                        scope, original_selection=selection)
+                finally:
+                    _DISCOVERY_READ.reset(token)
             async with database.get_session() as db:
                 identity, scope = await _context(db, owner, goal_ref, family or "general", programme_grant)
                 if family is None:
                     return TaskStrategyBinding(status="none", reason="baseline")
-                history = await _history(db, scope)
-                if identity is None:
-                    any_pointer = await db.scalar(select(TaskMethodActive.id).where(
-                        TaskMethodActive.goal_id == scope.goal_id, TaskMethodActive.goal_revision == scope.goal_revision,
-                        TaskMethodActive.family == scope.family).limit(1))
-                    if history or any_pointer:
-                        _fail("method_stable_identity_required")
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                pointer = await _pointer(db, identity, scope)
-                if pointer is None:
-                    other_pointer = await db.scalar(select(TaskMethodActive.id).where(
-                        TaskMethodActive.goal_id == scope.goal_id,
-                        TaskMethodActive.goal_revision == scope.goal_revision,
-                        TaskMethodActive.family == scope.family).limit(1))
-                    if other_pointer is not None:
-                        _fail("method_pointer_owner_changed")
-                    if history:
-                        _fail("method_pointer_missing")
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                if self._key is None:
-                    _fail("method_signing_key_unavailable")
-                if not _pointer_valid(pointer, self._key):
-                    _fail("method_pointer_invalid")
-                if pointer.baseline:
-                    return TaskStrategyBinding(status="none", reason="baseline")
-                selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
-                return await self._version(db, selected, identity, scope, allow_rollback=False)
+                return await self._resolve_current(db, identity, scope)
         except (BoardError, AuthFailure, ValueError, KeyError, TypeError, SQLAlchemyError) as error:
-            return TaskStrategyBinding(status="blocked", reason=getattr(error, "code", "method_selection_invalid"))
+            reason = getattr(error, "code", "method_selection_invalid")
+            if owned is not None:
+                owned.validate()
+                skeleton = (b'{"schema_version":1,"status":"blocked","method_id":null,"version":null,'
+                    b'"digest":null,"typed_data":null,"reason":null}')
+                width = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else
+                    3 if ord(c) < 65536 else 4 for c in reason)
+                owned.header_budget.debit(len(skeleton) - 4 + 6 * width + 2,
+                    appearance=("method-blocked-output",))
+            return TaskStrategyBinding(status="blocked", reason=reason)
 
-    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
+    async def _resolve_current(self, db, identity, scope, *, original_selection=None):
+        history = await _history(db, scope)
+        if original_selection is not None:
+            from src.memory.composition_headers import read_current_method_pointer
+            pointer, foreign = await read_current_method_pointer(db,
+                original_selection=original_selection)
+        else:
+            if identity is None:
+                any_pointer = await db.scalar(select(TaskMethodActive.id).where(
+                    TaskMethodActive.goal_id == scope.goal_id, TaskMethodActive.goal_revision == scope.goal_revision,
+                    TaskMethodActive.family == scope.family).limit(1))
+                if history or any_pointer:
+                    _fail("method_stable_identity_required")
+                return TaskStrategyBinding(status="none", reason="baseline")
+            pointer = await _pointer(db, identity, scope)
+            foreign = False
+            if pointer is None:
+                foreign = await db.scalar(select(TaskMethodActive.id).where(
+                    TaskMethodActive.goal_id == scope.goal_id,
+                    TaskMethodActive.goal_revision == scope.goal_revision,
+                    TaskMethodActive.family == scope.family).limit(1)) is not None
+        if pointer is None:
+            if foreign:
+                _fail("method_pointer_owner_changed")
+            if history:
+                _fail("method_pointer_missing")
+            _pay_owned_baseline()
+            return TaskStrategyBinding(status="none", reason="baseline")
+        if self._key is None:
+            _fail("method_signing_key_unavailable")
+        _prepay_owned_pointer(pointer)
+        if not _pointer_valid(pointer, self._key):
+            _fail("method_pointer_invalid")
+        if pointer.baseline:
+            _pay_owned_baseline()
+            return TaskStrategyBinding(status="none", reason="baseline")
+        selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
+        return await self._version(db, selected, identity, scope, allow_rollback=False)
+
+    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None):
         try:
+            if discovery_session is not None:
+                from src.guardian.goal_discovery import _OwnedDiscoverySession
+                from src.guardian.goal_programmes import goal_programme_service
+                from src.goals.contracts import GoalProgrammeAuthorityBinding
+                from src.work_board.research_parent import DISCOVERY_SERVICE, DISCOVERY_CAPABILITY
+                from src.workflows.research_guard import discovery_writer_scope
+                if (type(discovery_session) is not _OwnedDiscoverySession
+                        or owner.principal_id != DISCOVERY_SERVICE or owner.session_id != ""
+                        or programme_grant is None or programme_grant.goal_id != goal_ref
+                        or programme_grant.capability_id != DISCOVERY_CAPABILITY):
+                    _fail("method_programme_service_mismatch")
+                owned = discovery_session.validate(db=db)
+                async with discovery_writer_scope() as policy:
+                    programme = await goal_programme_service.validate_current_binding(db=owned.db,
+                        binding=programme_grant, policy=policy, discovery_session=owned)
+                await goal_programme_service.prepay_discovery_binding_copy(owned)
+                if GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != programme_grant:
+                    _fail("method_programme_scope_mismatch")
+                owned.validate()
+                token = _DISCOVERY_READ.set((owned, _owned_method_selection(owned).common33))
+                try:
+                    await _pay_owned_row(owned.db, "goals", programme.goal_id)
+                    scope = LessonScope(goal_id=programme.goal_id,
+                        goal_revision=programme.goal_revision, family="research")
+                    # The admitted immutable pin never consults the pointer.
+                    return await self._validate_pinned(owner, goal_ref, binding, programme_grant,
+                        owned.db, owned_scope=(programme.owner_identity_id, scope))
+                finally:
+                    _DISCOVERY_READ.reset(token)
             return await self._validate_pinned(owner, goal_ref, binding, programme_grant, db)
         except AuthFailure as error:
             raise BoardError("method_current_owner_required", "Authenticate the current task owner before execution", status_code=403) from error
@@ -286,7 +572,7 @@ class CurrentMethod:
         except SQLAlchemyError as error:
             raise BoardError("method_pin_store_unavailable", "Restore canonical method storage before execution", status_code=503) from error
 
-    async def _validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
+    async def _validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, owned_scope=None):
         if not self._started:
             _fail("method_lifecycle_not_started")
         binding = TaskStrategyBinding.model_validate(binding)
@@ -296,17 +582,26 @@ class CurrentMethod:
             async with database.get_session() as session:
                 return await self.validate_pinned(owner, goal_ref, binding, programme_grant, session)
         family = "research" if programme_grant is not None else "general"
-        identity, scope = await _context(db, owner, goal_ref, family, programme_grant)
+        identity, scope = owned_scope if owned_scope is not None else await _context(db, owner, goal_ref, family, programme_grant)
         if binding.status == "none":
+            _pay_owned_baseline(binding)
             return binding  # An admitted baseline does not consult a future pointer.
         if identity is None or self._key is None:
             _fail("method_pin_identity_or_key_unavailable")
+        await _pay_owned_row(db, "memory_proposals", binding.method_id)
         proposal = await db.get(MemoryProposal, binding.method_id, populate_existing=True)
         if proposal is None or proposal.schema_version != PROPOSAL_SCHEMA:
             _fail("method_pin_proposal_missing")
+        await _pay_owned_row(db, "memories", binding.version)
         memory = await db.get(Memory, binding.version, populate_existing=True)
         if memory is None:
             _fail("method_pin_version_missing")
+        await _pay_owned_row(db, "memories", binding.version)
+        # JSON decoding, typed scope, then the selected binding are distinct
+        # copies of the certified original metadata.
+        await _pay_owned_row(db, "memories", binding.version)
+        await _pay_owned_row(db, "memories", binding.version)
+        await _pay_owned_row(db, "memory_proposals", binding.method_id)
         signed = TaskMethodScope.model_validate(json.loads(memory.metadata_json)["work_board_provenance"]["memory_scope"])
         selected = ActiveMethodBinding(owner=signed.owner, scope=scope, version=binding.version,
             digest=binding.digest, proposal_id=binding.method_id)
@@ -318,8 +613,12 @@ class CurrentMethod:
     async def _version(self, db, selected, identity, scope, *, allow_rollback):
         from src.memory.repository import (_canonical_memory_deletion_marker, _m5_verified_source_binding,
             _m5_selection_binding_mac, _m5_selection_binding_key_id)
+        await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
         proposal = await db.get(MemoryProposal, selected.proposal_id, populate_existing=True)
+        await _pay_owned_row(db, "memories", selected.version)
         memory = await db.get(Memory, selected.version, populate_existing=True)
+        await _pay_owned_table_rows(db, "memory_tombstones")
+        await _pay_owned_row(db, "memories", selected.version)
         if (proposal is None or memory is None or proposal.schema_version != PROPOSAL_SCHEMA
             or proposal.accepted_memory_id != memory.id or selected.owner.identity_id != identity
             or memory.kind != MemoryKind.pattern or proposal.memory_kind != MemoryKind.pattern
@@ -327,13 +626,29 @@ class CurrentMethod:
             or selected.scope != scope or _canonical_memory_deletion_marker(memory) is not None
             or await db.scalar(select(MemoryTombstone.memory_id).where(MemoryTombstone.memory_id == memory.id))):
             _fail("method_version_unavailable")
+        await _pay_owned_row(db, "memories", selected.version)
         provenance = json.loads(memory.metadata_json)["work_board_provenance"]
+        await _pay_owned_row(db, "memories", selected.version)
         signed = TaskMethodScope.model_validate(provenance["memory_scope"])
+        await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
         if TaskMethodScope.model_validate_json(proposal.memory_scope_json) != signed:
             _fail("method_original_scope_changed")
+        await _pay_owned_row(db, "memories", selected.version)
         candidate = CANDIDATE.validate_json(memory.content)
+        await _pay_owned_row(db, "memories", selected.version)
         typed = candidate.model_dump(mode="json")
+        for _ in range(3):
+            await _pay_owned_row(db, "memories", selected.version)
         candidate_sha = digest(typed)
+        await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
+        # The scope dump and raw-content encoding/digest below are independent
+        # of the two canonical candidate/scope digest triples.
+        await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
+        for _ in range(2):
+            await _pay_owned_row(db, "memories", selected.version)
+        for _ in range(3):
+            await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
+            await _pay_owned_row(db, "memories", selected.version)
         if (signed.owner != selected.owner or signed.proposal_id != proposal.proposal_id
             or signed.candidate_version != memory.id or signed.candidate_digest != candidate_sha
             or signed.candidate_schema != typed["schema_version"]
@@ -359,9 +674,24 @@ class CurrentMethod:
                 _fail("method_rollback_binding_invalid")
         else:
             _fail("method_version_revoked")
+        # Original source binding: evidence parser, evidence list copy, and
+        # returned immutable-field dict, all paid before the helper allocates.
+        for _ in range(3):
+            await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
         source = _m5_verified_source_binding(proposal)
         if source is None or provenance["verified_source_binding"] != source:
             _fail("method_signed_source_changed")
+        # Original helper source events, including its nested canonical copy
+        # and digest output, are distinct appearances. The
+        # two certified original rows cover every selected field; retain each
+        # repeated whole-row upper rather than measuring constructed output.
+        for _ in ("scope-input-dump", "scope-model", "scope-output-dump",
+                "source-evidence-copy", "source-dict", "correction-input",
+                "correction-output", "hmac-payload", "canonical-copy",
+                "canonical-json", "canonical-encoding", "hmac-output",
+                "signing-key-id-digest", "signing-key-id-slice"):
+            await _pay_owned_row(db, "memory_proposals", selected.proposal_id)
+            await _pay_owned_row(db, "memories", selected.version)
         mac = _m5_selection_binding_mac(proposal_id=proposal.proposal_id,
             accepted_content_digest=provenance["accepted_content_digest"],
             owner_principal_id=selected.owner.issuer_principal_id, owner_session_id=selected.owner.issuer_root_id,
@@ -376,6 +706,7 @@ class CurrentMethod:
         if (scope.family == "research" and not isinstance(candidate, ResearchStrategy)
             or scope.family == "general" and (not isinstance(candidate, TaskMethod) or candidate.family != "general")):
             _fail("method_consumer_schema_unsupported")
+        await _pay_owned_row(db, "memories", selected.version)
         return TaskStrategyBinding(status="active", method_id=proposal.proposal_id,
             version=memory.id, digest=candidate_sha, typed_data=typed)
 
@@ -384,14 +715,117 @@ class TaskMethodStrategyResolver:
     def __init__(self, current):
         self.current = current
 
-    async def resolve(self, owner, goal_ref, task_family, programme_grant=None):
-        return await self.current.resolve(owner, goal_ref, task_family, programme_grant)
+    async def resolve(self, owner, goal_ref, task_family, programme_grant=None, *, discovery_session=None):
+        if discovery_session is None:
+            return await self.current.resolve(owner, goal_ref, task_family, programme_grant)
+        return await self.current.resolve(owner, goal_ref, task_family, programme_grant,
+            discovery_session=discovery_session)
 
-    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None):
-        return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db)
+    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None):
+        if discovery_session is None:
+            return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db)
+        return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db,
+            discovery_session=discovery_session)
 
 
 current_method = CurrentMethod()
+
+
+async def original_discovery_strategy_numeric_schedule(discovery_session, *, constructor, strategy):
+    """One current-pointer A read and one immutable-pin B read, source owned.
+
+    The native validator is forecast by its original owner. This reader traces
+    only the subsequent original method bodies with that genuine selection;
+    it never manufactures a selected future method or changes the staged pin.
+    """
+    from types import MappingProxyType
+    from src.guardian.goal_discovery import _OwnedDiscoverySession
+    from src.guardian.goal_programmes import original_discovery_authority_numeric_schedule
+    from src.memory.header_bounds import _trace_memory_numeric_charges
+    from src.work_board.research_parent import DISCOVERY_SERVICE
+    if type(discovery_session) is not _OwnedDiscoverySession:
+        _fail("method_original_session_unavailable")
+    owned = discovery_session.validate()
+    if (type(constructor) is not MappingProxyType or constructor is not owned._constructor_bounds
+            or owned._candidate is None or constructor["job_id"] != owned._candidate[0]
+            or type(strategy) is not TaskStrategyBinding or strategy.status == "blocked"):
+        _fail("method_original_session_unavailable")
+    resolver = owned.service.strategy_resolver
+    if resolver is None:
+        # Owned discovery must consult the original method owner. The legacy
+        # optional-resolver behavior cannot establish this continuation.
+        _fail("method_original_resolver_unavailable")
+    if type(resolver) is not TaskMethodStrategyResolver or type(resolver.current) is not CurrentMethod:
+        _fail("method_original_resolver_unavailable")
+    current = resolver.current
+    if not current._started:
+        _fail("method_lifecycle_not_started")
+    if constructor.get("persisted_queue_only") is True:
+        if (owned.guard._prospective_admission is not None
+                or strategy is not getattr(owned, "_discovery_persisted_strategy", None)):
+            _fail("method_original_session_unavailable")
+        native = await original_discovery_authority_numeric_schedule(owned, constructor=constructor)
+        if any(phase != "queue" for phase, _, _ in native):
+            _fail("method_original_schedule_invalid")
+        selection = _owned_method_selection(owned)
+        binding = owned._candidate[1]
+        if constructor["job_id"] not in selection.runs:
+            _fail("method_original_session_unavailable")
+        token = _DISCOVERY_READ.set((owned, selection.common33))
+        try:
+            with _trace_memory_numeric_charges(owned.header_budget) as trace:
+                await _pay_owned_row(owned.db, "goals", binding.goal_id)
+                await _pay_owned_row(owned.db, "goals", binding.goal_id)
+                scope = LessonScope(goal_id=binding.goal_id,
+                    goal_revision=binding.goal_revision, family="research")
+                verified = await current._validate_pinned(
+                    WorkBoardOwner(principal_id=DISCOVERY_SERVICE, session_id=""),
+                    binding.goal_id, strategy, binding, owned.db,
+                    owned_scope=(binding.owner_identity_id, scope))
+            if verified != strategy:
+                _fail("method_pin_candidate_changed")
+        finally:
+            _DISCOVERY_READ.reset(token)
+        # One physical pin validator adds its native B check and method-only
+        # appearances. No pointer read, restaging, or future-row projection.
+        return native + tuple(("queue", appearance, upper) for appearance, upper in trace)
+    native = await original_discovery_authority_numeric_schedule(owned, constructor=constructor)
+    admissions = tuple(entry for entry in native if entry[0] == "admission")
+    queues = tuple(entry for entry in native if entry[0] == "queue")
+    # The authority owner emits two identical direct-call A blocks. This
+    # resolver makes one additional call, and its pin validator one B call.
+    half = len(admissions) // 2
+    if len(admissions) % 2 or admissions[:half] != admissions[half:]:
+        _fail("method_original_schedule_invalid")
+    entries = list(admissions[:half] + queues)
+    selection = _owned_method_selection(owned)
+    binding = owned._candidate[1]
+    token = _DISCOVERY_READ.set((owned, selection.common33))
+    try:
+        with _trace_memory_numeric_charges(owned.header_budget) as admission_trace:
+            # The public resolver's binding comparison and LessonScope DTO
+            # each consume a separate selected-Goal appearance.
+            await _pay_owned_row(owned.db, "goals", binding.goal_id)
+            await _pay_owned_row(owned.db, "goals", binding.goal_id)
+            scope = LessonScope(goal_id=binding.goal_id, goal_revision=binding.goal_revision, family="research")
+            selected = await current._resolve_current(owned.db, binding.owner_identity_id,
+                scope, original_selection=selection)
+        if selected != strategy:
+            _fail("method_pin_candidate_changed")
+        with _trace_memory_numeric_charges(owned.header_budget) as queue_trace:
+            await _pay_owned_row(owned.db, "goals", binding.goal_id)
+            await _pay_owned_row(owned.db, "goals", binding.goal_id)
+            verified = await current._validate_pinned(
+                WorkBoardOwner(principal_id=DISCOVERY_SERVICE, session_id=""),
+                binding.goal_id, strategy, binding, owned.db,
+                owned_scope=(binding.owner_identity_id, scope))
+        if verified != strategy:
+            _fail("method_pin_candidate_changed")
+    finally:
+        _DISCOVERY_READ.reset(token)
+    entries.extend((phase, appearance, upper) for phase, trace in
+        (("admission", admission_trace), ("queue", queue_trace)) for appearance, upper in trace)
+    return tuple(entries)
 
 
 async def _proposal(db, operator, proposal_id, *, mutate=False):

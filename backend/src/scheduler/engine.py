@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import inspect
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -9,13 +10,57 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config.settings import settings
-from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.approval.runtime import (reset_runtime_context, set_runtime_context,
+    _current_discovery_invocation, _bind_discovery_invocation, _close_discovery_invocation)
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 _scheduler_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _claim_discovery_invocation(wrapper, callback, loop, registration_owner, original_registration):
+    """Authenticate and acquire the existing service owner without yielding."""
+    from src.guardian.goal_discovery import (goal_discovery_service,
+        run_goal_discovery_tick, _original_admission_task)
+    from src.work_board.dispatcher import _dispatcher
+    service = _dispatcher.goal_discovery
+    scheduler = _scheduler
+    registration = scheduler.get_job("goal_public_discovery") if scheduler is not None else None
+    task = asyncio.current_task()
+    if (_current_discovery_invocation.get() is not None
+            or scheduler is not registration_owner or type(scheduler) is not AsyncIOScheduler
+            or service is None or service is not goal_discovery_service
+            or getattr(service, "_active_discovery_invocation", None) is not None
+            or service._tasks or task is None or _original_admission_task.get() is not None
+            or loop is not _scheduler_loop or asyncio.get_running_loop() is not loop
+            or registration is None or registration is not original_registration
+            or registration.id != "goal_public_discovery"
+            or registration.func is not wrapper or callback is not run_goal_discovery_tick):
+        raise RuntimeError("goal_discovery_invocation_unavailable")
+    service._tasks.add(task)
+    token = _original_admission_task.set((service, task))
+    try:
+        service._validate_original_admission_owner(jobs=service.jobs,
+            host=service._lifecycle_host, task=task)
+    except BaseException:
+        _original_admission_task.reset(token)
+        service._tasks.discard(task)
+        raise
+    return service, scheduler, registration, task, token
+
+
+def _open_discovery_invocation(claim, wrapper, callback, loop, principal):
+    # Only the original wrapper's source-owned authority coroutine can issue.
+    code = next(value for value in _async_job_wrapper.__code__.co_consts
+        if inspect.iscode(value) and value.co_name == "_run_with_authority")
+    if inspect.currentframe().f_back.f_code is not code:
+        raise RuntimeError("goal_discovery_invocation_internal_only")
+    service, scheduler, registration, task, _token = claim
+    return _bind_discovery_invocation(service, scheduler=scheduler,
+        registration=registration, wrapper=wrapper, callback=callback, loop=loop,
+        principal=principal, task=task, job_id=principal.job_id)
 
 
 def _async_job_wrapper(
@@ -30,22 +75,59 @@ def _async_job_wrapper(
     Keep the returned callable async so AsyncIOScheduler tracks the real
     coroutine lifetime without blocking the app loop.
     """
+    registration_owner = (_scheduler
+        if inspect.currentframe().f_back.f_code is init_scheduler.__code__ else None)
+    original_registration = None
+
+    def _bind_original_registration(registration):
+        nonlocal original_registration
+        if (inspect.currentframe().f_back.f_code is not init_scheduler.__code__
+                or original_registration is not None or registration_owner is not _scheduler
+                or registration.func is not wrapper or registration.id != job_id):
+            raise RuntimeError("goal_discovery_registration_unavailable")
+        original_registration = registration
+
     async def _run_with_authority():
-        execution_job_id = f"scheduler:{job_id}:{uuid4().hex}"
-        principal = TrustPrincipal(
-            principal_id=f"service:scheduler:{job_id}",
-            principal_type=PrincipalType.SERVICE,
-            grants=((AuthorityGrant.MODEL_INFERENCE,) if allow_model_inference else ()),
-            job_id=execution_job_id,
-        )
-        tokens = set_runtime_context(None, "high_risk", trust_principal=principal)
+        # This synchronous acquisition precedes every principal mutation and
+        # holds the shared service owner through consumed/invalidated states.
+        if job_id == "goal_public_discovery" and allow_model_inference:
+            raise RuntimeError("goal_discovery_invocation_unavailable")
+        claim = (_claim_discovery_invocation(wrapper, coro_func, _loop,
+            registration_owner, original_registration)
+            if job_id == "goal_public_discovery" else None)
+        tokens = None
+        marker = None
+        marker_token = None
         try:
+            execution_job_id = f"scheduler:{job_id}:{uuid4().hex}"
+            principal = TrustPrincipal(
+                principal_id=f"service:scheduler:{job_id}",
+                principal_type=PrincipalType.SERVICE,
+                grants=((AuthorityGrant.MODEL_INFERENCE,) if allow_model_inference else ()),
+                job_id=execution_job_id,
+            )
+            tokens = set_runtime_context(None, "high_risk", trust_principal=principal)
+            if claim is not None:
+                marker, marker_token = _open_discovery_invocation(
+                    claim, wrapper, coro_func, _loop, principal)
             await coro_func()
         finally:
-            reset_runtime_context(tokens)
+            try:
+                if marker is not None:
+                    _close_discovery_invocation(marker, marker_token)
+                if tokens is not None:
+                    reset_runtime_context(tokens)
+            finally:
+                if claim is not None:
+                    from src.guardian.goal_discovery import _original_admission_task
+                    service, _scheduler_owner, _registration, task, admission_token = claim
+                    _original_admission_task.reset(admission_token)
+                    service._tasks.discard(task)
 
     async def wrapper():
         try:
+            if job_id == "goal_public_discovery" and asyncio.get_running_loop() is not _loop:
+                raise RuntimeError("goal_discovery_invocation_unavailable")
             if asyncio.get_running_loop() is _loop:
                 await _run_with_authority()
             else:
@@ -54,6 +136,8 @@ def _async_job_wrapper(
         except Exception:
             logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
             raise
+    if job_id == "goal_public_discovery":
+        wrapper._bind_original_registration = _bind_original_registration
     return wrapper
 
 
@@ -277,7 +361,9 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     for job in jobs:
         try:
-            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
+            registration = _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
+            if job["id"] == "goal_public_discovery":
+                job["func"]._bind_original_registration(registration)
         except Exception:
             logger.exception("Failed to register job: %s", job["id"])
 

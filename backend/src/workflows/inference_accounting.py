@@ -153,12 +153,141 @@ def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
     return payload
 
 
-def _ledger_digest(account: InferenceAccountingOwner, rows: list[InferenceCostReservation]) -> str:
+def _accounting_scalar_upper(value):
+    """Encoded JSON scalar bound on the original already-paid model values."""
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 5
+    if type(value) is int:
+        return max(1, (abs(value).bit_length() * 30103 + 99999) // 100000) + (value < 0)
+    if isinstance(value, datetime):
+        return 44
+    if type(value) is str:
+        return 2 + sum(12 if ord(c) > 0xffff else 6 if ord(c) < 32 or ord(c) >= 127
+            else 2 if c in {'"', '\\'} else 1 for c in value)
+    raise InferenceAccountingError("accounting_numeric_shape_unavailable")
+
+
+def _accounting_model_upper(model, *, operation=False):
+    fields = InferenceCostReservation.model_fields if operation else InferenceAccountingOwner.model_fields
+    return 2 + sum(len(name) + 3 + _accounting_scalar_upper(getattr(model, name))
+        for name in fields if name != "group_lookup_key") + max(0, len(fields) - (2 if operation else 1))
+
+
+def _accounting_witness_entries(account):
+    upper = 2 + sum(len(name) + 3 + _accounting_scalar_upper(getattr(account, name))
+        for name in ("deployment_id", "revision", "ledger_digest")) + 2
+    return tuple((("accounting-witness", account.deployment_id, name), upper)
+        for name in ("construction", "return"))
+
+
+def _accounting_ledger_entries(account, rows):
+    """Each original dump, ledger_record, sort, JSON and digest appearance."""
+    entries = []
+    owner_upper = _accounting_model_upper(account)
+    entries.append((("accounting-ledger", "owner-dump"), owner_upper))
+    entries.append((("accounting-ledger", "owner-record-copy"), owner_upper))
+    operation_sum = 0
+    for row in rows:
+        upper = _accounting_model_upper(row, operation=True)
+        operation_sum += upper + 1
+        for name in ("operation-dump", "operation-record-copy"):
+            entries.append((("accounting-ledger", row.operation_id, name), upper))
+        for field in ("created_at", "updated_at", "deadline_at", "contact_started_at"):
+            if getattr(row, field) is not None:
+                for name in ("dump-datetime", "record-datetime-parse", "record-datetime-iso"):
+                    entries.append((("accounting-ledger", row.operation_id, field, name), 44))
+    for field in ("created_at", "updated_at"):
+        for name in ("dump-datetime", "record-datetime-parse", "record-datetime-iso"):
+            entries.append((("accounting-ledger", "owner", field, name), 44))
+    operations_upper = 2 + operation_sum
+    payload_upper = 2 + len("account") + 3 + owner_upper + 1 + len("operations") + 3 + operations_upper
+    for name, upper in (("dump-operations-list", operations_upper), ("sorted-operations-list", operations_upper),
+            ("record-operations-list", operations_upper), ("payload-construction", payload_upper),
+            ("canonical-json", payload_upper), ("encoded-json", payload_upper), ("digest-return", 66)):
+        entries.append((("accounting-ledger", name), upper))
+    return tuple(entries)
+
+
+def original_accounting_witness_numeric_schedule(account, rows):
+    """Capacity only for one original witness and one unchanged real ledger."""
+    return _accounting_witness_entries(account) + _accounting_ledger_entries(account, rows)
+
+
+def _accounting_prepay(budget, entries):
+    if budget is not None:
+        for appearance, upper in entries:
+            budget.debit(upper, appearance=appearance)
+
+
+def _original_native_binding_numeric_entries(job_id, text_bytes):
+    """Original from_json grammar ceilings: 14 domains and 34 child methods."""
+    from src.runtime_plugins.ownership import DOMAINS, METHOD_DOMAINS
+    domain = max(_accounting_scalar_upper(name) for name in DOMAINS)
+    method = max(_accounting_scalar_upper(name) for name in METHOD_DOMAINS)
+    dependency = 2 + len("runtime_domain") + 3 + domain + len("owner_kind") + 3 + 9 \
+        + len("epoch") + 3 + 20 + len("composition_digest") + 3 + 66 + 3
+    domains = 2 + 14 * (domain + 1)
+    methods = 2 + 34 * (method + 1)
+    child_dependencies = 2 + 34 * (2 + method + 1 + domains + 1)
+    manifest = 2 + sum(len(name) + 3 + width for name, width in (
+        ("schema_version", len("runtime-service-methods.v1") + 2), ("origin_method", method),
+        ("native_branch", len("public_research") + 2), ("allowed_child_methods", methods),
+        ("origin_dependencies", domains), ("child_dependencies", child_dependencies))) + 5
+    parsed = 6 * text_bytes + 2
+    entries = []
+    def add(name, upper):
+        entries.append((("composition-binding-parser", job_id, name), upper))
+    for name, upper in (("size-utf8", text_bytes), ("json-parser", parsed), ("duplicate-pairs", parsed),
+            ("duplicate-dicts", parsed), ("field-sets", parsed), ("allowed-methods-tuple", methods),
+            ("dependencies-tuple", 2 + 14 * (dependency + 1)), ("binding-construction", parsed),
+            ("binding-return", parsed), ("dependency-keys-tuple", domains), ("dependency-keys-set", domains),
+            ("dependency-keys-sorted", domains), ("dependency-keys-sorted-tuple", domains),
+            ("required-dependencies-set", domains), ("actual-dependencies-set", domains),
+            ("required-plus-goals-set", domains), ("required-plus-goals-inference-set", domains),
+            ("payload-methods-list", methods), ("payload-dependencies-list", 2 + 14 * (dependency + 1)),
+            ("binding-payload", parsed), ("binding-canonical", parsed), ("binding-encoded", parsed), ("binding-digest", 66)):
+        add(name, upper)
+    add("dependency-constructions", 14 * dependency)
+    add("dependency-payloads", 14 * dependency)
+    # The constructor independently validates the method/dependency closure.
+    for name in ("method-set", "method-sort", "method-tuple"):
+        add(("constructor-closure", name), methods)
+    for name in ("domain-names", "domain-values", "domain-sort", "domain-tuple"):
+        add(("constructor-dependencies", name), domains + child_dependencies)
+    # One explicit manifest comparison plus one binding_digest payload call.
+    for occurrence in range(2):
+        for name in ("method-set", "method-sort", "method-tuple"):
+            add(("manifest", occurrence, name), methods)
+        for name in ("domain-names", "domain-values", "domain-sort", "domain-tuple"):
+            add(("manifest", occurrence, name), domains + child_dependencies)
+        for name, upper in (("method-closure", methods), ("origin-dependencies", domains),
+                ("child-dependencies", child_dependencies), ("manifest-source", manifest),
+                ("manifest-canonical", manifest), ("manifest-encoded", manifest), ("manifest-digest", 66)):
+            add(("manifest", occurrence, name), upper)
+    return tuple(entries)
+
+
+def original_discovery_native_binding_numeric_schedule(owned, *, constructor):
+    """Capacity-only new-row grammar; current roots retain their real trace."""
+    owned.jobs._validate_discovery_session(owned)
+    if constructor is not owned._constructor_bounds or constructor["job_id"] != owned._candidate[0]:
+        raise InferenceAccountingError("accounting_numeric_shape_unavailable")
+    return _original_native_binding_numeric_entries(constructor["job_id"],
+        constructor["text_bytes"]["composition_binding_json"])
+
+
+def _ledger_digest(account: InferenceAccountingOwner, rows: list[InferenceCostReservation], *, header_budget=None) -> str:
     from src.workspace.accounting_witness import ledger_digest
+    if header_budget is not None:
+        _accounting_prepay(header_budget, _accounting_ledger_entries(account, rows))
     return ledger_digest(account.model_dump(mode="json"), [_operation_payload(row) for row in rows])
 
 
-def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
+def _witness(account: InferenceAccountingOwner, *, header_budget=None) -> dict[str, object]:
+    if header_budget is not None:
+        _accounting_prepay(header_budget, _accounting_witness_entries(account))
     return {"deployment_id": account.deployment_id, "revision": account.revision, "ledger_digest": account.ledger_digest}
 
 

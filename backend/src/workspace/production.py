@@ -619,9 +619,32 @@ def write_lifecycle_receipt(workspace: ProductionWorkspace, receipt: Mapping[str
         os.close(descriptor)
 
 
+def _publication_json_upper(value):
+    """Original JSON encoded-byte width without constructing an output copy."""
+    from src.memory.composition_headers import _metadata_size, _descriptor_integer_size
+    if isinstance(value, Mapping):
+        return 2 + sum(_publication_json_upper(key) + 1 + _publication_json_upper(item)
+            for key, item in value.items()) + max(0, len(value) - 1)
+    if type(value) in (tuple, list):
+        return 2 + sum(_publication_json_upper(item) for item in value) + max(0, len(value) - 1)
+    if type(value) is int:
+        return _descriptor_integer_size(value)
+    if type(value) is str:
+        # json.dumps(..., ensure_ascii=True) has a closed per-code-point
+        # encoding. Count it before constructing either the text or UTF8 copy;
+        # known ASCII hashes therefore retain their actual 66-byte width.
+        return 2 + sum(2 if char in {'"', '\\', '\b', '\f', '\n', '\r', '\t'}
+            else 6 if ord(char) < 32 or 127 <= ord(char) <= 65535
+            else 12 if ord(char) > 65535 else 1 for char in value)
+    return _metadata_size(value)
+
+
 def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Mapping[str, Any], *,
         _programme_transition=None, _prior_receipt=None, header_budget=None) -> Path:
     path = lifecycle_receipt_path(workspace)
+    if header_budget is not None:
+        header_budget.debit(_publication_json_upper(receipt),
+            appearance=("composition-publication", "receipt", "dict-copy"))
     payload = dict(receipt)
     # Lifecycle status updates must not erase the accounting high-water mark.
     prior = _prior_receipt if _prior_receipt is not None else read_lifecycle_receipt(workspace, header_budget=header_budget)
@@ -668,6 +691,10 @@ def _write_lifecycle_receipt_locked(workspace: ProductionWorkspace, receipt: Map
                 or (incoming["revision"] == previous["revision"] and incoming != previous)):
                 raise ProductionWorkspaceError("workspace accounting witness cannot regress")
     payload["secret_values_included"] = False
+    if header_budget is not None:
+        upper = _publication_json_upper(payload)
+        for appearance in ("json", "utf8"):
+            header_budget.debit(upper, appearance=("composition-publication", "receipt", appearance))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     if len(encoded) > MAX_LIFECYCLE_RECEIPT_BYTES:
         raise ProductionWorkspaceError("workspace lifecycle receipt exceeds bounded size")
@@ -750,6 +777,11 @@ def read_lifecycle_receipt(workspace: ProductionWorkspace, *, header_budget=None
         private_mode=False, header_budget=header_budget)
     if raw is None:
         return None
+    if header_budget is not None:
+        header_budget.debit(len(raw), appearance=("composition-publication", "receipt", "decode"))
+        for appearance in ("json-parse", "materialization", "return"):
+            header_budget.debit(6 * len(raw) + 2,
+                appearance=("composition-publication", "receipt", appearance))
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -772,10 +804,15 @@ def write_accounting_checkpoint(workspace: ProductionWorkspace, payload: Mapping
             raise ProductionWorkspaceError("composition checkpoint component cannot be dropped")
     if prior is not None and prior.get("witness", {}).get("revision", 0) > payload.get("witness", {}).get("revision", 0):
         raise ProductionWorkspaceError("accounting checkpoint cannot regress")
-    _write_private_checkpoint(path, payload)
+    _write_private_checkpoint(path, payload, header_budget=header_budget)
 
 
-def _write_private_checkpoint(path: Path, payload: Mapping[str, Any]) -> None:
+def _write_private_checkpoint(path: Path, payload: Mapping[str, Any], *, header_budget=None) -> None:
+    if header_budget is not None:
+        upper = _publication_json_upper(payload)
+        for appearance in ("dict-copy", "json", "utf8"):
+            header_budget.debit(upper,
+                appearance=("composition-publication", "checkpoint", appearance))
     encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     if len(encoded) > MAX_ACCOUNTING_CHECKPOINT_BYTES or payload.get("secret_values_included") is not False:
         raise ProductionWorkspaceError("continuity checkpoint exceeds bounded contract")
@@ -806,6 +843,10 @@ def _read_private_checkpoint(path: Path, *, header_budget=None) -> dict[str, Any
         private_mode=True, header_budget=header_budget)
     if raw is None:
         return None
+    if header_budget is not None:
+        for appearance in ("json-parse", "materialization", "return"):
+            header_budget.debit(6 * len(raw) + 2,
+                appearance=("composition-publication", "checkpoint", appearance))
     try:
         payload = json.loads(raw)
     except ValueError as exc:
@@ -822,6 +863,12 @@ def _verify_composition_publication_bytes(workspace, checkpoint, receipt, *, hea
         (lifecycle_receipt_path(workspace), MAX_LIFECYCLE_RECEIPT_BYTES, receipt),
     ):
         raw = _read_bounded_private_file(path, maximum=maximum, private_mode=True, header_budget=header_budget)
+        if header_budget is not None:
+            upper = _publication_json_upper(payload)
+            label = "checkpoint" if path.name == "accounting-checkpoint.json" else "receipt"
+            for appearance in ("readback-dict", "readback-json", "readback-utf8"):
+                header_budget.debit(upper,
+                    appearance=("composition-publication", label, appearance))
         expected = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         if raw != expected:
             raise ProductionWorkspaceReconciliationError("session_publication_readback_changed")

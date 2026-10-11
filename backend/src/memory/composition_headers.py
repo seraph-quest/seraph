@@ -586,17 +586,25 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
                    f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"]
     result={}
     for key in identities:
-        if _header_budget is not None and (type(key) not in {str, int}
-                or (type(key) is str and sum(1 if ord(char)<128 else 2 if ord(char)<2048
-                    else 3 if ord(char)<=65535 else 4 for char in key)>512)):
-            raise HeaderBoundsError("header_request_bound")
+        if _header_budget is not None:
+            if type(key) not in {str, int}:
+                raise HeaderBoundsError("header_request_bound")
+            if type(key) is str:
+                key_octets = sum(1 if ord(char)<128 else 2 if ord(char)<2048
+                    else 3 if ord(char)<=65535 else 4 for char in key)
+                if key_octets > 512:
+                    raise HeaderBoundsError("header_request_bound")
+                key_copy_upper = 6*key_octets + 2
+            else:
+                # Original SQLite integer locators fit signed int64 JSON.
+                key_copy_upper = 20
         rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
-            copy_upper = 3074 + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
+            copy_upper = key_copy_upper + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
             _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", "skeleton-copy"))
-            fact_upper = 3074 + 6*len(descriptor.table) + 256
+            fact_upper = key_copy_upper + 6*len(descriptor.table) + 256
             _metadata_precharge(connection, _header_budget, fact_upper, ("row-header", "header-fact-copy"))
         skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
         cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
@@ -900,6 +908,135 @@ def read_programme_identity(certificate, identity):
         raise HeaderBoundsError("header_row_unavailable")
     return tuple(records[0])
 
+
+
+async def read_current_method_pointer(db, *, original_selection):
+    """ADR-035 transient read selected by the genuine original admission guard.
+
+    This does not register a generic body descriptor or authenticate a method:
+    CurrentMethod still owns the pointer MAC and canonical version checks.
+    """
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    from src.db.task_method_models import TaskMethodActive
+    from src.memory.header_bounds import _descriptor
+    from src.workspace.accounting_continuity import _ProgrammeSelection
+    if type(original_selection) is not _ProgrammeSelection:
+        raise HeaderBoundsError("task_method_pointer_owner_unavailable")
+    guard = original_selection.owner
+    if (type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard._prospective_admission is None
+            or guard._prospective_admission[0] is not original_selection):
+        raise HeaderBoundsError("task_method_pointer_owner_unavailable")
+    guard._validate_programme_selection(original_selection)
+    common33 = original_selection.common33
+    budget = common33.budget
+    binding = guard._prospective_admission_facts[2]
+    scope = (binding.owner_identity_id, binding.goal_id, binding.goal_revision, "research")
+    columns = ("id", "owner_identity_id", "goal_id", "goal_revision", "family", "revision",
+        "binding_json", "previous_binding_json", "baseline", "signature_key_id", "signature_mac", "updated_at")
+    sql_types = ("VARCHAR", "VARCHAR", "VARCHAR", "INTEGER", "VARCHAR", "INTEGER",
+        "VARCHAR", "VARCHAR", "BOOLEAN", "VARCHAR", "VARCHAR", "DATETIME")
+
+    def read(connection):
+        guard._validate_programme_selection(original_selection)
+        _validate(connection, common33)
+        if connection is not common33.connection:
+            raise HeaderBoundsError("task_method_pointer_owner_unavailable")
+        # Compiler/descriptor construction is a separate prepaid appearance.
+        _prepay_descriptor_compiler(connection, TaskMethodActive, columns, sql_types,
+            budget, table="task_method_active")
+        descriptor = _descriptor(TaskMethodActive, "id", columns)
+        if descriptor.sql_types != sql_types or tuple(TaskMethodActive.__table__.columns.keys()) != columns:
+            raise HeaderBoundsError("task_method_pointer_schema_changed")
+        schema = _descriptor_xinfo_rows(connection, (21, 8, 12, "task_method_active", 13),
+            budget=budget, upper=_metadata_upper(13, (23, 10, 2, 2, 1)))
+        expected = [(name, kind, 1, int(name == "id"), 0) for name, kind in zip(columns, sql_types)]
+        if [tuple(row) for row in schema] != expected:
+            raise HeaderBoundsError("task_method_pointer_schema_changed")
+        layout = _metadata_rows(connection,
+            'SELECT wr FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2',
+            ("task_method_active",), _header_budget=budget,
+            upper=_metadata_upper(2, (20,)), appearance=("task-method-pointer-layout",))
+        if [tuple(row) for row in layout] != [(0,)]:
+            raise HeaderBoundsError("task_method_pointer_schema_changed")
+        indexes = _metadata_rows(connection,
+            'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
+            'CASE WHEN octet_length(origin)<=2 THEN origin END,partial '
+            'FROM pragma_index_list(?) LIMIT 5', ("task_method_active",),
+            _header_budget=budget, upper=_metadata_upper(5, (20, 770, 20, 14, 20)),
+            appearance=("task-method-pointer-indexes",))
+        definitions = {
+            "sqlite_autoindex_task_method_active_1": (1, "pk", ("id",)),
+            "sqlite_autoindex_task_method_active_2": (1, "u", columns[1:5]),
+            "ix_task_method_active_owner_identity_id": (0, "c", ("owner_identity_id",)),
+            "ix_task_method_active_goal_id": (0, "c", ("goal_id",)),
+        }
+        if (len(indexes) != 4 or {row[1] for row in indexes} != set(definitions)
+                or {row[0] for row in indexes} != set(range(4))):
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        for seq, name, unique, origin, partial in indexes:
+            if (any(type(value) is not int for value in (seq, unique, partial))
+                    or (unique, origin, partial) != (*definitions[name][:2], 0)):
+                raise HeaderBoundsError("task_method_pointer_locator_changed")
+            keys = definitions[name][2]
+            parts = _metadata_rows(connection,
+                'SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,desc,'
+                'CASE WHEN octet_length(coll)<=128 THEN coll END,key '
+                'FROM pragma_index_xinfo(?) LIMIT ?', (name, len(keys) + 2),
+                _header_budget=budget, upper=_metadata_upper(len(keys) + 2, (20,20,770,20,770,20)),
+                appearance=("task-method-pointer-index-parts", name))
+            expected_parts = [(index, columns.index(key), key, 0, "BINARY", 1)
+                for index, key in enumerate(keys)] + [(len(keys), -1, None, 0, "BINARY", 0)]
+            if [tuple(row) for row in parts] != expected_parts:
+                raise HeaderBoundsError("task_method_pointer_locator_changed")
+        # Exact compound scope, no status filter or unbounded ID delivery.
+        selected = _metadata_rows(connection,
+            'SELECT CASE WHEN typeof(id)=\'text\' AND octet_length(id) BETWEEN 1 AND 512 '
+            'THEN id END,_rowid_ FROM task_method_active '
+            'WHERE owner_identity_id=? AND goal_id=? AND goal_revision=? AND family=? LIMIT 2',
+            scope, _header_budget=budget, upper=_metadata_upper(2, (3074, 20)),
+            appearance=("task-method-pointer-scope",))
+        if len(selected) > 1:
+            raise HeaderBoundsError("task_method_pointer_ambiguous")
+        if not selected:
+            foreign = _metadata_rows(connection,
+                'SELECT _rowid_ FROM task_method_active '
+                'WHERE goal_id=? AND goal_revision=? AND family=? LIMIT 1',
+                scope[1:], _header_budget=budget, upper=_metadata_upper(1, (20,)),
+                appearance=("task-method-pointer-foreign-existence",))
+            for row in foreign:
+                _descriptor_integer_size(row[0])
+                budget.enroll({("task_method_active", row[0])})
+            _validate(connection, common33)
+            guard._validate_programme_selection(original_selection)
+            return None, bool(foreign)
+        identifier, rowid = selected[0]
+        if type(identifier) is not str or not identifier:
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        _descriptor_integer_size(rowid)
+        budget.enroll({("task_method_active", rowid)})
+        headers = _headers(connection, descriptor, (identifier,), _header_budget=budget)
+        physical, upper = headers[("task_method_active", identifier)]
+        if physical != rowid:
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        budget.debit(upper, appearance=("task-method-pointer-complete-header", identifier))
+        # Raw body, typed materialization and returned object copy each spend.
+        for appearance in ("body", "materialization", "return-copy"):
+            budget.debit(upper, appearance=("task-method-pointer", appearance, identifier))
+        _validate(connection, common33)
+        guard._validate_programme_selection(original_selection)
+        rows = list(_sql(connection, 'SELECT ' + ','.join('"' + name + '"' for name in columns)
+            + ' FROM task_method_active WHERE id=? LIMIT 2', (identifier,)))
+        if len(rows) != 1:
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        pointer = TaskMethodActive.model_validate(dict(zip(columns, rows[0])))
+        if (pointer.owner_identity_id, pointer.goal_id, pointer.goal_revision, pointer.family) != scope:
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        _validate(connection, common33)
+        guard._validate_programme_selection(original_selection)
+        return pointer, False
+
+    return await (await db.connection()).run_sync(read)
 
 
 def _selected_schema_census_sql():

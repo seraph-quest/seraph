@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+from contextlib import nullcontext
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 import hashlib
 import inspect
 import json
+import logging
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from sqlalchemy import select
@@ -45,6 +47,143 @@ def discovery_external_effect_state(run):
 
 
 _original_admission_task = ContextVar("original_goal_discovery_admission_task", default=None)
+logger = logging.getLogger(__name__)
+
+
+class _OwnedDiscoverySession:
+    """Continuation of one real wrapper pass, never a standalone authority."""
+
+    def __init__(self, service, marker, db, header_budget, guard):
+        self.service, self.marker, self.db = service, marker, db
+        self.header_budget, self.guard = header_budget, guard
+        self.task = asyncio.current_task()
+        self.host = service._lifecycle_host
+        self.jobs = service.jobs
+        self._host_state = (self.host.reviewed, self.host.boot_nonce, self.host.process,
+            self.host.service_dispatch, service._lifecycle_dispatcher)
+        self.active = True
+        self._candidate = None
+        self._candidate_phase = None
+        self._composition_binding = None
+        self._constructor_bounds = None
+
+    def validate(self, *, db=None, header_budget=None, jobs=None):
+        from src.memory.header_bounds import HeaderReadBudget
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        if (type(self) is not _OwnedDiscoverySession or not self.active
+                or self.service._owned_discovery_session is not self
+                or self.task is None or self.task is not asyncio.current_task()
+                or (db is not None and db is not self.db)
+                or (header_budget is not None and header_budget is not self.header_budget)
+                or (jobs is not None and jobs is not self.jobs)
+                or type(self.header_budget) is not HeaderReadBudget
+                or type(self.guard) is not CompositionSessionGuard
+                or self.guard.db is not self.db
+                or self.db.info.get("composition_guard") is not self.guard
+                or self.guard.header_budget is not self.header_budget
+                or self.host is not self.service._lifecycle_host
+                or self.jobs is not self.service.jobs):
+            raise RuntimeError("goal_discovery_session_unavailable")
+        self.marker.validate(service=self.service)
+        current_host = (self.host.reviewed, self.host.boot_nonce, self.host.process,
+            self.host.service_dispatch, self.service._lifecycle_dispatcher)
+        if (current_host[1] != self._host_state[1]
+                or any(current_host[index] is not self._host_state[index]
+                    for index in (0, 2, 3, 4))):
+            raise RuntimeError("goal_discovery_session_unavailable")
+        self.service._validate_original_admission_owner(
+            jobs=self.jobs, host=self.host, task=self.task)
+        return self
+
+    def _numeric_reservation(self):
+        from src.memory.header_bounds import _DiscoveryNumericReservation
+        self.validate()
+        reservation = self.guard._discovery_reservation
+        if type(reservation) is not _DiscoveryNumericReservation:
+            raise RuntimeError("goal_discovery_original_reservation_unavailable")
+        reservation._checked()
+        return reservation
+
+    def _begin_candidate(self, job_id, binding):
+        self.validate()
+        facts = self.guard._prospective_admission_facts
+        if (self._candidate is not None or facts is None or facts[2] != binding
+                or type(job_id) is not str):
+            raise RuntimeError("goal_discovery_candidate_unavailable")
+        self._candidate = (job_id, binding)
+        self._candidate_phase = "reader"
+
+    def _record_writer_exit(self, phase):
+        """Accounting's engine-authenticated completion hook owns this call."""
+        self.validate()
+        if self._candidate is None:
+            raise RuntimeError("goal_discovery_candidate_unavailable")
+        if phase == "admission" and self._candidate_phase == "reader":
+            self._candidate_phase = "inserted"
+        elif phase == "queue" and self._candidate_phase in {"reader", "inserted"}:
+            self._candidate_phase = "queued"
+        else:
+            raise RuntimeError("goal_discovery_candidate_unavailable")
+
+    def _end_candidate(self):
+        self.validate()
+        if self._candidate_phase not in {"queued", "read_complete"}:
+            raise RuntimeError("goal_discovery_candidate_unavailable")
+        self._candidate = None
+        self._candidate_phase = None
+        self._composition_binding = None
+        self._constructor_bounds = None
+
+
+def original_discovery_staging_numeric_schedule(discovery_session, *, constructor):
+    """Original constructor/stager appearances; sizes convey no permission."""
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.work_board.input_artifacts import INPUT_ARTIFACT_MAX_BYTES
+    owned = discovery_session.validate()
+    if (constructor is not owned._constructor_bounds or owned._candidate is None
+            or constructor["job_id"] != owned._candidate[0]):
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    brief, plan = constructor["brief_bytes"], constructor["plan_bytes"]
+    authority, inputs = constructor["authority_bytes"], constructor["input_bytes"]
+    entries = []
+    # Each separately constructed/returned copy is prepaid independently.
+    for appearance, upper in (
+        ("brief-encode", brief),
+        ("brief-staged-dto", constructor["staged_brief_bytes"]),
+        ("plan-raw-input", plan), ("plan-validation", plan),
+        ("plan-dto", plan), ("plan-model-dump", plan), ("plan-json", plan),
+        ("plan-utf8", plan),
+        ("plan-staged-dto", constructor["staged_plan_bytes"]),
+        ("authority-dto", authority), ("input-dictionary", inputs),
+        ("spec-authority-copy", authority), ("fingerprint-authority-copy", authority),
+        ("fingerprint-object", inputs + authority + 32),
+        ("fingerprint-json", inputs + authority + 32),
+        ("fingerprint-utf8", inputs + authority + 32),
+        ("durable-spec-copy", constructor["spec_bytes"]),
+    ):
+        entries.append(("staging", ("discovery-constructor", appearance), upper))
+    for kind, size in (("public_brief", brief), ("plan", plan)):
+        # Initial exact no-follow read (including missing-file path), followed
+        # by the original no-clobber writer's full collision/readback allowance.
+        entries.append(("staging", None, size + 1))
+        entries.append(("staging", ("discovery-staging-reservation", kind),
+            size + INPUT_ARTIFACT_MAX_BYTES + 1 + size + 1))
+    return tuple(entries)
+
+
+def original_discovery_admission_numeric_schedule(discovery_session, *, constructor):
+    """Copies made by the original insertion callback, before row adoption."""
+    owned = discovery_session.validate()
+    if constructor is not owned._constructor_bounds or owned._candidate is None:
+        raise RuntimeError("goal_discovery_original_reservation_unavailable")
+    entries = [("admission", ("discovery-callback", "authority-model-dump"),
+        constructor["authority_bytes"])]
+    for name, field in (("checkpoints", "checkpoint_bytes"),
+            ("artifacts", "artifact_bytes"), ("effects", "effect_bytes")):
+        for operation in ("construction", "json", "return"):
+            entries.append(("admission", ("discovery-callback", name, operation),
+                constructor[field]))
+    return tuple(entries)
 
 
 def _original_admission_entry(method):
@@ -76,6 +215,8 @@ class GoalDiscoveryService:
         self._tasks = set()
         self._lifecycle_dispatcher = None
         self._lifecycle_host = None
+        self._active_discovery_invocation = None
+        self._owned_discovery_session = None
 
     async def start(self):
         if self.started:
@@ -114,14 +255,26 @@ class GoalDiscoveryService:
             raise RuntimeError("programme_original_admission_owner_unavailable")
         return task
 
-    async def _strategy(self, binding):
+    async def _strategy(self, binding, *, discovery_session=None):
         """Select the current method only for a new occurrence admission."""
-        result = TaskStrategyBinding(status="none", reason="baseline")
-        if self.strategy_resolver is not None:
+        if discovery_session is not None:
+            discovery_session.validate()
+            from src.memory.task_methods import TaskMethodStrategyResolver, CurrentMethod
+            if (type(self.strategy_resolver) is not TaskMethodStrategyResolver
+                    or type(self.strategy_resolver.current) is not CurrentMethod):
+                raise RuntimeError("programme_original_strategy_owner_unavailable")
+        if self.strategy_resolver is None:
+            result = TaskStrategyBinding(status="none", reason="baseline")
+        else:
             # Service context identifies this exact delegated programme; it
             # never authenticates or renews the original issuer browser Root.
+            continuation = {}
+            if discovery_session is not None:
+                discovery_session.validate()
+                continuation["discovery_session"] = discovery_session
             result = self.strategy_resolver.resolve(WorkBoardOwner(principal_id=DISCOVERY_SERVICE,
-                session_id=""), binding.goal_id, DISCOVERY_CAPABILITY, programme_grant=binding)
+                session_id=""), binding.goal_id, DISCOVERY_CAPABILITY, programme_grant=binding,
+                **continuation)
             if inspect.isawaitable(result):
                 result = await result
             result = TaskStrategyBinding.model_validate(result)
@@ -130,7 +283,7 @@ class GoalDiscoveryService:
         await validated_discovery_strategy(result)
         return result
 
-    async def _validate_pinned_strategy(self, binding, original, *, db=None):
+    async def _validate_pinned_strategy(self, binding, original, *, db=None, discovery_session=None):
         """Validate the immutable admitted version, never the current pointer.
 
         The delegated programme supplies authority; its issuer Root remains
@@ -138,6 +291,15 @@ class GoalDiscoveryService:
         method owner rather than a fresh selection or local status fallback.
         """
         self._ready()
+        continuation = {}
+        if discovery_session is not None:
+            discovery_session.validate(db=db, jobs=self.jobs)
+            from src.memory.task_methods import TaskMethodStrategyResolver, CurrentMethod
+            if (type(self.strategy_resolver) is not TaskMethodStrategyResolver
+                    or type(self.strategy_resolver.current) is not CurrentMethod):
+                raise RuntimeError("programme_original_strategy_owner_unavailable")
+            db = discovery_session.db
+            continuation["discovery_session"] = discovery_session
         original = TaskStrategyBinding.model_validate(original)
         validator = getattr(self.strategy_resolver, "validate_pinned", None)
         if validator is None:
@@ -146,7 +308,8 @@ class GoalDiscoveryService:
             result = original
         else:
             result = validator(WorkBoardOwner(principal_id=DISCOVERY_SERVICE,
-                session_id=""), binding.goal_id, original, programme_grant=binding, db=db)
+                session_id=""), binding.goal_id, original, programme_grant=binding, db=db,
+                **continuation)
             if inspect.isawaitable(result):
                 result = await result
             result = TaskStrategyBinding.model_validate(result)
@@ -156,66 +319,155 @@ class GoalDiscoveryService:
         return result
 
     @_original_admission_entry
-    async def admit(self, *, goal_id, programme_id, grant_revision):
+    async def admit(self, *, goal_id, programme_id, grant_revision, discovery_session=None):
         self._ready()
+        continuation = {}
+        if discovery_session is not None:
+            discovery_session.validate(jobs=self.jobs)
+            continuation["discovery_session"] = discovery_session
         programme = await goal_programme_service.assert_authority(goal_id=goal_id,
-            programme_id=programme_id, grant_revision=grant_revision, capability_id=DISCOVERY_CAPABILITY)
+            programme_id=programme_id, grant_revision=grant_revision, capability_id=DISCOVERY_CAPABILITY,
+            **continuation)
+        if discovery_session is not None:
+            discovery_session.validate(jobs=self.jobs)
+            await goal_programme_service.prepay_discovery_binding_copy(discovery_session)
         binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
         from src.workflows.job_runtime import _utc_now
         now = _utc_now()
         day = goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
         identifier = uuid5(NAMESPACE_URL, f"seraph:public-discovery:{binding.owner_identity_id}:{programme.id}:{day}")
         job_id = "goal-discovery:" + identifier.hex
-        prior = await self.jobs.get_job(job_id)
+        if discovery_session is not None:
+            discovery_session._begin_candidate(job_id, binding)
+        prior = await self.jobs.get_job(job_id, **continuation)
         if prior is not None:
             if prior["status"] == "accepted":
-                return await self._queue(job_id)
+                if discovery_session is not None:
+                    reserve_queue = getattr(discovery_session.guard,
+                        "_reserve_original_discovery_queue", None)
+                    if not callable(reserve_queue):
+                        raise RuntimeError("goal_discovery_original_reservation_unavailable")
+                    candidate = discovery_session._candidate
+                    await reserve_queue(discovery_session=discovery_session, job_id=job_id)
+                    discovery_session.validate(jobs=self.jobs)
+                    if (discovery_session._candidate is not candidate
+                            or discovery_session._candidate_phase != "reader"):
+                        raise RuntimeError("goal_discovery_candidate_unavailable")
+                    discovery_session._numeric_reservation()
+                return await self._queue(job_id, discovery_session=discovery_session)
+            if discovery_session is not None:
+                finish_read = getattr(discovery_session.guard, "_finish_owned_discovery_read", None)
+                if not callable(finish_read):
+                    raise RuntimeError("goal_discovery_original_read_unwind_unavailable")
+                await finish_read(discovery_session=discovery_session, job_id=job_id)
             return prior  # Current day only; never replay its provider contacts.
-        strategy = await self._strategy(binding)
+        strategy = await self._strategy(binding, discovery_session=discovery_session)
         deadline = min(programme.expires_at, now + timedelta(seconds=300))
-        brief = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
-            kind="public_brief", slot=0, content=programme.public_brief.encode())
-        from src.guardian.research_plan_contracts import STAGES
-        caps = {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}
-        refs = [[brief.reference.model_dump(mode="json")],
-            [{"producer_step_id": "plan_queries", "output_slot": "queries", "json_pointer": ""}],
-            [{"producer_step_id": "search_public", "output_slot": name, "json_pointer": ""} for name in ("manifest", "selection")],
-            [{"producer_step_id": "extract_sources", "output_slot": "snapshots", "json_pointer": ""}]]
-        plan = GoalResearchPlanSpecV1.model_validate({"schema_version": 1, "plan_id": str(identifier),
-            "programme_id": programme.id, "programme_revision": programme.grant_revision,
-            "goal_id": goal_id, "goal_revision": programme.goal_revision, "grant_id": programme.id,
-            "grant_revision": programme.grant_revision, "public_brief_digest": programme.brief_digest,
-            "route_epoch": programme.route_epoch, "strategy_binding": strategy.model_dump(mode="json"),
-            "issued_at": now.isoformat(), "deadline_at": deadline.isoformat(), "idempotency_key": str(identifier),
-            "limits": {"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
-                "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
-                "max_source_bytes": 262144, "max_output_bytes": 65536,
-                "cost_limit_microusd": programme.budget.max_inference_microusd},
-            "steps": [{"step_id": name, "capability_id": capability, "capability_version": 1,
-                "input_refs": refs[index], "output_slots": [{"slot": slot, "artifact_type": kind,
-                    "max_bytes": caps[slot]} for slot, kind in outputs]}
-                for index, (name, capability, outputs) in enumerate(STAGES)]})
-        staged = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
-            kind="plan", slot=0, content=json_bytes(plan.model_dump(mode="json")))
-        authority = GoalDiscoveryAuthority(authority_type="goal_programme_discovery_v1",
-            principal=DISCOVERY_SERVICE, owner_kind="service", service_id=DISCOVERY_SERVICE,
-            capability_id=DISCOVERY_CAPABILITY, capability_version="1",
-            goal_owner_principal_id=binding.issuer_principal_id, goal_owner_session_id=binding.issuer_root_id,
-            programme_binding=binding, plan_ref=staged.reference, occurrence_day=day,
-            original_job_id=job_id, budget_microusd=binding.cost_ceiling_microusd, no_learning=True)
-        inputs = {"plan_ref": staged.reference.model_dump(mode="json"), "plan_file_path": staged.file_path,
-            "public_brief_ref": brief.reference.model_dump(mode="json"), "public_brief_file_path": brief.file_path, "no_learning": True}
-        spec = DurableJobSpec(identity=DurableJobIdentity(job_id=job_id, owner_kind="service",
-            owner_principal_id=DISCOVERY_SERVICE, job_kind=DISCOVERY_KIND, capability_version="1",
-            idempotency_scope="goal-programme-daily", idempotency_key=identifier.hex), inputs=inputs,
-            goal_id=goal_id, goal_revision=binding.goal_revision, priority=50, service_id=DISCOVERY_SERVICE,
-            resource_claims=("goal-discovery:" + binding.owner_identity_id,), declared_authority=authority.model_dump(mode="json"),
-            deadline_at=deadline, max_attempts=1, budget_microusd=binding.cost_ceiling_microusd,
-            run_fingerprint=_digest({"inputs": inputs, "authority": authority.model_dump(mode="json")}))
-
+        original_composition = {}
+        if discovery_session is not None:
+            discovery_session.validate(jobs=self.jobs)
+            from src.runtime_plugins.ownership import bind_invocation
+            from src.memory.composition_headers import snapshot_reads_async, charge_table
+            from src.workflows.job_runtime import _discovery_constructor_numeric_bounds
+            prospective = discovery_session.guard._prospective_admission
+            if prospective is None:
+                raise RuntimeError("goal_discovery_original_reservation_unavailable")
+            common = prospective[0].common33
+            frame = discovery_session.header_budget
+            composition_upper = sum(cost for (table, _), (_, cost) in common.rows.items()
+                if table == "runtime_composition_states")
+            frame.debit(composition_upper, appearance=("discovery-composition-binding-construction",))
+            frame.debit(composition_upper, appearance=("discovery-composition-binding-output",))
+            async with snapshot_reads_async(discovery_session.db, common):
+                connection = await discovery_session.db.connection()
+                await connection.run_sync(lambda conn: charge_table(conn, "runtime_composition_states"))
+                issued_binding = await bind_invocation(discovery_session.db,
+                    method="research.executeAccepted", native_branch="public_research",
+                    goal_bound=True, programme_bound=True,
+                    reviewed_composition=discovery_session.host.reviewed, header_budget=frame)
+            # Numeric sizing reads already paid canonical facts. Its input and
+            # returned width copies remain separate from future construction.
+            current_upper = sum(cost for _, cost in common.rows.values())
+            frame.debit(current_upper, appearance=("discovery-constructor-sizing-input",))
+            frame.debit(current_upper, appearance=("discovery-constructor-sizing-output",))
+            constructor = _discovery_constructor_numeric_bounds(programme=programme,
+                binding=binding, identifier=identifier, now=now, deadline=deadline,
+                strategy=strategy, composition_binding=issued_binding)
+            discovery_session._composition_binding = issued_binding
+            discovery_session._constructor_bounds = constructor
+            reserve = getattr(discovery_session.guard, "_reserve_original_discovery_admission", None)
+            if not callable(reserve):
+                raise RuntimeError("goal_discovery_original_reservation_unavailable")
+            reservation = await reserve(discovery_session=discovery_session,
+                programme=programme, binding=binding, identifier=identifier, now=now,
+                deadline=deadline, strategy=strategy, composition_binding=issued_binding,
+                constructor=constructor)
+            if (reservation["composition_binding"] is not issued_binding
+                    or reservation["constructor"] is not constructor):
+                raise RuntimeError("goal_discovery_original_reservation_unavailable")
+            original_composition["composition_binding"] = issued_binding
+            discovery_session.validate(jobs=self.jobs)
+        staging_phase = (discovery_session._numeric_reservation().phase("staging")
+            if discovery_session is not None else nullcontext())
+        with staging_phase:
+            if discovery_session is not None:
+                for _, appearance, upper in original_discovery_staging_numeric_schedule(
+                        discovery_session, constructor=constructor):
+                    if appearance is not None and appearance[0] == "discovery-constructor":
+                        discovery_session.header_budget.debit(upper, appearance=appearance)
+            brief = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
+                kind="public_brief", slot=0, content=programme.public_brief.encode(),
+                **({"header_budget": discovery_session.header_budget} if discovery_session is not None else {}))
+            from src.guardian.research_plan_contracts import STAGES
+            caps = {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}
+            refs = [[brief.reference.model_dump(mode="json")],
+                [{"producer_step_id": "plan_queries", "output_slot": "queries", "json_pointer": ""}],
+                [{"producer_step_id": "search_public", "output_slot": name, "json_pointer": ""} for name in ("manifest", "selection")],
+                [{"producer_step_id": "extract_sources", "output_slot": "snapshots", "json_pointer": ""}]]
+            plan = GoalResearchPlanSpecV1.model_validate({"schema_version": 1, "plan_id": str(identifier),
+                "programme_id": programme.id, "programme_revision": programme.grant_revision,
+                "goal_id": goal_id, "goal_revision": programme.goal_revision, "grant_id": programme.id,
+                "grant_revision": programme.grant_revision, "public_brief_digest": programme.brief_digest,
+                "route_epoch": programme.route_epoch, "strategy_binding": strategy.model_dump(mode="json"),
+                "issued_at": now.isoformat(), "deadline_at": deadline.isoformat(), "idempotency_key": str(identifier),
+                "limits": {"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
+                    "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
+                    "max_source_bytes": 262144, "max_output_bytes": 65536,
+                    "cost_limit_microusd": programme.budget.max_inference_microusd},
+                "steps": [{"step_id": name, "capability_id": capability, "capability_version": 1,
+                    "input_refs": refs[index], "output_slots": [{"slot": slot, "artifact_type": kind,
+                        "max_bytes": caps[slot]} for slot, kind in outputs]}
+                    for index, (name, capability, outputs) in enumerate(STAGES)]})
+            staged = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
+                kind="plan", slot=0, content=json_bytes(plan.model_dump(mode="json")),
+                **({"header_budget": discovery_session.header_budget} if discovery_session is not None else {}))
+            authority = GoalDiscoveryAuthority(authority_type="goal_programme_discovery_v1",
+                principal=DISCOVERY_SERVICE, owner_kind="service", service_id=DISCOVERY_SERVICE,
+                capability_id=DISCOVERY_CAPABILITY, capability_version="1",
+                goal_owner_principal_id=binding.issuer_principal_id, goal_owner_session_id=binding.issuer_root_id,
+                programme_binding=binding, plan_ref=staged.reference, occurrence_day=day,
+                original_job_id=job_id, budget_microusd=binding.cost_ceiling_microusd, no_learning=True)
+            inputs = {"plan_ref": staged.reference.model_dump(mode="json"), "plan_file_path": staged.file_path,
+                "public_brief_ref": brief.reference.model_dump(mode="json"), "public_brief_file_path": brief.file_path, "no_learning": True}
+            spec = DurableJobSpec(identity=DurableJobIdentity(job_id=job_id, owner_kind="service",
+                owner_principal_id=DISCOVERY_SERVICE, job_kind=DISCOVERY_KIND, capability_version="1",
+                idempotency_scope="goal-programme-daily", idempotency_key=identifier.hex), inputs=inputs,
+                goal_id=goal_id, goal_revision=binding.goal_revision, priority=50, service_id=DISCOVERY_SERVICE,
+                resource_claims=("goal-discovery:" + binding.owner_identity_id,), declared_authority=authority.model_dump(mode="json"),
+                deadline_at=deadline, max_attempts=1, budget_microusd=binding.cost_ceiling_microusd,
+                run_fingerprint=_digest({"inputs": inputs, "authority": authority.model_dump(mode="json")}),
+                **original_composition)
         async def admission(db, run):
-            await assert_discovery_authority(db, authority.model_dump(mode="json"))
-            await self._outstanding(db, binding)
+            if discovery_session is not None:
+                discovery_session.validate(db=db, jobs=self.jobs)
+                for _, appearance, upper in original_discovery_admission_numeric_schedule(
+                        discovery_session, constructor=constructor):
+                    discovery_session.header_budget.debit(upper, appearance=appearance)
+                current_strategy = await self._strategy(binding, discovery_session=discovery_session)
+                if current_strategy != strategy:
+                    raise ValueError("programme_staged_strategy_changed")
+            await assert_discovery_authority(db, authority.model_dump(mode="json"), **continuation)
+            await self._outstanding(db, binding, discovery_session=discovery_session)
             # Physical readback was performed before this writer. Adopt its
             # exact immutable provenance in the original row insert transaction.
             history, artifacts, effects = [], [], []
@@ -236,16 +488,50 @@ class GoalDiscoveryService:
             run.checkpoint_receipts_json, run.artifact_receipts_json, run.effect_receipts_json = map(_canonical, (history, artifacts, effects))
 
         async with discovery_writer_scope():
-            await self.jobs.admit_job(spec, admission_authority_check=admission)
-        return await self._queue(job_id)
+            await self.jobs.admit_job(spec, admission_authority_check=admission, **continuation)
+        return await self._queue(job_id, discovery_session=discovery_session)
 
-    async def _queue(self, job_id):
-        witness = await physical_discovery_inputs(self.jobs, job_id)
+    async def _queue(self, job_id, *, discovery_session=None):
+        continuation = {}
+        if discovery_session is not None:
+            discovery_session.validate(jobs=self.jobs)
+            discovery_session._numeric_reservation()
+            continuation["discovery_session"] = discovery_session
+        witness = await physical_discovery_inputs(self.jobs, job_id, **continuation)
         async with discovery_writer_scope(witness=witness):
-            return await self.jobs.queue_job(job_id)
+            return await self.jobs.queue_job(job_id, **continuation)
 
-    async def _outstanding(self, db, binding):
+    async def _outstanding(self, db, binding, *, discovery_session=None):
         from src.work_board.research_parent import discovery_authority
+        if discovery_session is not None:
+            from src.memory.composition_headers import (
+                certify_composition_superset, snapshot_reads_async, charge_table)
+            owned = discovery_session.validate(db=db, jobs=self.jobs)
+            certificate = await certify_composition_superset(db, owned.header_budget,
+                _header_budget=owned.header_budget)
+            async with snapshot_reads_async(db, certificate):
+                connection = await db.connection()
+                await connection.run_sync(lambda conn: charge_table(conn, "workflow_run_states"))
+                rows = (await db.execute(select(WorkflowRunState).where(
+                    WorkflowRunState.job_kind == DISCOVERY_KIND))).scalars()
+                for run in rows:
+                    owned.validate()
+                    row_upper = certificate.rows[("workflow_run_states", run.run_identity)][1]
+                    owned.header_budget.debit(row_upper,
+                        appearance=("discovery-outstanding-authority", run.run_identity))
+                    old = discovery_authority(run.declared_authority_json).programme_binding
+                    if old.goal_id != binding.goal_id or old.owner_identity_id != binding.owner_identity_id:
+                        continue
+                    owned.header_budget.debit(row_upper,
+                        appearance=("discovery-outstanding-effects", run.run_identity))
+                    state = discovery_external_effect_state(run)
+                    await connection.run_sync(lambda conn: charge_table(conn, "inference_cost_reservations"))
+                    costs = (await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == run.run_identity))).scalars()
+                    held = any(row.state not in {"settled", "released"} for row in costs)
+                    if run.status not in {"succeeded", "degraded", "cancelled"} or state == "unknown" or held:
+                        raise ValueError("programme_outstanding_occurrence_requires_recovery")
+            return
         rows = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == DISCOVERY_KIND))).scalars()
         for run in rows:
             old = discovery_authority(run.declared_authority_json).programme_binding
@@ -307,6 +593,7 @@ class GoalDiscoveryService:
     async def run(self, job_id):
         self._ready()
         task = asyncio.current_task()
+        already_owned = task in self._tasks
         self._tasks.add(task)
         owner = "native:goal-public-discovery"
         try:
@@ -343,7 +630,8 @@ class GoalDiscoveryService:
                 pass
             raise
         finally:
-            self._tasks.discard(task)
+            if not already_owned:
+                self._tasks.discard(task)
 
     async def _execute(self, job_id, owner, fence):
         from pydantic import Field, StrictInt, model_validator
@@ -582,6 +870,8 @@ class GoalDiscoveryService:
 
     async def tick(self):
         self._ready()
+        from src.approval.runtime import _get_current_discovery_invocation
+        marker = _get_current_discovery_invocation(self)
         # Untouched invalid originals may close negatively before ordinary new
         # admission. Any claimed/contacted/cost-bearing row remains held.
         from src.guardian.discovery_recovery import close_untouched_occurrence
@@ -594,24 +884,95 @@ class GoalDiscoveryService:
                 await close_untouched_occurrence(self.jobs, job_id)
             except (ValueError, RuntimeError):
                 pass  # Safe history/current guards remain the only truth.
-        # Canonical discovery only, current UTC date only. No catch-up loop.
-        async with self.jobs._session() as db:
-            goals = list((await db.execute(select(Goal).where(Goal.status == "active").order_by(Goal.sort_order, Goal.id))).scalars())
-            candidates = [(goal.id, p["id"], p["grant_revision"]) for goal in goals for p in _load(goal)["generations"]
-                if p["state"] == "active" and DISCOVERY_CAPABILITY in p["capability_ids"]]
-        for goal_id, programme_id, revision in candidates:
-            try:
-                await self.admit(goal_id=goal_id, programme_id=programme_id, grant_revision=revision)
-            except Exception:
-                # Existing programme inspection and old canonical jobs retain
-                # exact blocked/expired/Unknown truth; no alternate grant.
-                continue
+        # Candidate discovery and its admissions have one numerical lifetime.
+        await self._owned_candidate_pass(marker)
         async with self.jobs._session() as db:
             selected = await db.scalar(select(WorkflowRunState.run_identity).where(WorkflowRunState.job_kind == DISCOVERY_KIND,
                 WorkflowRunState.status == "queued").order_by(WorkflowRunState.priority.desc(), WorkflowRunState.started_at,
                     WorkflowRunState.run_identity).limit(1))
         if selected:
             await self.run(selected)
+
+    async def _owned_candidate_pass(self, marker):
+        from src.approval.runtime import _get_current_discovery_invocation
+        from src.db.engine import get_session
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+        from src.memory.composition_headers import (
+            certify_composition_superset, snapshot_reads_async, charge_table)
+        from src.workspace.accounting_witness import (
+            prepare_composition_session, ProductionWorkspaceReconciliationError)
+        from src.guardian.goal_programmes import MAX_GENERATIONS
+
+        if _get_current_discovery_invocation(self, consume=True) is not marker:
+            raise RuntimeError("goal_discovery_invocation_unavailable")
+        frame = HeaderReadBudget()
+        owned = None
+        warned = False
+        try:
+            marker.validate(service=self)
+            async with get_session(header_budget=frame, discovery_service=self) as db:
+                marker.validate(service=self)
+                guard = await prepare_composition_session(
+                    db, fresh=False, header_budget=frame)
+                owned = _OwnedDiscoverySession(self, marker, db, frame, guard)
+                self._owned_discovery_session = owned
+                owned.validate()
+                certificate = await certify_composition_superset(db, frame, _header_budget=frame)
+                # The existing whole-Goal census bounds every delivered body.
+                # Apply active selection only after this paid full delivery.
+                goal_upper = sum(cost for (table, _), (_, cost) in certificate.rows.items()
+                    if table == "goals")
+                frame.debit(goal_upper, appearance=("discovery-goal-order-and-list",))
+                async with snapshot_reads_async(db, certificate):
+                    connection = await db.connection()
+                    await connection.run_sync(lambda conn: charge_table(conn, "goals"))
+                    goals = list((await db.execute(
+                        select(Goal).order_by(Goal.sort_order, Goal.id))).scalars())
+                candidates = []
+                for goal in goals:
+                    owned.validate()
+                    if goal.status != "active":
+                        continue
+                    row_upper = certificate.rows[("goals", goal.id)][1]
+                    # The original header's sixfold text expansion bounds JSON
+                    # parse and typed generation appearances separately.
+                    frame.debit(row_upper, appearance=("discovery-programme-json", goal.id))
+                    frame.debit(row_upper, appearance=("discovery-programme-dtos", goal.id))
+                    frame.debit(row_upper, appearance=("discovery-programme-return", goal.id))
+                    stored = _load(goal)
+                    # Each generation can repeat the Goal key in its triple;
+                    # count that duplication independently of the JSON bytes.
+                    goal_key_bytes = sum(1 if ord(char) < 128 else 2 if ord(char) < 2048
+                        else 3 if ord(char) <= 65535 else 4 for char in goal.id)
+                    frame.debit(row_upper + MAX_GENERATIONS * (6 * goal_key_bytes + 24),
+                        appearance=("discovery-candidate-triples", goal.id))
+                    candidates.extend((goal.id, p["id"], p["grant_revision"])
+                        for p in stored["generations"]
+                        if p["state"] == "active" and DISCOVERY_CAPABILITY in p["capability_ids"])
+                for goal_id, programme_id, revision in candidates:
+                    owned.validate()
+                    call_key_bytes = sum(1 if ord(char) < 128 else 2 if ord(char) < 2048
+                        else 3 if ord(char) <= 65535 else 4 for value in (goal_id, programme_id)
+                        for char in value)
+                    frame.debit(6 * call_key_bytes + 64,
+                        appearance=("discovery-admission-call",))
+                    try:
+                        await self.admit(goal_id=goal_id, programme_id=programme_id,
+                            grant_revision=revision, discovery_session=owned)
+                    except (HeaderBoundsError, ProductionWorkspaceReconciliationError):
+                        raise  # A denied frame never moves to the next candidate.
+                    except (ValueError, RuntimeError):
+                        raise  # Original session owner unwinds any unfinished candidate.
+        except Exception:
+            if not warned:
+                logger.warning("Goal discovery admission blocked")
+        finally:
+            # Keep the continuation authentic through the real session-exit
+            # publication/commit, including its failure/unwind.
+            if owned is not None:
+                owned.active = False
+                if self._owned_discovery_session is owned:
+                    self._owned_discovery_session = None
 
     async def inspect(self, *, operator, goal_id):
         self._ready()
@@ -699,10 +1060,28 @@ async def current_goal_discovery(*, dispatcher=None):
     service = goal_discovery_service
     if service.started:
         raise RuntimeError("public discovery lifecycle already owned")
+    from src.memory.task_methods import CurrentMethod, TaskMethodStrategyResolver, current_method
+    resolver = dispatcher.strategy_resolver
+    if (type(resolver) is TaskMethodStrategyResolver
+            and (type(resolver.current) is not CurrentMethod or not resolver.current._started)):
+        raise RuntimeError("public discovery strategy lifecycle unavailable")
+    if resolver is None:
+        general = dispatcher.general_tasks
+        if general is not None:
+            from src.work_board.general_task import GeneralTaskService
+            if type(general) is not GeneralTaskService or not general.started:
+                raise RuntimeError("public discovery strategy lifecycle unavailable")
+            resolver = general.strategy_resolver
+        else:
+            resolver = TaskMethodStrategyResolver(current_method)
+        if (type(resolver) is not TaskMethodStrategyResolver
+                or type(resolver.current) is not CurrentMethod
+                or not resolver.current._started):
+            raise RuntimeError("public discovery strategy lifecycle unavailable")
     previous = (service.jobs, service.strategy_resolver,
         service._lifecycle_dispatcher, service._lifecycle_host)
     service.jobs = dispatcher.jobs
-    service.strategy_resolver = dispatcher.strategy_resolver
+    service.strategy_resolver = resolver
     service._lifecycle_dispatcher = dispatcher
     service._lifecycle_host = cordis_host
     try:

@@ -1538,6 +1538,7 @@ async def _assert_canonical_goal_fence(
     owner_principal_id: str | None,
     session_id: str | None,
     authority: Any = None,
+    discovery_session=None,
 ) -> Goal | None:
     """Check the canonical goal before a durable job can execute or mutate.
 
@@ -1557,7 +1558,16 @@ async def _assert_canonical_goal_fence(
     if legacy_source is not None:
         from src.memory.header_bounds import GOAL
         await _legacy_writer_budget(db, legacy_source).certify(db, GOAL, (str(goal_id),))
-    result = await db.execute(select(Goal).where(Goal.id == str(goal_id)))
+    if discovery_session is None:
+        result = await db.execute(select(Goal).where(Goal.id == str(goal_id)))
+    else:
+        owned = discovery_session.jobs._validate_discovery_session(discovery_session, db=db)
+        from src.memory.composition_headers import snapshot_reads_async, charge_row
+        common = await owned.guard._original_discovery_common(owned)
+        async with snapshot_reads_async(db, common):
+            connection = await db.connection()
+            await connection.run_sync(lambda current: charge_row(current, "goals", str(goal_id)))
+            result = await db.execute(select(Goal).where(Goal.id == str(goal_id)))
     goal = result.scalars().first()
     if goal is None:
         raise DurableJobTransitionError("canonical goal does not exist")
@@ -1570,6 +1580,10 @@ async def _assert_canonical_goal_fence(
     goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
     if _text(goal_status) != "active":
         raise DurableJobTransitionError("canonical goal is not active")
+    if discovery_session is not None:
+        for appearance, upper in _discovery_goal_fence_numeric_entries(owned,
+                wire=not isinstance(authority, Mapping)):
+            owned.header_budget.debit(upper, appearance=appearance)
     canonical_owner, canonical_session = _goal_owner_binding(goal)
     if owner_kind == "user":
         if _text(owner_principal_id) != canonical_owner:
@@ -1599,16 +1613,27 @@ async def _assert_canonical_goal_fence(
                 or native.programme_binding.goal_id != goal_id
                 or native.programme_binding.goal_revision != goal_revision):
             raise DurableJobTransitionError("programme canonical Goal binding changed")
-        await assert_discovery_authority(db, authority_value)
+        if discovery_session is None:
+            await assert_discovery_authority(db, authority_value)
+        else:
+            # The original research_guard owns and prepays this exact lookup
+            # inside its current common33 snapshot, before delivering the row.
+            await assert_discovery_authority(db, authority_value, discovery_session=owned)
     return goal
 
 
-def _append_goal_fence_condition(conditions: list[Any], run: WorkflowRunState) -> None:
+def _append_goal_fence_condition(conditions: list[Any], run: WorkflowRunState, *, discovery_session=None) -> None:
     """Repeat the canonical goal fence in the final durable row CAS."""
     binding_json = getattr(run, "composition_binding_json", None)
     if binding_json is not None:
         from src.runtime_plugins.ownership import RuntimeCompositionBinding
         from src.db.models import RuntimeCompositionState
+        if discovery_session is not None:
+            owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+            if owned._candidate is None or owned._candidate[0] != run.run_identity:
+                raise DurableJobTransitionError("goal_discovery_candidate_changed")
+            for appearance, upper in _discovery_cas_fence_numeric_entries(owned):
+                owned.header_budget.debit(upper, appearance=appearance)
         binding = RuntimeCompositionBinding.from_json(binding_json)
         conditions.append(WorkflowRunState.composition_binding_json == binding_json)
         for dependency in binding.dependency_vector:
@@ -1784,10 +1809,10 @@ async def _verify_native_child_sql_scope(db, run):
 
 
 def _append_parent_fence_condition(
-    conditions: list[Any], run: WorkflowRunState, *, now: datetime, writer_db=None
+    conditions: list[Any], run: WorkflowRunState, *, now: datetime, writer_db=None, discovery_session=None
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
-    _append_goal_fence_condition(conditions, run)
+    _append_goal_fence_condition(conditions, run, discovery_session=discovery_session)
     from src.workflows.durable_state import _append_legacy_parent_condition
     if _append_legacy_parent_condition(conditions, run, writer_db=writer_db, now=now):
         return
@@ -2463,6 +2488,40 @@ def _discovery_constructor_numeric_bounds(*, programme, binding, identifier, now
     if set(authority_fields) != set(GoalDiscoveryAuthority.model_fields):
         raise HeaderBoundsError("programme_constructor_schema_changed")
     authority = object_bytes(authority_fields)
+    from dataclasses import fields
+    from src.work_board.research_artifacts import DiscoveryStagedArtifact
+    staged_fields = {"programme_id": encoded(programme.id), "job_id": encoded(job_id),
+        "kind": encoded("public_brief"), "slot": 1, "file_path": path,
+        "reference": reference, "content": 6 * brief + 2}
+    if set(staged_fields) != {item.name for item in fields(DiscoveryStagedArtifact)}:
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    staged_brief = object_bytes(staged_fields)
+    staged_plan = object_bytes({**staged_fields, "kind": encoded("plan"), "content": 6 * plan + 2})
+    identity_fields = {"job_id": encoded(job_id), "owner_kind": encoded("service"),
+        "owner_principal_id": encoded(DISCOVERY_SERVICE), "job_kind": encoded(DISCOVERY_KIND),
+        "capability_version": encoded("1"), "idempotency_scope": encoded("goal-programme-daily"),
+        "idempotency_key": 34}
+    if set(identity_fields) != {item.name for item in fields(DurableJobIdentity)}:
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    spec_fields = {item.name: 4 for item in fields(DurableJobSpec)}
+    spec_fields.update(identity=object_bytes(identity_fields), inputs=inputs,
+        goal_id=encoded(binding.goal_id), goal_revision=encoded(binding.goal_revision),
+        composition_binding=len(composition_binding.to_json().encode()), priority=2,
+        dependencies=2, resource_claims=encoded(["goal-discovery:" + binding.owner_identity_id]),
+        declared_authority=authority, deadline_at=timestamp, max_attempts=1,
+        service_id=encoded(DISCOVERY_SERVICE), run_fingerprint=66,
+        budget_microusd=encoded(binding.cost_ceiling_microusd))
+    nullable_spec = {"session_id", "conversation_id", "operator_session_id", "parent_job_id",
+        "parent_fencing_token", "plan_revision", "candidate_id", "source_task_id",
+        "max_outstanding_jobs", "budget_digest", "routine_publication_admission_guard"}
+    supplied_spec = {"identity", "inputs", "goal_id", "goal_revision", "composition_binding",
+        "priority", "dependencies", "resource_claims", "declared_authority", "deadline_at",
+        "max_attempts", "service_id", "run_fingerprint", "budget_microusd"}
+    if (set(spec_fields) != nullable_spec | supplied_spec
+            or any(item.default is not None for item in fields(DurableJobSpec)
+                if item.name in nullable_spec)):
+        raise HeaderBoundsError("programme_constructor_schema_changed")
+    spec = object_bytes(spec_fields)
     checkpoints, artifacts, effects = [], [], []
     for kind, size in (("public_brief", brief), ("plan", plan)):
         payload = object_bytes({"artifact_ref": reference, "file_path": path, "kind": encoded(kind),
@@ -2528,7 +2587,9 @@ def _discovery_constructor_numeric_bounds(*, programme, binding, identifier, now
     return MappingProxyType({"job_id": job_id, "brief_bytes": brief, "plan_bytes": plan,
         "input_bytes": inputs, "authority_bytes": authority, "checkpoint_bytes": text["checkpoint_receipts_json"],
         "artifact_bytes": text["artifact_receipts_json"], "effect_bytes": text["effect_receipts_json"],
-        "row_header_bytes": upper, "text_bytes": MappingProxyType(text),
+        "row_header_bytes": upper, "staged_brief_bytes": staged_brief,
+        "staged_plan_bytes": staged_plan, "spec_bytes": spec,
+        "text_bytes": MappingProxyType(text),
         "integer_columns": frozenset(integer), "null_columns": frozenset(null)})
 
 
@@ -2563,8 +2624,280 @@ def _validate_discovery_constructor_numeric_bounds(run, bounds):
             raise HeaderBoundsError("programme_constructor_numeric_bind_changed")
 
 
-def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+def _discovery_utf8_width(value):
+    """Count already-paid text without making a new encoded appearance."""
+    return sum(1 if ord(char) < 128 else 2 if ord(char) < 2048
+        else 3 if ord(char) <= 65535 else 4 for char in value)
+
+
+def _discovery_encoded_upper(value):
+    """Original JSON encoded units, over already paid closed scalar data."""
+    from src.memory.header_bounds import HeaderBoundsError
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is str:
+        return 2 + sum(2 if char in '"\\\b\f\n\r\t' else 6 if ord(char) < 32
+            or 127 <= ord(char) <= 65535 else 12 if ord(char) > 65535 else 1 for char in value)
+    if type(value) is int:
+        # Decimal digits <= ceil(bit_length * log10(2)); 30103/100000
+        # is an upper approximation. Includes sign and zero without str().
+        return max(1, (abs(value).bit_length() * 30103 + 99999) // 100000) + int(value < 0)
+    if type(value) is float:
+        return 64  # The original closed scalar real encoding bound.
+    if isinstance(value, datetime):
+        return 44  # 26 datetime characters +16 offset characters +quotes.
+    if type(value) in {list, tuple}:
+        return 2 + sum(_discovery_encoded_upper(item) for item in value) + max(0, len(value) - 1)
+    if isinstance(value, Mapping):
+        return 2 + sum(_discovery_encoded_upper(key) + 1 + _discovery_encoded_upper(item)
+            for key, item in value.items()) + max(0, len(value) - 1)
+    raise HeaderBoundsError("programme_numeric_scalar_unavailable")
+
+
+def _discovery_object_width(widths):
+    # The owner supplies literal ASCII schema keys, never future field values.
+    return 2 + sum(len(key) + 3 + width for key, width in widths.items()) + max(0, len(widths) - 1)
+
+
+def _discovery_serializer_numeric_entries(widths, *, job_id, receipt_upper=0):
+    """One original serializer's exact closed output shape and operations."""
+    scalar = lambda name: 6 * widths[name] + 2 if name in widths else 4
+    integer = 20
+    json_fields = {"dependencies": "dependencies_json", "resource_claims": "resource_claims_json",
+        "declared_authority": "declared_authority_json", "checkpoints": "checkpoint_receipts_json",
+        "artifacts": "artifact_receipts_json", "effects": "effect_receipts_json"}
+    entries = [(("discovery-serialize", job_id, "json", source), 6 * widths[source] + 2)
+        for source in json_fields.values()]
+    entries.append((("discovery-serialize", job_id, "checkpoint-filter"),
+        6 * widths["checkpoint_receipts_json"] + 2))
+    lease_seed = _discovery_object_width({"job_id": scalar("run_identity"), "fencing_token": integer})
+    for appearance, upper in (("lease-normalized-job", scalar("run_identity")),
+            ("lease-seed", lease_seed), ("lease-canonical", lease_seed),
+            ("lease-encoded", lease_seed), ("lease-digest", 66),
+            ("lease-slice", 34), ("lease-return", 40)):
+        entries.append((("discovery-serialize", job_id, appearance), upper))
+    direct = ("run_identity", "root_run_identity", "parent_run_identity", "parent_job_id",
+        "branch_kind", "job_kind", "capability_version", "workflow_name", "tool_name", "session_id",
+        "operator_session_id", "run_fingerprint", "goal_id", "candidate_id", "source_task_id",
+        "status", "input_digest", "authority_digest", "budget_digest", "failure_reason")
+    output = {name: scalar(name) for name in direct}
+    output.update(job_id=scalar("run_identity"), conversation_id=max(scalar("conversation_id"), scalar("session_id")),
+        parent_fencing_token=integer, record_schema_version=integer, branch_depth=integer,
+        goal_revision=integer, plan_revision=integer, priority=integer, revision=integer,
+        attempt_count=integer, max_attempts=integer,
+        owner=_discovery_object_width({"kind": scalar("owner_kind"),
+            "principal_id": scalar("owner_principal_id"), "service_id": scalar("service_id")}),
+        idempotency=_discovery_object_width({"scope": scalar("idempotency_scope"),
+            "key": scalar("idempotency_key"), "binding": scalar("idempotency_binding")}),
+        lease=_discovery_object_width({"owner": scalar("lease_owner"), "expires_at": 44,
+            "fencing_token": integer, "lease_id": 40, "revision": integer}),
+        result=_discovery_object_width({"digest": scalar("result_digest"),
+            "summary": scalar("result_summary"), "status": scalar("status")}),
+        deadline_at=44, started_at=44, updated_at=44, finished_at=44,
+        claim_boundary=len("durable_job_contract_on_workflow_state_not_exactly_once_external_execution") + 2)
+    output.update((name, 6 * widths[source] + 2) for name, source in json_fields.items())
+    if receipt_upper:
+        output["receipt"] = receipt_upper
+    for appearance in ("owner-container", "idempotency-container", "lease-container", "result-container"):
+        entries.append((("discovery-serialize", job_id, appearance), output[appearance.removesuffix("-container")]))
+    upper = _discovery_object_width(output)
+    entries.extend((("discovery-serialize", job_id, name), upper) for name in ("output-construction", "output-return"))
+    return tuple(entries)
+
+
+def _discovery_job_receipt_upper(widths, *, admission):
+    scalar = lambda name: 6 * widths.get(name, 0) + 2
+    if admission:
+        return _discovery_object_width({"kind": len("job_admission") + 2, "status": 10,
+            "job_id": scalar("run_identity"), "idempotency_binding": 66,
+            "reason": len("deadline_expired") + 2, "operator_visible": 4})
+    return _discovery_object_width({"kind": len("transition") + 2, "status": len("recorded") + 2,
+        "from": scalar("status"), "to": 10, "reason": len("deadline_expired") + 2,
+        "fencing_token": 20, "revision": 20, "operator_visible": 4})
+
+
+def _discovery_admission_materialization_entries(constructor):
+    inputs, authority = constructor["input_bytes"], constructor["authority_bytes"]
+    row = constructor["row_header_bytes"]
+    widths = constructor["text_bytes"]
+    # Separate original construction, parser/materialization, canonical and
+    # encoded appearances. A reserve is not a delivered row certificate.
+    entries = []
+    fingerprint_seed = _discovery_object_width({"native_fingerprint": 66, "composition_binding_digest": 66})
+    budget_seed = _discovery_object_width({"budget_microusd": 20})
+    binding_seed = _discovery_object_width({"owner_principal_id": 6 * widths["owner_principal_id"] + 2,
+        "goal_id": 6 * widths["goal_id"] + 2, "goal_revision": 20,
+        "idempotency_scope": 6 * widths["idempotency_scope"] + 2,
+        "candidate_dedupe_key": 6 * widths["idempotency_key"] + 2})
+    for name, upper in (("authority-validation-model", authority),
+            ("inputs-model", inputs), ("inputs-model-dump", inputs),
+            ("inputs-digest-canonical", inputs), ("inputs-digest-encoded", inputs),
+            ("input-digest-return", 66),
+            ("safe-authority-dict", authority), ("safe-authority-model", authority),
+            ("authority-canonical", authority), ("authority-encoded", authority),
+            ("authority-digest-return", 66),
+            ("budget-digest-seed", budget_seed), ("budget-digest-canonical", budget_seed),
+            ("budget-digest-encoded", budget_seed), ("budget-digest-return", 66),
+            ("budget-digest-check-seed", budget_seed), ("budget-digest-check-canonical", budget_seed),
+            ("budget-digest-check-encoded", budget_seed), ("budget-digest-check-return", 66),
+            ("idempotency-seed", binding_seed), ("idempotency-canonical", binding_seed),
+            ("idempotency-encoded", binding_seed), ("idempotency-return", 66),
+            ("composition-fingerprint-seed", fingerprint_seed), ("composition-fingerprint-canonical", fingerprint_seed),
+            ("composition-fingerprint-encoded", fingerprint_seed), ("composition-fingerprint-return", 66),
+            ("composition-binding-json", 6 * widths["composition_binding_json"] + 2),
+            ("dependencies-list", 6 * widths["dependencies_json"] + 2),
+            ("dependencies-canonical", 6 * widths["dependencies_json"] + 2),
+            ("resource-claims-list", 6 * widths["resource_claims_json"] + 2),
+            ("resource-claims-canonical", 6 * widths["resource_claims_json"] + 2),
+            ("authority-row-canonical", authority), ("inputs-row-canonical", inputs),
+            ("row-constructor", row)):
+        entries.append((("discovery-job-admission", constructor["job_id"], name), upper))
+    return tuple(entries)
+
+
+async def original_discovery_jobs_numeric_schedule(discovery_session, *, constructor):
+    """Computable original job/copy/serializer schedule before first staging."""
+    owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+    from src.memory.header_bounds import HeaderBoundsError
+    if constructor is not owned._constructor_bounds or constructor["job_id"] != owned._candidate[0]:
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    persisted = constructor.get("persisted_queue_only") is True
+    entries = [] if persisted else [("admission", appearance, upper)
+        for appearance, upper in _discovery_admission_materialization_entries(constructor)]
+    widths = constructor["text_bytes"]
+    for phase, admission in (("admission", True), ("queue", False)):
+        if persisted and admission:
+            continue
+        receipt_upper = _discovery_job_receipt_upper(widths, admission=admission)
+        entries.append((phase, ("discovery-job-receipt", constructor["job_id"], phase), receipt_upper))
+        entries.extend((phase, appearance, upper) for appearance, upper in
+            _discovery_serializer_numeric_entries(widths, job_id=constructor["job_id"], receipt_upper=receipt_upper))
+        entries.extend((phase, appearance, upper) for appearance, upper in
+            _discovery_goal_fence_numeric_entries(owned, wire=not admission))
+    entries.extend(("queue", appearance, upper) for appearance, upper in _discovery_cas_fence_numeric_entries(owned))
+    mutation_upper = _discovery_object_width({"status": 10, "revision": 20,
+        "updated_at": 44, "finished_at": 44, "lease_owner": 4, "lease_expires_at": 4,
+        "failure_reason": len("deadline_expired") + 2})
+    for appearance in ("pending-values", "cas-conditions", "transition-result-copy"):
+        entries.append(("queue", ("discovery-job-queue", constructor["job_id"], appearance),
+            constructor["row_header_bytes"] + mutation_upper))
+    return tuple(entries)
+
+
+# Singular spelling is retained for the original owner composer interface.
+original_discovery_job_numeric_schedule = original_discovery_jobs_numeric_schedule
+
+
+def _discovery_goal_fence_numeric_entries(owned, *, wire):
+    owned.jobs._validate_discovery_session(owned)
+    bounds = owned._constructor_bounds
+    upper = 6 * bounds["text_bytes"]["declared_authority_json"] + 2
+    job_id = bounds["job_id"]
+    entries = []
+    if wire:
+        # Service branch, delegated owner helper, and final native branch.
+        for occurrence in range(3):
+            entries.append((("discovery-goal-fence", job_id, "authority-json", occurrence), upper))
+    for name in ("canonical-owner-tuple", "delegated-owner-tuple", "owner-string-copy", "session-string-copy",
+            "authority-model", "programme-binding-model", "plan-ref-model", "authority-return"):
+        entries.append((("discovery-goal-fence", job_id, name), upper))
+    entries.append((("discovery-goal-fence", job_id, "occurrence-date"), 12))
+    return tuple(entries)
+
+
+def _discovery_cas_fence_numeric_entries(owned):
+    from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+    from src.runtime_plugins.ownership import DOMAINS
+    owned.jobs._validate_discovery_session(owned)
+    bounds = owned._constructor_bounds
+    widths, job_id = bounds["text_bytes"], bounds["job_id"]
+    entries = list(_original_native_binding_numeric_entries(job_id, widths["composition_binding_json"]))
+    authority_upper = 6 * widths["declared_authority_json"] + 2
+    for name in ("authority-json", "owner-string-copy", "session-string-copy", "owner-tuple"):
+        entries.append((("discovery-cas-fence", job_id, name), authority_upper))
+    # Five original predicates for each legal dependency, and five for Goal.
+    # Values remain parameters; the bound accounts for their original closed
+    # literal field/operator skeleton and the source scalar representations.
+    dependency_upper = _discovery_object_width({
+        "runtime_composition_states.runtime_domain": max(_discovery_encoded_upper(name) for name in DOMAINS),
+        "runtime_composition_states.owner_kind": 8,
+        "runtime_composition_states.epoch": 20,
+        "runtime_composition_states.composition_digest": 66,
+        "runtime_composition_states.state": len("ready") + 2,
+    }) + _discovery_encoded_upper("select runtime_composition_states.runtime_domain where = and = and = and = and = exists")
+    goal_upper = authority_upper + _discovery_object_width({
+        "goals.id": 6 * widths["goal_id"] + 2,
+        "goals.revision": 20, "goals.status": len("active") + 2,
+        "goals.owner_principal_id": authority_upper,
+        "goals.owner_session_id": authority_upper,
+    }) + _discovery_encoded_upper("alias goals select goals.id where = and = and = and = and = exists")
+    binding_equality_upper = _discovery_object_width({
+        "workflow_run_states.composition_binding_json": 6 * widths["composition_binding_json"] + 2,
+    }) + _discovery_encoded_upper("=")
+    for name, upper in (("binding-equality", binding_equality_upper),
+            ("dependency-predicates", 14 * dependency_upper), ("dependency-selects", 14 * dependency_upper),
+            ("dependency-exists", 14 * dependency_upper), ("goal-alias", goal_upper),
+            ("goal-predicates", goal_upper), ("goal-select", goal_upper), ("goal-exists", goal_upper)):
+        entries.append((("discovery-cas-fence", job_id, name), upper))
+    return tuple(entries)
+
+
+async def original_discovery_queue_numeric_bounds(discovery_session):
+    """Capacity facts from the genuine paid accepted row and original files.
+
+    This neither stages a constructor nor establishes admission authority. The
+    original guard retains and authenticates these facts before reserving B/C.
+    """
+    from types import MappingProxyType
+    from src.memory.composition_headers import snapshot_reads_async, charge_row
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.workflows.research_sources import physical_discovery_closure, _original_discovery_physical_capacity_scope
+    owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+    if owned._candidate is None or owned._candidate_phase != "reader":
+        raise HeaderBoundsError("programme_original_queue_candidate_changed")
+    job_id = owned._candidate[0]
+    common = await owned.guard._original_discovery_common(owned)
+    async with snapshot_reads_async(owned.db, common):
+        connection = await owned.db.connection()
+        await connection.run_sync(lambda current: charge_row(current, "workflow_run_states", job_id))
+        run = await owned.jobs._fetch(owned.db, job_id)
+        if run.job_kind != "goal_public_discovery_v1" or run.status != "accepted":
+            raise HeaderBoundsError("programme_original_queue_row_changed")
+        row_upper = common.rows[("workflow_run_states", job_id)][1]
+        owned.header_budget.debit(row_upper, appearance=("discovery-queue", job_id, "current-row-copy"))
+        raw = run.model_dump(mode="python")
+    with _original_discovery_physical_capacity_scope(owned.header_budget, _validated_plan_owner=owned) as facts:
+        appearances = physical_discovery_closure(raw, root=owned.guard.workspace.host_root,
+            header_budget=owned.header_budget)
+        retained = facts[job_id]
+        plan_bytes = next(size for _, _, size, kind in appearances if kind == "plan")
+        brief_bytes = next(size for _, _, size, kind in appearances if kind == "public_brief")
+        widths = dict(retained["widths"])
+    # These are the original possible queue/deadline mutations, not new data.
+    widths["status"] = max(widths["status"], len("queued"), len("failed"))
+    widths["failure_reason"] = max(widths.get("failure_reason", 0), len("deadline_expired"))
+    return MappingProxyType({"job_id": job_id, "persisted_queue_only": True,
+        "text_bytes": MappingProxyType(widths), "row_header_bytes": row_upper + 6 * len("deadline_expired") + 44,
+        "plan_bytes": plan_bytes, "brief_bytes": brief_bytes, "physical_count": retained["count"]})
+
+
+def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None, discovery_session=None) -> dict[str, Any]:
     """Return an operator-safe durable job projection."""
+    if discovery_session is not None:
+        owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+        if run.job_kind != "goal_public_discovery_v1":
+            raise DurableJobTransitionError("goal_discovery_candidate_changed")
+        # Both supported original discovery outputs have no native-turn or
+        # GitHub closure branch. Those unrelated additions are not discounted.
+        if _native_turn_pending(run) or getattr(run, "github_capacity_closure_json", None):
+            raise DurableJobTransitionError("goal_discovery_output_shape_changed")
+        widths = {name: _discovery_utf8_width(value) for name in WorkflowRunState.model_fields
+            if type(value := getattr(run, name)) is str}
+        for appearance, upper in _discovery_serializer_numeric_entries(widths,
+                job_id=run.run_identity, receipt_upper=_discovery_encoded_upper(receipt) if receipt is not None else 0):
+            owned.header_budget.debit(upper, appearance=appearance)
     payload = {
         "job_id": run.run_identity,
         "run_identity": run.run_identity,
@@ -2792,8 +3125,42 @@ class DurableJobSpec:
 class DurableJobRepository(InferenceAccountingRepositoryMixin):
     """Persistence operations for the one canonical workflow job record."""
 
+    def _validate_discovery_session(self, discovery_session, *, db=None, header_budget=None):
+        """Require the live original discovery owner, never a raw DB or frame."""
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise DurableJobTransitionError("goal_discovery_session_unavailable")
+        return discovery_session.validate(db=db, header_budget=header_budget, jobs=self)
+
     @asynccontextmanager
-    async def _writer_session(self, *, header_budget=None):
+    async def _discovery_read_session(self, discovery_session=None, *, header_budget=None):
+        if discovery_session is None:
+            async with self._session() as db:
+                yield db
+        else:
+            owned = self._validate_discovery_session(discovery_session, header_budget=header_budget)
+            yield owned.db
+
+    @asynccontextmanager
+    async def _discovery_paid_row(self, owned, job_id):
+        from src.memory.composition_headers import snapshot_reads_async, charge_row
+        common = await owned.guard._original_discovery_common(owned)
+        async with snapshot_reads_async(owned.db, common):
+            connection = await owned.db.connection()
+            await connection.run_sync(lambda current: charge_row(current, "workflow_run_states", job_id))
+            yield
+
+    @asynccontextmanager
+    async def _writer_session(self, *, header_budget=None, discovery_session=None, discovery_phase=None, job_id=None):
+        if discovery_session is not None:
+            owned = self._validate_discovery_session(discovery_session, header_budget=header_budget)
+            if discovery_phase != "queue" or owned._candidate[0] != job_id:
+                raise DurableJobTransitionError("goal_discovery_writer_phase_changed")
+            from src.db.engine import _exit_owned_discovery_writer
+            with owned.guard._discovery_reservation.phase("queue"):
+                yield owned.db
+            await _exit_owned_discovery_writer(owned, phase="queue", job_id=job_id)
+            return
         maintenance = _original_memory_maintenance_scope(self)
         if maintenance is not None and maintenance.header_budget is not None:
             if header_budget is not None and header_budget is not maintenance.header_budget:
@@ -3319,6 +3686,22 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             )
 
     async def admit_job(self, spec: DurableJobSpec, **kwargs) -> dict[str, Any]:
+        discovery_session = kwargs.get("discovery_session")
+        if discovery_session is not None:
+            owned = self._validate_discovery_session(discovery_session)
+            if owned._candidate is None or owned._candidate[0] != spec.identity.job_id:
+                raise DurableJobAdmissionDenied("goal_discovery_candidate_changed")
+            from src.db.engine import _exit_owned_discovery_writer
+            with owned.guard._discovery_reservation.phase("admission"):
+                await owned.db.rollback()
+                await owned.guard._begin_original_discovery_writer(owned, "admission")
+                from src.memory.composition_headers import snapshot_reads_async
+                common = await owned.guard._original_discovery_common(owned)
+                async with snapshot_reads_async(owned.db, common):
+                    output = await self._admit_in_session(owned.db, spec, **kwargs)
+                owned.guard._finish_programme_admission_selection()
+            await _exit_owned_discovery_writer(owned, phase="admission", job_id=spec.identity.job_id)
+            return output
         return await self._admit_in_session(None, spec, **kwargs)
 
     async def admit_workflow_recovery_job(self, spec, *, source):
@@ -3395,7 +3778,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         native_task_host=None,
         native_task_host_boot_nonce=None,
         native_research_projection=None,
+        discovery_session=None,
     ) -> dict[str, Any]:
+        owned = (self._validate_discovery_session(discovery_session, db=admission_db)
+            if discovery_session is not None else None)
+        if owned is not None:
+            for appearance, upper in _discovery_admission_materialization_entries(owned._constructor_bounds):
+                owned.header_budget.debit(upper, appearance=appearance)
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
@@ -3553,7 +3942,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             async def certify_native_memory_body(descriptor):
                 if native_memory_admission is not None:
                     await native_memory_admission.header_budget.certify_all(db, descriptor)
-            if native_memory_admission is not None:
+                elif owned is not None:
+                    await owned.header_budget.certify_all(db, descriptor)
+                    from src.memory.composition_headers import charge_table
+                    connection = await db.connection()
+                    await connection.run_sync(lambda current: charge_table(current, descriptor.table))
+            if native_memory_admission is not None or owned is not None:
                 from src.memory.header_bounds import WRS_BY_RUN, GOAL, SESSION
                 await certify_native_memory_body(WRS_BY_RUN)
             # Existing immutable admission replay does not authorize new use.
@@ -3604,7 +3998,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         .where(Goal.id == spec.goal_id)
                         .with_for_update()
                     )
-                if native_memory_admission is not None:
+                if native_memory_admission is not None or owned is not None:
                     await certify_native_memory_body(GOAL)
                 canonical_goal = await _assert_canonical_goal_fence(
                     db,
@@ -3614,6 +4008,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     owner_principal_id=identity.owner_principal_id,
                     session_id=spec.session_id,
                     authority=spec.declared_authority,
+                    **({"discovery_session": owned} if owned is not None else {}),
                 )
             if spec.composition_binding is not None:
                 if dialect_name == "sqlite" and not transaction_started:
@@ -3624,7 +4019,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 from src.runtime_plugins.ownership import validate_invocation
                 await validate_invocation(db, spec.composition_binding,
                     **({"header_budget": native_memory_admission.header_budget}
-                        if native_memory_admission is not None else {}))
+                        if native_memory_admission is not None else
+                        {"header_budget": owned.header_budget} if owned is not None else {}))
             if native_read_admission is not None:
                 from src.runtime_plugins.read_journal import validate_read_spec
                 await validate_read_spec(db, spec, native_read_admission)
@@ -3825,11 +4221,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     await _begin_legacy_aware_writer(db)
                     transaction_started = True
                 db.info["native_writer_started"] = True
-            if native_memory_admission is not None:
+            if native_memory_admission is not None or owned is not None:
                 await certify_native_memory_body(SESSION)
             await ensure_sessions_exist(db, [spec.session_id], retained_native=(spec.composition_binding is not None
                 or db.info.get("composition_guard") is not None))
-            if native_memory_admission is not None:
+            if native_memory_admission is not None or owned is not None:
                 await certify_native_memory_body(WRS_BY_RUN)
             existing = (
                 await db.execute(
@@ -3894,7 +4290,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         goal_id=spec.goal_id,
                     )
 
-            if native_memory_admission is not None:
+            if native_memory_admission is not None or owned is not None:
                 await certify_native_memory_body(WRS_BY_RUN)
             by_id = (
                 await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == identity.job_id))
@@ -4008,6 +4404,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if native_memory_admission is not None:
                 from src.workspace.accounting_witness import reserve_native_memory_admission_run
                 await reserve_native_memory_admission_run(db, run, native_memory_admission)
+            if owned is not None:
+                _validate_discovery_constructor_numeric_bounds(run, owned._constructor_bounds)
             db.add(run)
             try:
                 await db.flush()
@@ -4017,6 +4415,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # idempotent when it supplied the same immutable contract, yet
                 # still rejects a conflicting job or identity collision.
                 await db.rollback()
+                if owned is not None:
+                    # A losing insert settled no original owner exit. Its
+                    # prospective selection cannot become a new writer or
+                    # authorize the legacy immutable reread below.
+                    raise DurableJobIdempotencyConflict(
+                        "programme_original_admission_insert_conflict") from exc
                 if near_text_policy_scope is not None:
                     # The failed insert published no new authority. Release
                     # only after real rollback, before the immutable reread
@@ -4067,6 +4471,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "concurrent admission failed before a durable row was visible"
                 ) from exc
             db.expunge(run)
+            if owned is not None:
+                owned.header_budget.debit(_discovery_job_receipt_upper(owned._constructor_bounds["text_bytes"], admission=True),
+                    appearance=("discovery-job-receipt", identity.job_id, "admission"))
             receipt = {
                 "kind": "job_admission",
                 "status": status,
@@ -4075,7 +4482,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "reason": failure_reason,
                 "operator_visible": True,
             }
-            return _serialize(run, receipt=receipt)
+            return _serialize(run, receipt=receipt,
+                **({"discovery_session": owned} if owned is not None else {}))
 
     async def create_job(self, spec: DurableJobSpec) -> dict[str, Any]:
         """Compatibility alias emphasizing that ScheduledJob is only a trigger."""
@@ -4201,13 +4609,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import revise_operator_paused_parent
         return await revise_operator_paused_parent(self, parent_id, **bindings)
 
-    async def get_job(self, job_id: str, *, header_budget=None) -> dict[str, Any] | None:
+    async def get_job(self, job_id: str, *, header_budget=None, discovery_session=None) -> dict[str, Any] | None:
+        owned = (self._validate_discovery_session(discovery_session, header_budget=header_budget)
+            if discovery_session is not None else None)
+        if owned is not None:
+            if owned._candidate is None or owned._candidate[0] != job_id:
+                raise DurableJobTransitionError("goal_discovery_candidate_changed")
+            header_budget = owned.header_budget
         maintenance = _original_memory_maintenance_scope(self)
         if maintenance is not None:
             if header_budget is not None and header_budget is not maintenance.header_budget:
                 raise DurableJobLeaseError("original_memory_maintenance_frame_changed")
             header_budget = maintenance.header_budget
-        async with self._session() as db:
+        async with self._discovery_read_session(discovery_session, header_budget=header_budget) as db:
             if maintenance is not None:
                 await _original_memory_maintenance_snapshot(self, db)
             if header_budget is not None:
@@ -4220,13 +4634,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if not ids:
                     return None
                 await header_budget.certify(db, WRS_BY_RUN, ids)
-            run = (
-                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
-            ).scalars().first()
+            async with (self._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+                run = (
+                    await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+                ).scalars().first()
             if run is None:
                 return None
             db.expunge(run)
-            output = _serialize(run)
+            output = _serialize(run, **({"discovery_session": owned} if owned is not None else {}))
             if maintenance is not None and header_budget is not None:
                 header_budget.debit(len(_canonical(output).encode("utf-8")))
             return output
@@ -4559,11 +4974,25 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         _general_task_resume_witness=None,
         _native_report_terminal=None,
         header_budget=None,
+        discovery_session=None,
     ) -> dict[str, Any]:
+        owned = (self._validate_discovery_session(discovery_session, header_budget=header_budget)
+            if discovery_session is not None else None)
+        if owned is not None:
+            if to_status != "queued" or owned._candidate is None or owned._candidate[0] != job_id:
+                raise DurableJobTransitionError("goal_discovery_writer_phase_changed")
+            header_budget = owned.header_budget
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
         async with self._writer_session(**(
-            {"header_budget": header_budget} if header_budget is not None else {})) as db:
+            {"header_budget": header_budget} if header_budget is not None else {}),
+            **({"discovery_session": owned, "discovery_phase": "queue", "job_id": job_id}
+                if owned is not None else {})) as db:
+            if owned is not None:
+                for phase, appearance, upper in await original_discovery_jobs_numeric_schedule(
+                        owned, constructor=owned._constructor_bounds):
+                    if phase == "queue" and appearance[0] == "discovery-job-queue":
+                        owned.header_budget.debit(upper, appearance=appearance)
             # A capability-specific terminal guard must observe its owner,
             # consent, and artifact rows in the same serialized transaction as
             # the root CAS.  SQLite otherwise permits a stale read snapshot
@@ -4573,7 +5002,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 await header_budget.certify(db, WRS_BY_RUN, (job_id,))
-            preflight_run = await self._fetch(db, job_id)
+            async with (self._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+                preflight_run = await self._fetch(db, job_id)
             report_terminal = (preflight_run.job_kind == "work.local-evidence-report.v1"
                 and preflight_run.composition_binding_json is not None
                 and to_status in {"succeeded", "degraded", "cancelled"})
@@ -4609,7 +5039,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
                         goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
                         owner_principal_id=preflight_run.owner_principal_id, session_id=preflight_run.session_id,
-                        authority=preflight_run.declared_authority_json)
+                        authority=preflight_run.declared_authority_json,
+                        **({"discovery_session": owned} if owned is not None else {}))
                 if str(preflight_run.status) != to_status:
                     raise DurableJobTransitionError(f'terminal job cannot transition {preflight_run.status} -> {to_status}')
                 db.expunge(preflight_run)
@@ -4631,10 +5062,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             near_writer_started = False
             general_writer_started = False
             if header_budget is not None:
-                if preflight_run.job_kind != "runtime_service_memory_v1":
+                if owned is not None:
+                    from src.work_board.research_parent import DISCOVERY_KIND
+                    if preflight_run.job_kind != DISCOVERY_KIND:
+                        raise DurableJobTransitionError("native_memory_resource_context_unexpected")
+                    await owned.guard._begin_original_discovery_writer(owned, "queue")
+                elif preflight_run.job_kind != "runtime_service_memory_v1":
                     raise DurableJobTransitionError("native_memory_resource_context_unexpected")
-                from src.runtime_plugins.ownership import begin_native_writer
-                await begin_native_writer(db, owner="durable_jobs", header_budget=header_budget)
+                else:
+                    from src.runtime_plugins.ownership import begin_native_writer
+                    await begin_native_writer(db, owner="durable_jobs", header_budget=header_budget)
             elif report_terminal:
                 from src.runtime_plugins.ownership import begin_native_writer
                 await begin_native_writer(db, owner="finite_service")
@@ -4648,7 +5085,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 await header_budget.certify(db, WRS_BY_RUN, (job_id,))
-            run = await self._fetch(db, job_id)
+            async with (self._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+                run = await self._fetch(db, job_id)
             report_original = None
             if report_terminal:
                 report_original = {field: getattr(run, field) for field in (
@@ -4702,6 +5140,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     owner_principal_id=getattr(run, "owner_principal_id", None),
                     session_id=getattr(run, "session_id", None),
                     authority=getattr(run, "declared_authority_json", None),
+                    **({"discovery_session": owned} if owned is not None else {}),
                 )
             current = str(run.status)
             if current in DURABLE_JOB_TERMINAL_STATUSES:
@@ -5045,7 +5484,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             if to_status not in {"failed", "cancelled"}:
                 await _verify_native_child_sql_scope(db, run)
-                _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
+                _append_parent_fence_condition(conditions, run, now=now, writer_db=db,
+                    **({"discovery_session": owned} if owned is not None else {}))
             if run.job_kind == "runtime_service_memory_v1" and to_status == "queued" and header_budget is not None:
                 result_update = await db.execute(update(WorkflowRunState).execution_options(
                     synchronize_session=False).where(*conditions).values(**values))
@@ -5060,7 +5500,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 await header_budget.certify(db, WRS_BY_RUN, (job_id,))
-            refreshed = await self._fetch(db, job_id)
+            async with (self._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+                refreshed = await self._fetch(db, job_id)
+            if owned is not None:
+                owned.header_budget.debit(_discovery_job_receipt_upper(owned._constructor_bounds["text_bytes"], admission=False),
+                    appearance=("discovery-job-receipt", job_id, "queue"))
             receipt = {
                 "kind": "transition",
                 "status": "recorded",
@@ -5078,7 +5522,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # stores only the redacted approval-resume record.
                 receipt["approval_binding"] = approval_request_record
             db.expunge(refreshed)
-            return _serialize(refreshed, receipt=receipt)
+            return _serialize(refreshed, receipt=receipt,
+                **({"discovery_session": owned} if owned is not None else {}))
 
     async def queue_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
         return await self.transition_job(job_id, "queued", **kwargs)

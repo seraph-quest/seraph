@@ -936,9 +936,43 @@ NULL_SESSION_DDL_DIGEST = hashlib.sha256(json.dumps(
     NULL_SESSION_DDL_DESCRIPTOR, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _original_composition_metadata_rows(connection, query, parameters, columns, *, appearance):
+    """Price original metadata widths before delivering any schema strings."""
+    from src.memory.composition_headers import current_budget, _metadata_rows, _metadata_upper
+    budget = current_budget()
+    if budget is None:
+        return list(_sql(connection, query, parameters))
+    terms = [f'CASE typeof("{column}") WHEN \'null\' THEN 4 WHEN \'integer\' THEN 20 '
+        f'WHEN \'real\' THEN 64 WHEN \'text\' THEN 6*octet_length("{column}")+2 ELSE -1 END'
+        for column in columns]
+    scalar_query = ("WITH original_metadata AS (" + query + ") SELECT count(*),"
+        + "coalesce(sum(" + "+".join(terms) + "),0),coalesce(sum("
+        + "+".join(f'CASE WHEN typeof("{column}") IN (\'null\',\'integer\',\'real\',\'text\') THEN 0 ELSE 1 END'
+            for column in columns) + "),0) FROM original_metadata")
+    facts = _metadata_rows(connection, scalar_query, parameters, _header_budget=budget,
+        upper=_metadata_upper(2, (20, 20, 20)), appearance=("composition-schema-width", *appearance))
+    if (len(facts) != 1 or any(type(value) is not int for value in facts[0])
+            or not 0 <= facts[0][0] <= 1359 or facts[0][1] < 0 or facts[0][2]):
+        raise ProductionWorkspaceReconciliationError("composition_projection_schema_changed")
+    count, widths, _ = facts[0]
+    upper = 2 + count * (2 + max(0, len(columns) - 1)) + widths + max(0, count - 1)
+    return _metadata_rows(connection, query, parameters, _header_budget=budget,
+        upper=upper, appearance=("composition-schema", *appearance))
+
+
 def validate_retained_table_schema(connection, table, *, error="composition_projection_schema_changed"):
     """Only the reviewed NULL-only Session addition is DDL-compatible with v3."""
-    columns = list(_sql(connection, f'PRAGMA table_info("{table}")'))
+    from src.memory.composition_headers import current_budget
+    if current_budget() is not None and table != "sessions":
+        names = _original_composition_metadata_rows(connection,
+            'SELECT name FROM pragma_table_info(?) LIMIT ?', (table, len(RETAINED_FIELDS[table]) + 1),
+            ("name",), appearance=(table, "columns"))
+        if {row[0] for row in names} != set(RETAINED_FIELDS[table]):
+            raise ProductionWorkspaceReconciliationError(error)
+        return
+    columns = _original_composition_metadata_rows(connection,
+        'SELECT cid,name,type,"notnull",dflt_value,pk FROM pragma_table_info(?) LIMIT 1360',
+        (table,), ("cid", "name", "type", "notnull", "dflt_value", "pk"), appearance=(table, "columns"))
     actual = {row[1] for row in columns}
     expected = set(RETAINED_FIELDS[table])
     if table != "sessions":
@@ -946,7 +980,9 @@ def validate_retained_table_schema(connection, table, *, error="composition_proj
             raise ProductionWorkspaceReconciliationError(error)
         return
     index_name = "ix_sessions_continuity_task_id"
-    named = list(_sql(connection, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", (index_name,)))
+    named = _original_composition_metadata_rows(connection,
+        "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=? LIMIT 1360", (index_name,),
+        ("tbl_name",), appearance=(table, "continuity-index-owner"))
     if actual == expected:
         if named:
             raise ProductionWorkspaceReconciliationError(error)
@@ -956,7 +992,10 @@ def validate_retained_table_schema(connection, table, *, error="composition_proj
     column = next(row for row in columns if row[1] == "continuity_task_id")
     if tuple(column[1:]) != tuple(NULL_SESSION_DDL_DESCRIPTOR["column"]):
         raise ProductionWorkspaceReconciliationError(error)
-    all_foreign = [tuple(row) for row in _sql(connection, 'PRAGMA foreign_key_list("sessions")')]
+    all_foreign = [tuple(row) for row in _original_composition_metadata_rows(connection,
+        'SELECT id,seq,"table","from","to",on_update,on_delete,match FROM pragma_foreign_key_list(?) LIMIT 1360',
+        (table,), ("id", "seq", "table", "from", "to", "on_update", "on_delete", "match"),
+        appearance=(table, "foreign-keys"))]
     foreign = [row for row in all_foreign if row[3] == "continuity_task_id"]
     if (len(foreign) != 1 or foreign[0][1] != 0
         or foreign[0][2:] != tuple(NULL_SESSION_DDL_DESCRIPTOR["foreign_key"])
@@ -964,11 +1003,17 @@ def validate_retained_table_schema(connection, table, *, error="composition_proj
         raise ProductionWorkspaceReconciliationError(error)
     if len(named) != 1 or named[0][0] != "sessions":
         raise ProductionWorkspaceReconciliationError(error)
-    indexes = [row for row in _sql(connection, 'PRAGMA index_list("sessions")') if row[1] == index_name]
+    indexes = [row for row in _original_composition_metadata_rows(connection,
+        'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 1360', (table,),
+        ("seq", "name", "unique", "origin", "partial"), appearance=(table, "indexes")) if row[1] == index_name]
     if len(indexes) != 1 or tuple(indexes[0][2:]) != (0, "c", 0):
         raise ProductionWorkspaceReconciliationError(error)
-    info = [tuple(row) for row in _sql(connection, f'PRAGMA index_info("{index_name}")')]
-    keys = [tuple(row) for row in _sql(connection, f'PRAGMA index_xinfo("{index_name}")') if row[5] == 1]
+    info = [tuple(row) for row in _original_composition_metadata_rows(connection,
+        'SELECT seqno,cid,name FROM pragma_index_info(?) LIMIT 1360', (index_name,),
+        ("seqno", "cid", "name"), appearance=(table, "continuity-index-info"))]
+    keys = [tuple(row) for row in _original_composition_metadata_rows(connection,
+        'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 1360', (index_name,),
+        ("seqno", "cid", "name", "desc", "coll", "key"), appearance=(table, "continuity-index-parts")) if row[5] == 1]
     if info != [(0, column[0], "continuity_task_id")] or keys != [(0, column[0], "continuity_task_id", 0, "BINARY", 1)]:
         raise ProductionWorkspaceReconciliationError(error)
 
@@ -1062,6 +1107,21 @@ def decode_turn_float(value):
 
 
 def composition_row_digest(table, key, row):
+    from src.memory.composition_headers import current_budget
+    from src.workspace.production import _publication_json_upper as width
+    payer = current_budget()
+    if payer is not None:
+        fields = NATIVE_EXTENSION_FIELDS.get(table, COMPOSITION_FIELDS.get(table))
+        if fields is None or len(row) != len(fields) or any(field not in row for field in fields):
+            raise ProductionWorkspaceReconciliationError("composition_scalar_schema_invalid")
+        # Pair-list JSON adds two brackets per field relative to the original
+        # object header. Float64's accepted finite hex representation fits 128
+        # logical JSON bytes; no float codec/output is made to measure it.
+        row_upper = 2 + sum(width(field) + 1 + (128 if table == "memory_episodes"
+            and field in {"salience", "confidence"} else width(row[field]))
+            for field in fields) + max(0, len(fields) - 1)
+        for appearance, upper in _original_native_row_digest_entries(table, key, row_upper):
+            payer.debit(upper, appearance=appearance)
     if table in NATIVE_EXTENSION_FIELDS:
         fields = NATIVE_EXTENSION_FIELDS[table]
         if set(row) != set(fields):
@@ -1085,6 +1145,109 @@ def composition_row_digest(table, key, row):
     return hashlib.sha256(b"seraph-continuity-row-v1\0" + encoded).hexdigest()
 
 
+def _original_native_row_digest_entries(table, key, row_upper):
+    """Original row codec capacity from an authentic numeric object header."""
+    from src.workspace.production import _publication_json_upper as width
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    fields = NATIVE_EXTENSION_FIELDS.get(table, COMPOSITION_FIELDS.get(table))
+    if (fields is None or type(key) is not str or type(row_upper) is not int
+            or not 0 < row_upper <= MAX_BYTES):
+        raise HeaderBoundsError("programme_native_row_numeric_unavailable")
+    values = row_upper + 2 * len(fields)
+    extension = table in NATIVE_EXTENSION_FIELDS
+    prefix = b"seraph-continuity-extension-row-v1\0" if extension else b"seraph-continuity-row-v1\0"
+    payload = 2 + width(table) + width(key) + values + 2
+    payload += (width(NATIVE_EXTENSION_VERSION) + width(NATIVE_EXTENSION_DIGEST) + 2
+        if extension else width(COMPOSITION_SCHEMA) + 1)
+    field_keys = 2 + sum(width(field) for field in fields) + max(0, len(fields) - 1)
+    entries = tuple((("native-row-digest", table, key, stage), upper) for stage, upper in (
+        ("row-field-set", field_keys), ("schema-field-set", field_keys),
+        ("field-pairs", values), ("payload", payload), ("json", payload),
+        ("utf8", payload), ("hash-preimage", len(prefix) + payload),
+        ("hash-input", len(prefix) + payload), ("digest-return", 66)))
+    if table == "memory_episodes":
+        entries += tuple((("native-row-digest", table, key, stage, field), upper)
+            for field in ("salience", "confidence")
+            for stage, upper in (("float-hex", 64), ("float-codec", 128)))
+    return entries
+
+
+def _original_native_closure_projected_entries(trace, *, constructor, publication_widths):
+    """Replace only source-owned native codecs for one typed future constructor.
+
+    Keep every genuine retained-root event. Only numeric row/header/component
+    bounds are consumed; this never constructs a future row, hash or witness.
+    """
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    from src.workspace.production import _publication_json_upper as width
+    if (type(constructor) is not MappingProxyType or type(publication_widths) is not MappingProxyType
+            or type(constructor.get("job_id")) is not str
+            or type(constructor.get("row_header_bytes")) is not int):
+        raise HeaderBoundsError("programme_native_closure_numeric_unavailable")
+    job_id = constructor["job_id"]
+    if (not job_id.startswith("goal-discovery:") or len(job_id) != len("goal-discovery:") + 32
+            or any(char not in "0123456789abcdef" for char in job_id[len("goal-discovery:"):])
+            or ("persisted_queue_only" in constructor and type(constructor["persisted_queue_only"]) is not bool)):
+        raise HeaderBoundsError("programme_native_closure_numeric_unavailable")
+    persisted = constructor.get("persisted_queue_only") is True
+    required_tail = {"closure-prefix", "visited-sort", "table-counts", "inventory-list",
+        "inventory-json", "inventory-utf8", "inventory-hash", "inventory-digest-return", "role-counts",
+        "relations-sort", "relations-json", "relations-utf8", "relations-hash", "artifacts-sort",
+        "artifacts-json", "artifacts-utf8", "artifacts-hash", "closure-digest-return",
+        "relations-digest-return", "artifacts-digest-return", "result", "visited-return"}
+    actual_tail = {appearance[1] for appearance, upper in trace
+        if type(appearance) is tuple and len(appearance) == 2 and appearance[0] == "native-closure-tail"}
+    actual_envelope = {appearance[1] for appearance, upper in trace
+        if type(appearance) is tuple and len(appearance) == 2 and appearance[0] == "programme-snapshot-envelope"}
+    candidate_codecs = sum(type(appearance) is tuple
+        and appearance[:3] == ("native-row-digest", "workflow_run_states", job_id)
+        for appearance, upper in trace)
+    if (not required_tail <= actual_tail
+            or actual_envelope != {"construction", "return", "leaves-set", "members-union"}
+            or candidate_codecs != (10 if persisted else 0)):
+        raise HeaderBoundsError("programme_native_closure_numeric_unavailable")
+    needed = ("native_bytes", "target_bytes", "members_bytes")
+    if any(type(publication_widths.get(name)) is not int
+            or not 0 <= publication_widths[name] <= MAX_BYTES for name in needed):
+        raise HeaderBoundsError("programme_native_closure_numeric_unavailable")
+    key_width = width(("workflow_run_states", job_id))
+    # A discovery constructor's legacy session FK is NULL, so it adds no native
+    # role/file/inventory member. Programme relations/files have their own owner.
+    increment = 0 if persisted else key_width + 1
+    result = []
+    for appearance, upper in trace:
+        if (type(upper) is not int or not 0 <= upper <= MAX_BYTES
+                or (appearance is not None and type(appearance) is not tuple)):
+            raise HeaderBoundsError("programme_native_closure_numeric_unavailable")
+        if type(appearance) is tuple and appearance[:3] == ("native-row-digest", "workflow_run_states", job_id):
+            continue
+        if type(appearance) is tuple and appearance[:1] == ("native-closure-tail",):
+            stage = appearance[1]
+            if stage in {"visited-sort", "visited-return"}:
+                upper += increment
+            elif stage == "table-counts":
+                upper += 0 if persisted else width("workflow_run_states") + 22
+            elif stage == "result":
+                upper = publication_widths["native_bytes"]
+        elif type(appearance) is tuple and appearance[:1] == ("programme-snapshot-envelope",):
+            upper = (publication_widths["members_bytes"] if appearance[1] in {"leaves-set", "members-union"}
+                else publication_widths["target_bytes"])
+        result.append((appearance, upper))
+    result.extend(_original_native_row_digest_entries("workflow_run_states", job_id,
+        constructor["row_header_bytes"]))
+    if not persisted:
+        for _ in range(2):
+            result.append((("body", "workflow_run_states", job_id), constructor["row_header_bytes"]))
+        # One new sort-key UTF8 copy and each real length-prefixed hash update.
+        result.append((("native-closure-tail", "key-utf8", "workflow_run_states", job_id),
+            sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in job_id)))
+        for field, value_upper in (("table", width("workflow_run_states")), ("key", width(job_id)), ("leaf", 64)):
+            for stage, upper in (("utf8", value_upper), ("length-prefix", 8), ("hash-prefix", 8), ("hash-value", value_upper)):
+                result.append((("native-closure-tail", stage, "workflow_run_states", job_id, field), upper))
+    return tuple(result)
+
+
 def _checked_memory_candidate_row(row):
     """Original input encodings and immutable binding, without a Source grant."""
     from src.runtime_plugins.memory_producer import memory_context
@@ -1097,6 +1260,13 @@ def _checked_memory_candidate_row(row):
         run.deadline_at = datetime.fromisoformat(row["deadline_at"])
         context = memory_context(run)
         candidate = context["candidate"]
+        from src.memory.composition_headers import current_budget
+        payer = current_budget()
+        if payer is not None:
+            from src.workflows.inference_accounting import _original_native_binding_numeric_entries, _accounting_prepay
+            original_text = row["composition_binding_json"]
+            text_bytes = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in original_text)
+            _accounting_prepay(payer, _original_native_binding_numeric_entries(row["run_identity"], text_bytes))
         binding = RuntimeCompositionBinding.from_json(row["composition_binding_json"])
         _, original_inputs = _safe_durable_inputs(candidate)
         authority = strict_json_loads(row["declared_authority_json"])
@@ -1140,6 +1310,13 @@ def _checked_memory_claim_row(row, run, context, binding, *, unverified_unknown=
             if set(claims[0]) != {"checkpoint_id", "state_digest", "safe", "payload"}:
                 raise ValueError("memory_preoriginal_claim_changed")
             claim = _receipt_witness(claims[0])
+            from src.memory.composition_headers import current_budget
+            payer = current_budget()
+            if payer is not None:
+                from src.workflows.inference_accounting import _original_native_binding_numeric_entries, _accounting_prepay
+                original_text = row["composition_binding_json"]
+                text_bytes = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in original_text)
+                _accounting_prepay(payer, _original_native_binding_numeric_entries(row["run_identity"], text_bytes))
             binding = RuntimeCompositionBinding.from_json(row["composition_binding_json"])
             if (any(claim[field] != row[column] for field, column in (
                     ("invocation_ref", "run_identity"), ("input_digest", "input_digest"),
@@ -1214,10 +1391,15 @@ def _native_memory_reference_row_on_connection(connection, table, key):
 def _programme_reference_row_on_connection(connection, table, key):
     """Named common33 programme provenance, using unchanged raw tuple bytes."""
     from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, HeaderBoundsError
-    from src.memory.composition_headers import charge_row, current_budget
+    from src.memory.composition_headers import charge_row, current_budget, _CURRENT, _validate
     if current_budget() is None or table not in {"workflow_run_states", "goals", "operator_sessions"}:
         raise HeaderBoundsError("programme_current_bound_not_certified")
     descriptor = COMPOSITION_DESCRIPTORS[table]
+    certificate = _CURRENT.get()
+    _validate(connection, certificate)
+    upper = certificate.rows[(table, key)][1]
+    for appearance in ("dict-copy", "encoded-copy"):
+        certificate.budget.debit(upper, appearance=("programme-row-output", appearance, table, key))
     charge_row(connection, table, key)
     columns = ",".join('"' + name + '"' for name in descriptor.columns)
     records = list(_sql(connection, f'SELECT {columns} FROM "{table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,)))
@@ -1576,12 +1758,27 @@ def _programme_component_on_connection(connection, common33, selection, identity
     from src.work_board.research_parent import discovery_authority
     from src.workflows.research_sources import physical_discovery_closure, discovery_physical_records
     from src.workflows.job_runtime import _digest
+    from src.workspace.production import _publication_json_upper
+    def pay(appearance, upper):
+        if common33.budget is not None:
+            common33.budget.debit(upper, appearance=("programme-manifest", *appearance))
+    def width(value):
+        return _publication_json_upper(value)
     original_owner._validate_programme_selection(selection)
     _validate(connection, common33)
     if common33.connection is not connection:
         raise ProductionWorkspaceReconciliationError("programme_original_owner_changed")
     if not selection.runs:
+        from types import MappingProxyType
+        pay(("numeric-facts",), 2 + sum(width(name) + 21 for name in
+            ("rows_encoded_upper", "relations_encoded_upper", "files_encoded_upper", "result_encoded_upper",
+             "row_count", "relation_count", "file_count")) + 6)
+        original_owner._discovery_manifest_facts = (selection, MappingProxyType({
+            "rows_encoded_upper": 2, "relations_encoded_upper": 2,
+            "files_encoded_upper": 2, "result_encoded_upper": 4,
+            "row_count": 0, "relation_count": 0, "file_count": 0}))
         return None
+    pay(("state-init",), 6 * 2)
     rows, relations, files = {}, set(), []
     for table, keys in (("goals", selection.goals), ("operator_sessions", selection.issuers)):
         for key in keys:
@@ -1592,11 +1789,22 @@ def _programme_component_on_connection(connection, common33, selection, identity
                     and table == "operator_sessions" and key == forecast[1]):
                 # Pure target arithmetic; the actual original row was paid/read
                 # above. This value is never enrolled or issued as a certificate.
+                forecast_upper = (2 + width("native-composition-memory.v1") + width(table) + width(key) + 3
+                    + 2 + sum(3 + width(name) + width(forecast[2][name]) for name in descriptor.columns)
+                    + max(0, len(descriptor.columns) - 1))
+                pay(("issuer-forecast-copy", key), width(forecast[2]))
+                for appearance in ("issuer-forecast-codec", "issuer-forecast-json", "issuer-forecast-utf8"):
+                    pay((appearance, key), forecast_upper)
                 raw = _native_memory_row_bytes(descriptor, key, dict(forecast[2]))
+            pay(("leaf-map-entry", table, key), width(table) + width(key) + 66 + 4)
+            pay(("row-hash", table, key), len(raw))
             rows[(table, key)] = hashlib.sha256(raw).hexdigest()
             if table == "goals" and row["parent_id"] is not None:
+                pay(("relation", "goal_parent_fk", key), width(("goal_parent_fk", table, key, "goals", row["parent_id"])))
                 relations.add(("goal_parent_fk", table, key, "goals", row["parent_id"]))
             if table == "operator_sessions":
+                pay(("relation", "programme_owner_identity", key), width(("programme_owner_identity", table, key,
+                    "operator_identities", row["operator_identity_id"])))
                 relations.add(("programme_owner_identity", table, key,
                     "operator_identities", row["operator_identity_id"]))
     for key in selection.identity_ids:
@@ -1605,21 +1813,39 @@ def _programme_component_on_connection(connection, common33, selection, identity
         row = read_programme_identity(identity_certificate, key)
         if row is None:
             raise ProductionWorkspaceReconciliationError("programme_identity_missing")
+        identity_upper = identity_certificate.rows[("operator_identities", key)][1]
+        # The Identity3 raw owner paid delivery; this codec and retained leaf
+        # are distinct appearances, with unchanged bytes and validation.
+        identity_leaf_upper = identity_upper + width((PROGRAMME_MANIFEST_VERSION,
+            PROGRAMME_MANIFEST_DIGEST, "operator_identities", key,
+            ("id", "created_at", "revoked_at"))) + 16
+        for appearance in ("identity-codec", "identity-json", "identity-utf8", "identity-hash"):
+            pay((appearance, key), identity_leaf_upper)
+        pay(("leaf-map-entry", "operator_identities", key), width("operator_identities") + width(key) + 70)
         rows[("operator_identities", key)] = _programme_identity_leaf(key, row)
     slots = set()
     for key in selection.runs:
         with snapshot_reads(common33):
             _descriptor, run, _raw = _programme_reference_row_on_connection(connection, "workflow_run_states", key)
+        run_upper = common33.rows[("workflow_run_states", key)][1]
+        for appearance in ("authority-json", "authority-model", "authority-binding-copy"):
+            pay((appearance, key), run_upper)
         binding = discovery_authority(run["declared_authority_json"]).programme_binding
+        pay(("relation", "programme_goal", key), width(("programme_goal", "workflow_run_states", key, "goals", binding.goal_id)))
         relations.add(("programme_goal", "workflow_run_states", key, "goals", binding.goal_id))
+        pay(("relation", "programme_issuer_provenance", key), width(("programme_issuer_provenance", "workflow_run_states", key,
+            "operator_sessions", binding.issuer_root_id)))
         relations.add(("programme_issuer_provenance", "workflow_run_states", key,
             "operator_sessions", binding.issuer_root_id))
         # Original safe bytes are mandatory before metadata enters this new
         # projection. Repeated appearances still spend the same frame's bytes.
         physical_discovery_closure(run, root=root, header_budget=common33.budget)
+        pay(("effects-json", key), run_upper)
         effects = json.loads(run["effect_receipts_json"])
-        physical_records = discovery_physical_records(run)
-        for record in physical_records:
+        for appearance in ("physical-records-parse", "physical-records-copy", "physical-records-output"):
+            pay((appearance, key), run_upper)
+        physical_records = discovery_physical_records(run, header_budget=common33.budget)
+        for record_index, record in enumerate(physical_records):
             payload, artifact, effect = record["payload"], record["artifact"], record["effect"]
             address = (key, payload["kind"], payload["slot"])
             if address in slots:
@@ -1627,6 +1853,17 @@ def _programme_component_on_connection(connection, common33, selection, identity
             slots.add(address)
             http_digest = None
             if payload["kind"] == "snapshot":
+                # This historical join's original helper performs three file
+                # model decodes and retained effect/digest copies. Its reads
+                # remain independently charged by read_discovery below it.
+                for appearance in ("snapshot-record-filter", "snapshot-reference-model",
+                        "snapshot-effect-filter", "snapshot-effect-copy", "snapshot-effect-json", "snapshot-effect-utf8"):
+                    pay((appearance, key, record_index), run_upper)
+                for kind in ("snapshot", "manifest", "selection"):
+                    original_size = sum(item["artifact"]["size_bytes"] for item in physical_records
+                        if item["payload"]["kind"] == kind)
+                    for appearance in ("snapshot-model-json", "snapshot-model-copy"):
+                        pay((appearance, key, record_index, kind), 6 * original_size + 2)
                 http_digest = _programme_snapshot_http_readback_digest(record, physical_records, effects,
                     job_id=key, programme_id=binding.programme_id, root=root, header_budget=common33.budget)
             if payload["kind"] == "manifest":
@@ -1635,7 +1872,9 @@ def _programme_component_on_connection(connection, common33, selection, identity
                 # Any incomplete/duplicate vector projects null; original
                 # effect liabilities remain intact and null grants nothing.
                 from src.work_board.research_artifacts import read_discovery
-                query_records = [item for item in discovery_physical_records(run)
+                for appearance in ("query-records-parse", "query-records-copy", "query-records-output", "query-records-filter"):
+                    pay((appearance, key), run_upper)
+                query_records = [item for item in discovery_physical_records(run, header_budget=common33.budget)
                     if item["payload"]["kind"] == "queries"]
                 if len(query_records) != 1:
                     raise ProductionWorkspaceReconciliationError("programme_queries_original_missing")
@@ -1643,9 +1882,11 @@ def _programme_component_on_connection(connection, common33, selection, identity
                 content = read_discovery(query["payload"]["file_path"], query["artifact"]["content_sha256"],
                     programme_id=binding.programme_id, max_bytes=16384, root=root,
                     expected_size=query["artifact"]["size_bytes"], header_budget=common33.budget)
+                pay(("queries-json", key), 6 * len(content) + 2)
                 queries = json.loads(content)["queries"]
                 vector = []
                 for index in range(len(queries)):
+                    pay(("search-effect-filter", key, index), run_upper)
                     original = [item for item in effects if item.get("effect_id") == f"discovery-search:{key}:{index}"
                         and item.get("receipt_kind") == "readback"]
                     if (len(original) != 1 or original[0].get("effect_type") != "public_https_read"
@@ -1653,35 +1894,216 @@ def _programme_component_on_connection(connection, common33, selection, identity
                             or original[0].get("details", {}).get("search_response_receipt", {}).get("query_index") != index):
                         vector = []
                         break
+                    pay(("search-effect-vector", key, index), width(original[0]))
                     vector.append(original[0])
                 if vector:
+                    for appearance in ("search-vector-json", "search-vector-utf8"):
+                        pay((appearance, key), width(vector))
                     http_digest = _digest(vector)
+            for appearance in ("effect-digest-json", "effect-digest-utf8"):
+                pay((appearance, key, record_index), width(effect))
+            # All selected variable file fields are retained in the paid run;
+            # only the closed output keys and two digest scalars are new.
+            file_upper = run_upper + width(("job_id", "programme_id", "artifact_id", "file_path", "kind", "slot",
+                "content_sha256", "size_bytes", "producer_fence", "checkpoint_id", "artifact_readback_digest", "http_readback_digest")) + 132
+            pay(("file-dto", key, record_index), file_upper)
             files.append({"job_id": key, "programme_id": payload["programme_id"],
                 "artifact_id": artifact["artifact_id"], "file_path": payload["file_path"],
                 "kind": payload["kind"], "slot": payload["slot"],
                 "content_sha256": artifact["content_sha256"], "size_bytes": artifact["size_bytes"],
                 "producer_fence": payload["producer_fence"], "checkpoint_id": record["checkpoint_id"],
                 "artifact_readback_digest": _digest(effect), "http_readback_digest": http_digest})
+    aggregate_upper = width((PROGRAMME_MANIFEST_VERSION, PROGRAMME_MANIFEST_DIGEST))
+    for appearance in ("closure-prefix", "relations-prefix", "artifacts-prefix"):
+        pay((appearance,), aggregate_upper)
+    leaf_upper = 2 + sum(width(table) + width(key) + width(leaf) + 6
+        for (table, key), leaf in rows.items()) + max(0, len(rows) - 1)
+    pay(("leaf-sort",), leaf_upper)
     closure = _programme_aggregate(b"seraph-continuity-programme-closure-v1\0")
     row_counts = {}
     for (table, key), leaf in sorted(rows.items(), key=lambda item: (item[0][0], item[0][1].encode("utf-8"))):
-        for value in (table, key, leaf):
+        for field, value in (("table", table), ("key", key), ("digest", leaf)):
+            pay(("leaf-prefix", table, key, field), width(value) + 8)
             _programme_length_prefix(closure, value)
+        pay(("row-count-entry", table, key), width(table) + 21)
         row_counts[table] = row_counts.get(table, 0) + 1
     relation_counts = {}
     for role, *_ in relations:
+        pay(("relation-count-entry", role), width(role) + 21)
         relation_counts[role] = relation_counts.get(role, 0) + 1
     relation_digest = _programme_aggregate(b"seraph-continuity-programme-relations-v1\0")
+    relation_upper = width(relations)
+    for appearance in ("relations-sort", "relations-json", "relations-utf8", "relations-update"):
+        pay((appearance,), relation_upper)
     relation_digest.update(_programme_json(sorted(relations)))
     artifact_digest = _programme_aggregate(b"seraph-continuity-programme-artifacts-v1\0")
+    file_upper = width(files)
+    for appearance in ("files-sort", "files-json", "files-utf8", "files-update"):
+        pay((appearance,), file_upper)
     artifact_digest.update(_programme_json(sorted(files, key=lambda item: (
         item["job_id"], item["kind"], item["slot"], item["artifact_id"]))))
     if _leaf_sink is not None:
+        pay(("leaf-map-update",), leaf_upper)
         _leaf_sink.update(rows)
+    result_upper = (2 + width("manifest_version") + 1 + width(PROGRAMME_MANIFEST_VERSION)
+        + width("manifest_digest") + 1 + width(PROGRAMME_MANIFEST_DIGEST)
+        + width("row_counts") + 1 + width(row_counts)
+        + width("relation_counts") + 1 + width(relation_counts)
+        + width("artifact_count") + 1 + width(len(files))
+        + sum(width(field) + 1 + 66 for field in
+            ("closure_digest", "relation_digest", "artifact_manifest_digest")) + 7)
+    pay(("result",), result_upper)
+    from types import MappingProxyType
+    # Source-owned numerical observations retain no domain rows or hashes and
+    # confer no certificate/selection authority on the prospective publisher.
+    pay(("numeric-facts",), 2 + sum(width(name) + 21 for name in
+        ("rows_encoded_upper", "relations_encoded_upper", "files_encoded_upper", "result_encoded_upper",
+         "row_count", "relation_count", "file_count")) + 6)
+    original_owner._discovery_manifest_facts = (selection, MappingProxyType({
+        "rows_encoded_upper": leaf_upper, "relations_encoded_upper": relation_upper,
+        "files_encoded_upper": file_upper, "result_encoded_upper": result_upper,
+        "row_count": len(rows), "relation_count": len(relations), "file_count": len(files)}))
     return {"manifest_version": PROGRAMME_MANIFEST_VERSION, "manifest_digest": PROGRAMME_MANIFEST_DIGEST,
         "row_counts": row_counts, "closure_digest": closure.hexdigest(),
         "relation_counts": relation_counts, "relation_digest": relation_digest.hexdigest(),
         "artifact_count": len(files), "artifact_manifest_digest": artifact_digest.hexdigest()}
+
+
+def original_discovery_manifest_numeric_schedule(owned, *, constructor, certificate, publication_widths):
+    """Numeric projection of this original manifest's new root appearances.
+
+    Current roots are measured by their real projection, and the aggregate
+    appearances are enlarged using those numerical observations. No future
+    domain row, digest, Identity certificate or execution permission is issued.
+    """
+    from types import MappingProxyType
+    from src.workspace.production import _publication_json_upper as width
+    owned.validate(db=owned.guard.db, header_budget=owned.guard.header_budget)
+    guard = owned.guard
+    prospective = guard._prospective_admission
+    facts = getattr(guard, "_discovery_manifest_facts", None)
+    if (constructor is not owned._constructor_bounds or type(constructor) is not MappingProxyType
+            or prospective is None or certificate is not prospective[0].common33
+            or facts is None or type(facts[1]) is not MappingProxyType
+            or type(publication_widths) is not MappingProxyType
+            or owned._candidate is None or owned._candidate[0] != constructor["job_id"]):
+        raise ProductionWorkspaceReconciliationError("programme_numeric_manifest_unavailable")
+    baseline = facts[1]
+    binding = owned._candidate[1]
+    key, run_upper = constructor["job_id"], constructor["row_header_bytes"]
+    entries = []
+    def add(appearance, upper):
+        entries.append(("publication-admission", ("programme-manifest", *appearance), upper))
+    add(("state-init",), 6 * 2)
+    for appearance in ("authority-json", "authority-model", "authority-binding-copy", "effects-json",
+            "physical-records-parse", "physical-records-copy", "physical-records-output"):
+        add((appearance, key), run_upper)
+    relation_extra = 0
+    for role, values in (("programme_goal", ("workflow_run_states", key, "goals", binding.goal_id)),
+            ("programme_issuer_provenance", ("workflow_run_states", key, "operator_sessions", binding.issuer_root_id))):
+        upper = width((role, *values))
+        add(("relation", role, key), upper)
+        add(("relation-count-entry", role), width(role) + 21)
+        relation_extra += upper + 1
+    leaf_extra = 0
+    for table, ids in (("goals", publication_widths["added_goals"]),
+            ("operator_sessions", publication_widths["added_issuers"]),
+            ("operator_identities", publication_widths["added_identities"])):
+        for identity in ids:
+            upper = width(table) + width(identity) + 70
+            add(("leaf-map-entry", table, identity), upper)
+            leaf_extra += upper + 2
+            for field, value in (("table", table), ("key", identity), ("digest", None)):
+                add(("leaf-prefix", table, identity, field), (66 if field == "digest" else width(value)) + 8)
+            add(("row-count-entry", table, identity), width(table) + 21)
+            if table == "operator_identities":
+                identity_upper = publication_widths["identity_row_uppers"][identity]
+                codec_upper = identity_upper + width((PROGRAMME_MANIFEST_VERSION,
+                    PROGRAMME_MANIFEST_DIGEST, table, identity, ("id", "created_at", "revoked_at"))) + 16
+                for appearance in ("identity-codec", "identity-json", "identity-utf8", "identity-hash"):
+                    add((appearance, identity), codec_upper)
+            else:
+                add(("row-hash", table, identity), certificate.rows[(table, identity)][1])
+                parents = publication_widths["goal_parents"] if table == "goals" else publication_widths["issuer_identities"]
+                if identity not in parents:
+                    raise ProductionWorkspaceReconciliationError("programme_numeric_manifest_unavailable")
+                parent = parents[identity]
+                if parent is not None:
+                    role = "goal_parent_fk" if table == "goals" else "programme_owner_identity"
+                    target = "goals" if table == "goals" else "operator_identities"
+                    upper = width((role, table, identity, target, parent))
+                    add(("relation", role, identity), upper)
+                    add(("relation-count-entry", role), width(role) + 21)
+                    relation_extra += upper + 1
+    file_upper = run_upper + width(("job_id", "programme_id", "artifact_id", "file_path", "kind", "slot",
+        "content_sha256", "size_bytes", "producer_fence", "checkpoint_id", "artifact_readback_digest", "http_readback_digest")) + 132
+    for index in range(2):
+        for appearance in ("effect-digest-json", "effect-digest-utf8"):
+            add((appearance, key, index), constructor["effect_bytes"])
+        add(("file-dto", key, index), file_upper)
+    rows_upper = baseline["rows_encoded_upper"] + leaf_extra
+    relations_upper = baseline["relations_encoded_upper"] + relation_extra
+    files_upper = baseline["files_encoded_upper"] + 2 * (file_upper + 1)
+    for appearance in ("closure-prefix", "relations-prefix", "artifacts-prefix"):
+        add((appearance,), width((PROGRAMME_MANIFEST_VERSION, PROGRAMME_MANIFEST_DIGEST)))
+    for appearance in ("leaf-sort", "leaf-map-update"):
+        add((appearance,), rows_upper)
+    for appearance in ("relations-sort", "relations-json", "relations-utf8", "relations-update"):
+        add((appearance,), relations_upper)
+    for appearance in ("files-sort", "files-json", "files-utf8", "files-update"):
+        add((appearance,), files_upper)
+    # Existing count keys may be absent. Bound each newly counted key and its
+    # fixed int64 scalar; the result's three digests remain their original width.
+    empty_result_upper = (2 + width("manifest_version") + 1 + width(PROGRAMME_MANIFEST_VERSION)
+        + width("manifest_digest") + 1 + width(PROGRAMME_MANIFEST_DIGEST)
+        + width("row_counts") + 3 + width("relation_counts") + 3
+        + width("artifact_count") + 21 + sum(width(field) + 67 for field in
+            ("closure_digest", "relation_digest", "artifact_manifest_digest")) + 7)
+    result_upper = max(baseline["result_encoded_upper"], empty_result_upper) + sum(
+        width(name) + 22 for name in ("goals", "operator_sessions", "operator_identities",
+            "programme_goal", "programme_issuer_provenance", "goal_parent_fk", "programme_owner_identity"))
+    add(("result",), result_upper)
+    add(("numeric-facts",), 2 + sum(width(name) + 21 for name in
+        ("rows_encoded_upper", "relations_encoded_upper", "files_encoded_upper", "result_encoded_upper",
+         "row_count", "relation_count", "file_count")) + 6)
+    return tuple(entries)
+
+
+def original_discovery_publication_construction_numeric_schedule(owned, *, constructor, publication_widths):
+    """Capacity for the original prepare-publication copies and size codecs.
+
+    The accounting owner measures the existing facts and assigns phase
+    repetitions. These scalars cannot mint a future target or certificate.
+    """
+    from types import MappingProxyType
+    owned.validate(db=owned.guard.db, header_budget=owned.guard.header_budget)
+    if (constructor is not owned._constructor_bounds or type(constructor) is not MappingProxyType
+            or type(publication_widths) is not MappingProxyType
+            or owned._candidate is None or constructor["job_id"] != owned._candidate[0]):
+        raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+    # Each existing/changed-key set is a subset of the measured target union.
+    # A delta-sort tuple also carries a before digest, bounded by its closed
+    # SHA256 scalar, in addition to the measured (table,key) width.
+    delta_count = max(1, len(publication_widths["added_members"]))
+    amounts = (("members-difference", 2 * publication_widths["members_bytes"]),
+        ("delta-key-union", 2 * publication_widths["delta_key_bytes"]),
+        ("changed-touched-map", publication_widths["changed_touched_bytes"]),
+        ("delta-sort", publication_widths["delta_sort_bytes"] + delta_count * (66 + 3)),
+        ("delta-construction", publication_widths["delta_bytes"]),
+        ("checkpoint-construction", publication_widths["checkpoint_bytes"]),
+        ("receipt-default", publication_widths["receipt_default_bytes"]),
+        ("receipt-target-update", publication_widths["receipt_target_update_bytes"]),
+        ("receipt-witness-update", publication_widths["receipt_witness_update_bytes"]),
+        ("checkpoint-size-json", publication_widths["checkpoint_bytes"]),
+        ("checkpoint-size-utf8", publication_widths["checkpoint_bytes"]),
+        ("receipt-size-json", publication_widths["receipt_bytes"]),
+        ("receipt-size-utf8", publication_widths["receipt_bytes"]),
+        ("return", publication_widths["target_bytes"] + publication_widths["checkpoint_bytes"]
+            + publication_widths["receipt_bytes"] + 4))
+    if any(type(upper) is not int or upper < 0 for _, upper in amounts):
+        raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+    return tuple(("publication-admission", ("composition-prepare-publication", appearance), upper)
+        for appearance, upper in amounts)
 
 
 def composition_closure(connection, *, verify_files=None, programme_selection=None):
@@ -1702,7 +2124,9 @@ def composition_closure(connection, *, verify_files=None, programme_selection=No
         if owner is None:
             raise ProductionWorkspaceReconciliationError("programme_original_connection_unavailable")
         owner._validate_programme_selection(programme_selection)
-    tables = {row[0] for row in _sql(connection, "SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {row[0] for row in _original_composition_metadata_rows(connection,
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY rowid LIMIT 1360", (),
+        ("name",), appearance=("table-census",))}
     from src.memory.universe import native_memory_universe_on_connection
     from src.memory.composition_headers import current_budget, charge_table
     if "workflow_run_states" in tables and current_budget() is not None:
@@ -1848,6 +2272,14 @@ def composition_closure(connection, *, verify_files=None, programme_selection=No
                     required("work_board_attempts", source["attempt_id"])
             binding = row["composition_binding_json"]
             if binding is not None:
+                payer = current_budget()
+                if payer is not None:
+                    from src.workflows.inference_accounting import (_original_native_binding_numeric_entries,
+                        _accounting_prepay)
+                    # Count UTF8 numerically before the original parser's
+                    # size-check encoding or any model/canonical allocation.
+                    text_bytes = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in binding)
+                    _accounting_prepay(payer, _original_native_binding_numeric_entries(key, text_bytes))
                 native_binding = RuntimeCompositionBinding.from_json(binding)
                 if row["job_kind"] == "work.local-evidence-report.v1":
                     from src.runtime_plugins.task_capability import checked_report_records
@@ -2053,19 +2485,60 @@ def composition_closure(connection, *, verify_files=None, programme_selection=No
                 raise ProductionWorkspaceReconciliationError("composition_recovery_predecessor_cycle")
             trail.add(current)
             current = audit_predecessors.get(current)
+    payer = current_budget()
+    from src.workspace.production import _publication_json_upper as width
+    def pay(stage, upper, *address):
+        if payer is not None:
+            payer.debit(upper, appearance=("native-closure-tail", stage, *address))
+    visited_width = 2 + sum(width(item) for item in visited) + max(0, len(visited) - 1)
+    pay("closure-prefix", len(b"seraph-continuity-closure-v1\0"))
+    pay("visited-sort", visited_width)
+    for table, key in visited:
+        pay("key-utf8", sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4
+            for c in key), table, key)
+    pay("table-counts", 2 + sum(width(table) + 22 for table, key in visited))
     digest = hashlib.sha256(b"seraph-continuity-closure-v1\0")
     counts = {}
     for table, key in sorted(visited, key=lambda item: (item[0], item[1].encode())):
         leaf = composition_row_digest(table, key, _composition_row(connection, table, key))
-        for value in (table, key, leaf):
+        for field, value in (("table", table), ("key", key), ("leaf", leaf)):
+            value_width = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in value)
+            for stage, upper in (("utf8", value_width), ("length-prefix", 8), ("hash-prefix", 8), ("hash-value", value_width)):
+                pay(stage, upper, table, key, field)
             encoded = value.encode()
             digest.update(len(encoded).to_bytes(8, "big"))
             digest.update(encoded)
         counts[table] = counts.get(table, 0) + 1
+    inventory_width = 2 + max(0, len(inventory) - 1)
+    for row in inventory:
+        item_width = 2 + sum(width(field) + 1 + width(value)
+            for field, value in zip(COMPOSITION_FIELDS["runtime_composition_states"], row)) + len(row) - 1
+        pay("inventory-row-copy", item_width)
+        inventory_width += item_width
+    pay("inventory-list", inventory_width)
+    for stage in ("inventory-json", "inventory-utf8", "inventory-hash"):
+        pay(stage, inventory_width)
+    pay("inventory-digest-return", 66)
     inventory_payload = [dict(zip(COMPOSITION_FIELDS["runtime_composition_states"], row)) for row in inventory]
+    pay("role-counts", 2 + sum(width(role) + 22 for role, *_ in roles))
     role_counts = {}
     for role, *_ in roles:
         role_counts[role] = role_counts.get(role, 0) + 1
+    relation_width = 2 + sum(width(role) for role in roles) + max(0, len(roles) - 1)
+    artifact_width = 2 + sum(width(item) for item in artifacts.values()) + max(0, len(artifacts) - 1)
+    for stage in ("relations-sort", "relations-json", "relations-utf8", "relations-hash"):
+        pay(stage, relation_width)
+    for stage in ("artifacts-sort", "artifacts-json", "artifacts-utf8", "artifacts-hash"):
+        pay(stage, artifact_width)
+    for stage in ("closure-digest-return", "relations-digest-return", "artifacts-digest-return"):
+        pay(stage, 66)
+    result_widths = {"schema_version": 1, "projection_schema": width(COMPOSITION_SCHEMA),
+        "extension_version": width(NATIVE_EXTENSION_VERSION), "extension_digest": 66,
+        "inventory": inventory_width, "inventory_digest": 66, "closure_digest": 66,
+        "total_rows": width(len(visited)), "table_counts": width(counts), "relation_counts": width(role_counts),
+        "relation_digest": 66, "artifact_count": width(len(artifacts)), "artifact_manifest_digest": 66}
+    pay("result", 2 + sum(width(field) + 1 + upper for field, upper in result_widths.items()) + len(result_widths) - 1)
+    pay("visited-return", visited_width)
     return {"schema_version": 1, "projection_schema": COMPOSITION_SCHEMA,
         "extension_version": NATIVE_EXTENSION_VERSION, "extension_digest": NATIVE_EXTENSION_DIGEST,
         "inventory": inventory_payload,
@@ -2282,6 +2755,12 @@ class CompositionSessionGuard:
         self._prospective_admission = None
         self._prospective_admission_facts = None
         self._prospective_admission_finished = False
+        self._discovery_publication_exit = None
+        self._discovery_commit_exit = None
+        self._discovery_publication_snapshot = None
+        self._discovery_writer_metadata_owner = None
+        self._discovery_reservation = None
+        self._publication_members = None
         self._programme_snapshot_owner = None
         self._programme_current_leaves = {}
         self._programme_base_leaves = {}
@@ -2329,6 +2808,16 @@ class CompositionSessionGuard:
             if leaf is None:
                 raise ProductionWorkspaceReconciliationError("programme_selected_leaf_unavailable")
             return leaf
+        owned = self._discovery_writer_metadata_owner
+        if owned is not None:
+            from src.memory.composition_headers import _CURRENT, snapshot_reads
+            from src.db.engine import _original_discovery_exit_completion
+            owned.validate(db=self.db, header_budget=self.header_budget)
+            if _CURRENT.get() is None:
+                certificate = (self._publication_common if _original_discovery_exit_completion.get() is not None
+                    else self._discovery_latest_common)
+                with snapshot_reads(certificate):
+                    return composition_row_digest(table, key, _composition_row(connection, table, key))
         return composition_row_digest(table, key, _composition_row(connection, table, key))
 
     def _validate_programme_selection(self, selection):
@@ -2465,6 +2954,112 @@ class CompositionSessionGuard:
                 raise ProductionWorkspaceReconciliationError("programme_original_incoming_provenance_exists")
         _validate(connection, certificate)
 
+    async def _original_discovery_persisted_authority_charges(self, discovery_session,
+            *, constructor, trace, certificate):
+        """Project the original persisted selector, never issue future authority.
+
+        Existing roots and both conditional Identity selections are measured by
+        their real owners. Only the absent constructor's numeric row width and
+        the already selected Goal/issuer provenance are added to that schedule.
+        """
+        from src.memory.header_bounds import (_trace_memory_numeric_charges,
+            _discovery_projected_superset_charges)
+        from src.memory.composition_headers import (_validate,
+            preflight_programme_identity_component, read_programme_identity)
+        import inspect
+        from src.guardian import goal_programmes
+        source_owner = getattr(goal_programmes, "original_discovery_authority_numeric_schedule", None)
+        if (source_owner is None or inspect.currentframe().f_back.f_code is not source_owner.__code__):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_trace_changed")
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        prospective = self._prospective_admission
+        if (discovery_session.guard is not self or prospective is None
+                or constructor is not discovery_session._constructor_bounds
+                or certificate is not prospective[0].common33
+                or discovery_session._candidate is None
+                or discovery_session._candidate[0] != constructor["job_id"]
+                or discovery_session._candidate[1] != self._prospective_admission_facts[2]
+                or self.db.new or self.db.dirty or self.db.deleted):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_trace_changed")
+        binding = self._prospective_admission_facts[2]
+        connection = await self.db.connection()
+        def measured(conn):
+            _validate(conn, certificate)
+            self._validate_programme_selection(prospective[0])
+            with _trace_memory_numeric_charges(self.header_budget) as selected_trace:
+                selected = self._select_programmes(conn, certificate)
+                identity_ids = tuple(sorted(set(selected.identity_ids) | {binding.owner_identity_id}))
+                identity_uppers = {}
+                # Additive measurements conservatively include the shared
+                # compiler/state overhead twice; they never waive a repeat.
+                for original in (selected, prospective[0]):
+                    if not original.identity_ids:
+                        continue
+                    identity = preflight_programme_identity_component(certificate,
+                        original_selection=original)
+                    identity_uppers.update((key, upper) for (table, key), (_, upper) in identity.rows.items())
+                    for key in original.identity_ids:
+                        read_programme_identity(identity, key)
+            return tuple(selected_trace), identity_ids, identity_uppers
+        selected_trace, identity_ids, identity_uppers = await connection.run_sync(measured)
+        from types import MappingProxyType
+        from src.workspace.production import _publication_json_upper
+        self.header_budget.debit(_publication_json_upper(identity_uppers),
+            appearance=("discovery-identity-width-output", constructor["job_id"]))
+        self._discovery_identity_widths = (discovery_session._candidate, MappingProxyType(identity_uppers))
+        widths = await self._discovery_publication_numeric_widths(constructor=constructor)
+        union_header_upper = sum(amount for appearance, amount in selected_trace
+            if type(appearance) is tuple and appearance[:1] == ("programme-identity-headers",))
+        projected_trace = tuple((("programme-identity-headers", identity_ids), union_header_upper)
+            if type(appearance) is tuple and appearance[:1] == ("programme-identity-headers",)
+            else (appearance, amount) for appearance, amount in trace)
+        entries = list(_discovery_projected_superset_charges(certificate,
+            projected_trace, job_id=constructor["job_id"],
+            row_upper=constructor["row_header_bytes"]))
+        # The real combined Identity certificate emits one full-header charge.
+        # Sum both genuine owner measurements before replacing only its numeric
+        # appearance label. No selection or certificate is reconstructed.
+        selected_entries = list(_discovery_projected_superset_charges(certificate,
+            selected_trace, job_id=constructor["job_id"], row_upper=constructor["row_header_bytes"]))
+        identity_headers = [(index, amount) for index, (appearance, amount) in enumerate(selected_entries)
+            if type(appearance) is tuple and appearance[:1] == ("programme-identity-headers",)]
+        if identity_headers:
+            first = identity_headers[0][0]
+            total = sum(amount for _, amount in identity_headers)
+            indices = {index for index, _ in identity_headers}
+            selected_entries = [(("programme-identity-headers", identity_ids), total) if index == first
+                else entry for index, entry in enumerate(selected_entries) if index == first or index not in indices]
+        entries.extend(selected_entries)
+        def row(table, key, upper):
+            entries.extend((appearance, upper) for appearance in (
+                ("programme-row-output", "dict-copy", table, key),
+                ("programme-row-output", "encoded-copy", table, key), ("body", table, key)))
+        job_id, upper = constructor["job_id"], constructor["row_header_bytes"]
+        row("workflow_run_states", job_id, upper)
+        for appearance in ("authority-json", "authority-model", "composition-json",
+                "composition-model", "composition-dependencies", "authority-digest-json",
+                "authority-digest-canonical", "authority-digest-encoded", "input-digest-json",
+                "input-digest-canonical", "input-digest-encoded", "run-map-entry"):
+            entries.append((("programme-selector", appearance, "workflow_run_states", job_id), upper))
+        goal, issuer = binding.goal_id, binding.issuer_root_id
+        goal_upper = certificate.rows[("goals", goal)][1]
+        issuer_upper = certificate.rows[("operator_sessions", issuer)][1]
+        row("goals", goal, goal_upper)
+        for appearance in ("programme-namespace", "programme-json", "programme-envelope",
+                "generation-list", "generation-model", "programme-binding-model", "goal-map-entry"):
+            entries.append((("programme-selector", appearance, "goals", goal), goal_upper))
+        row("operator_sessions", issuer, issuer_upper)
+        for appearance in ("issuer-map-entry", "identity-set-entry"):
+            entries.append((("programme-selector", appearance, "operator_sessions", issuer), issuer_upper))
+        for ancestor in widths["ancestor_goals"]:
+            ancestor_upper = certificate.rows[("goals", ancestor)][1]
+            row("goals", ancestor, ancestor_upper)
+            entries.append((("programme-selector", "ancestor-map-entry", "goals", ancestor), ancestor_upper))
+        identity_upper = 2 + sum(6 * len(key.encode("utf-8")) + 3 for key in identity_ids)
+        for appearance in ("identity-order", "identity-return"):
+            entries.append((("programme-selector", appearance), identity_upper))
+        return tuple(entries)
+
     async def _discovery_publication_numeric_widths(self, *, constructor):
         """Measure original target/output RESOURCE widths without predicting hashes.
 
@@ -2530,7 +3125,8 @@ class CompositionSessionGuard:
                 raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
             return goals, direct, added_goals, added_issuers, added_identities, added
         goals, direct, added_goals, added_issuers, added_identities, added = await connection.run_sync(selected_facts)
-        encoded = lambda value: len(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode())
+        from src.workspace.production import _publication_json_upper
+        encoded = _publication_json_upper
         def object_width(widths):
             return 2 + sum(encoded(key) + 1 + size for key, size in widths.items()) + max(0, len(widths) - 1)
         def modified_width(actual, changes):
@@ -2558,16 +3154,17 @@ class CompositionSessionGuard:
             "artifact_manifest_digest": 66})
         target_width = modified_width(self.base, {"native": native_width, "programme": programme_width})
         delta_widths = [object_width({"table_id": encoded(table), "key": encoded(key),
-            "before_digest": 4, "after_digest": 66}) for table, key in sorted(added)]
+            "before_digest": 66, "after_digest": 66}) for table, key in sorted(added)]
         delta_width = 2 + sum(delta_widths) + max(0, len(delta_widths) - 1)
         accounting = await self._publication_accounting_payload(_numeric_body_certificate=common33)
         if accounting.get("operations"):
             raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
         checkpoint_fields = {key: encoded(value) for key, value in accounting.items()}
-        checkpoint_fields.update(schema_version=1, composition_base=encoded(self.base),
+        checkpoint_fields.update(schema_version=1, composition_base=max(encoded(self.base), target_width),
             composition_target=target_width, composition_delta=delta_width, secret_values_included=5)
         checkpoint_width = object_width(checkpoint_fields)
-        receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {"secret_values_included": False}
+        prior_receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+        receipt = prior_receipt or {"secret_values_included": False}
         receipt_fields = {key: encoded(value) for key, value in receipt.items()}
         receipt_fields["runtime_composition"] = target_width
         if accounting.get("witness") is not None:
@@ -2576,18 +3173,623 @@ class CompositionSessionGuard:
         if checkpoint_width > MAX_ACCOUNTING_CHECKPOINT_BYTES or receipt_width > MAX_LIFECYCLE_RECEIPT_BYTES:
             raise ProductionWorkspaceReconciliationError("composition_publication_size_exceeded")
         # Numeric output/fact storage is a paid appearance, never a witness.
-        facts = {"target_bytes": target_width, "checkpoint_bytes": checkpoint_width,
+        facts = {"target_bytes": target_width, "native_bytes": native_width, "programme_bytes": programme_width,
+            "checkpoint_bytes": checkpoint_width,
             "receipt_bytes": receipt_width, "added_members": added,
             "added_goals": added_goals, "added_issuers": added_issuers, "added_identities": added_identities,
             "direct_goals": direct, "ancestor_goals": tuple(key for key in goals if key not in direct)}
+        target_members = self.members | set(added)
+        # A's changed membership is a conservative bound for B's one existing
+        # root. These are encoded capacity facts; no target row or digest is
+        # invented and the publisher still derives the actual touched set.
+        target_keys = tuple(sorted(set(added) | {("workflow_run_states", constructor["job_id"])}))
+        facts.update(members_bytes=encoded(tuple(sorted(target_members))),
+            delta_bytes=delta_width, delta_key_bytes=encoded(target_keys),
+            changed_members_bytes=encoded(tuple(sorted(added))),
+            changed_touched_bytes=2 + sum(encoded((table, key)) + 1 + 66
+                for table, key in target_keys) + max(0, len(target_keys) - 1),
+            delta_sort_bytes=encoded(target_keys),
+            witness_bytes=encoded(accounting["witness"]) if accounting.get("witness") is not None else 0)
+        facts["receipt_default_bytes"] = 0 if prior_receipt else encoded({"secret_values_included": False})
+        facts["receipt_target_update_bytes"] = encoded(receipt) + encoded("runtime_composition") + 1 + target_width
+        facts["receipt_witness_update_bytes"] = (modified_width(receipt, {"runtime_composition": target_width})
+            + encoded("inference_accounting") + 1 + facts["witness_bytes"])
+        facts["goal_parents"] = MappingProxyType({key: row["parent_id"] for key, row in goals.items()})
+        facts["issuer_identities"] = MappingProxyType({key: row["operator_identity_id"]
+            for key, row in prospective[0].issuers.items()})
+        identity_widths = getattr(self, "_discovery_identity_widths", None)
+        owned = getattr(prospective[2], "_owned_discovery_session", None)
+        if (identity_widths is not None and owned is not None
+                and identity_widths[0] is owned._candidate and owned._constructor_bounds is constructor):
+            facts["identity_row_uppers"] = identity_widths[1]
         self.header_budget.debit(encoded(facts), appearance=("discovery-publication-width-output", constructor["job_id"]))
         return MappingProxyType(facts)
+
+    async def _original_discovery_body_numeric_schedule(self, owned, *, constructor, certificate):
+        """Current original snapshot validation and finite table/row fees."""
+        from types import MappingProxyType
+        from src.memory.composition_headers import snapshot_reads, charge_row, charge_table
+        from src.memory.header_bounds import _trace_memory_numeric_charges
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        if constructor is not owned._constructor_bounds or certificate.budget is not self.header_budget:
+            raise ProductionWorkspaceReconciliationError("programme_numeric_body_unavailable")
+        connection = await self.db.connection()
+        goal_id = owned._candidate[1].goal_id
+        with _trace_memory_numeric_charges(self.header_budget) as row:
+            def pay_row(conn):
+                with snapshot_reads(certificate):
+                    charge_row(conn, "goals", goal_id)
+            await connection.run_sync(pay_row)
+        tables = {}
+        for table in ("workflow_run_states", "goals", "sessions"):
+            with _trace_memory_numeric_charges(self.header_budget) as trace:
+                def pay_table(conn):
+                    with snapshot_reads(certificate):
+                        charge_table(conn, table)
+                await connection.run_sync(pay_table)
+            tables[table] = tuple(trace)
+        validations = tuple((appearance, upper) for appearance, upper in row
+            if appearance != ("body", "goals", goal_id))
+        half = len(validations) // 2
+        if len(validations) % 2 or validations[:half] != validations[half:]:
+            raise ProductionWorkspaceReconciliationError("programme_numeric_validation_trace_changed")
+        future = (*validations, (("body", "workflow_run_states", constructor["job_id"]), constructor["row_header_bytes"]))
+        return MappingProxyType({"goal": tuple(row), "run": tuple(future),
+            "validate": validations[:half], "tables": MappingProxyType(tables)})
+
+    def _original_discovery_publication_output_numeric_schedule(self, owned, *, constructor, publication_widths):
+        """The original writers' private reads, emitted copies and exit copies."""
+        from src.memory.composition_headers import _metadata_size
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        if constructor is not owned._constructor_bounds or owned._candidate[0] != constructor["job_id"]:
+            raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+        phases = ("queue",) if constructor.get("persisted_queue_only") else ("admission", "queue")
+        entries = []
+        members = self.members | set(publication_widths["added_members"])
+        member_upper = 2 + sum(3 + _metadata_size(table) + _metadata_size(key)
+            for table, key in members) + max(0, len(members) - 1)
+        leaves = set(self._programme_base_leaves) | {address for address in publication_widths["added_members"]
+            if address[0] in self._programme_tables()}
+        leaf_upper = 2 + sum(4 + _metadata_size(table) + _metadata_size(key) + 386
+            for table, key in leaves) + max(0, len(leaves) - 1)
+        delta_keys = set(publication_widths["added_members"]) | {("workflow_run_states", constructor["job_id"])}
+        touched_upper = 2 + sum(4 + _metadata_size(table) + _metadata_size(key) + 386
+            for table, key in delta_keys)
+        for phase in phases:
+            label = "publication-" + phase
+            for output, key in (("target", "target_bytes"), ("checkpoint", "checkpoint_bytes"), ("receipt", "receipt_bytes")):
+                for appearance in ("construction", "canonical", "encoded"):
+                    entries.append((label, ("discovery-publication-output", output, appearance), publication_widths[key]))
+            for output, key in (("checkpoint", "checkpoint_bytes"), ("receipt", "receipt_bytes")):
+                size = publication_widths[key]
+                for appearance in ("dict-copy", "json", "utf8", "readback-dict", "readback-json", "readback-utf8"):
+                    entries.append((label, ("composition-publication", output, appearance), size))
+                # Readback reads raw bytes without a JSON parser.
+                entries.append((label, None, size + 1))
+            # Original checkpoint writer reads its prior checkpoint and, for
+            # schema 2, its paired receipt. Original receipt writer reads prior
+            # receipt again. The conditional unused allowance stays spent.
+            prior = max(publication_widths["checkpoint_bytes"], publication_widths["receipt_bytes"],
+                publication_widths.get("prior_private_read_bytes", 0))
+            for output, repeats in (("checkpoint", 1), ("receipt", 2)):
+                for _ in range(repeats):
+                    entries.append((label, None, prior + 1))
+                    if output == "receipt":
+                        entries.append((label, ("composition-publication", output, "decode"), prior))
+                    for appearance in ("json-parse", "materialization", "return"):
+                        entries.append((label, ("composition-publication", output, appearance), 6 * prior + 2))
+            entries.append((label, ("discovery-publication-touched-copy", phase, constructor["job_id"]), touched_upper))
+            for appearance, upper in (("members", member_upper), ("base-leaves", leaf_upper), ("current-leaves", leaf_upper)):
+                entries.append((label, ("discovery-committed-continuation", phase, constructor["job_id"], appearance), upper))
+        return tuple(entries)
+
+    async def _original_discovery_continuation_numeric_schedule(self, owned, *, constructor, strategy):
+        """Compose original-owner appearances; never manufacture future authority.
+
+        Measurements spend the existing frame. Reservation issuance remains in
+        the two original reserve entrypoints, after this complete source census.
+        Current and projected repeats remain separate and never refund slack.
+        """
+        from types import MappingProxyType
+        from src.memory.header_bounds import (_trace_memory_numeric_charges,
+            _discovery_projected_superset_charges, HeaderBoundsError, MAX_BYTES)
+        from src.guardian.goal_programmes import original_discovery_authority_numeric_schedule
+        from src.memory.task_methods import original_discovery_strategy_numeric_schedule
+        from src.guardian.goal_discovery import (original_discovery_staging_numeric_schedule,
+            original_discovery_admission_numeric_schedule)
+        from src.workflows.job_runtime import original_discovery_jobs_numeric_schedule
+        from src.workflows.research_sources import original_discovery_physical_numeric_schedule
+        from src.workflows.inference_accounting import original_discovery_native_binding_numeric_schedule
+        from src.workflows import research_guard
+
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        if (owned.guard is not self or constructor is not owned._constructor_bounds
+                or type(constructor) is not MappingProxyType or owned._candidate_phase != "reader"
+                or owned._candidate is None or owned._candidate[0] != constructor["job_id"]
+                or self._discovery_reservation is not None or self.db.new or self.db.dirty or self.db.deleted):
+            raise HeaderBoundsError("programme_numeric_schedule_owner_changed")
+        persisted = constructor.get("persisted_queue_only") is True
+        if persisted != (self._prospective_admission is None):
+            raise HeaderBoundsError("programme_numeric_schedule_owner_changed")
+
+        # Require the original parser/codec schedules as well as table bounds.
+        if not hasattr(research_guard, "original_discovery_research_guard_numeric_schedule"):
+            raise HeaderBoundsError("programme_numeric_research_guard_schedule_unavailable")
+        native_projection = globals().get("_original_native_closure_projected_entries")
+        if not callable(native_projection):
+            raise HeaderBoundsError("programme_numeric_native_closure_schedule_unavailable")
+
+        certificate, common, closure, physical = await self._original_discovery_numeric_baseline(
+            owned, constructor=constructor)
+        authority = await original_discovery_authority_numeric_schedule(owned, constructor=constructor)
+        method = await original_discovery_strategy_numeric_schedule(owned,
+            constructor=constructor, strategy=strategy)
+        with _trace_memory_numeric_charges(self.header_budget) as publication_trace:
+            widths = (await self._original_discovery_queue_publication_widths(owned,
+                constructor=constructor, certificate=certificate) if persisted else
+                await self._discovery_publication_numeric_widths(constructor=constructor))
+        widths = MappingProxyType({**widths, "prior_private_read_bytes": max(
+            (max(0, upper - 1) for appearance, upper in publication_trace if appearance is None), default=0)})
+        bodies = await self._original_discovery_body_numeric_schedule(owned,
+            constructor=constructor, certificate=certificate)
+        entries = []
+        def append(phase, trace):
+            entries.extend((phase, appearance, upper) for appearance, upper in trace)
+        def project(trace):
+            return tuple(trace) if persisted else _discovery_projected_superset_charges(
+                certificate, trace, job_id=constructor["job_id"], row_upper=constructor["row_header_bytes"])
+        def rephase(phase, schedule):
+            entries.extend((phase, appearance, upper) for _, appearance, upper in schedule)
+
+        entries.extend(authority)
+        entries.extend(method)
+        entries.extend(await original_discovery_jobs_numeric_schedule(owned, constructor=constructor))
+        entries.extend(original_discovery_physical_numeric_schedule(owned, constructor=constructor))
+        if not persisted:
+            entries.extend(original_discovery_staging_numeric_schedule(owned, constructor=constructor))
+            entries.extend(original_discovery_admission_numeric_schedule(owned, constructor=constructor))
+            with _trace_memory_numeric_charges(self.header_budget) as outstanding:
+                await owned.service._outstanding(owned.db, owned._candidate[1], discovery_session=owned)
+            append("admission", outstanding)
+            # Four direct common reads plus the original first-writer read.
+            for _ in range(5):
+                append("admission", common)
+            append("admission", closure)
+            for table in ("workflow_run_states", "goals", "sessions"):
+                append("admission", bodies["tables"][table])
+            append("admission", bodies["goal"])
+        # Six direct B reads plus its genuine first-writer closure certificate.
+        for _ in range(7):
+            append("queue", project(common))
+        for _ in range(4):
+            append("queue", bodies["run"])
+        append("queue", bodies["goal"])
+        # Existing-root CAS touches independently derive the original leaf.
+        append("queue", bodies["run"])
+        append("queue", _original_native_row_digest_entries("workflow_run_states",
+            constructor["job_id"], constructor["row_header_bytes"]))
+
+        publications = ("publication-queue",) if persisted else (
+            "publication-admission", "publication-queue")
+        aggregates = {"closure-prefix", "relations-prefix", "artifacts-prefix", "leaf-sort",
+            "leaf-map-update", "relations-sort", "relations-json", "relations-utf8", "relations-update",
+            "files-sort", "files-json", "files-utf8", "files-update", "result", "numeric-facts"}
+        future_closure = native_projection(project(closure), constructor=constructor,
+            publication_widths=widths)
+        if not persisted:
+            future_closure = tuple((appearance, upper) for appearance, upper in future_closure
+                if not (type(appearance) is tuple and len(appearance) > 1
+                    and appearance[0] == "programme-manifest" and appearance[1] in aggregates))
+        for phase in ("queue", *publications):
+            append(phase, future_closure)
+            if not persisted:
+                # Source-owned persisted selector/Identity union, not a future
+                # selection. Preserve all original measured old-root charges.
+                append(phase, tuple((appearance, upper) for selected_phase, appearance, upper
+                    in authority if selected_phase == "queue"))
+                rephase(phase, original_discovery_manifest_numeric_schedule(owned,
+                    constructor=constructor, certificate=certificate, publication_widths=widths))
+                append(phase, original_discovery_native_binding_numeric_schedule(owned, constructor=constructor))
+                # The native closure's two new charge_row calls each validate
+                # the genuine snapshot. Its existing outer validation remains
+                # in the actual baseline trace; the codec owner adds body fees.
+                for _ in range(2):
+                    append(phase, bodies["validate"])
+                # The programme component has its own original raw-row
+                # delivery after the persisted selector's separate delivery.
+                append(phase, bodies["run"])
+                append(phase, tuple((("programme-row-output", appearance,
+                    "workflow_run_states", constructor["job_id"]), constructor["row_header_bytes"])
+                    for appearance in ("dict-copy", "encoded-copy")))
+                rephase(phase, original_discovery_physical_numeric_schedule(owned,
+                    constructor=constructor, publication=True))
+        for phase in publications:
+            append(phase, project(common))
+            # Delta publication derives the touched WRS leaf independently
+            # after the closure's own leaf. Preserve that additional read/hash.
+            append(phase, bodies["run"])
+            append(phase, _original_native_row_digest_entries("workflow_run_states",
+                constructor["job_id"], constructor["row_header_bytes"]))
+            # Current private files may contain more whitespace than future
+            # canonical output. Retain both measured and future parser bounds.
+            append(phase, tuple((appearance, upper) for appearance, upper in publication_trace
+                if not (type(appearance) is tuple and appearance[:1] == ("discovery-publication-width-output",))))
+            prior = max(widths["checkpoint_bytes"], widths["receipt_bytes"], widths["prior_private_read_bytes"])
+            for output, repeats in (("checkpoint", 1), ("receipt", 2)):
+                for _ in range(repeats):
+                    append(phase, ((None, prior + 1),))
+                    if output == "receipt":
+                        append(phase, ((("composition-publication", output, "decode"), prior),))
+                    append(phase, tuple((("composition-publication", output, label), 6 * prior + 2)
+                        for label in ("json-parse", "materialization", "return")))
+            rephase(phase, original_discovery_publication_construction_numeric_schedule(owned,
+                constructor=constructor, publication_widths=widths))
+        entries.extend(self._original_discovery_publication_output_numeric_schedule(owned,
+            constructor=constructor, publication_widths=widths))
+        # This source-owner schedule accompanies its actual parser precharges;
+        # missing codecs are never implicit allowances.
+        entries.extend(research_guard.original_discovery_research_guard_numeric_schedule(
+            owned, constructor=constructor))
+        if any(phase not in {"staging", "admission", "queue", *publications}
+                or (appearance is not None and type(appearance) is not tuple)
+                or type(upper) is not int or not 0 <= upper <= MAX_BYTES
+                for phase, appearance, upper in entries):
+            raise HeaderBoundsError("programme_numeric_schedule_invalid")
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        return tuple(entries), widths, physical
+
+    async def _original_discovery_numeric_baseline(self, owned, *, constructor):
+        """Read the real current closure once and retain numerical costs only."""
+        from types import MappingProxyType
+        from src.memory.header_bounds import _trace_memory_numeric_charges
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        if (constructor is not owned._constructor_bounds or self._discovery_reservation is not None
+                or self.db.new or self.db.dirty or self.db.deleted):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_baseline_unavailable")
+        with _trace_memory_numeric_charges(self.header_budget) as headers:
+            common = await self._original_discovery_common(owned)
+        connection = await self.db.connection()
+        # The prospective certificate remains the original selection's owner;
+        # the newly paid current certificate does not replace that authority.
+        certificate = (self._prospective_admission[0].common33
+            if self._prospective_admission is not None else common)
+        with _trace_memory_numeric_charges(self.header_budget) as closure:
+            observed, members = await connection.run_sync(
+                lambda conn: self._programme_snapshot(conn, certificate, self.base))
+        if observed != self.base or members != self.members:
+            raise ProductionWorkspaceReconciliationError("programme_numeric_baseline_conflict")
+        physical = getattr(self, "_discovery_current_physical_widths", None)
+        if type(physical) is not dict:
+            raise ProductionWorkspaceReconciliationError("programme_numeric_baseline_unavailable")
+        from src.workspace.production import _publication_json_upper
+        self.header_budget.debit(_publication_json_upper(physical),
+            appearance=("discovery-physical-capacity-copy", constructor["job_id"]))
+        return certificate, tuple(headers), tuple(closure), MappingProxyType(dict(physical))
+
+    async def _original_discovery_queue_publication_widths(self, owned, *, constructor, certificate):
+        """Current accepted-root output capacities without a new admission."""
+        from types import MappingProxyType
+        from src.workspace.production import _publication_json_upper as width
+        owned.validate(db=self.db, header_budget=self.header_budget)
+        if (constructor is not owned._constructor_bounds or not constructor.get("persisted_queue_only")
+                or owned._candidate_phase != "reader" or self._prospective_admission is not None
+                or constructor["job_id"] not in self._selection.runs):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+        self._validate_programme_selection(self._selection)
+        def object_width(fields):
+            return 2 + sum(width(key) + 1 + upper for key, upper in fields.items()) + max(0, len(fields) - 1)
+        job_id = constructor["job_id"]
+        keys = (("workflow_run_states", job_id),)
+        delta = 2 + object_width({"table_id": width("workflow_run_states"),
+            "key": width(job_id), "before_digest": 66, "after_digest": 66})
+        target = width(self.base)
+        accounting = await self._publication_accounting_payload(
+            _numeric_body_certificate=certificate, discovery_session=owned)
+        if accounting.get("operations"):
+            raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+        checkpoint_fields = {key: width(value) for key, value in accounting.items()}
+        checkpoint_fields.update(schema_version=1, composition_base=target,
+            composition_target=target, composition_delta=delta, secret_values_included=5)
+        prior = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+        receipt = prior or {"secret_values_included": False}
+        receipt_fields = {key: width(value) for key, value in receipt.items()}
+        receipt_fields["runtime_composition"] = target
+        witness = width(accounting["witness"]) if accounting.get("witness") is not None else 0
+        if witness:
+            receipt_fields["inference_accounting"] = witness
+        target_update = width(receipt) + width("runtime_composition") + 1 + target
+        witness_update = object_width({**{key: width(value) for key, value in receipt.items()},
+            "runtime_composition": target}) + width("inference_accounting") + 1 + witness
+        facts = {"target_bytes": target, "native_bytes": width(self.base["native"]),
+            "programme_bytes": width(self.base["programme"]), "checkpoint_bytes": object_width(checkpoint_fields),
+            "receipt_bytes": object_width(receipt_fields), "added_members": (),
+            "members_bytes": width(tuple(sorted(self.members))), "delta_bytes": delta,
+            "delta_key_bytes": width(keys), "delta_sort_bytes": width(keys),
+            "changed_members_bytes": 2, "changed_touched_bytes": 2,
+            "witness_bytes": witness, "receipt_default_bytes": 0 if prior else width(receipt),
+            "receipt_target_update_bytes": target_update, "receipt_witness_update_bytes": witness_update}
+        self.header_budget.debit(width(facts), appearance=("discovery-publication-width-output", job_id))
+        return MappingProxyType(facts)
+
+    async def _reserve_original_discovery_admission(self, *, discovery_session, programme,
+            binding, identifier, now, deadline, strategy, composition_binding, constructor):
+        """Reserve the original candidate's continuation before its first stage."""
+        from types import MappingProxyType
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.header_bounds import _DiscoveryNumericReservation, HeaderBoundsError
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise HeaderBoundsError("programme_original_session_unavailable")
+        owned = discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        facts = self._prospective_admission_facts
+        if (owned.guard is not self or owned._candidate_phase != "reader"
+                or owned._candidate is None or self._discovery_reservation is not None
+                or facts is None or binding != facts[2] or owned._candidate[1] != binding
+                or programme.id != binding.programme_id
+                or programme.goal_revision != binding.goal_revision
+                or programme.grant_revision != binding.grant_revision
+                or constructor is not owned._constructor_bounds
+                or type(constructor) is not MappingProxyType
+                or constructor.get("persisted_queue_only")
+                or composition_binding is not owned._composition_binding
+                or constructor["job_id"] != owned._candidate[0]
+                or owned._candidate[0] != "goal-discovery:" + identifier.hex
+                or self.db.new or self.db.dirty or self.db.deleted):
+            raise HeaderBoundsError("programme_constructor_numeric_owner_changed")
+        # Widths were produced by the actual typed constructor owner from these
+        # exact scalars; the guard neither reconstructs a spec nor issues a bind.
+        if deadline <= now or deadline > programme.expires_at:
+            raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+        from src.workspace.accounting_continuity import _derive_programme_admission_rows
+        common = self._prospective_admission[0].common33
+        connection = await self.db.connection()
+        def rederive(conn):
+            self._validate_programme_selection(self._prospective_admission[0])
+            def fail(code):
+                raise HeaderBoundsError(code)
+            return _derive_programme_admission_rows(conn, common, goal_id=binding.goal_id,
+                programme_id=binding.programme_id, grant_revision=binding.grant_revision, fail=fail)
+        current_programme, current_binding, current_goals, current_issuers = await connection.run_sync(rederive)
+        if (current_programme != programme or current_binding != binding
+                or current_goals != facts[3] or current_issuers != facts[4]):
+            raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+        entries, widths, physical = await self._original_discovery_continuation_numeric_schedule(
+            owned, constructor=constructor, strategy=strategy)
+        from src.memory.header_bounds import WRS_BY_RUN
+        # Enroll the actual source-owned future address on the existing frame.
+        # This is capacity only; the real insertion and later full headers must
+        # still validate every scalar and resolve the original physical rowid.
+        self.header_budget.reserve_future_row(WRS_BY_RUN, owned._candidate[0], constructor["row_header_bytes"])
+        reservation = _DiscoveryNumericReservation(self, owned, constructor, entries)
+        reservation.publication_widths = widths
+        reservation.physical_widths = physical
+        self._discovery_reservation = reservation
+        reservation._checked()
+        return MappingProxyType({"composition_binding": composition_binding, "constructor": constructor})
+
+    async def _reserve_original_discovery_queue(self, *, discovery_session, job_id):
+        """Accepted siblings reserve only their original persisted B/C path."""
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.header_bounds import _DiscoveryNumericReservation, HeaderBoundsError
+        from src.runtime_plugins.ownership import RuntimeCompositionBinding
+        from src.workflows.job_runtime import original_discovery_queue_numeric_bounds
+        from src.memory.composition_headers import snapshot_reads
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise HeaderBoundsError("programme_original_session_unavailable")
+        owned = discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        if (owned.guard is not self or owned._candidate_phase != "reader"
+                or owned._candidate is None or owned._candidate[0] != job_id
+                or self._discovery_reservation is not None
+                or self.db.new or self.db.dirty or self.db.deleted):
+            raise HeaderBoundsError("programme_original_queue_candidate_changed")
+        constructor = await original_discovery_queue_numeric_bounds(owned)
+        common = await self._original_discovery_common(owned)
+        connection = await self.db.connection()
+        def retained_binding(conn):
+            with snapshot_reads(common):
+                _, row, _ = _programme_reference_row_on_connection(conn, "workflow_run_states", job_id)
+            if row["status"] != "accepted" or row["job_kind"] != "goal_public_discovery_v1":
+                raise HeaderBoundsError("programme_original_queue_row_changed")
+            from src.workflows.inference_accounting import (_accounting_prepay,
+                _original_native_binding_numeric_entries)
+            text = row["composition_binding_json"]
+            if type(text) is not str:
+                raise HeaderBoundsError("programme_original_queue_row_changed")
+            size = sum(1 if ord(char) < 128 else 2 if ord(char) < 2048
+                else 3 if ord(char) < 65536 else 4 for char in text)
+            _accounting_prepay(self.header_budget, _original_native_binding_numeric_entries(job_id, size))
+            return RuntimeCompositionBinding.from_json(text)
+        composition_binding = await connection.run_sync(retained_binding)
+        strategy = getattr(owned, "_discovery_persisted_strategy", None)
+        if strategy is None:
+            raise HeaderBoundsError("programme_original_queue_pin_unavailable")
+        owned._constructor_bounds, owned._composition_binding = constructor, composition_binding
+        self._finish_programme_admission_selection()
+        entries, widths, physical = await self._original_discovery_continuation_numeric_schedule(
+            owned, constructor=constructor, strategy=strategy)
+        reservation = _DiscoveryNumericReservation(self, owned, constructor, entries)
+        reservation.publication_widths = widths
+        reservation.physical_widths = physical
+        self._discovery_reservation = reservation
+        reservation._checked()
+        return reservation
 
     def _finish_programme_admission_selection(self):
         """Original insertion/unwind ends the capacity-only prospective lifetime."""
         self._prospective_admission = None
         self._prospective_admission_facts = None
         self._prospective_admission_finished = True
+
+    async def _complete_original_discovery_writer_exit(self, discovery_session, phase, job_id):
+        """Continue the same guard only after the original engine's real commit.
+
+        Publication and the actual commit callback must have witnessed the same
+        live engine exit. Neither a caller's success flag nor budget possession
+        can substitute for that completed original writer.
+        """
+        from src.db.engine import _get_original_discovery_exit_completion
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.composition_headers import _metadata_size
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        completed = _get_original_discovery_exit_completion(discovery_session, phase, job_id)
+        if (phase not in {"admission", "queue"} or discovery_session.guard is not self
+                or self._discovery_publication_exit is not completed
+                or self._discovery_commit_exit is not completed
+                or self._discovery_publication_snapshot is None or self.prepared_commit
+                or self.db.in_transaction() or self.db.new or self.db.dirty or self.db.deleted
+                or discovery_session._candidate is None
+                or discovery_session._candidate[0] != job_id):
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        target, members, leaves, touched = self._discovery_publication_snapshot
+        if ("workflow_run_states", job_id) not in touched:
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        if phase == "admission" and (touched[("workflow_run_states", job_id)] is not None
+                or not self._prospective_admission_finished
+                or discovery_session._candidate_phase != "reader"):
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        if phase == "queue" and discovery_session._candidate_phase not in {"reader", "inserted"}:
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        # Copies used by the continuation are another appearance. This does not
+        # refund or replace any metadata/body/output cost of either writer.
+        member_upper = 2 + sum(3 + _metadata_size(table) + _metadata_size(key)
+            for table, key in members) + max(0, len(members) - 1)
+        leaf_upper = 2 + sum(4 + _metadata_size(table) + _metadata_size(key) + _metadata_size(digest)
+            for (table, key), digest in leaves.items()) + max(0, len(leaves) - 1)
+        for appearance, upper in (("members", member_upper), ("base-leaves", leaf_upper),
+                ("current-leaves", leaf_upper)):
+            self.header_budget.debit(upper,
+                appearance=("discovery-committed-continuation", phase, job_id, appearance))
+        self.base, self.members = target, set(members)
+        self._programme_base_leaves = dict(leaves)
+        self._programme_current_leaves = dict(leaves)
+        self.db.info["composition_base_witness"] = target
+        self.touched.clear()
+        self._pending_events.clear()
+        self._selection = None
+        self._programme_snapshot_owner = None
+        self._programme_writer = None
+        self._retention_writer_snapshot = None
+        self._retention_read_budget = None
+        self._writer_first_metadata_frame = None
+        self._discovery_writer_metadata_owner = None
+        self._discovery_publication_exit = None
+        self._discovery_commit_exit = None
+        self._discovery_publication_snapshot = None
+        discovery_session._record_writer_exit(phase)
+        if phase == "queue":
+            self._prospective_admission = None
+            self._prospective_admission_facts = None
+            self._prospective_admission_finished = False
+            if self._discovery_reservation is not None:
+                self._discovery_reservation._checked()
+                self._discovery_reservation.close()
+                self._discovery_reservation = None
+            discovery_session._end_candidate()
+
+    async def _begin_original_discovery_writer(self, discovery_session, phase):
+        """The original retained connection's fresh paid A or B writer."""
+        from sqlalchemy import text
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.composition_headers import certify_composition_superset
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_unavailable")
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        if (discovery_session.guard is not self or phase not in {"admission", "queue"}
+                or discovery_session._candidate is None or self.db.in_transaction()
+                or self.db.in_nested_transaction() or self.db.new or self.db.dirty or self.db.deleted
+                or self._discovery_writer_metadata_owner is not None
+                or (phase == "admission" and discovery_session._candidate_phase != "reader")
+                or (phase == "queue" and discovery_session._candidate_phase not in {"reader", "inserted"})):
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_unavailable")
+        await self.db.execute(text("BEGIN IMMEDIATE"))
+        connection = await self.db.connection()
+        if connection is not self.db.info.get("owned_discovery_connection"):
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_unavailable")
+        certificate = await certify_composition_superset(self.db, self.header_budget,
+            _header_budget=self.header_budget)
+        self._discovery_latest_common = certificate
+        self.db.info["native_writer_started"] = True
+        self.db.info["composition_writer_owner"] = "durable_jobs"
+        await connection.run_sync(lambda current: self._capture_native_writer_snapshot(
+            current, self.header_budget, "durable_jobs"))
+        self._discovery_writer_metadata_owner = discovery_session
+        return certificate
+
+    async def _original_discovery_common(self, discovery_session):
+        """Current common33 capacity, never a cached pre-mutation certificate."""
+        from sqlalchemy import text
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        from src.memory.composition_headers import certify_composition_superset
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        connection = await self.db.connection()
+        if (discovery_session.guard is not self
+                or connection is not self.db.info.get("owned_discovery_connection")
+                or self.db.in_nested_transaction()):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        if not (await connection.get_raw_connection()).driver_connection.in_transaction:
+            await self.db.execute(text("BEGIN"))
+        certificate = await certify_composition_superset(self.db, self.header_budget,
+            _header_budget=self.header_budget)
+        self._discovery_latest_common = certificate
+        return certificate
+
+    async def _finish_owned_discovery_read(self, discovery_session, job_id):
+        """Current persisted queued/terminal original may finish without a writer."""
+        from src.memory.composition_headers import snapshot_reads
+        from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
+        from src.memory.header_bounds import HeaderBoundsError
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        if (discovery_session.guard is not self or discovery_session._candidate is None
+                or discovery_session._candidate[0] != job_id
+                or discovery_session._candidate_phase != "reader"
+                or self.db.new or self.db.dirty or self.db.deleted or self.touched
+                or self._pending_events or self.prepared_commit):
+            raise ProductionWorkspaceReconciliationError("programme_original_selection_unavailable")
+        common = await self._original_discovery_common(discovery_session)
+        connection = await self.db.connection()
+        def original_row(current):
+            with snapshot_reads(common):
+                _descriptor, row, _raw = _programme_reference_row_on_connection(
+                    current, "workflow_run_states", job_id)
+            upper = common.rows[("workflow_run_states", job_id)][1]
+            # Declared-authority decoding and its typed/output comparison are
+            # distinct from the fully paid raw appearance above.
+            for appearance in ("authority-parse", "authority-model", "binding-copy"):
+                common.budget.debit(upper, appearance=("discovery-read-completion", appearance, job_id))
+            authority = discovery_authority(row["declared_authority_json"])
+            if (row["run_identity"] != job_id or row["job_kind"] != DISCOVERY_KIND
+                    or row["owner_kind"] != "service" or row["service_id"] != DISCOVERY_SERVICE
+                    or row["owner_principal_id"] != DISCOVERY_SERVICE
+                    or authority.original_job_id != job_id
+                    or authority.programme_binding != discovery_session._candidate[1]
+                    or row["status"] not in {"queued", "succeeded", "failed", "cancelled", "degraded", "expired"}):
+                raise HeaderBoundsError("programme_original_read_completion_unavailable")
+        await connection.run_sync(original_row)
+        self._finish_programme_admission_selection()
+        discovery_session._candidate_phase = "read_complete"
+        discovery_session._end_candidate()
+        self._prospective_admission_finished = False
+
+    async def _finish_original_discovery_owner(self, discovery_session):
+        """Close the authentic idle pass without publishing an extra writer."""
+        from src.guardian.goal_discovery import _OwnedDiscoverySession
+        if type(discovery_session) is not _OwnedDiscoverySession:
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        discovery_session.validate(db=self.db, header_budget=self.header_budget)
+        if (discovery_session.guard is not self or discovery_session._candidate is not None
+                or discovery_session._candidate_phase is not None
+                or self._discovery_reservation is not None
+                or self.db.new or self.db.dirty or self.db.deleted or self.touched
+                or self._pending_events or self.prepared_commit
+                or self._discovery_publication_exit is not None
+                or self._discovery_commit_exit is not None):
+            raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+        if self.db.in_transaction():
+            await self.db.rollback()
+        return True
 
     def _select_programmes(self, connection, common33):
         import asyncio
@@ -2612,6 +3814,7 @@ class CompositionSessionGuard:
 
     def _programme_snapshot(self, connection, certificate, expected):
         from src.memory.composition_headers import preflight_programme_identity_component, snapshot_reads
+        from src.workflows.research_sources import _original_discovery_physical_capacity_scope
         _validate_programme_envelope(expected)
         selection = self._select_programmes(connection, certificate)
         identity = (preflight_programme_identity_component(certificate, original_selection=selection)
@@ -2620,8 +3823,27 @@ class CompositionSessionGuard:
             native, members = composition_closure(connection, verify_files=native_composition_files,
                 programme_selection=selection)
         self._programme_current_leaves = {}
-        programme = _programme_component_on_connection(connection, certificate, selection, identity,
-            root=self.workspace.host_root, original_owner=self, _leaf_sink=self._programme_current_leaves)
+        with _original_discovery_physical_capacity_scope(self.header_budget) as physical_widths:
+            programme = _programme_component_on_connection(connection, certificate, selection, identity,
+                root=self.workspace.host_root, original_owner=self, _leaf_sink=self._programme_current_leaves)
+        self._discovery_current_physical_widths = physical_widths
+        from src.workspace.production import _publication_json_upper as width
+        envelope_width = (2 + width("schema_version") + 1 + 1
+            + width("projection_schema") + 1 + width(COMPOSITION_ENVELOPE_SCHEMA)
+            + width("native") + 1 + width(native) + width("programme") + 1 + width(programme)
+            + width("transition_ref") + 1 + width(expected["transition_ref"]) + 4)
+        leaves_width = 2 + sum(width(item) for item in self._programme_current_leaves) \
+            + max(0, len(self._programme_current_leaves) - 1)
+        # Union width is computed over authentic current keys without making
+        # the returned set or a speculative future membership object.
+        union_count = len(members) + sum(item not in members for item in self._programme_current_leaves)
+        union_width = (2 + sum(width(item) for item in members)
+            + sum(width(item) for item in self._programme_current_leaves if item not in members)
+            + max(0, union_count - 1))
+        if self.header_budget is not None:
+            for stage, upper in (("construction", envelope_width), ("return", envelope_width),
+                    ("leaves-set", leaves_width), ("members-union", union_width)):
+                self.header_budget.debit(upper, appearance=("programme-snapshot-envelope", stage))
         return _programme_envelope(native, programme, expected["transition_ref"]), members | set(self._programme_current_leaves)
 
     def _native_writer_fields(self, connection, budget, owner):
@@ -2677,6 +3899,13 @@ class CompositionSessionGuard:
         if (self not in _COMPOSITION_METADATA_GUARDS or self._retention_closed
                 or self.db.info.get("composition_guard") is not self):
             raise HeaderBoundsError("memory_retention_writer_changed")
+        if self._discovery_writer_metadata_owner is not None:
+            owned = self._discovery_writer_metadata_owner
+            owned.validate(db=self.db, header_budget=self.header_budget)
+            if owned.guard is not self:
+                raise HeaderBoundsError("memory_retention_writer_changed")
+            self._validate_native_writer_snapshot(self.header_budget, connection)
+            return self.header_budget
         mode, frame = self._writer_first_metadata_mode, self._writer_first_metadata_frame
         if self not in _WRITER_FIRST_METADATA_GUARDS:
             if mode is None and frame is None:
@@ -3061,6 +4290,11 @@ class CompositionSessionGuard:
                 # Releasing a savepoint does not publish the outer writer.
                 return
             if self.prepared_commit:
+                if self._discovery_publication_exit is not None:
+                    from src.db.engine import _get_original_discovery_exit_completion
+                    owned, phase, job_id, _task = self._discovery_publication_exit
+                    if _get_original_discovery_exit_completion(owned, phase, job_id) is not self._discovery_publication_exit:
+                        raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
                 self.prepared_commit = False
                 return
             session.flush()
@@ -3070,24 +4304,50 @@ class CompositionSessionGuard:
             pending, self._pending_events = self._pending_events, []
             for event in pending:
                 self._touch(session.connection(), "work_board_events", event.event_id, creating=True)
+        def after_commit(session):
+            if self._discovery_publication_exit is not None:
+                from src.db.engine import _get_original_discovery_exit_completion
+                owned, phase, job_id, _task = self._discovery_publication_exit
+                completed = _get_original_discovery_exit_completion(owned, phase, job_id)
+                if completed is not self._discovery_publication_exit or self.prepared_commit:
+                    raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+                self._discovery_commit_exit = completed
+        def after_rollback(session):
+            self._discovery_publication_exit = None
+            self._discovery_commit_exit = None
+            self._discovery_publication_snapshot = None
         for name, callback in (("after_flush_postexec", after_flush_postexec), ("do_orm_execute", before_execute), ("before_flush", before_flush),
-                               ("after_begin", connection_started), ("before_commit", before_commit)):
+                               ("after_begin", connection_started), ("before_commit", before_commit),
+                               ("after_commit", after_commit), ("after_rollback", after_rollback)):
             guarded = poison(callback)
             event.listen(self.db.sync_session, name, guarded)
             self.listeners.append((name, guarded))
 
-    async def _publication_accounting_payload(self, *, _numeric_body_certificate=None):
+    async def _publication_accounting_payload(self, *, _numeric_body_certificate=None,
+            discovery_session=None):
         """Original unchanged ledger/readback predicates, in this same session."""
         if _numeric_body_certificate is not None:
             from src.memory.composition_headers import _validate
             prospective = self._prospective_admission
-            if (prospective is None or _numeric_body_certificate is not prospective[0].common33
+            if discovery_session is not None:
+                from src.guardian.goal_discovery import _OwnedDiscoverySession
+                if type(discovery_session) is not _OwnedDiscoverySession:
+                    raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+                discovery_session.validate(db=self.db, header_budget=self.header_budget)
+                if discovery_session.guard is not self or discovery_session._candidate is None:
+                    raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
+            elif (prospective is None or _numeric_body_certificate is not prospective[0].common33
                     or _numeric_body_certificate.budget is not self.header_budget
                     or self.db.info.get("composition_guard") is not self):
                 raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
             connection = await self.db.connection()
             def validate_numeric_reader(conn):
-                self._validate_programme_selection(prospective[0])
+                if discovery_session is None:
+                    self._validate_programme_selection(prospective[0])
+                elif (_numeric_body_certificate.connection is not conn
+                        or _numeric_body_certificate.budget is not self.header_budget
+                        or _numeric_body_certificate.raw_owner is not None):
+                    raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
                 _validate(conn, _numeric_body_certificate)
             await connection.run_sync(validate_numeric_reader)
         accounting = self.db.info.get("composition_accounting_payload")
@@ -3103,9 +4363,13 @@ class CompositionSessionGuard:
             if self.header_budget is not None:
                 from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
                 from src.memory.composition_headers import locate_exact_rows
-                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment", self.header_budget)
-                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids)
-                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"])
+                payer = self.header_budget if _numeric_body_certificate is not None else None
+                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment",
+                    self.header_budget, _header_budget=payer)
+                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids,
+                    _header_budget=payer)
+                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"],
+                    _header_budget=payer)
             if _numeric_body_certificate is not None:
                 from src.memory.composition_headers import snapshot_reads, charge_row, charge_table
                 def pay_owner(conn):
@@ -3125,8 +4389,9 @@ class CompositionSessionGuard:
                     raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
                 accounting = {}
             else:
-                witness = _witness(account)
-                if (account.ledger_digest != _ledger_digest(account, rows)
+                witness = _witness(account, header_budget=self.header_budget if _numeric_body_certificate is not None else None)
+                if (account.ledger_digest != _ledger_digest(account, rows,
+                    header_budget=self.header_budget if _numeric_body_certificate is not None else None)
                     or lifecycle.get("inference_accounting") != witness
                     or prior is None or prior.get("witness") != witness
                     or prior.get("secret_values_included") is not False
@@ -3137,6 +4402,13 @@ class CompositionSessionGuard:
         return accounting
 
     async def _prepare_publication(self):
+        from src.workspace.production import _publication_json_upper
+        def width(value):
+            return 0 if self.header_budget is None else _publication_json_upper(value)
+        def pay(appearance, upper):
+            if self.header_budget is not None:
+                self.header_budget.debit(upper,
+                    appearance=("composition-prepare-publication", appearance))
         connection = await self.db.connection()
         def checked_snapshot(conn):
             if self.header_budget is None:
@@ -3146,17 +4418,24 @@ class CompositionSessionGuard:
             from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
             certificate = _certify_current_memory_snapshot_on_connection(conn, self.header_budget,
                 _header_budget=self._writer_metadata_budget(conn))
+            self._publication_common = certificate
             if type(self.base) is dict and self.base.get("schema_version") == 2:
                 return self._programme_snapshot(conn, certificate, self.base)
             with snapshot_reads(certificate):
                 return composition_closure(conn, verify_files=native_composition_files)
         target, members = await connection.run_sync(checked_snapshot)
+        self._publication_members = members
+        pay("members-difference", width(members) + width(self.members))
         changed_members = members.symmetric_difference(self.members)
         if changed_members and self.db.info.get("composition_writer_owner") not in {
                 "durable_jobs", "native_ingress", "composition_maintenance", "finite_service"}:
             raise ProductionWorkspaceReconciliationError("composition_unhooked_membership_writer")
+        pay("delta-key-union", width(self.touched.keys()) + width(changed_members))
         if len(set(self.touched) | changed_members) > 128:
             raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+        changed_touched_upper = 2 + sum(width(table) + width(key) + 70
+            for table, key in changed_members) + max(0, len(changed_members) - 1)
+        pay("changed-touched-map", changed_touched_upper)
         for table, key in changed_members:
             if (table, key) not in self.touched:
                 # Newly retained ancestors must be included in the shared delta.
@@ -3164,27 +4443,59 @@ class CompositionSessionGuard:
                     lambda conn, table=table, key=key: self._leaf(conn, table, key, original=True))
         if not self.touched and target != self.base:
             raise ProductionWorkspaceReconciliationError("composition_unhooked_membership_writer")
+        delta_sort_upper = 2 + sum(width(table) + width(key) + width(before) + 6
+            for (table, key), before in self.touched.items()) + max(0, len(self.touched) - 1)
+        delta_upper = 2 + sum(2 + width("table_id") + 1 + width(table)
+            + width("key") + 1 + width(key) + width("before_digest") + 67
+            + width("after_digest") + 67 + 3 for table, key in self.touched) + max(0, len(self.touched) - 1)
+        pay("delta-sort", delta_sort_upper)
+        pay("delta-construction", delta_upper)
         delta = []
         for (table, key), before in sorted(self.touched.items()):
             after = await connection.run_sync(lambda conn, table=table, key=key:
                 self._leaf(conn, table, key)) if (table, key) in members else None
             delta.append({"table_id": table, "key": key, "before_digest": before, "after_digest": after})
-        accounting = await self._publication_accounting_payload()
+        from src.db.engine import _original_discovery_exit_completion
+        owned_exit = _original_discovery_exit_completion.get()
+        accounting = await self._publication_accounting_payload(
+            _numeric_body_certificate=self._publication_common if owned_exit is not None else None,
+            discovery_session=owned_exit[0] if owned_exit is not None else None)
         if target == self.base and not self.db.info.get("composition_accounting_payload"):
+            pay("return", width(target) + 12)
             return target, None, None
         if len(delta) + len(accounting.get("operations", [])) > 128:
             raise ProductionWorkspaceReconciliationError("composition_transaction_delta_exceeded")
+        checkpoint_upper = (2 + sum(width(key) + 1 + width(value)
+            for key, value in accounting.items() if key not in {"schema_version", "composition_base",
+                "composition_target", "composition_delta", "secret_values_included"})
+            + width("schema_version") + 2 + width("composition_base") + 1 + width(self.base)
+            + width("composition_target") + 1 + width(target)
+            + width("composition_delta") + 1 + width(delta)
+            + width("secret_values_included") + 6
+            + max(0, len(accounting) + sum(name not in accounting for name in
+                ("schema_version", "composition_base", "composition_target",
+                 "composition_delta", "secret_values_included")) - 1))
+        pay("checkpoint-construction", checkpoint_upper)
         checkpoint = {**accounting, "schema_version": 2, "composition_base": self.base,
             "composition_target": target, "composition_delta": delta, "secret_values_included": False}
-        receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {"secret_values_included": False}
+        prior_receipt = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+        if not prior_receipt:
+            pay("receipt-default", 2 + width("secret_values_included") + 6)
+        receipt = prior_receipt or {"secret_values_included": False}
+        pay("receipt-target-update", width(receipt) + width("runtime_composition") + 1 + width(target))
         receipt["runtime_composition"] = target
         if accounting.get("witness") is not None:
+            pay("receipt-witness-update", width(receipt) + width("inference_accounting") + 1 + width(accounting["witness"]))
             receipt["inference_accounting"] = accounting["witness"]
         # Check BOTH size bounds before publishing either file.
         from src.workspace.production import MAX_ACCOUNTING_CHECKPOINT_BYTES, MAX_LIFECYCLE_RECEIPT_BYTES
+        for label, payload in (("checkpoint", checkpoint), ("receipt", receipt)):
+            for appearance in ("size-json", "size-utf8"):
+                pay(label + "-" + appearance, width(payload))
         if (len(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")).encode()) > MAX_ACCOUNTING_CHECKPOINT_BYTES
             or len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()) > MAX_LIFECYCLE_RECEIPT_BYTES):
             raise ProductionWorkspaceReconciliationError("composition_publication_size_exceeded")
+        pay("return", width(target) + width(checkpoint) + width(receipt) + 4)
         return target, checkpoint, receipt
 
     async def reserve_session_mutation(self, record, changes):
@@ -3242,9 +4553,12 @@ class CompositionSessionGuard:
                 amount = amount - original_upper + upper
             entries.append((appearance, amount))
         if expected[1] is not None:
+            from src.workspace.production import _publication_json_upper
             for label, payload in (("checkpoint", expected[1]), ("receipt", expected[2])):
                 encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
                 entries.extend([(("session-output", label), len(encoded)), (None, len(encoded) + 1)])
+                for appearance in ("dict-copy", "json", "utf8", "readback-dict", "readback-json", "readback-utf8"):
+                    entries.append((("composition-publication", label, appearance), _publication_json_upper(payload)))
         reservation = _SessionNumericReservation(self, binding, entries)
         self._session_reservation = reservation
         self._session_expected = tuple(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -3272,6 +4586,25 @@ class CompositionSessionGuard:
         if self.db.info.get("composition_sticky_failure") is not None:
             raise self.db.info["composition_sticky_failure"]
         reservation = self._session_reservation
+        from src.db.engine import _original_discovery_exit_completion, _get_original_discovery_exit_completion
+        original_exit = _original_discovery_exit_completion.get()
+        discovery_reservation = None
+        if original_exit is not None:
+            owned, phase, job_id, _task = original_exit
+            if (_get_original_discovery_exit_completion(owned, phase, job_id) is not original_exit
+                    or owned.guard is not self or self._discovery_reservation is None):
+                raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+            discovery_reservation = self._discovery_reservation
+            discovery_reservation._checked()
+            widths = discovery_reservation.publication_widths
+            # The actual target and output objects are built by the unchanged
+            # publisher below. Their closed numeric widths were reserved before
+            # staging; pay the repeated construction appearances first.
+            for label, key in (("target", "target_bytes"), ("checkpoint", "checkpoint_bytes"),
+                    ("receipt", "receipt_bytes")):
+                for appearance in ("construction", "canonical", "encoded"):
+                    self.header_budget.debit(widths[key],
+                        appearance=("discovery-publication-output", label, appearance))
         if reservation is not None:
             self._validate_session_reservation()
         self._writer_metadata_budget()
@@ -3282,8 +4615,15 @@ class CompositionSessionGuard:
             prepared = await self._prepare_publication()
             target, checkpoint, receipt = prepared
             if checkpoint is not None:
-                write_accounting_checkpoint(self.workspace, checkpoint)
-                write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True)
+                if discovery_reservation is None:
+                    write_accounting_checkpoint(self.workspace, checkpoint)
+                    write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True)
+                else:
+                    write_accounting_checkpoint(self.workspace, checkpoint, header_budget=self.header_budget)
+                    write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True,
+                        header_budget=self.header_budget)
+                    _verify_composition_publication_bytes(self.workspace, checkpoint, receipt,
+                        header_budget=self.header_budget)
         else:
             with reservation.reads():
                 prepared = await self._prepare_publication()
@@ -3302,6 +4642,18 @@ class CompositionSessionGuard:
             if any(reservation.entries.values()):
                 raise ProductionWorkspaceReconciliationError("session_publication_appearance_missing")
             reservation.close()
+        if original_exit is not None:
+            owned, phase, job_id, _task = original_exit
+            if _get_original_discovery_exit_completion(owned, phase, job_id) is not original_exit:
+                raise ProductionWorkspaceReconciliationError("programme_original_writer_exit_unavailable")
+            from src.memory.composition_headers import _metadata_size
+            touched_upper = 2 + sum(4 + _metadata_size(table) + _metadata_size(key)
+                + _metadata_size(before) for (table, key), before in self.touched.items())
+            self.header_budget.debit(touched_upper,
+                appearance=("discovery-publication-touched-copy", phase, job_id))
+            self._discovery_publication_snapshot = (target, self._publication_members,
+                self._programme_current_leaves, dict(self.touched))
+            self._discovery_publication_exit = original_exit
         self.prepared_commit = True
 
     def close(self):

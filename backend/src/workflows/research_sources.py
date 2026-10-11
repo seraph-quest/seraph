@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -242,6 +244,12 @@ class DiscoveryInputWitness:
 def discovery_stage_inputs(plan, artifacts, stage_id):
     """Resolve only declared whole-output refs to their exact physical owners."""
     from src.guardian.research_plan_contracts import ArtifactRef
+    # Each retained record contains its bytes, decoded value and fixed ref.
+    upper = 2 + sum(12 * len(item["content"]) + 141 + 64 + 3 for item in artifacts.values())
+    for index, _ in enumerate(next(item for item in plan.steps if item.step_id == stage_id).input_refs):
+        _discovery_physical_debit(("stage-input-candidates", stage_id, index), upper, job_id=plan.plan_id)
+    _discovery_physical_debit(("stage-input-list", stage_id), upper, job_id=plan.plan_id)
+    _discovery_physical_debit(("stage-input-return", stage_id), upper, job_id=plan.plan_id)
     step = next(item for item in plan.steps if item.step_id == stage_id)
     resolved = []
     for ref in step.input_refs:
@@ -276,11 +284,20 @@ def compile_discovery_search_derivation(plan, artifacts, effects, manifest, refe
     import re
     from src.guardian.discovery_search import SEARCH_URL
     queries = discovery_stage_inputs(plan, artifacts, "search_public")[0]["parsed"]["queries"]
+    from src.workflows.job_runtime import _discovery_utf8_width, _discovery_encoded_upper
+    query_bytes = sum(_discovery_utf8_width(query) for query in queries) + max(0, len(queries) - 1)
+    for name, upper in (("query-join", 6 * query_bytes + 2), ("query-encoded", query_bytes), ("query-digest", 66),
+            ("responses-list", 2 + _discovery_encoded_upper(effects))):
+        _discovery_physical_debit(("manifest-derivation", name), upper, job_id=job_id)
     query_digest = hashlib.sha256("\n".join(queries).encode()).hexdigest()
     if manifest.query_digest != query_digest or manifest.run_id != plan.plan_id or len(manifest.results) > plan.limits.max_results:
         raise ValueError("programme manifest derivation differs from original query outputs")
     responses = []
     for index, query in enumerate(queries):
+        for name, upper in (("matching-responses", _discovery_encoded_upper(effects)),
+                ("query-encoded", _discovery_utf8_width(query)), ("query-digest", 66),
+                ("search-url-encoded", len(SEARCH_URL)), ("search-url-digest", 66)):
+            _discovery_physical_debit(("manifest-response", index, name), upper, job_id=job_id)
         original = [item for item in effects if item.get("receipt_kind") == "readback"
             and item.get("effect_type") == "public_https_read" and item.get("status") == "succeeded"
             and item.get("details", {}).get("search_response_receipt", {}).get("query_index") == index]
@@ -298,17 +315,227 @@ def compile_discovery_search_derivation(plan, artifacts, effects, manifest, refe
                 or record.get("target_digest") != hashlib.sha256(SEARCH_URL.encode()).hexdigest()
                 or record.get("effect_id") != f"discovery-search:{job_id}:{index}"):
             raise ValueError("programme manifest lacks its exact original HTTP response receipts")
+        _discovery_physical_debit(("manifest-response", index, "receipt-copy"), _discovery_encoded_upper(receipt), job_id=job_id)
         responses.append(dict(receipt))
+    _discovery_physical_debit("manifest-reference-dump", 141, job_id=job_id)
+    _discovery_physical_debit("manifest-derivation-return", 141 + _discovery_encoded_upper(responses) + 130, job_id=job_id)
     return {"manifest_ref": reference.model_dump(mode="json"), "query_digest": query_digest, "responses": responses}
 
 
-def _discovery_original_rows(raw_workflow_row):
+def _discovery_physical_function_entries(function, *, job_id, widths, count=2, plan_bytes=0, brief_bytes=0):
+    """Source-derived encoded appearances, excluding separately paid callees."""
+    from src.workflows.job_runtime import _discovery_object_width
+    j = lambda name: 6 * widths[name] + 2
+    ref = _discovery_object_width({"artifact_id": 30, "digest": 66, "schema_version": 1})
+    path = len("goal-programmes/") + 32 + 1 + 64 + 1 + 64 + len(".json") + 2
+    metadata = 2 + path + 66 + 20 + len("public_brief") + 2 + 3
+    entries = []
+    def add(name, upper, repeats=1):
+        entries.extend((("discovery-physical", job_id, function, name), upper) for _ in range(repeats))
+    if function == "original-rows":
+        for name in ("declared_authority_json", "arguments_json", "checkpoint_receipts_json",
+                "artifact_receipts_json", "effect_receipts_json", "declared_authority_json"):
+            add("json-" + name, j(name))
+        add("authority-dto", j("declared_authority_json"))
+        add("artifact-ref", ref, 2)
+        for name in ("arguments_json", "declared_authority_json"):
+            add("digest-canonical-" + name, j(name))
+            add("digest-encoded-" + name, j(name))
+            add("digest-return", 66)
+        add("return-tuple", 2 + 6 * widths["run_identity"] + 2 + sum(j(name) for name in
+            ("declared_authority_json", "arguments_json", "checkpoint_receipts_json",
+             "artifact_receipts_json", "effect_receipts_json")) + 5)
+    elif function == "records":
+        add("empty-selected", 2)
+        add("slot-set", 2 + count * (2 + len("public_brief") + 2 + 1 + 1) + max(0, count - 1))
+        record = _discovery_object_width({"checkpoint_id": j("checkpoint_receipts_json"),
+            "payload": j("checkpoint_receipts_json"), "artifact": j("artifact_receipts_json"),
+            "effect": j("effect_receipts_json")})
+        seed = 2 + 6 * widths["run_identity"] + 2 + len("public_brief") + 2 + 1 + 2
+        identifier_seed = len("goal_public_discovery_v1") + len("goal_discovery_public_brief") + widths["run_identity"] + path + 64 + 4
+        for name, upper in (("artifact-ref", ref), ("path-seed-list", seed),
+                ("path-seed-json", seed), ("path-seed-encoded", seed), ("path-seed-digest", 66),
+                ("expected-path", path), ("identifier-seed-list", identifier_seed),
+                ("identifier-seed-string", identifier_seed), ("identifier-seed-encoded", identifier_seed),
+                ("identifier-digest", 66), ("identifier-slice", 26), ("identifier-return", 30),
+                ("matching-artifacts", j("artifact_receipts_json")),
+                ("matching-effects", j("effect_receipts_json")), ("selected-record", record)):
+            add(name, upper, count)
+        add("return-tuple", 2 + count * record + max(0, count - 1))
+    elif function == "references":
+        selected = 2 + count * metadata + max(0, count - 1)
+        all_refs = 2 + (count + 2) * metadata + count + 1
+        add("selected-metadata-list", selected)
+        add("initial-metadata-list", 2 + 2 * metadata + 1)
+        add("artifact-ref", ref, 2)
+        add("matching-list", selected, 2)
+        add("concat-list", all_refs)
+        add("return-tuple", all_refs)
+    elif function in {"provenance", "input-reader"}:
+        add("plan-json", 6 * plan_bytes + 2)
+        add("plan-dto", 6 * plan_bytes + 2)
+        for name in ("plan-model-dump", "plan-size-json", "plan-size-encoded"):
+            add(name, 6 * plan_bytes + 2)
+        add("artifact-ref", ref, 2 + count if function == "input-reader" else 2 + count)
+        if function == "input-reader":
+            add("contents-map", 2 + 2 * (6 * path + 1) + 6 * (plan_bytes + brief_bytes) + 4 + 1)
+            add("row-copy", widths["row_header_bytes"])
+        else:
+            add("authority-digest-json", j("declared_authority_json"))
+            for name in ("arguments_json", "declared_authority_json", "checkpoint_receipts_json", "artifact_receipts_json"):
+                add("digest-canonical-" + name, j(name))
+                add("digest-encoded-" + name, j(name))
+                add("digest-return", 66)
+            add("brief-decode", 6 * brief_bytes + 2)
+            for size in (plan_bytes, brief_bytes, brief_bytes, plan_bytes):
+                add("content-hash", size)
+                add("content-hash-digest", 66)
+            add("adopted-plan-json", 6 * plan_bytes + 2)
+            identifier_seed = len("goal_public_discovery_v1") + len("goal_discovery_public_brief") + widths["run_identity"] + path + 64 + 4
+            for name, upper in (("identifier-seed-list", identifier_seed), ("identifier-seed-string", identifier_seed),
+                    ("identifier-seed-encoded", identifier_seed), ("identifier-digest", 66),
+                    ("identifier-slice", 26), ("identifier-return", 30)):
+                add(name, upper, 2 + count)
+            artifact = _discovery_object_width({"reference": ref, "content": 6 * max(plan_bytes, brief_bytes) + 2,
+                "parsed": 6 * plan_bytes + 2, "kind": len("public_brief") + 2,
+                "slot": 1, "search_derivation": 4})
+            add("artifact-record", artifact, 2 + count)
+            add("artifacts-map", 2 + (count + 2) * (30 + 1 + artifact) + count + 1)
+            add("adopted-slot-set", 2 + count * (2 + len("public_brief") + 2 + 1 + 1) + max(0, count - 1))
+            add("matching-artifacts", j("artifact_receipts_json"), count)
+            for name in ("manifest-list", "selection-list", "snapshot-sorted-list"):
+                add(name, 2)
+            witness = _discovery_object_width({"job_id": 6 * widths["run_identity"] + 2,
+                "input_digest": 66, "authority_digest": 66, "checkpoint_digest": 66, "artifact_digest": 66,
+                "plan": 6 * plan_bytes + 2, "public_brief": 6 * brief_bytes + 2,
+                "artifacts": 2 + (count + 2) * (30 + 1 + artifact) + count + 1})
+            add("witness-construction", witness)
+            add("witness-return", witness)
+    return tuple(entries)
+
+
+_DISCOVERY_PHYSICAL_CAPACITY = ContextVar("original_discovery_physical_capacity", default=None)
+_DISCOVERY_VALIDATED_PLAN_OWNER = ContextVar("original_discovery_validated_plan_owner", default=None)
+
+
+@contextmanager
+def _original_discovery_physical_capacity_scope(budget, *, _validated_plan_owner=None):
+    """An original reader's capacity facts; no row or execution authority."""
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    if type(budget) is not HeaderReadBudget:
+        raise HeaderBoundsError("programme_physical_capacity_unavailable")
+    prior = _DISCOVERY_PHYSICAL_CAPACITY.get()
+    if prior is not None and prior[0] is not budget:
+        raise HeaderBoundsError("programme_physical_capacity_changed")
+    facts = prior[1] if prior is not None else {}
+    owner_token = None
+    if _validated_plan_owner is not None:
+        owned = _validated_plan_owner.jobs._validate_discovery_session(_validated_plan_owner, header_budget=budget)
+        if owned._candidate is None or owned._candidate_phase != "reader":
+            raise HeaderBoundsError("programme_original_queue_candidate_changed")
+        if _DISCOVERY_VALIDATED_PLAN_OWNER.get() not in (None, owned):
+            raise HeaderBoundsError("programme_original_queue_candidate_changed")
+        owner_token = _DISCOVERY_VALIDATED_PLAN_OWNER.set(owned)
+    token = _DISCOVERY_PHYSICAL_CAPACITY.set((budget, facts))
+    try:
+        yield facts
+    finally:
+        _DISCOVERY_PHYSICAL_CAPACITY.reset(token)
+        if owner_token is not None:
+            _DISCOVERY_VALIDATED_PLAN_OWNER.reset(owner_token)
+
+
+def _discovery_physical_budget(explicit=None):
+    from src.memory.header_bounds import HeaderBoundsError
+    scope = _DISCOVERY_PHYSICAL_CAPACITY.get()
+    if scope is not None and explicit is not None and scope[0] is not explicit:
+        raise HeaderBoundsError("programme_physical_capacity_changed")
+    return explicit if explicit is not None else scope[0] if scope is not None else None
+
+
+def _discovery_physical_debit(name, upper, *, job_id, header_budget=None):
+    budget = _discovery_physical_budget(header_budget)
+    if budget is not None:
+        budget.debit(upper, appearance=("discovery-physical", job_id, name))
+
+
+def _discovery_physical_prepay(budget, function, raw, *, count=2, contents=None, plan_bytes=None, brief_bytes=None):
+    budget = _discovery_physical_budget(budget)
+    if budget is None:
+        return
+    from src.workflows.job_runtime import _discovery_utf8_width
+    from src.memory.header_bounds import _DISCOVERY_NUMERIC_READS, HeaderBoundsError
+    active = _DISCOVERY_NUMERIC_READS.get()
+    if active is None or active.budget is not budget:
+        # An existing original closure's paid trace is supplied by its owner;
+        # this helper is not permission to stage or use a bare frame.
+        from src.workflows.job_runtime import _discovery_encoded_upper
+        widths = {name: _discovery_utf8_width(value) for name, value in raw.items() if type(value) is str}
+        widths["row_header_bytes"] = _discovery_encoded_upper(raw)
+        sizes = tuple(len(value) for value in (contents or {}).values())
+        plan = plan_bytes if plan_bytes is not None else max(sizes, default=0)
+        brief = brief_bytes if brief_bytes is not None else max(sizes, default=0)
+        scope = _DISCOVERY_PHYSICAL_CAPACITY.get()
+        if scope is not None:
+            prior = scope[1].get(raw["run_identity"])
+            scope[1][raw["run_identity"]] = {"widths": widths,
+                "count": max(count, prior["count"] if prior is not None else 0),
+                "plan_bytes": max(plan, prior["plan_bytes"] if prior is not None else 0),
+                "brief_bytes": max(brief, prior["brief_bytes"] if prior is not None else 0)}
+    else:
+        active._checked()
+        if raw["run_identity"] == active.constructor["job_id"]:
+            widths = active.constructor["text_bytes"]
+            widths = {**widths, "row_header_bytes": active.constructor["row_header_bytes"]}
+            plan, brief = active.constructor["plan_bytes"], active.constructor["brief_bytes"]
+            count = active.constructor.get("physical_count", count)
+        else:
+            retained = active.physical_widths.get(raw["run_identity"])
+            if retained is None:
+                raise HeaderBoundsError("programme_physical_numeric_row_unreserved")
+            widths, count = retained["widths"], retained["count"]
+            plan, brief = retained["plan_bytes"], retained["brief_bytes"]
+    for appearance, upper in _discovery_physical_function_entries(function, job_id=raw["run_identity"],
+            widths=widths, count=count, plan_bytes=plan, brief_bytes=brief):
+        budget.debit(upper, appearance=appearance)
+
+
+def original_discovery_physical_numeric_schedule(discovery_session, *, constructor, publication=False):
+    """Original queue and publication variants for the real initial artifacts."""
+    owned = discovery_session.jobs._validate_discovery_session(discovery_session)
+    from src.memory.header_bounds import HeaderBoundsError
+    if constructor is not owned._constructor_bounds or constructor["job_id"] != owned._candidate[0]:
+        raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
+    widths = {**constructor["text_bytes"], "row_header_bytes": constructor["row_header_bytes"]}
+    phase = "publication-admission" if publication else "queue"
+    entries = []
+    counts = {"original-rows": 7 if publication else 6, "records": 3 if publication else 2,
+        "references": 2, "provenance": 1, "input-reader": 0 if publication else 1}
+    for function, count in counts.items():
+        for _ in range(count):
+            entries.extend((phase, appearance, upper) for appearance, upper in
+                _discovery_physical_function_entries(function, job_id=constructor["job_id"], widths=widths,
+                    count=constructor.get("physical_count", 2),
+                    plan_bytes=constructor["plan_bytes"], brief_bytes=constructor["brief_bytes"]))
+    if publication:
+        path = len("goal-programmes/") + 32 + 1 + 64 + 1 + 64 + len(".json")
+        size_sum = 2 * (constructor["plan_bytes"] + constructor["brief_bytes"])
+        entries.append((phase, ("discovery-physical", constructor["job_id"], "closure-contents"),
+            2 + 4 * (6 * path + 3) + size_sum))
+    for size in (constructor["plan_bytes"], constructor["brief_bytes"],
+            constructor["brief_bytes"], constructor["plan_bytes"]):
+        entries.append((phase, None, size + 1))
+    return tuple(entries)
+
+
+def _discovery_original_rows(raw_workflow_row, *, header_budget=None):
     """Decode original finite provenance, without current lifecycle checks."""
     from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
     from src.guardian.research_plan_contracts import ArtifactRef
     from src.workflows.job_runtime import _digest
     if type(raw_workflow_row) is not dict or raw_workflow_row.get("job_kind") != DISCOVERY_KIND:
         raise ValueError("programme physical inputs require native lineage")
+    _discovery_physical_prepay(header_budget, "original-rows", raw_workflow_row)
     authority = discovery_authority(raw_workflow_row["declared_authority_json"])
     job_id = raw_workflow_row["run_identity"]
     if (job_id != authority.original_job_id or raw_workflow_row.get("owner_principal_id") != DISCOVERY_SERVICE
@@ -337,13 +564,15 @@ def _discovery_original_rows(raw_workflow_row):
     return job_id, authority, inputs, history, artifacts, effects
 
 
-def discovery_physical_records(raw_workflow_row):
+def discovery_physical_records(raw_workflow_row, *, header_budget=None):
     """Pure original adoption checks over exact retained provenance records."""
     from src.work_board.research_parent import DISCOVERY_KIND
     from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS, discovery_prefix, json_bytes, sha
     from src.guardian.research_plan_contracts import ArtifactRef
     from src.artifacts.registry import artifact_id_for
-    job_id, authority, inputs, history, artifacts, effects = _discovery_original_rows(raw_workflow_row)
+    job_id, authority, inputs, history, artifacts, effects = _discovery_original_rows(raw_workflow_row, header_budget=header_budget)
+    count = sum(1 for entry in history if str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"))
+    _discovery_physical_prepay(header_budget, "records", raw_workflow_row, count=count)
     programme_id = authority.programme_binding.programme_id
     selected = []
     slots = set()
@@ -390,13 +619,15 @@ def discovery_physical_records(raw_workflow_row):
     return tuple(selected)
 
 
-def discovery_physical_references(raw_workflow_row):
+def discovery_physical_references(raw_workflow_row, *, header_budget=None):
     """Return each original read appearance, including repeated initial refs."""
     from src.guardian.research_plan_contracts import ArtifactRef
-    _, _, inputs, _, _, _ = _discovery_original_rows(raw_workflow_row)
+    _, _, inputs, _, _, _ = _discovery_original_rows(raw_workflow_row, header_budget=header_budget)
+    records = discovery_physical_records(raw_workflow_row, header_budget=header_budget)
+    _discovery_physical_prepay(header_budget, "references", raw_workflow_row, count=len(records))
     selected = [(item["payload"]["file_path"], item["artifact"]["content_sha256"],
         item["payload"]["byte_count"], item["payload"]["kind"])
-        for item in discovery_physical_records(raw_workflow_row)]
+        for item in records]
     initial = []
     for kind in ("plan", "public_brief"):
         reference = ArtifactRef.model_validate(inputs[kind + "_ref"])
@@ -413,35 +644,68 @@ def physical_discovery_closure(raw_workflow_row, *, root, header_budget):
     from src.memory.header_bounds import HeaderReadBudget
     if type(header_budget) is not HeaderReadBudget:
         raise ValueError("programme physical closure requires its original budget")
-    appearances = discovery_physical_references(raw_workflow_row)
-    authority = _discovery_original_rows(raw_workflow_row)[1]
-    contents = {}
-    for path, digest, size, kind in appearances:
-        contents[path] = read_discovery(path, digest, programme_id=authority.programme_binding.programme_id,
-            max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind], root=root, expected_size=size, header_budget=header_budget)
-    validate_discovery_physical_provenance(raw_workflow_row, contents, historical=True)
-    return appearances
+    with _original_discovery_physical_capacity_scope(header_budget):
+        appearances = discovery_physical_references(raw_workflow_row, header_budget=header_budget)
+        authority = _discovery_original_rows(raw_workflow_row, header_budget=header_budget)[1]
+        header_budget.debit(2 + sum(6 * len(path) + 3 + size for path, _, size, _ in appearances),
+            appearance=("discovery-physical", raw_workflow_row["run_identity"], "closure-contents"))
+        contents = {}
+        for path, digest, size, kind in appearances:
+            contents[path] = read_discovery(path, digest, programme_id=authority.programme_binding.programme_id,
+                max_bytes=DISCOVERY_ARTIFACT_LIMITS[kind], root=root, expected_size=size, header_budget=header_budget)
+        validate_discovery_physical_provenance(raw_workflow_row, contents, historical=True, header_budget=header_budget)
+        return appearances
 
 
-async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None):
+async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None, discovery_session=None):
+    if discovery_session is not None:
+        owned = jobs._validate_discovery_session(discovery_session)
+        with owned.guard._discovery_reservation.phase("queue"):
+            return await _physical_discovery_inputs(jobs, job_id, completed_read=completed_read,
+                stage_id=stage_id, discovery_session=owned)
+    return await _physical_discovery_inputs(jobs, job_id, completed_read=completed_read, stage_id=stage_id)
+
+
+async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None, discovery_session=None):
     """Reopen immutable programme inputs BEFORE a short native writer."""
     from src.work_board.research_parent import DISCOVERY_KIND
     from src.work_board.research_artifacts import read_discovery, DISCOVERY_ARTIFACT_LIMITS
     from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef
     from src.workflows.job_runtime import _utc_now
-    async with jobs._session() as db:
-        run = await jobs._fetch(db, job_id)
+    owned = (jobs._validate_discovery_session(discovery_session)
+        if discovery_session is not None else None)
+    if owned is not None:
+        if completed_read or stage_id is not None or owned._candidate is None or owned._candidate[0] != job_id:
+            raise ValueError("programme original physical read owner changed")
+    async with jobs._discovery_read_session(discovery_session) as db:
+        if owned is not None:
+            from src.memory.header_bounds import WRS_BY_RUN
+            await owned.header_budget.certify(db, WRS_BY_RUN, (job_id,))
+        from contextlib import nullcontext
+        async with (jobs._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+            run = await jobs._fetch(db, job_id)
         if run.job_kind != DISCOVERY_KIND:
             raise ValueError("programme physical inputs require native lineage")
         if completed_read and run.status not in {"succeeded", "degraded"}:
             raise ValueError("programme completed readback requires its original positive terminal job")
+        if owned is not None:
+            _discovery_physical_prepay(owned.header_budget, "input-reader", {"run_identity": job_id})
         raw_row = run.model_dump(mode="python")
-    _, authority, inputs, history, _, _ = _discovery_original_rows(raw_row)
-    discovery_physical_references(raw_row)
+    frame = owned.header_budget if owned is not None else None
+    _, authority, inputs, history, _, _ = _discovery_original_rows(raw_row, header_budget=frame)
+    references = discovery_physical_references(raw_row, header_budget=frame)
+    def physical_read(path, digest, max_bytes):
+        if owned is None:
+            return read_discovery(path, digest, programme_id=binding.programme_id, max_bytes=max_bytes)
+        sizes = {size for selected_path, selected_digest, size, _ in references
+            if selected_path == path and selected_digest == digest}
+        if len(sizes) != 1:
+            raise ValueError("programme original physical size changed")
+        return read_discovery(path, digest, programme_id=binding.programme_id, max_bytes=max_bytes,
+            root=owned.guard.workspace.host_root, expected_size=next(iter(sizes)), header_budget=owned.header_budget)
     binding = authority.programme_binding
     contents = {}
-    raw_plan = read_discovery(inputs["plan_file_path"], ArtifactRef.model_validate(inputs["plan_ref"]).digest,
-        programme_id=binding.programme_id, max_bytes=65536)
+    raw_plan = physical_read(inputs["plan_file_path"], ArtifactRef.model_validate(inputs["plan_ref"]).digest, 65536)
     contents[inputs["plan_file_path"]] = raw_plan
     plan_payload = json.loads(raw_plan)
     observed = datetime.fromisoformat(plan_payload["issued_at"].replace("Z", "+00:00")) if completed_read else _utc_now()
@@ -449,22 +713,25 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
     from src.work_board.dispatcher import _dispatcher
     current_service = _dispatcher.goal_discovery
     if current_service is not None:
-        async with jobs._session() as db:
-            await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db)
+        if owned is not None and current_service is not owned.service:
+            raise ValueError("programme original physical strategy owner changed")
+        async with jobs._discovery_read_session(discovery_session) as db:
+            await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db,
+                **({"discovery_session": owned} if owned is not None else {}))
     elif plan.strategy_binding.status != "none":
         raise ValueError("programme active strategy requires its current native lifecycle owner")
-    contents[inputs["public_brief_file_path"]] = read_discovery(inputs["public_brief_file_path"],
-        ArtifactRef.model_validate(inputs["public_brief_ref"]).digest, programme_id=binding.programme_id, max_bytes=8000)
+    contents[inputs["public_brief_file_path"]] = physical_read(inputs["public_brief_file_path"],
+        ArtifactRef.model_validate(inputs["public_brief_ref"]).digest, 8000)
     for entry in history:
         if str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"):
             payload = entry["payload"]
             reference = ArtifactRef.model_validate(payload["artifact_ref"])
-            contents[payload["file_path"]] = read_discovery(payload["file_path"], reference.digest,
-                programme_id=binding.programme_id, max_bytes=DISCOVERY_ARTIFACT_LIMITS[payload["kind"]])
-    return validate_discovery_physical_provenance(raw_row, contents, historical=completed_read, stage_id=stage_id)
+            contents[payload["file_path"]] = physical_read(payload["file_path"], reference.digest,
+                DISCOVERY_ARTIFACT_LIMITS[payload["kind"]])
+    return validate_discovery_physical_provenance(raw_row, contents, historical=completed_read, stage_id=stage_id, header_budget=frame)
 
 
-def validate_discovery_physical_provenance(raw_workflow_row, contents, *, historical=False, stage_id=None):
+def validate_discovery_physical_provenance(raw_workflow_row, contents, *, historical=False, stage_id=None, header_budget=None):
     """Pure original plan/output derivation over already staged exact bytes.
 
     This returns data, never a live Source or current execution authority.
@@ -476,9 +743,15 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
     from src.guardian.research_plan_contracts import validate_goal_research_plan, ArtifactRef, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, DiscoveryBriefV1
     from src.artifacts.registry import artifact_id_for
     from src.workflows.job_runtime import _digest, _utc_now
-    job_id, authority, inputs, history, canonical_artifacts, effects = _discovery_original_rows(raw_workflow_row)
-    for path, digest, size, _ in discovery_physical_references(raw_workflow_row):
+    job_id, authority, inputs, history, canonical_artifacts, effects = _discovery_original_rows(raw_workflow_row, header_budget=header_budget)
+    count = sum(1 for entry in history if str(entry.get("checkpoint_id", "")).startswith("discovery:artifact:"))
+    _discovery_physical_prepay(header_budget, "provenance", raw_workflow_row, count=count, contents=contents,
+        plan_bytes=len(contents[inputs["plan_file_path"]]), brief_bytes=len(contents[inputs["public_brief_file_path"]]))
+    for path, digest, size, _ in discovery_physical_references(raw_workflow_row, header_budget=header_budget):
         content = contents[path]
+        if path not in {inputs["plan_file_path"], inputs["public_brief_file_path"]}:
+            _discovery_physical_debit(("stage-content-hash", path), size, job_id=job_id, header_budget=header_budget)
+            _discovery_physical_debit(("stage-content-digest", path), 66, job_id=job_id, header_budget=header_budget)
         if type(content) is not bytes or len(content) != size or hashlib.sha256(content).hexdigest() != digest:
             raise ValueError("programme staged original physical bytes changed")
     input_digest, authority_digest = raw_workflow_row["input_digest"], raw_workflow_row["authority_digest"]
@@ -544,22 +817,54 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
         if (output_slot is not None and len(content) > min(output_slot.max_bytes, plan.limits.max_output_bytes)
                 or kind in {"snapshot", "draft"} and len(content) > plan.limits.max_output_bytes):
             raise ValueError("programme physical output exceeds its declared byte allowance")
+        if kind not in {"plan", "public_brief"}:
+            _discovery_physical_debit(("stage-json", kind, slot), 6 * len(content) + 2,
+                job_id=job_id, header_budget=header_budget)
+            _discovery_physical_debit(("stage-record", kind, slot),
+                6 * len(content) + 6 * len(payload["file_path"]) + 6 * len(raw_workflow_row["checkpoint_receipts_json"]) + 2,
+                job_id=job_id, header_budget=header_budget)
         parsed = json.loads(content) if kind != "public_brief" else None
         if kind == "queries":
+            _discovery_physical_debit(("query-set", slot), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
+            if type(parsed) is dict and type(parsed.get("queries")) is list:
+                from src.workflows.job_runtime import _discovery_utf8_width
+                for index, query in enumerate(parsed["queries"]):
+                    if type(query) is str:
+                        size = _discovery_utf8_width(query)
+                        _discovery_physical_debit(("query-strip", slot, index), 6 * size + 2, job_id=job_id, header_budget=header_budget)
+                        _discovery_physical_debit(("query-encoded", slot, index), size, job_id=job_id, header_budget=header_budget)
             if (type(parsed) is not dict or set(parsed) != {"queries"} or type(parsed["queries"]) is not list
                     or not 1 <= len(parsed["queries"]) <= plan.limits.max_queries
                     or len(set(parsed["queries"])) != len(parsed["queries"])
                     or any(type(q) is not str or not q.strip() or len(q.encode()) > 2048 or any(ord(c) < 32 for c in q) for q in parsed["queries"])):
                 raise ValueError("programme physical query plan exceeds its original allowance")
         elif kind == "manifest":
+            _discovery_physical_debit(("stage-dto", kind, slot), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
+            for name in ("result-id-set", "result-url-set"):
+                _discovery_physical_debit(("manifest-validator", slot, name), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
+            if type(parsed) is dict and type(parsed.get("results")) is list:
+                from src.workflows.job_runtime import _discovery_utf8_width
+                for index, result in enumerate(parsed["results"]):
+                    if type(result) is dict and type(result.get("exact_url")) is str:
+                        _discovery_physical_debit(("manifest-url-parser", slot, index),
+                            6 * _discovery_utf8_width(result["exact_url"]) + 2, job_id=job_id, header_budget=header_budget)
             parsed = SearchManifestV1.model_validate(parsed)
             if parsed.run_id != plan.plan_id or len(parsed.results) > plan.limits.max_results:
                 raise ValueError("programme search manifest run or cap changed")
         elif kind == "selection":
+            _discovery_physical_debit(("stage-dto", kind, slot), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
+            _discovery_physical_debit(("selection-validator", slot, "id-set"), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
             parsed = SourceSelectionV1.model_validate(parsed)
             if len(parsed.selected_result_ids) > plan.limits.max_sources:
                 raise ValueError("programme selected source count exceeds its original allowance")
         elif kind == "snapshot":
+            _discovery_physical_debit(("stage-dto", kind, slot), 6 * len(content) + 2, job_id=job_id, header_budget=header_budget)
+            for name, upper in (("normalized-join", 6 * len(content) + 2), ("normalized-encoded", 6 * len(content) + 2), ("normalized-digest", 66)):
+                _discovery_physical_debit(("snapshot-validator", slot, name), upper, job_id=job_id, header_budget=header_budget)
+            if type(parsed) is dict and type(parsed.get("url")) is str:
+                from src.workflows.job_runtime import _discovery_utf8_width
+                _discovery_physical_debit(("snapshot-url-parser", slot), 6 * _discovery_utf8_width(parsed["url"]) + 2,
+                    job_id=job_id, header_budget=header_budget)
             parsed = PublicSnapshotV1.model_validate(parsed)
         artifacts[reference.artifact_id] = {"reference": reference, "content": content, "parsed": parsed, "kind": kind, "slot": slot,
             "search_derivation": payload.get("search_derivation")}
@@ -573,6 +878,13 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
             discovery_stage_inputs(plan, artifacts, producer)
     if stage_id is not None:
         discovery_stage_inputs(plan, artifacts, stage_id)
+    retained_upper = 2 + sum(12 * len(item["content"]) + 141 + 64 + 3 for item in artifacts.values())
+    # These later-stage containers are absent from the initial two-artifact
+    # constructor. Their original paid current-root trace retains every fee.
+    if count > 2:
+        for name in ("manifest-list", "selection-list", "snapshot-sorted-list"):
+            _discovery_physical_debit(("retained-stage", name), retained_upper,
+                job_id=job_id, header_budget=header_budget)
     manifests = [a for a in artifacts.values() if a["kind"] == "manifest"]
     selections = [a for a in artifacts.values() if a["kind"] == "selection"]
     for manifest_artifact in manifests:
@@ -584,7 +896,13 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
     if selections:
         if len(manifests) != 1 or len(selections) != 1:
             raise ValueError("programme selection provenance is ambiguous")
+        for name in ("selected-id-set", "manifest-id-set"):
+            _discovery_physical_debit(("selection-manifest", name), retained_upper, job_id=job_id, header_budget=header_budget)
         selections[0]["parsed"].validate_manifest(manifests[0]["parsed"], manifests[0]["reference"])
+        from src.workflows.job_runtime import _discovery_encoded_upper, _discovery_utf8_width
+        known_upper = 2 + sum(_discovery_encoded_upper(r.result_id) + _discovery_encoded_upper(r.exact_url) + 2
+            for r in manifests[0]["parsed"].results)
+        _discovery_physical_debit("selection-known-map", known_upper, job_id=job_id, header_budget=header_budget)
         known = {r.result_id: r.exact_url for r in manifests[0]["parsed"].results}
         for artifact in artifacts.values():
             if artifact["kind"] == "snapshot":
@@ -599,6 +917,13 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
         raise ValueError("programme physical snapshot count exceeds its original allowance")
     for container in (item for item in artifacts.values() if item["kind"] == "snapshots"):
         summary = container["parsed"]
+        from src.workflows.job_runtime import _discovery_encoded_upper, _discovery_object_width
+        summary_upper = 2 + sum(_discovery_object_width({"url": _discovery_encoded_upper(item["parsed"].url),
+            "digest": 66, "result_id": _discovery_encoded_upper(item["parsed"].result_id), "fetched_at": 44}) + 1
+            for item in snapshots)
+        _discovery_physical_debit("snapshot-summary-list", summary_upper, job_id=job_id, header_budget=header_budget)
+        for item in snapshots:
+            _discovery_physical_debit(("snapshot-time", item["slot"]), 44, job_id=job_id, header_budget=header_budget)
         expected = [{"url": item["parsed"].url, "digest": item["parsed"].digest,
             "result_id": item["parsed"].result_id, "fetched_at": item["parsed"].fetched_at.isoformat()} for item in snapshots]
         if type(summary) is not dict or set(summary) != {"snapshots", "denied"} or summary["snapshots"] != expected:
@@ -606,6 +931,15 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
     for artifact in artifacts.values():
         if artifact["kind"] != "brief":
             continue
+        _discovery_physical_debit("brief-output-dto", 6 * len(artifact["content"]) + 2, job_id=job_id, header_budget=header_budget)
+        if type(artifact["parsed"]) is dict:
+            coverage_value = artifact["parsed"].get("coverage")
+            if type(coverage_value) is dict and type(coverage_value.get("sources")) is list:
+                from src.workflows.job_runtime import _discovery_utf8_width
+                for index, source in enumerate(coverage_value["sources"]):
+                    if type(source) is dict and type(source.get("url")) is str:
+                        _discovery_physical_debit(("brief-source-url-parser", index), 6 * _discovery_utf8_width(source["url"]) + 2,
+                            job_id=job_id, header_budget=header_budget)
         output = DiscoveryBriefV1.model_validate(artifact["parsed"])
         coverage = output.coverage
         if (coverage.original_public_brief_digest != brief_ref.digest
@@ -616,17 +950,40 @@ def validate_discovery_physical_provenance(raw_workflow_row, contents, *, histor
             if adopted is None or adopted["kind"] != "snapshot" or adopted["reference"] != span.snapshot_ref:
                 raise ValueError("programme output span has no original adopted snapshot")
             snapshot = adopted["parsed"]
+            from src.workflows.job_runtime import _discovery_utf8_width
+            normalized_bytes = sum(_discovery_utf8_width(line) for line in snapshot.lines) + max(0, len(snapshot.lines) - 1)
+            _discovery_physical_debit(("brief-normalized-join", span.snapshot_ref.artifact_id), 6 * normalized_bytes + 2, job_id=job_id, header_budget=header_budget)
+            _discovery_physical_debit(("brief-normalized-encoded", span.snapshot_ref.artifact_id), normalized_bytes, job_id=job_id, header_budget=header_budget)
             normalized = "\n".join(snapshot.lines).encode()
             if (span.result_id != snapshot.result_id or span.normalized_digest != snapshot.digest
                     or span.normalized_byte_count != len(normalized)):
                 raise ValueError("programme output normalized coverage changed")
             first, last = span.included_first_line, span.included_last_line
             count = last - first + 1 if first else 0
+            if first:
+                # Full original lines are an upper bound for the selected slice.
+                for name, upper in (("slice", 6 * normalized_bytes + 2), ("join", 6 * normalized_bytes + 2),
+                        ("encoded", normalized_bytes), ("digest", 66)):
+                    _discovery_physical_debit(("brief-span", span.snapshot_ref.artifact_id, name), upper,
+                        job_id=job_id, header_budget=header_budget)
             if ((first == 0) != (last == 0) or (first and not 1 <= first <= last <= len(snapshot.lines))
                     or span.omitted_lines != len(snapshot.lines) - count
                     or (first and hashlib.sha256("\n".join(snapshot.lines[first-1:last]).encode()).hexdigest() != span.included_span_digest)
                     or (not first and span.included_span_digest is not None)):
                 raise ValueError("programme represented source span is not mechanically verified")
+    if len(artifacts) > 2:
+        for name in ("witness-construction", "witness-return"):
+            _discovery_physical_debit(("retained-stage", name), retained_upper,
+                job_id=job_id, header_budget=header_budget)
+    retained_owner = _DISCOVERY_VALIDATED_PLAN_OWNER.get()
+    if retained_owner is not None:
+        retained_owner.jobs._validate_discovery_session(retained_owner, header_budget=_discovery_physical_budget(header_budget))
+        if (retained_owner._candidate != (job_id, binding) or retained_owner._candidate_phase != "reader"
+                or raw_workflow_row["status"] != "accepted"):
+            raise ValueError("programme_original_queue_candidate_changed")
+        # Retain the exact already-validated instance, without copying,
+        # reparsing, resolving a current strategy or issuing a new pin.
+        retained_owner._discovery_persisted_strategy = plan.strategy_binding
     return DiscoveryInputWitness(job_id=job_id, input_digest=input_digest, authority_digest=authority_digest,
         checkpoint_digest=_digest(history), artifact_digest=_digest(canonical_artifacts),
         plan=plan, public_brief=public_brief, artifacts=artifacts)

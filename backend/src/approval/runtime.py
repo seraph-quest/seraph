@@ -1,6 +1,8 @@
 """Execution context shared with tool wrappers during agent runs."""
 
 from contextvars import ContextVar, Token
+import asyncio
+import inspect
 import hashlib
 import hmac
 import json
@@ -24,6 +26,92 @@ _current_trust_principal: ContextVar[TrustPrincipal | None] = ContextVar(
 )
 _current_fencing_token: ContextVar[str | None] = ContextVar("capability_fencing_token", default=None)
 _current_lease_owner: ContextVar[str | None] = ContextVar("durable_lease_owner", default=None)
+_current_discovery_invocation: ContextVar[Any] = ContextVar("original_discovery_invocation", default=None)
+
+
+class _DiscoveryInvocation:
+    """One registered wrapper lifetime; provenance only, never a grant."""
+    __slots__ = ("_bindings", "_live", "_consumed")
+
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("goal_discovery_invocation_internal_only")
+
+    def __setattr__(self, name, value):
+        raise RuntimeError("goal_discovery_invocation_immutable")
+
+    def validate(self, *, service):
+        from src.scheduler import engine
+        from src.guardian.goal_discovery import run_goal_discovery_tick
+        (original_service, scheduler, registration, wrapper, callback, loop,
+            principal, task, job_id) = self._bindings
+        if (type(self) is not _DiscoveryInvocation or not self._live
+                or _current_discovery_invocation.get() is not self
+                or service is not original_service
+                or getattr(service, "_active_discovery_invocation", None) is not self
+                or engine._scheduler is not scheduler or engine._scheduler_loop is not loop
+                or asyncio.get_running_loop() is not loop or asyncio.current_task() is not task
+                or scheduler.get_job("goal_public_discovery") is not registration
+                or registration.func is not wrapper or callback is not run_goal_discovery_tick
+                or registration.id != "goal_public_discovery"
+                or get_current_trust_principal() is not principal
+                or type(principal) is not TrustPrincipal
+                or principal.principal_id != "service:scheduler:goal_public_discovery"
+                or principal.principal_type is not PrincipalType.SERVICE
+                or not principal.authenticated or principal.revoked or principal.grants != ()
+                or principal.job_id != job_id or not job_id.startswith("scheduler:goal_public_discovery:")):
+            raise RuntimeError("goal_discovery_invocation_unavailable")
+        service._validate_original_admission_owner(jobs=service.jobs,
+            host=service._lifecycle_host, task=task)
+        return self
+
+
+def _bind_discovery_invocation(service, *, scheduler, registration, wrapper, callback,
+        loop, principal, task, job_id):
+    from src.scheduler import engine
+    if inspect.currentframe().f_back.f_code is not engine._open_discovery_invocation.__code__:
+        raise RuntimeError("goal_discovery_invocation_internal_only")
+    if (_current_discovery_invocation.get() is not None
+            or getattr(service, "_active_discovery_invocation", None) is not None):
+        raise RuntimeError("goal_discovery_invocation_unavailable")
+    marker = object.__new__(_DiscoveryInvocation)
+    object.__setattr__(marker, "_bindings", (service, scheduler, registration, wrapper,
+        callback, loop, principal, task, job_id))
+    object.__setattr__(marker, "_live", True)
+    object.__setattr__(marker, "_consumed", False)
+    token = _current_discovery_invocation.set(marker)
+    service._active_discovery_invocation = marker
+    try:
+        marker.validate(service=service)
+    except BaseException:
+        _close_discovery_invocation(marker, token)
+        raise
+    return marker, token
+
+
+def _get_current_discovery_invocation(service, *, consume=False):
+    marker = _current_discovery_invocation.get()
+    if type(marker) is not _DiscoveryInvocation:
+        raise RuntimeError("goal_discovery_invocation_unavailable")
+    marker.validate(service=service)
+    if consume:
+        if marker._consumed:
+            raise RuntimeError("goal_discovery_invocation_consumed")
+        object.__setattr__(marker, "_consumed", True)
+    return marker
+
+
+def _invalidate_discovery_invocation():
+    marker = _current_discovery_invocation.get()
+    if type(marker) is _DiscoveryInvocation:
+        object.__setattr__(marker, "_live", False)
+
+
+def _close_discovery_invocation(marker, token):
+    object.__setattr__(marker, "_live", False)
+    service = marker._bindings[0]
+    if getattr(service, "_active_discovery_invocation", None) is marker:
+        service._active_discovery_invocation = None
+    _current_discovery_invocation.reset(token)
 
 # Approval rows are consumed by the async repository and then handed to the
 # synchronous capability host.  The short-lived binding below is an opaque
@@ -184,6 +272,7 @@ def set_runtime_context(
     trust_principal: TrustPrincipal | None = None,
 ) -> tuple[Token, Token, Token]:
     """Set session/approval context for the current agent execution."""
+    _invalidate_discovery_invocation()
     return (
         _current_session_id.set(session_id),
         _current_approval_mode.set(approval_mode),
@@ -197,6 +286,7 @@ def reset_runtime_context(tokens: tuple[Token, ...]) -> None:
         raise ValueError("runtime context token bundle is invalid")
     session_token, approval_token = tokens[:2]
     if len(tokens) == 3:
+        _invalidate_discovery_invocation()
         _current_trust_principal.reset(tokens[2])
     _current_session_id.reset(session_token)
     _current_approval_mode.reset(approval_token)
@@ -217,10 +307,12 @@ def get_current_trust_principal() -> TrustPrincipal | None:
 
 def set_runtime_trust_principal(principal: TrustPrincipal | None) -> Token:
     """Temporarily bind a verified service/job principal to the current turn."""
+    _invalidate_discovery_invocation()
     return _current_trust_principal.set(principal)
 
 
 def reset_runtime_trust_principal(token: Token) -> None:
+    _invalidate_discovery_invocation()
     _current_trust_principal.reset(token)
 
 

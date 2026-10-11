@@ -21,6 +21,12 @@ remain unchanged. [ADR-033](./033-task-method-composition-metadata.md) continues
 to own the metadata ceiling **1359** and unfiltered **LIMIT 1360**. All other
 ADR-026, ADR-027 and ADR-028 authority, body, lifecycle and capacity rules remain.
 
+[ADR-035](./035-first-admission-saved-strategy-read.md) separately accepts the
+original owner's bounded transient current-strategy pointer read after this
+decision's original guard/Identity/current-authority checks. It preserves the
+same operation, session, spent frame and fresh-BEGIN ordering; this capacity
+selector alone never authorizes pointer bodies, retention or restore.
+
 ## Context
 
 The original `GoalDiscoveryService.admit` receives only Goal/programme/grant

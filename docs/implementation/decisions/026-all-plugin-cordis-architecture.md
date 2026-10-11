@@ -156,7 +156,11 @@ ledger, grant or authority. All other R1G restrictions remain in force.
 [ADR-033](./033-task-method-composition-metadata.md) supersedes only the
 closed schema-object allowance and ceiling below: the exact existing
 `task_method_active` metadata and four indexes yield 1359 objects / LIMIT 1360.
-Its metadata-only rule adds no common body or authority. The original numeric
+Its metadata-only allowance adds no common body or authority.
+[ADR-035](./035-first-admission-saved-strategy-read.md) separately permits only
+the original owner's transient current-pointer read for first composed discovery
+admission under the same frame; it adds no retained/common table or authority.
+The original numeric
 clauses below retain their decision provenance and are governed by that narrow
 supersession.
 

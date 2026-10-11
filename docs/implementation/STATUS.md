@@ -32,6 +32,12 @@ the original first-discovery capacity selector before job insertion. It preserve
 current grant checks and the same original frame; it establishes no implemented
 admission, execution permission or shipped composition availability.
 
+[ADR-035](./decisions/035-first-admission-saved-strategy-read.md) accepts only
+the original saved-strategy owner's bounded current-pointer read during first
+composed discovery admission on the same guarded session and spent frame.
+Implementation, complete resource fit and runtime admission remain unproved;
+pointer retention/restore and shipped availability are not established.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

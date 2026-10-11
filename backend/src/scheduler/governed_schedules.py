@@ -411,9 +411,16 @@ def _is_sqlite(db: Any) -> bool:
         return False
 
 
-async def _begin_serialized(db: Any) -> None:
-    """Start the scheduler write fence after discarding only a clean read tx."""
+async def _begin_serialized(db: Any, *, composition_authority_check=None) -> None:
+    """Start the scheduler fence, then recheck this original composition call.
+
+    The check belongs to each fresh transaction, including a uniqueness-race
+    retry; a check from the transaction that was rolled back cannot authorize
+    the new transaction's private reads or effects.
+    """
     if not _is_sqlite(db):
+        if composition_authority_check is not None:
+            await composition_authority_check(db)
         return
     if db.new or db.dirty or db.deleted:
         raise RuntimeError("scheduler_transaction_boundary")
@@ -424,6 +431,8 @@ async def _begin_serialized(db: Any) -> None:
         # next slot reservation.
         await db.commit()
     await db.execute(text("BEGIN IMMEDIATE"))
+    if composition_authority_check is not None:
+        await composition_authority_check(db)
 
 
 async def _persist_unknown_and_raise(db: Any, row: GovernedScheduleOccurrence, now: datetime) -> None:
@@ -619,9 +628,7 @@ async def reserve_occurrence(
     binding_id = str(binding.binding_id or "")
     if not binding_id:
         raise ValueError("governed schedule binding is unavailable")
-    await _begin_serialized(db)
-    if composition_authority_check is not None:
-        await composition_authority_check(db)
+    await _begin_serialized(db, composition_authority_check=composition_authority_check)
     # SQLite DateTime binds are timezone-naive. Store one canonical UTC wall
     # value there; _utc restores its semantic timezone at comparison/receipt
     # boundaries.
@@ -717,6 +724,7 @@ async def reserve_occurrence(
                     recovery_action=recovery_action,
                     claim_token=active.claim_token,
                     fencing_token=active.fencing_token,
+                    composition_authority_check=composition_authority_check,
                 )
                 active = None
     if active is not None:
@@ -744,7 +752,7 @@ async def reserve_occurrence(
         await db.flush()
     except IntegrityError:
         await db.rollback()
-        await _begin_serialized(db)
+        await _begin_serialized(db, composition_authority_check=composition_authority_check)
         existing = (
             await db.execute(
                 select(GovernedScheduleOccurrence).where(
@@ -776,8 +784,7 @@ async def claim_occurrence(
     if not token or occurrence.state != "reserved":
         raise ValueError("governed occurrence is not claimable")
     if composition_authority_check is not None:
-        await _begin_serialized(db)
-        await composition_authority_check(db)
+        await _begin_serialized(db, composition_authority_check=composition_authority_check)
     result = await db.execute(
         update(GovernedScheduleOccurrence)
         .where(
@@ -820,8 +827,7 @@ async def settle_occurrence(
     if occurrence.state != "running" or not token:
         raise ValueError("governed occurrence is not settleable")
     if composition_authority_check is not None:
-        await _begin_serialized(db)
-        await composition_authority_check(db)
+        await _begin_serialized(db, composition_authority_check=composition_authority_check)
     result = await db.execute(
         update(GovernedScheduleOccurrence)
         .where(
@@ -1212,9 +1218,7 @@ async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, A
     session = str(owner.session_id or "").strip()
     if not principal or not session:
         raise ValueError("governed schedule owner is unavailable")
-    await _begin_serialized(db)
-    if composition_authority_check is not None:
-        await composition_authority_check(db)
+    await _begin_serialized(db, composition_authority_check=composition_authority_check)
     action = str(request.get("action_type") or GOVERNED_ACTION)
     spec = action_spec(action)
     if str(request.get("capability_id") or spec["capability_id"]) != spec["capability_id"]:
@@ -1356,9 +1360,7 @@ async def apply_control(
     normalized_reason = None if reason is None else str(reason)
     if normalized_reason is not None and len(normalized_reason) > 500:
         raise ValueError("governed schedule control reason is too long")
-    await _begin_serialized(db)
-    if composition_authority_check is not None:
-        await composition_authority_check(db)
+    await _begin_serialized(db, composition_authority_check=composition_authority_check)
     if not owner.principal_id or not owner.session_id:
         raise RuntimeError("governed_schedule_session_unavailable")
     session = await db.get(OperatorSession, owner.session_id)

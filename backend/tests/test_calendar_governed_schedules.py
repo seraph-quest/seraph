@@ -773,6 +773,115 @@ async def _seed_real_schedule(async_db) -> str:
 
 
 @pytest.mark.asyncio
+async def test_original_calendar_input_authority_resolves_without_a_binding_locator(async_db):
+    """The original input resolver needs no fabricated schedule or task."""
+    from src.scheduler.scheduled_jobs import load_governed_calendar_input_authority
+    from src.work_board.contracts import WorkBoardOwner
+
+    await _seed_real_schedule(async_db)
+    async with async_db() as db:
+        binding = (await db.execute(select(GovernedScheduleBinding))).scalar_one()
+        consent, connection, goal, artifact = await load_governed_calendar_input_authority(
+            db,
+            owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
+            consent_id="scheduler-consent",
+            input_artifact_id=binding.input_artifact_id,
+        )
+        assert consent.consent_id == "scheduler-consent"
+        assert connection.connection_id == "scheduler-connection"
+        assert goal.id == "scheduler-goal"
+        assert artifact.artifact_id == binding.input_artifact_id
+        assert artifact.bound_task_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked_owner", ["session", "consent", "connection", "goal"])
+async def test_original_calendar_input_authority_denies_current_revocation_before_file(
+    async_db, monkeypatch, revoked_owner,
+):
+    from src.scheduler.scheduled_jobs import load_governed_calendar_input_authority
+    from src.work_board.contracts import WorkBoardOwner
+
+    await _seed_real_schedule(async_db)
+    async with async_db() as db:
+        binding = (await db.execute(select(GovernedScheduleBinding))).scalar_one()
+        artifact_id = binding.input_artifact_id
+        if revoked_owner == "session":
+            row = await db.get(OperatorSession, SESSION)
+            row.revoked_at = datetime.now(timezone.utc)
+        elif revoked_owner == "consent":
+            row = await db.get(CalendarReadConsent, "scheduler-consent")
+            row.state = "revoked"
+        elif revoked_owner == "connection":
+            row = await db.get(GoogleServiceConnection, "scheduler-connection")
+            row.revision += 1
+        else:
+            row = await db.get(Goal, "scheduler-goal")
+            row.revision += 1
+        await db.flush()
+
+    def forbidden_file_read(*args, **kwargs):
+        pytest.fail("stale original authority reached physical private input")
+
+    monkeypatch.setattr("src.scheduler.scheduled_jobs._safe_file_bytes", forbidden_file_read)
+    async with async_db() as db:
+        with pytest.raises(RuntimeError, match="governed_schedule_prerequisite_stale"):
+            await load_governed_calendar_input_authority(
+                db,
+                owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
+                consent_id="scheduler-consent",
+                input_artifact_id=artifact_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_original_calendar_input_authority_binding_drift_denies_before_file(async_db, monkeypatch):
+    from src.scheduler.scheduled_jobs import _load_governed_authority, scheduled_job_repository
+
+    job_id = await _seed_real_schedule(async_db)
+    job = await scheduled_job_repository.get_job(job_id)
+    async with async_db() as db:
+        binding = (await db.execute(select(GovernedScheduleBinding))).scalar_one()
+        binding_id = binding.binding_id
+        binding.input_digest = "sha256:" + "f" * 64
+        await db.flush()
+
+    def forbidden_file_read(*args, **kwargs):
+        pytest.fail("binding digest drift reached physical private input")
+
+    monkeypatch.setattr("src.scheduler.scheduled_jobs._safe_file_bytes", forbidden_file_read)
+    async with async_db() as db:
+        with pytest.raises(RuntimeError, match="governed_schedule_prerequisite_stale"):
+            await _load_governed_authority(db, job, binding_id)
+
+
+@pytest.mark.asyncio
+async def test_original_calendar_input_authority_detects_physical_file_drift(async_db):
+    from src.scheduler.scheduled_jobs import load_governed_calendar_input_authority
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.input_artifacts import _payload_path
+
+    await _seed_real_schedule(async_db)
+    async with async_db() as db:
+        binding = (await db.execute(select(GovernedScheduleBinding))).scalar_one()
+        artifact_id = binding.input_artifact_id
+        artifact = await db.get(WorkBoardInputArtifact, artifact_id)
+        path = _payload_path(artifact)
+        original = path.read_bytes()
+        try:
+            path.write_bytes(b"{}")
+            with pytest.raises(RuntimeError, match="governed_schedule_input_artifact_invalid"):
+                await load_governed_calendar_input_authority(
+                    db,
+                    owner=WorkBoardOwner(principal_id=OWNER, session_id=SESSION),
+                    consent_id="scheduler-consent",
+                    input_artifact_id=artifact_id,
+                )
+        finally:
+            path.write_bytes(original)
+
+
+@pytest.mark.asyncio
 async def test_execute_governed_schedule_publishes_todo_and_dedupes_changed_events(
     async_db,
     monkeypatch,

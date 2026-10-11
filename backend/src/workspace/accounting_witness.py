@@ -1,6 +1,6 @@
 """Dependency-free encoding shared by the runtime and managed lifecycle CLI."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -66,6 +66,8 @@ _HELD_COMPOSITION_WORKSPACE = ContextVar("held_composition_workspace", default=N
 _MEMORY_PUBLICATION_SEAL = object()
 _MEMORY_PUBLICATIONS = WeakValueDictionary()
 _ARMED_MEMORY_PUBLICATION = ContextVar("armed_native_memory_publication", default=None)
+_MEMORY_RETENTIONS = WeakValueDictionary()
+_MEMORY_RETENTION_PROOFS = ContextVar("original_memory_retention_proofs", default=None)
 
 MEMORY_REFERENCE_PROFILE = "native-composition-memory-reference.v2"
 MEMORY_ORIGINAL_CHECKPOINT = "memory:original-reference.v2"
@@ -527,6 +529,40 @@ def _native_memory_current_rows_digest(rows, run_identity):
     return _digest(normalized)
 
 
+def _native_memory_closed_value_width(value):
+    """Encoded-unit arithmetic for already selected closed Memory values.
+
+    No serializer, UTF8 copy, digest, row construction or permission is issued
+    here. Callers must establish their original Source and body certificate.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is str:
+        return _native_memory_ascii_string_width(value)
+    if type(value) is int and -(2**63) <= value < 2**63:
+        return 20
+    if type(value) is list or type(value) is tuple:
+        return 2 + max(0, len(value) - 1) + sum(
+            _native_memory_closed_value_width(item) for item in value)
+    if type(value) is dict and all(type(name) is str for name in value):
+        return 2 + max(0, len(value) - 1) + sum(
+            _native_memory_ascii_string_width(name) + 1 + _native_memory_closed_value_width(item)
+            for name, item in value.items())
+    raise HeaderBoundsError("memory_numeric_shape_unavailable")
+
+
+def _native_memory_current_tuple_upper(raw_row, journal_utf8_upper):
+    """Preserve the original temporary-tuple fee without allocating to size."""
+    from src.memory.header_bounds import WRS_BY_RUN, _native_memory_tuple_skeleton_width, _native_memory_utf8_width
+    return _native_memory_tuple_skeleton_width(WRS_BY_RUN, raw_row["run_identity"]) + sum(
+        6 * (journal_utf8_upper if name == "checkpoint_receipts_json" else _native_memory_utf8_width(value)) + 2
+        if type(value) is str else 32 if value is not None else 0
+        for name, value in raw_row.items())
+
+
 def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
     """Finite numeric convergence over real pending WRS values, no writer grant.
 
@@ -558,10 +594,8 @@ def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
         # Count all temporary raw appearances before encoding the full tuple.
         # Six times UTF8 is a conservative bound for canonical ASCII escaping.
         candidate = dict(row, checkpoint_receipts_json=journal)
-        upper = len(_canonical(["native-composition-memory.v1", WRS_BY_RUN.table, identity,
-            [[name, None] for name in WRS_BY_RUN.columns]]).encode("utf-8"))
-        upper += sum(6 * len(value.encode("utf-8")) + 2 if type(value) is str
-                     else 32 if value is not None else 0 for value in candidate.values())
+        from src.memory.header_bounds import _native_memory_utf8_width
+        upper = _native_memory_current_tuple_upper(candidate, _native_memory_utf8_width(journal))
         header_budget.debit(upper)
         encoded = _native_memory_row_bytes(WRS_BY_RUN, identity, candidate)
         if len(encoded) > MAX_BYTES:
@@ -713,11 +747,252 @@ class _NativeMemoryPublication:
     applied: bool = False
 
 
+@dataclass(eq=False)
+class _NativeMemorySourcePublication:
+    retention: object
+    db: object
+    run: object
+    statement: object
+    before: dict
+    after: dict
+    certificate: object
+    transaction: object
+    driver: object
+    total_changes: int
+    task: object
+    signature: tuple
+    kind: str
+    consumed: bool = False
+    applied: bool = False
+    seal: object = field(default=_MEMORY_PUBLICATION_SEAL, repr=False)
+
+
+@dataclass(eq=False)
+class _NativeMemoryRetention:
+    source: object
+    operation: object
+    prepared: object
+    ledger: object
+    before: dict
+    new_rows: tuple
+    updates: tuple
+    existing_references: tuple
+    affected: tuple = ()
+    original: object = None
+    captured: bool = False
+    completed: bool = False
+    seal: object = field(default=_MEMORY_PUBLICATION_SEAL, repr=False)
+
+    def _checked(self):
+        from src.runtime_plugins.memory_producer import _MEMORY_SOURCES, _MEMORY_OPERATIONS
+        if (self.seal is not _MEMORY_PUBLICATION_SEAL
+                or _MEMORY_RETENTIONS.get(id(self.source)) is not self
+                or getattr(self.source, "_retention", None) is not self
+                or _MEMORY_SOURCES.get(id(self.source)) is not self.source
+                or not self.source._live.is_set()
+                or _MEMORY_OPERATIONS.get(id(self.operation)) is not self.operation
+                or self.operation.source is not self.source
+                or self.operation._prepared is not self.prepared):
+            raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+        self.ledger._checked()
+        return self
+
+    @asynccontextmanager
+    async def phase(self, phase, db, run):
+        from src.runtime_plugins.memory_producer import (
+            _validate_memory_owner_source, _validate_memory_lifecycle_source)
+        self._checked()
+        if phase == "completion":
+            if not self.captured or self.completed:
+                raise ProductionWorkspaceReconciliationError("memory_retention_completion_unavailable")
+        elif phase not in {"effect", "capture"}:
+            raise ProductionWorkspaceReconciliationError("memory_retention_phase_invalid")
+        await self.ledger.bind(db, phase)
+        with self.ledger.phase(phase):
+            # Numerical enrollment grants no mutation permission. The original
+            # current authority still runs before yielding the effect scope.
+            if phase == "completion":
+                source = await _validate_memory_lifecycle_source(db, run, self.source.claim)
+                if source is not self.source:
+                    raise ProductionWorkspaceReconciliationError("memory_retention_source_changed")
+            else:
+                await _validate_memory_owner_source(db, run, self.operation)
+            yield self
+
+    def payload(self):
+        from src.workflows.job_runtime import _digest
+        self._checked()
+        if not self.captured or self.original is None:
+            raise ProductionWorkspaceReconciliationError("memory_retention_original_unavailable")
+        return {"profile": MEMORY_REFERENCE_PROFILE,
+            "invocation_ref": self.before["run_identity"],
+            "original_checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT,
+            "original_checkpoint_digest": _digest(self.original)}
+
+
+async def _native_memory_source_snapshot(db, budget):
+    from src.memory.universe import native_memory_universe
+    from src.memory.composition_headers import _certify_current_memory_snapshot
+    await native_memory_universe(db, _header_budget=budget)
+    return await _certify_current_memory_snapshot(db, budget)
+
+
+async def _native_memory_source_rows(db, certificate, references):
+    from src.memory.composition_headers import snapshot_reads
+    references = tuple(sorted(set(references)))
+    def read(connection):
+        with snapshot_reads(certificate):
+            return tuple((descriptor, key, row, encoded)
+                for table, key in references
+                for descriptor, row, encoded in (
+                    _native_memory_reference_row_on_connection(connection, table, key),))
+    return await (await db.connection()).run_sync(read)
+
+
+async def begin_native_memory_effect(db, run, claim_ref, admission, *, source_operation, prepared):
+    """Reserve the actual Source's complete plan before its first M5 write."""
+    from src.runtime_plugins.memory_producer import (
+        _validate_memory_owner_source, prospective_memory_existing_references)
+    from src.memory.m5 import validate_native_memory_mutation_plan
+    from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, _reserve_native_memory_effect_ledger
+    source = await _validate_memory_owner_source(db, run, source_operation)
+    if (source.admission is not admission or source_operation._prepared is not prepared
+            or claim_ref != source._scope.witness["claim_ref"]
+            or _MEMORY_RETENTIONS.get(id(source)) is not None):
+        raise ProductionWorkspaceReconciliationError("memory_retention_original_source_changed")
+    await validate_native_memory_mutation_plan(prepared, db=db, candidate_digest=admission.candidate_digest)
+    certificate = await _native_memory_source_snapshot(db, admission.header_budget)
+    rows = await _native_memory_source_rows(db, certificate, (("workflow_run_states", run.run_identity),))
+    before = rows[0][2]
+    if preflight_native_memory_reference_journal(before["checkpoint_receipts_json"]) != (None, None):
+        raise ProductionWorkspaceReconciliationError("memory_retention_original_already_exists")
+    existing = await prospective_memory_existing_references(db, run, source_operation)
+    references = tuple(sorted({("workflow_run_states", run.run_identity),
+        *((item.table, item.row_ref) for item in existing)}))
+    new_rows = []
+    for instance in prepared.original_rows():
+        descriptor = COMPOSITION_DESCRIPTORS[instance.__tablename__]
+        row = _native_memory_transient_sql_row(instance)
+        key = row[descriptor.key]
+        # An unresolved database-generated address is not a reference grant.
+        if type(key) is not str:
+            raise ProductionWorkspaceReconciliationError("memory_retention_future_address_unavailable")
+        new_rows.append((descriptor, key, row))
+    updates = []
+    for instance, key, changes in prepared.original_update_rows():
+        descriptor = COMPOSITION_DESCRIPTORS[instance.__tablename__]
+        row = _native_memory_planned_sql_row(instance, changes)
+        updates.append((descriptor, key, {name: row[name] for name in changes}))
+    ledger = await _reserve_native_memory_effect_ledger(db, run, source_operation, prepared,
+        existing_references=references, before_row=before, certificate=certificate)
+    retention = _NativeMemoryRetention(source, source_operation, prepared, ledger, before,
+        tuple(new_rows), tuple(updates), references)
+    object.__setattr__(source, "_retention", retention)
+    _MEMORY_RETENTIONS[id(source)] = retention
+    return retention
+
+
+def _append_native_memory_original(raw, original):
+    """Add Original without rewriting any retained journal lexeme."""
+    from src.memory.header_bounds import strict_json_loads
+    from src.workflows.job_runtime import _canonical
+    records = strict_json_loads(raw)
+    if type(records) is not list or any(type(item) is not dict for item in records):
+        raise ProductionWorkspaceReconciliationError("memory_reference_journal_invalid")
+    if any(item.get("checkpoint_id") in {MEMORY_ORIGINAL_CHECKPOINT, MEMORY_CURRENT_CHECKPOINT}
+            for item in records):
+        raise ProductionWorkspaceReconciliationError("memory_retention_original_already_exists")
+    end = len(raw.rstrip()) - 1
+    if end < 0 or raw[end] != "]":
+        raise ProductionWorkspaceReconciliationError("memory_reference_journal_invalid")
+    return raw[:end] + ("," if records else "") + _canonical(original) + raw[end:]
+
+
+async def _prepare_native_memory_source_publication(db, run, retention, before, after, certificate, kind, *, pending_changes):
+    import asyncio
+    import sys
+    from sqlalchemy import update
+    from src.db.models import WorkflowRunState
+    from src.memory.header_bounds import _connection_state
+    retention._checked()
+    issuer = sys._getframe(1).f_code
+    if ((kind == "capture" and issuer is not capture_native_memory_retention.__code__)
+            or (kind == "completion" and issuer is not prepare_native_memory_lifecycle.__code__)
+            or kind not in {"capture", "completion"}):
+        raise ProductionWorkspaceReconciliationError("memory_publication_original_owner_required")
+    pending = dict(pending_changes, checkpoint_receipts_json=after["checkpoint_receipts_json"])
+    if _native_memory_planned_sql_row(run, pending) != after:
+        raise ProductionWorkspaceReconciliationError("memory_publication_bind_changed")
+    statement = update(WorkflowRunState).where(
+        WorkflowRunState.run_identity == before["run_identity"],
+        WorkflowRunState.status == before["status"], WorkflowRunState.revision == before["revision"],
+        WorkflowRunState.attempt_count == before["attempt_count"],
+        WorkflowRunState.lease_owner == before["lease_owner"],
+        WorkflowRunState.fencing_token == before["fencing_token"],
+        WorkflowRunState.checkpoint_receipts_json == before["checkpoint_receipts_json"],
+        WorkflowRunState.checkpoint_context_json == before["checkpoint_context_json"],
+        WorkflowRunState.deadline_at > datetime.now(timezone.utc),
+        WorkflowRunState.lease_expires_at > datetime.now(timezone.utc),
+    ).execution_options(synchronize_session=False).values(**pending)
+    transaction, driver, changes = await _connection_state(db)
+    plan = _NativeMemorySourcePublication(retention, db, run, statement, before, after, certificate,
+        transaction, driver, changes, asyncio.current_task(), _native_memory_statement_signature(statement), kind)
+    _MEMORY_PUBLICATIONS[id(plan)] = plan
+    return plan
+
+
+def _consume_native_memory_source_publication(db, statement, run_id, before, after, previous, current, plan):
+    import asyncio
+    from src.memory.composition_headers import current_budget, _validate
+    retention = plan.retention._checked()
+    if (plan.seal is not _MEMORY_PUBLICATION_SEAL or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan
+            or plan.consumed or plan.applied or plan.db is not db or plan.statement is not statement
+            or plan.task is not asyncio.current_task() or run_id != plan.before["run_identity"]
+            or before != plan.before["checkpoint_receipts_json"] or after != plan.after["checkpoint_receipts_json"]
+            or db.sync_session.get_transaction() is not plan.transaction
+            or current_budget() is not retention.source.admission.header_budget
+            or _native_memory_statement_signature(statement) != plan.signature):
+        raise ProductionWorkspaceReconciliationError("memory_publication_source_changed")
+    connection = db.sync_session.connection()
+    _validate(connection, plan.certificate)
+    if (connection.connection.driver_connection is not plan.driver
+            or _sql(connection, "SELECT total_changes()").scalar_one() != plan.total_changes):
+        raise ProductionWorkspaceReconciliationError("memory_publication_writer_changed")
+    _, actual, _ = _native_memory_reference_row_on_connection(connection, "workflow_run_states", run_id)
+    if actual != plan.before or current.get(MEMORY_CURRENT_CHECKPOINT) is None:
+        raise ProductionWorkspaceReconciliationError("memory_publication_current_changed")
+    if plan.kind == "capture":
+        if (retention.captured or not retention.prepared.consumed
+                or retention.operation._effect is None
+                or previous.get(MEMORY_ORIGINAL_CHECKPOINT) is not None
+                or previous.get(MEMORY_CURRENT_CHECKPOINT) is not None
+                or current.get(MEMORY_ORIGINAL_CHECKPOINT) != retention.original):
+            raise ProductionWorkspaceReconciliationError("memory_publication_original_changed")
+        permission = (retention.original, current[MEMORY_CURRENT_CHECKPOINT])
+    elif plan.kind == "completion":
+        if (not retention.captured or retention.completed
+                or previous.get(MEMORY_ORIGINAL_CHECKPOINT) != retention.original
+                or current.get(MEMORY_ORIGINAL_CHECKPOINT) != retention.original):
+            raise ProductionWorkspaceReconciliationError("memory_publication_original_changed")
+        permission = (current[MEMORY_CURRENT_CHECKPOINT],)
+    else:
+        raise ProductionWorkspaceReconciliationError("memory_publication_kind_invalid")
+    expected = preflight_native_memory_reference_journal(plan.after["checkpoint_receipts_json"])
+    if (expected != (current.get(MEMORY_ORIGINAL_CHECKPOINT), current.get(MEMORY_CURRENT_CHECKPOINT))
+            or expected[1]["payload"]["state"] != "validated"):
+        raise ProductionWorkspaceReconciliationError("memory_publication_current_changed")
+    plan.consumed = True
+    return permission
+
+
 def _consume_native_memory_publication(db, statement, run_id, before, after, previous, current):
     """The journal hook can consume only the armed, exact original execute."""
     from src.memory.composition_headers import current_budget, _validate, _certify_current_memory_snapshot_on_connection
     from src.workflows.job_runtime import _MEMORY_NEGATIVE_OWNERS, _original_memory_maintenance_scope
     plan = _ARMED_MEMORY_PUBLICATION.get()
+    if type(plan) is _NativeMemorySourcePublication:
+        return _consume_native_memory_source_publication(
+            db, statement, run_id, before, after, previous, current, plan)
     if (type(plan) is not _NativeMemoryPublication or plan.seal is not _MEMORY_PUBLICATION_SEAL
             or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan or plan.consumed or plan.applied
             or plan.db is not db or statement is not plan.statement
@@ -865,6 +1140,225 @@ async def apply_native_memory_unknown(db, run, plan):
     finally:
         _ARMED_MEMORY_PUBLICATION.reset(token)
         _MEMORY_PUBLICATIONS.pop(id(plan), None)
+
+
+def _native_memory_row_witnesses(rows):
+    return [{"ref": {"table": descriptor.table, "key": key},
+        "tuple_digest": hashlib.sha256(encoded).hexdigest(), "encoded_bytes": len(encoded)}
+        for descriptor, key, row, encoded in rows]
+
+
+async def _apply_native_memory_source_publication(db, run, plan):
+    from src.runtime_plugins.memory_producer import (
+        _validate_memory_owner_source, _validate_memory_lifecycle_source)
+    from src.memory.composition_headers import snapshot_reads, snapshot_reads_async
+    retention = plan.retention._checked()
+    if (type(plan) is not _NativeMemorySourcePublication
+            or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan or plan.db is not db
+            or plan.run is not run or plan.consumed or plan.applied):
+        raise ProductionWorkspaceReconciliationError("memory_publication_plan_unavailable")
+    guard = db.info.get("composition_guard")
+    if type(guard) is not CompositionSessionGuard or guard.db is not db:
+        raise ProductionWorkspaceReconciliationError("memory_publication_guard_missing")
+    if plan.kind == "capture":
+        await _validate_memory_owner_source(db, run, retention.operation, effect=retention.operation._effect)
+    else:
+        await _validate_memory_lifecycle_source(db, run, retention.source.claim)
+    token = _ARMED_MEMORY_PUBLICATION.set(plan)
+    try:
+        async with snapshot_reads_async(db, plan.certificate):
+            result = await db.execute(plan.statement)
+        if result.rowcount != 1 or not plan.consumed:
+            raise ProductionWorkspaceReconciliationError("memory_publication_cas_changed")
+        certificate = await _native_memory_source_snapshot(db, retention.source.admission.header_budget)
+        def read_back(connection):
+            with snapshot_reads(certificate):
+                _, actual, _ = _native_memory_reference_row_on_connection(
+                    connection, "workflow_run_states", plan.before["run_identity"])
+                if actual != plan.after:
+                    raise ProductionWorkspaceReconciliationError("memory_publication_readback_changed")
+                _checked_memory_reference_row(connection, actual)
+        await (await db.connection()).run_sync(read_back)
+        # Populate this exact original ORM instance from actual SQL readback;
+        # this does not leave a dirty object to flush a second publication.
+        retention.source.admission.header_budget.debit(
+            certificate.rows[("workflow_run_states", run.run_identity)][1],
+            appearance=("memory-source-publication", "refresh", run.run_identity))
+        await db.refresh(run)
+        plan.applied = True
+        return result
+    finally:
+        _ARMED_MEMORY_PUBLICATION.reset(token)
+        _MEMORY_PUBLICATIONS.pop(id(plan), None)
+
+
+async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_operation, prepared, result):
+    """Capture the identical returned M5 effect on its original live writer."""
+    from dataclasses import asdict
+    from src.runtime_plugins.memory_producer import (
+        _validate_memory_owner_source, memory_owner_references, memory_context)
+    from src.memory.m5 import validate_native_memory_mutation_plan
+    from src.memory.header_bounds import WRS_BY_RUN
+    from src.workflows.job_runtime import _canonical, _digest
+    source = await _validate_memory_owner_source(db, run, source_operation, effect=effect)
+    retention = _MEMORY_RETENTIONS.get(id(source))
+    if (type(retention) is not _NativeMemoryRetention or retention._checked().captured
+            or retention.operation is not source_operation or retention.prepared is not prepared
+            or source_operation._effect is not effect or claim_ref != source._scope.witness["claim_ref"]):
+        raise ProductionWorkspaceReconciliationError("memory_retention_effect_changed")
+    await validate_native_memory_mutation_plan(prepared, db=db,
+        candidate_digest=source.admission.candidate_digest, consumed=True)
+    from src.runtime_plugins.contracts import succeeded, blocked
+    if effect.status == "succeeded":
+        expected_value = json.loads(effect.value_json)
+        if effect.method != "memory.propose":
+            expected_value["receipt_ref"] = "native-memory-receipt:" + _digest({
+                "invocation": run.run_identity, "claim": claim_ref,
+                "candidate": source.admission.candidate_digest})
+        expected_result = succeeded(effect.method, expected_value)
+    else:
+        expected_result = blocked("native_memory_owner_outcome_unsupported")
+    if result != expected_result:
+        raise ProductionWorkspaceReconciliationError("memory_retention_result_changed")
+    certificate = await _native_memory_source_snapshot(db, source.admission.header_budget)
+    actual_refs = await memory_owner_references(db, source.admission, effect)
+    refs = tuple(sorted({*retention.existing_references,
+        *((item.table, item.row_ref) for item in actual_refs),
+        *((descriptor.table, key) for descriptor, key, row in retention.new_rows),
+        *((descriptor.table, key) for descriptor, key, row in retention.updates),
+        ("audit_events", effect.audit_event_id)}))
+    rows = await _native_memory_source_rows(db, certificate, refs)
+    lookup = {(descriptor.table, key): (row, encoded) for descriptor, key, row, encoded in rows}
+    for descriptor, key, expected in retention.new_rows:
+        if lookup[(descriptor.table, key)][0] != expected:
+            raise ProductionWorkspaceReconciliationError("memory_retention_created_row_changed")
+    for descriptor, key, changes in retention.updates:
+        if any(lookup[(descriptor.table, key)][0][name] != value for name, value in changes.items()):
+            raise ProductionWorkspaceReconciliationError("memory_retention_updated_row_changed")
+    before = lookup[("workflow_run_states", run.run_identity)][0]
+    if before != retention.before:
+        raise ProductionWorkspaceReconciliationError("memory_retention_original_run_changed")
+    witnesses = _native_memory_row_witnesses(rows)
+    candidate = source.admission.candidate()
+    audit_digest = hashlib.sha256(lookup[("audit_events", effect.audit_event_id)][1]).hexdigest()
+    original_payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+        "invocation_ref": run.run_identity, "claim_ref": claim_ref,
+        "candidate_digest": source.admission.candidate_digest,
+        "composition_binding_digest": source.claim.binding.binding_digest,
+        "method": effect.method, "owner_principal_id": candidate["operator_principal_id"],
+        "operator_session_id": candidate["operator_session_id"],
+        "original_deadline": candidate["original_deadline"],
+        "source_binding_digest": _digest(candidate.get("source")),
+        "original_effect_digest": _digest(asdict(effect)),
+        "original_audit": {"ref": {"table": "audit_events", "key": effect.audit_event_id},
+            "tuple_digest": audit_digest},
+        "refs": [{"table": table, "key": key} for table, key in refs],
+        "rows_digest": _digest(witnesses), "encoded_bytes": sum(item["encoded_bytes"] for item in witnesses)}
+    preflight_native_memory_reference_payload(original_payload)
+    original = {"checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT, "safe": True,
+        "state_digest": _digest(original_payload), "payload": original_payload}
+    retention.original = original
+    locator = {"profile": MEMORY_REFERENCE_PROFILE, "invocation_ref": run.run_identity,
+        "original_checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT, "original_checkpoint_digest": _digest(original)}
+    context = memory_context(run)
+    sealed = {"invocation_ref": run.run_identity, "claim_ref": claim_ref,
+        "candidate_digest": source.admission.candidate_digest, "result_digest": _digest(result),
+        "payload": result, "effect": asdict(effect), "retention": locator}
+    pending = {"checkpoint_context_json": _canonical(dict(context, result=sealed)),
+        "checkpoint_receipts_json": _append_native_memory_original(before["checkpoint_receipts_json"], original),
+        "revision": before["revision"] + 1, "updated_at": datetime.now(timezone.utc)}
+    row = _native_memory_planned_sql_row(run, pending)
+    events = tuple(sorted((descriptor.table, key) for descriptor, key, values in retention.new_rows
+        if descriptor.table in {"audit_events", "work_board_events"}))
+    delta = _native_memory_selected_delta_preimage(retention.new_rows,
+        (*retention.updates, (WRS_BY_RUN, run.run_identity,
+            {name: row[name] for name in pending})), events)
+    payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+        "original_checkpoint_digest": _digest(original), "projection_revision": 1,
+        "state": "validated", "reason_code": None, "refs": original_payload["refs"],
+        "absences": [], "rows": witnesses, "rows_digest": _native_memory_current_rows_digest(witnesses, run.run_identity),
+        "encoded_bytes": sum(item["encoded_bytes"] for item in witnesses),
+        "owner_operation_kind": effect.method,
+        "owner_events": [{"table": table, "key": key} for table, key in events],
+        "selected_delta_digest": _digest(delta)}
+    after, current = _native_memory_prepare_current_row(row, payload, header_budget=source.admission.header_budget)
+    plan = await _prepare_native_memory_source_publication(db, run, retention, before, after, certificate, "capture",
+        pending_changes=pending)
+    await _apply_native_memory_source_publication(db, run, plan)
+    retention.captured = True
+    return retention
+
+
+async def validate_native_memory_retention(db, run, sealed):
+    """Current cold evidence plus the still-live original Source; no reissuer."""
+    from src.runtime_plugins.memory_producer import _validate_memory_lifecycle_source, memory_context
+    matches = [value for value in tuple(_MEMORY_RETENTIONS.values())
+        if value.before["run_identity"] == run.run_identity]
+    if len(matches) != 1:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+    retention = matches[0]._checked()
+    source = await _validate_memory_lifecycle_source(db, run, retention.source.claim)
+    if source is not retention.source or not retention.captured or retention.completed:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_changed")
+    if memory_context(run)["result"] != sealed or sealed["retention"] != retention.payload():
+        raise ProductionWorkspaceReconciliationError("memory_retention_result_changed")
+    certificate = await _native_memory_source_snapshot(db, source.admission.header_budget)
+    from src.memory.composition_headers import snapshot_reads
+    def validate(connection):
+        with snapshot_reads(certificate):
+            _, row, _ = _native_memory_reference_row_on_connection(connection, "workflow_run_states", run.run_identity)
+            return _checked_memory_reference_row(connection, row)
+    await (await db.connection()).run_sync(validate)
+    return retention
+
+
+async def prepare_native_memory_lifecycle(db, run, *, original_claim, pending_changes, header_budget):
+    from src.runtime_plugins.memory_producer import _validate_memory_lifecycle_source, memory_context
+    from src.memory.header_bounds import WRS_BY_RUN
+    from src.workflows.job_runtime import _digest
+    source = await _validate_memory_lifecycle_source(db, run, original_claim)
+    retention = _MEMORY_RETENTIONS.get(id(source))
+    if type(retention) is not _NativeMemoryRetention or source.admission.header_budget is not header_budget:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+    retention._checked()
+    certificate = await _native_memory_source_snapshot(db, header_budget)
+    own = await _native_memory_source_rows(db, certificate, (("workflow_run_states", run.run_identity),))
+    before = own[0][2]
+    original, current = preflight_native_memory_reference_journal(before["checkpoint_receipts_json"])
+    if not retention.captured or retention.completed or original != retention.original or current is None:
+        raise ProductionWorkspaceReconciliationError("memory_retention_original_changed")
+    allowed = {"status", "result_digest", "result_summary", "failure_reason", "finished_at", "updated_at",
+        "lease_owner", "lease_expires_at", "revision", "checkpoint_context_json"}
+    if set(pending_changes) != allowed:
+        raise ProductionWorkspaceReconciliationError("memory_retention_completion_patch_invalid")
+    row = _native_memory_planned_sql_row(run, pending_changes)
+    sealed = memory_context(run)["result"]
+    if (row["status"] != ("succeeded" if sealed["payload"]["status"] == "succeeded" else "blocked")
+            or row["revision"] != before["revision"] + 1 or row["result_digest"] != sealed["result_digest"]
+            or row["lease_owner"] is not None or row["lease_expires_at"] is not None
+            or row["checkpoint_context_json"] != before["checkpoint_context_json"]
+            or row["result_summary"] != "Native Memory owner result committed"
+            or row["failure_reason"] != sealed["payload"].get("reason_code")
+            or row["finished_at"] is None or row["updated_at"] != row["finished_at"]):
+        raise ProductionWorkspaceReconciliationError("memory_retention_completion_patch_invalid")
+    refs = tuple((item["table"], item["key"]) for item in current["payload"]["refs"])
+    rows = await _native_memory_source_rows(db, certificate, refs)
+    payload = dict(current["payload"], projection_revision=current["payload"]["projection_revision"] + 1,
+        rows=_native_memory_row_witnesses(rows), selected_delta_digest=_digest(
+            _native_memory_selected_delta_preimage([], [(WRS_BY_RUN, run.run_identity,
+                {name: row[name] for name in pending_changes})], [])), owner_events=[])
+    payload["encoded_bytes"] = sum(item["encoded_bytes"] for item in payload["rows"])
+    after, record = _native_memory_prepare_current_row(row, payload, header_budget=header_budget)
+    return await _prepare_native_memory_source_publication(db, run, retention, before, after, certificate, "completion",
+        pending_changes=pending_changes)
+
+
+async def apply_native_memory_lifecycle(db, run, plan):
+    if type(plan) is not _NativeMemorySourcePublication or plan.kind != "completion":
+        raise ProductionWorkspaceReconciliationError("memory_publication_plan_unavailable")
+    result = await _apply_native_memory_source_publication(db, run, plan)
+    plan.retention.completed = True
+    return result
 
 
 async def _preflight_native_memory_journal_headers(db, *, existing_references=(),
@@ -4075,6 +4569,12 @@ class CompositionSessionGuard:
             preflight_report_journal(json.loads(after or "[]"))
         family_permission = self.db.info.get("composition_native_turn_family_receipt")
         permitted = (self.db.info.get("composition_native_claim_receipt"), self.db.info.get("composition_native_turn_receipt"), family_permission, *memory_permission)
+        if any(identifier.startswith("runtime-service-invocation:programme-start:")
+                for identifier in current.keys() - previous.keys()):
+            from src.runtime_plugins.programme_producer import validate_programme_start_publication
+            programme_permission = validate_programme_start_publication(
+                self.db, statement, run_id, before, after, previous, current)
+            permitted = (*permitted, *programme_permission)
         if any(previous.get(key) != current.get(key) for key in task_ids):
             from src.runtime_plugins.task_capability import validate_task_publication
             task_permission = validate_task_publication(self.db, previous, current, run_id=run_id,

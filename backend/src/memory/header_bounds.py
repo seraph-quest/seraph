@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from types import MappingProxyType
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from weakref import WeakValueDictionary
 
@@ -269,29 +269,181 @@ def _trace_memory_numeric_charges(budget):
 
 def _native_memory_projected_header_upper(descriptor, identity, row):
     """The original full-header formula over resolved numeric-only binds."""
-    from src.workspace.accounting_witness import _native_memory_row_bytes
-    if not any(descriptor is item for item in COMPOSITION_DESCRIPTORS.values()):
-        raise HeaderBoundsError("header_descriptor_unavailable")
-    _native_memory_row_bytes(descriptor, identity, row)
-    skeleton = ["native-composition-memory.v1", descriptor.table, identity,
-        [[name, None] for name in descriptor.columns]]
-    amount = len(json.dumps(skeleton, ensure_ascii=True, separators=(",", ":")).encode()) + 128
+    return _native_memory_resolved_row_widths(descriptor, identity, row)[0]
+
+
+def _native_memory_utf8_width(value):
+    if type(value) is not str:
+        raise HeaderBoundsError("memory_numeric_scalar_unavailable")
+    total = 0
+    for char in value:
+        point = ord(char)
+        if 0xD800 <= point <= 0xDFFF:
+            raise HeaderBoundsError("memory_numeric_scalar_unavailable")
+        total += 1 if point < 128 else 2 if point < 2048 else 3 if point < 65536 else 4
+    return total
+
+
+def _native_memory_ascii_string_width(value):
+    """Exact ensure_ascii string width without constructing JSON or UTF8."""
+    _native_memory_utf8_width(value)
+    return 2 + sum(2 if char in '"\\\b\f\n\r\t' else 6 if ord(char) < 32
+        or 127 <= ord(char) <= 65535 else 12 if ord(char) > 65535 else 1 for char in value)
+
+
+def _native_memory_tuple_skeleton_width(descriptor, identity):
+    fields = 2 + max(0, len(descriptor.columns) - 1) + sum(
+        7 + _native_memory_ascii_string_width(name) for name in descriptor.columns)
+    return (5 + _native_memory_ascii_string_width("native-composition-memory.v1")
+        + _native_memory_ascii_string_width(descriptor.table)
+        + _native_memory_ascii_string_width(identity) + fields)
+
+
+def _native_memory_resolved_row_widths(descriptor, identity, row):
+    """Capacity over actual resolved SQL values; never a row certificate.
+
+    The header result preserves the original full-header fee exactly. The raw
+    tuple result also covers the original finite float.hex representation.
+    Neither computation serializes a tuple, skeleton or private field value.
+    """
+    if (not any(descriptor is item for item in COMPOSITION_DESCRIPTORS.values())
+            or type(identity) is not str or not identity
+            or _native_memory_utf8_width(identity) > 512
+            or type(row) is not dict or len(row) != len(descriptor.columns)
+            or any(name not in row for name in descriptor.columns)):
+        raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+    skeleton = _native_memory_tuple_skeleton_width(descriptor, identity)
+    amount, raw_tuple = skeleton + 128, skeleton
     for name, kind, nullable in zip(descriptor.columns, descriptor.kinds, descriptor.nullable):
         value = row[name]
         if value is None:
             if not nullable:
                 raise HeaderBoundsError("header_scalar_unavailable")
-        elif kind == "text":
-            amount += 6 * len(value.encode("utf-8")) + 2 - 4
-        elif kind == "integer":
+        elif kind == "text" and type(value) is str:
+            amount += 6 * _native_memory_utf8_width(value) + 2 - 4
+            raw_tuple += _native_memory_ascii_string_width(value) - 4
+        elif kind == "integer" and type(value) is int and -(2**63) <= value < 2**63:
             amount += 20 - 4
-        elif kind == "real":
+            raw_tuple += 20 - 4
+        elif kind == "real" and type(value) is float and math.isfinite(value):
             amount += 64 - 4
+            raw_tuple += 128 - 4
         else:
             raise HeaderBoundsError("header_scalar_type_unsupported")
-    if amount > MAX_BYTES:
+    if amount > MAX_BYTES or raw_tuple > MAX_BYTES:
         raise HeaderBoundsError("canonical_bound_not_certified")
-    return amount
+    return amount, raw_tuple
+
+
+def _native_memory_array_width(widths):
+    return 2 + sum(widths) + max(0, len(widths) - 1)
+
+
+def _native_memory_object_width(fields):
+    """Numeric JSON construction shape over the original literal field names."""
+    return 2 + sum(_native_memory_ascii_string_width(name) + 1 + upper
+        for name, upper in fields.items()) + max(0, len(fields) - 1)
+
+
+def _native_memory_current_payload_upper(references, owner_events, *, method,
+        unknown_reason=None, original_present=True):
+    """Bound the original fourteen-field Current without constructing it.
+
+    Encoded byte counts have at most seven decimal digits under MAX_BYTES.
+    This bounds all thirty-two convergence attempts and the final build; it
+    supplies neither their actual counts nor a receipt or body-read grant.
+    """
+    from src.workspace.accounting_witness import (
+        MEMORY_REFERENCE_PROFILE, MEMORY_CURRENT_CHECKPOINT,
+        _MEMORY_CURRENT_FIELDS, _MEMORY_UNKNOWN_REASONS, _MEMORY_NATIVE_OPERATIONS)
+    if (type(references) is not tuple or type(owner_events) is not tuple
+            or not 0 < len(references) <= MAX_ROWS or len(owner_events) > 2
+            or type(method) is not str or method not in _MEMORY_NATIVE_OPERATIONS
+            or type(original_present) is not bool
+            or (unknown_reason is not None and (type(unknown_reason) is not str
+                or unknown_reason not in _MEMORY_UNKNOWN_REASONS))):
+        raise HeaderBoundsError("memory_numeric_reference_shape_invalid")
+    def reference_width(ref):
+        if (type(ref) is not tuple or len(ref) != 2 or type(ref[0]) is not str
+                or type(ref[1]) is not str or ref[0] not in COMPOSITION_DESCRIPTORS
+                or not ref[1] or _native_memory_utf8_width(ref[1]) > 512):
+            raise HeaderBoundsError("memory_numeric_reference_shape_invalid")
+        return _native_memory_object_width({"table": _native_memory_ascii_string_width(ref[0]),
+            "key": _native_memory_ascii_string_width(ref[1])})
+    refs = tuple(reference_width(ref) for ref in references)
+    events = tuple(reference_width(ref) for ref in owner_events)
+    if (references != tuple(sorted(set(references)))
+            or owner_events != tuple(sorted(set(owner_events)))
+            or any(ref not in references for ref in owner_events)):
+        raise HeaderBoundsError("memory_numeric_reference_shape_invalid")
+    witnesses = tuple(_native_memory_object_width({"ref": upper,
+        "tuple_digest": 66, "encoded_bytes": 7}) for upper in refs)
+    unknown = unknown_reason is not None
+    fields = {"schema_version": 1,
+        "profile": _native_memory_ascii_string_width(MEMORY_REFERENCE_PROFILE),
+        "original_checkpoint_digest": 66 if original_present else 4,
+        "projection_revision": 20,
+        "state": _native_memory_ascii_string_width("unknown" if unknown else "validated"),
+        "reason_code": _native_memory_ascii_string_width(unknown_reason) if unknown else 4,
+        "refs": _native_memory_array_width(refs), "absences": 2,
+        "rows": 2 if unknown else _native_memory_array_width(witnesses),
+        "rows_digest": 4 if unknown else 66, "encoded_bytes": 7,
+        "owner_operation_kind": _native_memory_ascii_string_width(method),
+        "owner_events": 2 if unknown else _native_memory_array_width(events),
+        "selected_delta_digest": 66}
+    if fields.keys() != _MEMORY_CURRENT_FIELDS or (not unknown and not original_present):
+        raise HeaderBoundsError("memory_numeric_reference_shape_invalid")
+    payload = _native_memory_object_width(fields)
+    record = _native_memory_object_width({
+        "checkpoint_id": _native_memory_ascii_string_width(MEMORY_CURRENT_CHECKPOINT),
+        "safe": 4, "state_digest": 66, "payload": payload})
+    return payload, record
+
+
+def _native_memory_future_wrs_widths(before_row, *, text_bytes, null_fields=(), integer_fields=()):
+    """Future raw WRS widths from source-owned SQL-bind dimensions only.
+
+    text_bytes measures logical UTF8 bytes, including complete future journal
+    and context widths. This view constructs no future row, JSON or timestamp.
+    It is capacity only; actual publication still requires exact raw readback.
+    """
+    descriptor = COMPOSITION_DESCRIPTORS["workflow_run_states"]
+    if (type(before_row) is not dict or len(before_row) != len(descriptor.columns)
+            or any(name not in before_row for name in descriptor.columns)
+            or type(text_bytes) is not dict or type(null_fields) is not tuple
+            or type(integer_fields) is not tuple):
+        raise HeaderBoundsError("memory_numeric_wrs_shape_invalid")
+    changed = (*text_bytes, *null_fields, *integer_fields)
+    if (len(changed) != len(set(changed))
+            or any(name not in descriptor.columns for name in changed)
+            or any(type(size) is not int or not 0 <= size <= MAX_BYTES
+                for size in text_bytes.values())):
+        raise HeaderBoundsError("memory_numeric_wrs_shape_invalid")
+    header, raw_tuple = _native_memory_resolved_row_widths(
+        descriptor, before_row["run_identity"], before_row)
+    for name, kind, nullable in zip(descriptor.columns, descriptor.kinds, descriptor.nullable):
+        if name not in changed:
+            continue
+        value = before_row[name]
+        old_header = (4 if value is None else 6 * _native_memory_utf8_width(value) + 2
+            if kind == "text" else 20 if kind == "integer" else 64)
+        old_tuple = (4 if value is None else _native_memory_ascii_string_width(value)
+            if kind == "text" else 20 if kind == "integer" else 128)
+        if name in text_bytes and kind == "text":
+            upper = 6 * text_bytes[name] + 2
+            header += upper - old_header
+            raw_tuple += upper - old_tuple
+        elif name in integer_fields and kind == "integer":
+            header += 20 - old_header
+            raw_tuple += 20 - old_tuple
+        elif name in null_fields and nullable:
+            header += 4 - old_header
+            raw_tuple += 4 - old_tuple
+        else:
+            raise HeaderBoundsError("memory_numeric_wrs_shape_invalid")
+    if header > MAX_BYTES or raw_tuple > MAX_BYTES:
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return header, raw_tuple
 
 
 def _native_memory_projected_superset_charges(certificate, trace, new_rows, updated_rows):
@@ -623,7 +775,8 @@ async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, ap
         raise HeaderBoundsError("memory_numeric_ledger_plan_changed")
     entries, total = {}, 0
     for phase, appearance, amount in appearances:
-        if (phase not in {"effect", "capture", "completion"} or type(appearance) is not tuple
+        if (phase not in {"effect", "capture", "completion"}
+                or (appearance is not None and type(appearance) is not tuple)
                 or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
             raise HeaderBoundsError("memory_numeric_ledger_entry_invalid")
         entries.setdefault((phase, appearance), []).append(amount)
@@ -633,6 +786,248 @@ async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, ap
         entries, _MEMORY_LEDGER_SEAL)
     _MEMORY_LEDGERS[id(ledger)] = ledger
     await ledger.bind(db, "effect")
+    return ledger
+
+
+async def _reserve_native_memory_effect_ledger(db, run, operation, prepared, *,
+        existing_references, before_row, certificate):
+    """Enroll only the complete original owner's pre-effect numeric forecast.
+
+    Current certificates and numeric row sizes are capacity facts. They do not
+    replace the live Source or the identical original, unconsumed M5 plan.
+    An unavailable source-owned schedule stops before the first effect; it must
+    never become a partial ledger or a caller-supplied list of fees.
+    """
+    from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+    from src.memory.m5 import validate_native_memory_mutation_plan
+    from src.memory.composition_headers import (
+        CompositionHeaderCertificate, validate_composition_certificate)
+    from src.workspace import accounting_witness
+    source = await _validate_memory_owner_source(db, run, operation)
+    budget = source.admission.header_budget
+    await validate_native_memory_mutation_plan(prepared, db=db,
+        candidate_digest=source.admission.candidate_digest)
+    if (operation._prepared is not prepared or type(budget) is not HeaderReadBudget
+            or type(certificate) is not CompositionHeaderCertificate
+            or certificate.budget is not budget
+            or type(before_row) is not dict or set(before_row) != set(WRS_BY_RUN.columns)
+            or before_row["run_identity"] != run.run_identity
+            or type(existing_references) is not tuple
+            or not 0 < len(existing_references) <= MAX_ROWS
+            or any(type(ref) is not tuple or len(ref) != 2
+                or type(ref[0]) is not str or type(ref[1]) is not str
+                for ref in existing_references)
+            or existing_references != tuple(sorted(set(existing_references)))
+            or (WRS_BY_RUN.table, run.run_identity) not in existing_references
+            or any(ref not in certificate.rows for ref in existing_references)):
+        raise HeaderBoundsError("memory_numeric_forecast_owner_changed")
+    await validate_composition_certificate(db, certificate)
+    schedule_owner = getattr(accounting_witness, "_native_memory_effect_numeric_schedule", None)
+    if schedule_owner is None:
+        raise HeaderBoundsError("memory_complete_numeric_forecast_unavailable")
+    appearances = await schedule_owner(db, run, operation, prepared,
+        existing_references=existing_references, before_row=before_row, certificate=certificate)
+    if (type(appearances) is not tuple or not appearances
+            or any(type(entry) is not tuple or len(entry) != 3 for entry in appearances)
+            or {entry[0] for entry in appearances} != {"effect", "capture", "completion"}):
+        raise HeaderBoundsError("memory_complete_numeric_forecast_unavailable")
+    # The original ledger checks every amount and deducts the complete sum
+    # atomically before installing any prepaid effect phase. No slack refund.
+    return await _reserve_native_memory_numeric_ledger(db, run, operation, prepared, appearances)
+
+
+@dataclass(eq=False)
+class _NativeProgrammeNumericLedger:
+    """The same numeric debit protocol, owned by the actual programme Source."""
+    budget: HeaderReadBudget
+    guard: object
+    source: object
+    called: object
+    run: object
+    entries: dict
+    seal: object
+    bindings: dict = field(default_factory=dict)
+    consumed: list = field(default_factory=list)
+    closed: bool = False
+    _delivered_capacity_task: object = field(default=None, repr=False)
+
+    def _checked(self):
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        if (type(self) is not _NativeProgrammeNumericLedger or self.closed
+                or self.seal is not _MEMORY_LEDGER_SEAL
+                or _MEMORY_LEDGERS.get(id(self)) is not self
+                or type(self.source) is not _ProgrammeSource
+                or getattr(self.source, "_numeric_reservation", None) is not self
+                or type(self.guard) is not CompositionSessionGuard
+                or self.guard.header_budget is not self.budget
+                or self.source.header_budget is not self.budget
+                or self.source.job_id != self.run.run_identity):
+            raise HeaderBoundsError("programme_start_numeric_owner_changed")
+        self.source.validate()
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is not None and active[0] is self and active[1] == "delivered":
+            import asyncio
+            self.source.validate(owner=True)
+            if self._delivered_capacity_task is not asyncio.current_task():
+                raise HeaderBoundsError("programme_start_numeric_owner_changed")
+
+    available = _NativeMemoryNumericLedger.available
+    close = _NativeMemoryNumericLedger.close
+
+    def consume(self, phase, appearance, amount):
+        if not _NativeMemoryNumericLedger.consume(self, phase, appearance, amount):
+            raise HeaderBoundsError("programme_start_numeric_appearance_unreserved")
+        return True
+
+    def _checked_delivery(self):
+        from src.runtime_plugins.programme_producer import _StartPublication
+        self._checked()
+        self.source.validate(owner=True)
+        proof = self.source.publication
+        response = getattr(self.source, "_delivered_response", None)
+        if (type(proof) is not _StartPublication or proof.source is not self.source
+                or proof.called is not self.called or not proof.checked or not proof.committed
+                or self.source.state != "start_committed" or response is None
+                or response is not self.source.response or response != proof.response):
+            raise HeaderBoundsError("programme_start_numeric_delivery_unavailable")
+
+    @asynccontextmanager
+    async def source_phase(self, source, phase):
+        """Capacity for actual delivery; each reader still establishes body authority."""
+        import asyncio
+        self._checked_delivery()
+        if (source is not self.source or phase != "delivered"
+                or self._delivered_capacity_task is not None
+                or _MEMORY_LEDGER_PHASE.get() is not None
+                or _DISCOVERY_NUMERIC_READS.get() is not None
+                or _SESSION_NUMERIC_READS.get() is not None):
+            raise HeaderBoundsError("programme_start_numeric_phase_invalid")
+        self._delivered_capacity_task = asyncio.current_task()
+        token = _MEMORY_LEDGER_PHASE.set((self, phase))
+        try:
+            yield self
+        finally:
+            _MEMORY_LEDGER_PHASE.reset(token)
+            self._delivered_capacity_task = None
+            self.bindings.pop("delivered", None)
+
+    async def bind(self, db, phase):
+        import asyncio
+        from src.runtime_plugins.programme_producer import _StartPublication
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        self._checked()
+        if phase not in {"start", "publication", "delivered"}:
+            raise HeaderBoundsError("programme_start_numeric_phase_invalid")
+        held = self.source.writer
+        if (type(held) is not tuple or len(held) != 6
+                or held[0] is not asyncio.current_task() or held[1] is not db
+                or type(held[3]) is not CompositionSessionGuard
+                or db.info.get("composition_guard") is not held[3]
+                or held[3].db is not db or held[3].header_budget is not self.budget):
+            raise HeaderBoundsError("programme_start_numeric_owner_changed")
+        current_guard = held[3]
+        if phase == "delivered":
+            self._checked_delivery()
+            if (self._delivered_capacity_task is not asyncio.current_task()
+                    or _MEMORY_LEDGER_PHASE.get() != (self, "delivered")):
+                raise HeaderBoundsError("programme_start_numeric_phase_invalid")
+        else:
+            self.source.validate(called=self.called)
+            if current_guard is not self.guard:
+                raise HeaderBoundsError("programme_start_numeric_writer_changed")
+            if phase == "publication":
+                proof = self.source.publication
+                if (type(proof) is not _StartPublication or proof.source is not self.source
+                        or proof.called is not self.called or proof.db is not db
+                        or proof.task is not asyncio.current_task() or not proof.checked):
+                    raise HeaderBoundsError("programme_start_numeric_publication_unavailable")
+        connection = held[2].sync_connection
+        transaction = db.sync_session.get_transaction()
+        sql_transaction = connection.get_transaction()
+        driver = connection.connection.driver_connection
+        if transaction is None or sql_transaction is None or not driver.in_transaction:
+            raise HeaderBoundsError("programme_start_numeric_writer_changed")
+        prior = self.bindings.get(phase)
+        if phase != "delivered" and prior is not None and (prior[0] is not db or prior[1] is not transaction
+                or prior[2] is not driver or prior[3] is not current_guard
+                or prior[4] is not connection or prior[5] is not sql_transaction):
+            raise HeaderBoundsError("programme_start_numeric_writer_changed")
+        self.bindings[phase] = (db, transaction, driver, current_guard, connection,
+            sql_transaction, asyncio.current_task())
+
+    @contextmanager
+    def phase(self, phase):
+        import asyncio
+        self._checked()
+        binding = self.bindings.get(phase)
+        held = self.source.writer
+        if (binding is None or binding[0].sync_session.get_transaction() is not binding[1]
+                or not binding[2].in_transaction
+                or binding[4].get_transaction() is not binding[5]
+                or binding[4].connection.driver_connection is not binding[2]
+                or binding[6] is not asyncio.current_task()
+                or held is None or held[0] is not binding[6] or held[1] is not binding[0]
+                or held[2].sync_connection is not binding[4] or held[3] is not binding[3]):
+            raise HeaderBoundsError("programme_start_numeric_writer_changed")
+        if phase == "delivered":
+            self._checked_delivery()
+        else:
+            self.source.validate(called=self.called)
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is not None and not (phase == "delivered" and active == (self, phase)
+                and self._delivered_capacity_task is asyncio.current_task()):
+            raise HeaderBoundsError("programme_start_numeric_phase_invalid")
+        token = _MEMORY_LEDGER_PHASE.set((self, phase))
+        try:
+            yield self
+        finally:
+            _MEMORY_LEDGER_PHASE.reset(token)
+
+
+async def _reserve_native_programme_start_numeric_ledger(guard, source, called, run, entries):
+    """Enroll only the exact complete vector retained by the original guard."""
+    from src.runtime_plugins.programme_producer import _ProgrammeSource
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if type(guard) is not CompositionSessionGuard or type(source) is not _ProgrammeSource:
+        raise HeaderBoundsError("programme_start_numeric_owner_changed")
+    source.validate(called=called)
+    owner = getattr(guard, "_native_programme_start_numeric_owner", None)
+    if (type(owner) is not tuple or len(owner) != 3
+            or owner[0] is not source or owner[1] is not called or owner[2] is not run
+            or entries is not getattr(guard, "_native_programme_start_numeric_entries", None)
+            or type(entries) is not tuple or not entries
+            or source.authority_selection(guard.db)[0] is not guard
+            or type(source.header_budget) is not HeaderReadBudget
+            or guard.header_budget is not source.header_budget
+            or source.state != "claimed" or source.publication is not None
+            or getattr(source, "_numeric_reservation", None) is not None
+            or run.run_identity != source.job_id):
+        raise HeaderBoundsError("programme_start_numeric_owner_changed")
+    projected, total, phases = {}, 0, set()
+    for entry in entries:
+        if type(entry) is not tuple or len(entry) != 3:
+            raise HeaderBoundsError("programme_start_numeric_entry_invalid")
+        phase, appearance, amount = entry
+        if (phase not in {"start", "publication", "delivered"}
+                or (appearance is not None and type(appearance) is not tuple)
+                or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+            raise HeaderBoundsError("programme_start_numeric_entry_invalid")
+        phases.add(phase)
+        projected.setdefault((phase, appearance), []).append(amount)
+        total += amount
+    if phases != {"start", "publication", "delivered"}:
+        raise HeaderBoundsError("programme_start_complete_numeric_forecast_unavailable")
+    source.header_budget.debit(total)
+    ledger = _NativeProgrammeNumericLedger(source.header_budget, guard, source, called, run,
+        projected, _MEMORY_LEDGER_SEAL)
+    source._numeric_reservation = ledger
+    _MEMORY_LEDGERS[id(ledger)] = ledger
+    try:
+        await ledger.bind(guard.db, "start")
+    except BaseException:
+        ledger.close()
+        raise
     return ledger
 
 

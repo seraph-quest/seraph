@@ -1182,30 +1182,35 @@ async def dispatch_memory_mutation(dispatcher, db, run, witness, method, payload
     prepared = await m5.prepare_native_memory_mutation(db, admission=admission,
         native_memory_report_source=report_context)
     operation = await _begin_memory_owner_source(db, run, original_scope, prepared=prepared)
-    await begin_native_memory_effect(db, run, witness["claim_ref"], admission,
+    retention_owner = await begin_native_memory_effect(db, run, witness["claim_ref"], admission,
         source_operation=operation, prepared=prepared)
-    effect = await perform_memory_mutation(db, admission, authority_check=authority,
-        source_operation=operation, native_prepared_mutation=prepared,
-        native_memory_report_source=report_context)
-    if effect.status == "succeeded":
-        value = json.loads(effect.value_json)
-        if method != "memory.propose":
-            value["receipt_ref"] = "native-memory-receipt:" + _digest({"invocation": run.run_identity,
-                "claim": witness["claim_ref"], "candidate": admission.candidate_digest})
-        result = succeeded(method, value)
-    else:
-        result = blocked("native_memory_owner_outcome_unsupported")
+    from src.workspace.accounting_witness import _NativeMemoryRetention
+    if type(retention_owner) is not _NativeMemoryRetention:
+        raise NativeServiceBlocked("native_memory_retention_unavailable")
+    async with retention_owner.phase("effect", db, run):
+        effect = await perform_memory_mutation(db, admission, authority_check=authority,
+            source_operation=operation, native_prepared_mutation=prepared,
+            native_memory_report_source=report_context)
+        if effect.status == "succeeded":
+            value = json.loads(effect.value_json)
+            if method != "memory.propose":
+                value["receipt_ref"] = "native-memory-receipt:" + _digest({"invocation": run.run_identity,
+                    "claim": witness["claim_ref"], "candidate": admission.candidate_digest})
+            result = succeeded(method, value)
+        else:
+            result = blocked("native_memory_owner_outcome_unsupported")
     # Capture stages the complete actual owner result before computing Current.
     # Appending this context after capture would immediately stale its own WRS.
-    capture = await capture_native_memory_retention(db, run, witness["claim_ref"], effect,
-        source_operation=operation, prepared=prepared, result=result)
-    retention = validate_memory_retention_locator(capture.payload(), run.run_identity)
-    expected = {"invocation_ref": run.run_identity, "claim_ref": witness["claim_ref"],
-        "candidate_digest": admission.candidate_digest, "result_digest": _digest(result), "payload": result,
-        "effect": asdict(effect), "retention": retention}
-    if memory_context(run)["result"] != expected:
-        raise NativeServiceBlocked("native_memory_retention_result_readback_changed")
-    await authority(db)
+    async with retention_owner.phase("capture", db, run):
+        capture = await capture_native_memory_retention(db, run, witness["claim_ref"], effect,
+            source_operation=operation, prepared=prepared, result=result)
+        retention = validate_memory_retention_locator(capture.payload(), run.run_identity)
+        expected = {"invocation_ref": run.run_identity, "claim_ref": witness["claim_ref"],
+            "candidate_digest": admission.candidate_digest, "result_digest": _digest(result), "payload": result,
+            "effect": asdict(effect), "retention": retention}
+        if memory_context(run)["result"] != expected:
+            raise NativeServiceBlocked("native_memory_retention_result_readback_changed")
+        await authority(db)
     return result
 
 

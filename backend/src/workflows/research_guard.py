@@ -241,15 +241,28 @@ def _discovery_guard_prepay(owned, *, part, value=None, run=None, row_upper=None
         owned.header_budget.debit(amount, appearance=appearance)
 
 
-async def assert_discovery_authority(db, value, *, run=None, discovery_session=None):
+async def assert_discovery_authority(db, value, *, run=None, discovery_session=None, native_programme_source=None):
     """DB-only programme validation in the existing original job writer."""
     from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
     from src.guardian.goal_programmes import goal_programme_service
     from src.workflows.job_runtime import DurableJobTransitionError
+    native_selection = {}
+    if native_programme_source is not None:
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        if type(native_programme_source) is not _ProgrammeSource or discovery_session is not None:
+            raise DurableJobTransitionError("native_programme_source_unavailable")
+        guard, identity = native_programme_source.authority_selection(db)
+        native_selection = {"original_admission_guard": guard, "identity_certificate": identity,
+            "native_programme_source": native_programme_source}
     owned = (discovery_session.jobs._validate_discovery_session(discovery_session, db=db)
         if discovery_session is not None else None)
     if owned is not None:
         _discovery_guard_prepay(owned, part="authority", value=value)
+    if native_programme_source is not None:
+        from src.workflows.job_runtime import _discovery_utf8_width
+        widths = {"declared_authority_json": _discovery_utf8_width(value)}
+        for appearance, amount in _discovery_guard_numeric_entries(native_programme_source.job_id, widths, 0, part="authority"):
+            native_programme_source.header_budget.debit(amount, appearance=appearance)
     authority = discovery_authority(value)
     import asyncio
     held = _programme_policy.get()
@@ -290,12 +303,17 @@ async def assert_discovery_authority(db, value, *, run=None, discovery_session=N
         witness = held[2]
         if owned is not None:
             _discovery_guard_prepay(owned, part="readback", run=run)
+        if native_programme_source is not None:
+            widths = {name: _discovery_utf8_width(getattr(run, name))
+                for name in ("checkpoint_receipts_json", "artifact_receipts_json")}
+            for appearance, amount in _discovery_guard_numeric_entries(native_programme_source.job_id, widths, 0, part="readback"):
+                native_programme_source.header_budget.debit(amount, appearance=appearance)
         if (not isinstance(witness, DiscoveryInputWitness) or witness.job_id != run.run_identity
                 or witness.input_digest != run.input_digest or witness.authority_digest != run.authority_digest
                 or witness.checkpoint_digest != _digest(json.loads(run.checkpoint_receipts_json))
                 or witness.artifact_digest != _digest(json.loads(run.artifact_receipts_json))):
             raise DurableJobTransitionError("programme physical readback is not current at this writer")
-    programme = await goal_programme_service.validate_current_binding(db=db, binding=binding, policy=policy,
+    programme = await goal_programme_service.validate_current_binding(db=db, binding=binding, policy=policy, **native_selection,
         **({"discovery_session": discovery_session} if discovery_session is not None else {}))
     from src.guardian.research_plan_contracts import STAGES
     if owned is None:

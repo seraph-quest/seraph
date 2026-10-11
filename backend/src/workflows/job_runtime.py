@@ -266,6 +266,8 @@ class _NativeServiceClaimRequest:
     header_budget: Any = field(default=None, repr=False, compare=False)
     native_memory_admission: Any = field(default=None, repr=False, compare=False)
 
+    native_programme_source: Any = field(default=None, repr=False, compare=False)
+
     def validate_host(self):
         if (not self.host.admitting or self.host.reviewed is not self.reviewed
                 or self.host.boot_nonce != self.host_boot_nonce):
@@ -279,6 +281,7 @@ async def _validate_native_service_claim(db, run, request):
     request.validate_host()
     binding = RuntimeCompositionBinding.from_json(run.composition_binding_json)
     producers = {
+        "goal_public_discovery_v1": {("research.executeAccepted", "programme_discovery")},
         "workflow": {("tasks.admit", "workflow"), ("capabilities.invoke", "workflow"),
                      ("tasks.admit", "artifact"), ("capabilities.invoke", "artifact")},
         "readonly_research_child": {("research.executeAccepted", "public_research"),
@@ -298,7 +301,7 @@ async def _validate_native_service_claim(db, run, request):
             or binding.host_composition_digest != request.reviewed.composition_digest
             or binding.host_package_digest is None or run.deadline_at is None):
         raise DurableJobLeaseError("original reviewed native service binding unavailable")
-    memory_budget = request.header_budget if run.job_kind == "runtime_service_memory_v1" else None
+    memory_budget = request.header_budget if run.job_kind in {"runtime_service_memory_v1", "goal_public_discovery_v1"} else None
     if run.job_kind == "runtime_service_memory_v1":
         from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION
         if type(memory_budget) is not HeaderReadBudget:
@@ -306,6 +309,19 @@ async def _validate_native_service_claim(db, run, request):
         await memory_budget.certify(db, OPERATOR_SESSION, (run.operator_session_id,))
     await validate_invocation(db, binding, **(
         {"header_budget": memory_budget} if memory_budget is not None else {}))
+    if run.job_kind == "goal_public_discovery_v1":
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        from src.workflows.research_guard import assert_discovery_authority
+        source = request.native_programme_source
+        if (type(source) is not _ProgrammeSource or source.jobs is None
+                or source.job_id != run.run_identity or source.host is not request.host
+                or source.header_budget is not request.header_budget or source.state != "reserved"):
+            raise DurableJobLeaseError("native_programme_source_unavailable")
+        source.validate(owner=True)
+        await source.prepare_selection(db, run)
+        await validate_invocation(db, binding, header_budget=source.header_budget)
+        await assert_discovery_authority(db, run.declared_authority_json, run=run, native_programme_source=source)
+        return binding
     now = _utc_now()
     if run.owner_kind != "user" or run.operator_session_id != run.session_id:
         raise DurableJobLeaseError("native service original operator provenance unavailable")
@@ -2429,7 +2445,7 @@ def _discovery_constructor_numeric_bounds(*, programme, binding, identifier, now
             or type(composition_binding) is not RuntimeCompositionBinding
             or GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != binding
             or composition_binding.origin_method != "research.executeAccepted"
-            or composition_binding.native_branch != "public_research"
+            or composition_binding.native_branch not in {"public_research", "programme_discovery"}
             or now.tzinfo is None or deadline.tzinfo is None or not now < deadline <= programme.expires_at):
         raise HeaderBoundsError("programme_constructor_numeric_inputs_changed")
     encoded = lambda value: len(_canonical(value).encode("utf-8"))
@@ -6345,18 +6361,22 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await apply_native_memory_lifecycle(db, run, lifecycle)
             return _serialize(run, receipt={"kind": "native_memory_completed", "memory_status": result["memory_status"]})
 
+    async def start_programme_service(self, db, run, *, called, payload):
+        from src.runtime_plugins.programme_producer import write_programme_start
+        return await write_programme_start(self, db, run, called, payload)
+
     async def claim_service_job(self, job_id: str, *, host, owner: str,
                                 lease_seconds: int = 300, expected_revision: int | None = None,
                                 expected_fencing_token: int | None = None, claim_authority_check=None,
                                 native_report_candidate=None, header_budget=None,
-                                native_memory_admission=None) -> NativeServiceClaim:
+                                native_memory_admission=None, native_programme_source=None) -> NativeServiceClaim:
         from src.runtime_plugins.bridge import CordisHost
         from src.runtime_plugins.composition import ReviewedComposition
         if (not isinstance(host, CordisHost) or not host.admitting
                 or not isinstance(host.reviewed, ReviewedComposition)
                 or type(host.boot_nonce) is not str or not re.fullmatch(r"[0-9a-f]{64}", host.boot_nonce)):
             raise DurableJobLeaseError("admitting original reviewed native service host required")
-        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce, native_report_candidate, header_budget, native_memory_admission)
+        request = _NativeServiceClaimRequest(host, host.reviewed, host.boot_nonce, native_report_candidate, header_budget, native_memory_admission, native_programme_source)
         result = await self.claim_job(job_id, owner=owner, lease_seconds=lease_seconds,
             expected_revision=expected_revision, expected_fencing_token=expected_fencing_token,
             claim_authority_check=claim_authority_check, _runtime_service_claim=request)

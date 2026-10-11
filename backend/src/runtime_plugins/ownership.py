@@ -96,7 +96,7 @@ class RuntimeCompositionBinding:
         keys = tuple(item.runtime_domain for item in self.dependency_vector)
         if (type(self.schema_version) is not int or self.schema_version != 1
             or METHOD_DOMAINS.get(self.origin_method) != self.runtime_domain
-            or self.native_branch not in {"base", "artifact", "workflow", "public_research", "direct_turn", "generic_turn"}
+            or self.native_branch not in {"base", "artifact", "workflow", "public_research", "programme_discovery", "direct_turn", "generic_turn"}
             or self.allowed_child_methods != method_closure(self.origin_method, self.native_branch)
             or not 1 <= len(keys) <= 14 or keys != tuple(sorted(set(keys)))
             or not {self.runtime_domain, "seraph.authority.v1", "seraph.tasks.v1"}.issubset(keys)):
@@ -191,6 +191,9 @@ def method_closure(origin_method, native_branch):
     if native_branch in {"artifact", "workflow"} and origin_method in {"tasks.admit", "capabilities.invoke"}:
         return tuple(sorted({origin_method, "tasks.inspect", "tasks.cancel", "tasks.checkpoint", "tasks.settle",
                              "artifacts.read", "artifacts.stage", "artifacts.adopt"}))
+    if native_branch == "programme_discovery" and origin_method == "research.executeAccepted":
+        return tuple(sorted({origin_method, "authority.resolve", "tasks.inspect",
+            "source-extraction.extract", "inference.request"}))
     if native_branch == "public_research" and origin_method == "research.buildPlan":
         return (origin_method,)
     if native_branch == "public_research" and origin_method == "research.executeAccepted":
@@ -237,6 +240,8 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
         names.add("artifacts")
     elif native_branch == "workflow" and method.startswith("tasks."):
         pass
+    elif native_branch == "programme_discovery":
+        names.update({"goals", "research", "artifacts", "inference", "source-extraction"})
     elif native_branch == "public_research" and method in {"capabilities.invoke", "tasks.admit", "tasks.settle", "tasks.cancel", "artifacts.adopt"}:
         names.update({"research", "capabilities", "inference", "artifacts", "source-extraction"})
     elif native_branch == "public_research" and method in {"source-extraction.extract", "research.buildPlan",

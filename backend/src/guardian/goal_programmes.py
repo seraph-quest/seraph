@@ -319,7 +319,7 @@ class GoalProgrammeService:
 
     async def validate_current_binding(self, *, db, binding: GoalProgrammeAuthorityBinding,
                                        policy: ProgrammePolicySnapshot, original_admission_guard=None,
-                                       identity_certificate=None, discovery_session=None) -> GoalProgramme:
+                                       identity_certificate=None, discovery_session=None, native_programme_source=None) -> GoalProgramme:
         """DB-ONLY validation within the existing native contact/adoption CAS.
 
         Caller owns the short writer transaction and the original durable
@@ -334,8 +334,24 @@ class GoalProgrammeService:
         this SAME transaction. Output must be staged before adoption validation.
         """
         self._ready()
+        from src.work_board.research_parent import discovery_authority
         owned = None
         selection = None
+        if native_programme_source is not None:
+            from src.runtime_plugins.programme_producer import _ProgrammeSource
+            if type(native_programme_source) is not _ProgrammeSource or discovery_session is not None:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            guard, identity = native_programme_source.authority_selection(db)
+            if original_admission_guard is not guard or identity_certificate is not identity:
+                raise GoalProgrammeError("programme_original_selection_unavailable")
+            selection = identity.original_selection
+            for job_id in selection.runs:
+                native_programme_source.header_budget.debit(
+                    selection.common33.rows[("workflow_run_states", job_id)][1],
+                    appearance=("programme-source", "selected-authority-model", job_id))
+            if not any(discovery_authority(run["declared_authority_json"]).programme_binding == binding
+                    for run in selection.runs.values()):
+                raise GoalProgrammeError("programme_binding_stale")
         if discovery_session is not None:
             from src.guardian.goal_discovery import _OwnedDiscoverySession
             from src.memory.composition_headers import (
@@ -391,10 +407,12 @@ class GoalProgrammeService:
                     or identity_certificate.budget is not guard.header_budget
                     or (prospective is not None and (guard._prospective_admission_facts is None
                         or guard._prospective_admission_facts[2] != binding))
-                    or (prospective is None and owned is None)):
+                    or (prospective is None and owned is None and native_programme_source is None)):
                 raise GoalProgrammeError("programme_original_selection_unavailable")
             connection = await db.connection()
             def pay_goal(conn):
+                if native_programme_source is not None:
+                    native_programme_source.authority_selection(db)
                 if owned is not None:
                     owned.validate(db=db)
                 guard._validate_programme_selection(selection)
@@ -420,6 +438,8 @@ class GoalProgrammeService:
         programme = GoalProgramme.model_validate(raw)
         if selected:
             def pay_issuer(conn):
+                if native_programme_source is not None:
+                    native_programme_source.authority_selection(db)
                 if owned is not None:
                     owned.validate(db=db)
                 _validate(conn, identity_certificate)

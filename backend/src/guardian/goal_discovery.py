@@ -213,6 +213,7 @@ class GoalDiscoveryService:
         self.resolver, self.transport = resolver, transport
         self.started = False
         self._tasks = set()
+        self._native_programme_sources = {}
         self._lifecycle_dispatcher = None
         self._lifecycle_host = None
         self._active_discovery_invocation = None
@@ -382,7 +383,7 @@ class GoalDiscoveryService:
                 connection = await discovery_session.db.connection()
                 await connection.run_sync(lambda conn: charge_table(conn, "runtime_composition_states"))
                 issued_binding = await bind_invocation(discovery_session.db,
-                    method="research.executeAccepted", native_branch="public_research",
+                    method="research.executeAccepted", native_branch="programme_discovery",
                     goal_bound=True, programme_bound=True,
                     reviewed_composition=discovery_session.host.reviewed, header_budget=frame)
             # Numeric sizing reads already paid canonical facts. Its input and
@@ -596,7 +597,15 @@ class GoalDiscoveryService:
         already_owned = task in self._tasks
         self._tasks.add(task)
         owner = "native:goal-public-discovery"
+        source = None
         try:
+            if self._lifecycle_host is not None:
+                from src.runtime_plugins.programme_producer import reserve_programme_source
+                source = reserve_programme_source(self, job_id)
+                if await source.is_native_programme():
+                    return await self._run_native_programme(source)
+                source.close()
+                source = None
             witness = await physical_discovery_inputs(self.jobs, job_id)
             async def current(db, run):
                 await assert_discovery_authority(db, run.declared_authority_json, run=run)
@@ -616,6 +625,10 @@ class GoalDiscoveryService:
                         "freshness": "current", "no_learning": True, "uncertainty": [str(exc)]}, degraded=True)
             return await self.jobs.get_job(job_id)
         except BaseException as exc:
+            if source is not None:
+                # A committed START with lost ACK remains held. Never renew or
+                # translate it into an ordinary recoverable execution attempt.
+                raise
             # Invalid late authority may reject this ordinary transition. Its
             # original running/effect/cost state then remains visible and held.
             try:
@@ -630,10 +643,42 @@ class GoalDiscoveryService:
                 pass
             raise
         finally:
+            if source is not None:
+                source.close()
             if not already_owned:
                 self._tasks.discard(task)
 
-    async def _execute(self, job_id, owner, fence):
+    async def _run_native_programme(self, source):
+        source.validate(owner=True)
+        await source.preflight_current()
+        witness = await source.physical_inputs()
+        async def current(db, run):
+            await source.prepare_selection(db, run)
+            await assert_discovery_authority(db, run.declared_authority_json, run=run,
+                native_programme_source=source)
+        async with discovery_writer_scope(witness=witness):
+            claim = await self.jobs.claim_service_job(source.job_id, host=source.host,
+                owner="native:goal-public-discovery", lease_seconds=300,
+                claim_authority_check=current, header_budget=source.header_budget,
+                native_programme_source=source)
+        scope = source.bind_claim(claim)
+        result = await source.host.request_service("research.executeAccepted",
+            {"plan_ref": next(item["reference"].artifact_id for item in witness.artifacts.values()
+                if item["kind"] == "plan")}, original_scope=scope)
+        await source.delivered(result)
+        await self._execute(source.job_id, "native:goal-public-discovery",
+            claim.job["lease"]["fencing_token"], native_programme_source=source)
+        return result
+
+    async def _execute(self, job_id, owner, fence, *, native_programme_source=None):
+        if native_programme_source is not None:
+            native_programme_source.validate(owner=True)
+            if native_programme_source.state != "executing":
+                raise ValueError("native_programme_start_response_unavailable")
+            native_programme_source.state = "execution_consumed"
+            # The accepted programme START does not grant a turn-shaped
+            # inference continuation or an output Source.
+            raise ValueError("native_programme_inference_continuation_unavailable")
         from pydantic import Field, StrictInt, model_validator
         from typing import Annotated, Literal
         class Queries(Closed):

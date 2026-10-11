@@ -650,13 +650,46 @@ async def _load_governed_authority(db, job: dict[str, Any], binding_id: str):
     now = _utc_now()
     if binding.state != "active" or _utc(binding.expires_at) <= now:
         raise RuntimeError("governed_schedule_prerequisite_stale")
+    consent, connection, goal, artifact = await load_governed_calendar_input_authority(
+        db,
+        owner=WorkBoardOwner(
+            principal_id=binding.owner_principal_id,
+            session_id=binding.owner_session_id,
+        ),
+        consent_id=binding.read_consent_id,
+        input_artifact_id=binding.input_artifact_id,
+        binding=binding,
+    )
+    return binding, consent, connection, goal, artifact
+
+
+async def load_governed_calendar_input_authority(
+    db,
+    *,
+    owner: WorkBoardOwner,
+    consent_id: str,
+    input_artifact_id: str,
+    binding: GovernedScheduleBinding | None = None,
+):
+    """Resolve the original Calendar input before or after binding creation.
+
+    Callers supply only locators retained by the original scheduler request.
+    The current owner, consent, connection, Goal, session and physical artifact
+    are always resolved here; a locator or decoded payload grants no authority.
+    This scheduler-only resolver does not broaden canonical task admission.
+    A native caller must hold its current original invocation guard before
+    entering this owner and again after every fresh transaction boundary.
+    """
+    if not owner.principal_id or not owner.session_id or not consent_id or not input_artifact_id:
+        raise RuntimeError("governed_schedule_prerequisite_stale")
+    now = _utc_now()
     consent = (
         await db.execute(
             sa_select(CalendarReadConsent)
             .where(
-                CalendarReadConsent.consent_id == binding.read_consent_id,
-                CalendarReadConsent.owner_principal_id == binding.owner_principal_id,
-                CalendarReadConsent.owner_session_id == binding.owner_session_id,
+                CalendarReadConsent.consent_id == consent_id,
+                CalendarReadConsent.owner_principal_id == owner.principal_id,
+                CalendarReadConsent.owner_session_id == owner.session_id,
             )
             .execution_options(populate_existing=True)
         )
@@ -666,19 +699,19 @@ async def _load_governed_authority(db, job: dict[str, Any], binding_id: str):
             sa_select(GoogleServiceConnection)
             .where(
                 GoogleServiceConnection.connection_id == (consent.connection_id if consent else ""),
-                GoogleServiceConnection.owner_principal_id == binding.owner_principal_id,
-                GoogleServiceConnection.owner_session_id == binding.owner_session_id,
+                GoogleServiceConnection.owner_principal_id == owner.principal_id,
+                GoogleServiceConnection.owner_session_id == owner.session_id,
             )
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none() if consent is not None else None
-    goal = await db.get(Goal, binding.goal_id, populate_existing=True)
+    goal = await db.get(Goal, consent.goal_id, populate_existing=True) if consent is not None else None
     artifact = await db.get(
         WorkBoardInputArtifact,
-        binding.input_artifact_id,
+        input_artifact_id,
         populate_existing=True,
     )
-    session = await db.get(OperatorSession, binding.owner_session_id, populate_existing=True)
+    session = await db.get(OperatorSession, owner.session_id, populate_existing=True)
     goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
     if (
         consent is None
@@ -692,24 +725,33 @@ async def _load_governed_authority(db, job: dict[str, Any], binding_id: str):
         or consent.state != "active"
         or not bool(consent.allow_remote_model)
         or _utc(consent.expires_at) <= now
-        or consent.revision != binding.consent_revision
         or consent.connection_revision != connection.revision
         or connection.state != "active"
-        or goal.owner_principal_id != binding.owner_principal_id
-        or goal.owner_session_id != binding.owner_session_id
+        or goal.owner_principal_id != owner.principal_id
+        or goal.owner_session_id != owner.session_id
         or goal_status != "active"
-        or int(goal.revision) != int(binding.goal_revision)
-        or artifact.owner_principal_id != binding.owner_principal_id
-        or artifact.owner_session_id != binding.owner_session_id
+        or int(goal.revision) != int(consent.goal_revision)
+        or artifact.owner_principal_id != owner.principal_id
+        or artifact.owner_session_id != owner.session_id
         or artifact.capability_id != "calendar.observe_due_events.v1"
-        or artifact.goal_id != binding.goal_id
-        or int(artifact.goal_revision) != int(binding.goal_revision)
-        or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
+        or artifact.goal_id != consent.goal_id
+        or int(artifact.goal_revision) != int(consent.goal_revision)
         or artifact.state != "pending"
         or artifact.bound_task_id is not None
         or artifact.expires_at is None
         or _utc(artifact.expires_at) <= now
         or not artifact.metadata_digest
+    ):
+        raise RuntimeError("governed_schedule_prerequisite_stale")
+    if binding is not None and (
+        binding.owner_principal_id != owner.principal_id
+        or binding.owner_session_id != owner.session_id
+        or binding.read_consent_id != consent_id
+        or binding.input_artifact_id != artifact.artifact_id
+        or consent.revision != binding.consent_revision
+        or goal.id != binding.goal_id
+        or int(goal.revision) != int(binding.goal_revision)
+        or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
     ):
         raise RuntimeError("governed_schedule_prerequisite_stale")
     # Metadata is not enough to admit a provider read.  Re-read the immutable
@@ -729,14 +771,14 @@ async def _load_governed_authority(db, job: dict[str, Any], binding_id: str):
         if (
             typed_input.get("consent_id") != consent.consent_id
             or typed_input.get("connection_id") != connection.connection_id
-            or typed_input.get("goal_id") != binding.goal_id
-            or int(typed_input.get("goal_revision") or 0) != int(binding.goal_revision)
+            or typed_input.get("goal_id") != consent.goal_id
+            or int(typed_input.get("goal_revision") or 0) != int(consent.goal_revision)
             or int(typed_input.get("max_events_per_scan") or 0) != 10
         ):
             raise RuntimeError("artifact_authority_binding_mismatch")
     except Exception as exc:
         raise RuntimeError("governed_schedule_input_artifact_invalid") from exc
-    return binding, consent, connection, goal, artifact
+    return consent, connection, goal, artifact
 
 
 async def _load_governed_mail_authority(db, job: dict[str, Any], binding_id: str):

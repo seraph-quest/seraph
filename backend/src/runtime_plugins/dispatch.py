@@ -37,6 +37,7 @@ class OriginalServiceInvocation:
     native_report_resource: object = None
     native_memory_report_source: object = None
     native_memory_source: object = None
+    native_programme_source: object = None
 
     @property
     def deadline_at(self):
@@ -132,14 +133,14 @@ class NativeServiceDispatcher:
         "conversation.read", "conversation.cancel", "agent-loop.cancelTurn",
         "agent-loop.inspectTurn", "conversation.accept", "agent-loop.startTurn",
         "conversation.append", "source-extraction.extract", "capabilities.list", "capabilities.describe",
-        "connections.inspect", "memory.retrieve", "artifacts.stage", "artifacts.adopt",
+        "research.executeAccepted", "connections.inspect", "memory.retrieve", "artifacts.stage", "artifacts.adopt",
         "artifacts.read", "audit.append", "inference.request", "memory.propose", "memory.applyReviewed", "memory.forget",
         "tasks.admit", "tasks.checkpoint", "capabilities.invoke", "tasks.settle", "tasks.cancel"})
     def __init__(self, *, jobs=None):
         from src.workflows.job_runtime import durable_job_repository
         self.jobs = jobs or durable_job_repository
 
-    async def _current_in_db(self, db, invocation_ref, method, original_scope, *, native_memory_call=None):
+    async def _current_in_db(self, db, invocation_ref, method, original_scope, *, native_memory_call=None, native_programme_call=None):
         from src.auth.service import authenticate_principal
         from src.db.models import OperatorSession
         from src.workflows.job_runtime import _assert_canonical_goal_fence
@@ -155,6 +156,13 @@ class NativeServiceDispatcher:
             from .memory_producer import memory_dispatch_header_budget
             memory_budget = memory_dispatch_header_budget(dispatcher=self, scope=original_scope,
                 called_scope=native_memory_call, invocation_ref=invocation_ref, method=method)
+        programme_source = original_scope.native_programme_source
+        if programme_source is not None:
+            from .programme_producer import _ProgrammeSource
+            if type(programme_source) is not _ProgrammeSource:
+                raise NativeServiceBlocked("native_programme_source_unavailable")
+            programme_source.validate(called=native_programme_call)
+            memory_budget = programme_source.header_budget
         await begin_native_writer(db, owner="finite_service", **(
             {"header_budget": memory_budget} if memory_budget is not None else {}))
         if memory_budget is not None:
@@ -186,6 +194,12 @@ class NativeServiceDispatcher:
             raise NativeServiceBlocked("native_original_job_not_running")
         if not terminal_output_read:
             self.jobs._assert_lease(run, owner=witness["lease_owner"], fencing_token=witness["fencing_token"])
+        if programme_source is not None:
+            from src.workflows.research_guard import assert_discovery_authority
+            await programme_source.prepare_selection(db, run)
+            await assert_discovery_authority(db, run.declared_authority_json, run=run,
+                native_programme_source=programme_source)
+            return run, witness, binding
         # Current baseline native service provenance is operator-root. Standing
         # programme jobs need their reviewed original durable binding; issuer
         # Root expiry must never be substituted for programme validation.
@@ -240,6 +254,9 @@ class NativeServiceDispatcher:
                 or frame["deadline_at"] != call_scope.deadline_at
                 or frame["deadline_at"] > original_scope.deadline_at):
                 raise NativeServiceBlocked("native_original_frame_changed")
+            if original_scope.native_programme_source is not None:
+                from .programme_producer import dispatch_programme
+                return await dispatch_programme(self, frame, payload, call_scope)
             if method in {"tasks.admit", "tasks.checkpoint", "capabilities.invoke", "tasks.settle", "tasks.cancel"}:
                 from .task_capability import dispatch_report_service
                 return await dispatch_report_service(self, frame, call_scope)

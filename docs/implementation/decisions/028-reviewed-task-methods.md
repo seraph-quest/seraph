@@ -42,6 +42,12 @@ requires current original Goal ownership; selected recovery is read-only. A
 service-owned discovery read validates the exact finite current programme grant
 and stable owner, without reviving the issuing browser Root.
 
+[ADR-035](./035-first-admission-saved-strategy-read.md) permits only this original
+owner's bounded current-pointer read during first composed discovery admission,
+after ADR-034's same-session/frame guard and current authority checks. It changes
+no selection, signature, grant, admitted-pin or retention/restore semantics and
+establishes no implemented admission or runtime availability.
+
 Rollback changes future selection to a permitted prior version or an explicit
 signed baseline. Its signed rolled_back historical version remains valid only
 for existing native pins. Tombstones, export redaction, explicit revocation,

@@ -167,6 +167,7 @@ The following architecture decisions are normative:
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 33. [ADR-033: Task-method composition metadata compatibility](./decisions/033-task-method-composition-metadata.md)
 34. [ADR-034: First-discovery capacity selection](./decisions/034-first-discovery-capacity-selection.md)
+35. [ADR-035: First-admission saved-strategy read](./decisions/035-first-admission-saved-strategy-read.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

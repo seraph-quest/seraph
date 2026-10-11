@@ -77,7 +77,11 @@ operation frame before private bodies. Unknown names, unsupported object kinds,
 unsupported layouts under existing schema checks, generated/hidden canonical
 body columns and overflow continue to deny before private bodies.
 
-`task_method_active` is **metadata only** for this allowance. Do not add a
+`task_method_active` is **metadata only** for this allowance. The separate
+[ADR-035](./035-first-admission-saved-strategy-read.md) supersedes only the
+descriptor/current-body-read prohibition for its named first-admission owner
+path; it preserves this inventory, ceiling and all retention/witness exclusions.
+Outside that exact exception, do not add a
 composition body descriptor, scan pointer rows, read binding JSON, retain its
 body or insert a witness component because its metadata is accepted. The
 unchanged common **33-table** body superset and exact conditional

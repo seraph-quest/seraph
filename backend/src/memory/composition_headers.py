@@ -595,8 +595,9 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
         row=rows[0]
         if _header_budget is not None:
             copy_upper = 3074 + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
-            for stage in ("skeleton-copy", "header-fact-copy"):
-                _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", stage))
+            _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", "skeleton-copy"))
+            fact_upper = 3074 + 6*len(descriptor.table) + 256
+            _metadata_precharge(connection, _header_budget, fact_upper, ("row-header", "header-fact-copy"))
         skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
         cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
         for i,(kind,nullable) in enumerate(zip(descriptor.kinds,descriptor.nullable)):

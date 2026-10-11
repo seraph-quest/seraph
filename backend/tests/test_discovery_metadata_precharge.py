@@ -306,6 +306,103 @@ async def test_original_auth_reservation_scope_denies_metadata_query(original_au
     assert sql_state(case) == before and private_files(case) == files
 
 
+@pytest.mark.parametrize("denied_stage", ["skeleton-copy", "header-fact-copy"])
+async def test_row_header_each_construction_denial_precedes_skeleton(
+        model_db, monkeypatch, denied_stage):
+    from src.db.models import RuntimeCompositionState
+
+    row = RuntimeCompositionState(runtime_domain="header-test", owner_kind="native",
+        epoch=1, composition_digest="a" * 64, state="stopped")
+    model_db.add(row)
+    await model_db.flush()
+    connection = await model_db.connection()
+    descriptor = COMPOSITION_DESCRIPTORS["runtime_composition_states"]
+    reference = HeaderReadBudget()
+    with _trace_memory_numeric_charges(reference) as complete:
+        await connection.run_sync(lambda conn: headers._headers(
+            conn, descriptor, (row.runtime_domain,), _header_budget=reference))
+    labels = [("metadata-prequery", "row-header", stage) for stage in
+        ("delivery", "row-copy", "encoded-copy", "skeleton-copy", "header-fact-copy")]
+    assert [appearance for appearance, _ in complete] == labels
+    # Independently reviewed source-model literals, not a duplicate fee formula.
+    assert [amount for _, amount in complete[-2:]] == [3990, 3486]
+    stop = labels.index(("metadata-prequery", "row-header", denied_stage))
+    capacity = sum(amount for _, amount in complete[:stop + 1]) - 1
+    budget = HeaderReadBudget()
+    budget.debit(budget.remaining - capacity)
+    serializations = []
+    original_dumps = headers.json.dumps
+
+    def observed_dumps(value, *args, **kwargs):
+        if isinstance(value, list) and value and value[0] == "native-composition-memory.v1":
+            serializations.append(value)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(headers.json, "dumps", observed_dumps)
+    with observed(connection, budget) as queries, _trace_memory_numeric_charges(budget) as trace:
+        with pytest.raises(HeaderBoundsError, match="^canonical_bound_not_certified$"):
+            await connection.run_sync(lambda conn: headers._headers(
+                conn, descriptor, (row.runtime_domain,), _header_budget=budget))
+    assert trace == complete[:stop + 1]
+    assert budget.remaining == complete[stop][1] - 1
+    assert serializations == []
+    assert len(queries) == 1 and 'FROM "runtime_composition_states"' in queries[0][0]
+    assert queries[0][1] == capacity - sum(amount for _, amount in complete[:3])
+
+
+async def test_row_header_fact_bound_json_equivalence_and_repeated_payment(model_db):
+    from src.db.models import Goal, Session, WorkBoardEvent, WorkBoardTask
+
+    keys = ("a" * 512, '\"\\\b\t\n\f\r' * 64, "\x01" * 512,
+        "é" * 256, "😀" * 128)
+    rows = [Session(id=key, title="header evidence") for key in keys]
+    goal = Goal(title="event header fixture")
+    task = WorkBoardTask(owner_principal_id="test-owner", owner_session_id="test-session",
+        goal_id=goal.id, idempotency_key="row-header-integer-fixture")
+    model_db.add_all((goal, task, *rows))
+    await model_db.flush()
+    events = [WorkBoardEvent(event_id=value, task_id=task.task_id,
+        owner_principal_id="test-owner", owner_session_id="test-session",
+        actor_principal_id="test-owner", kind="header evidence")
+        for value in (-(2**63), 2**63 - 1)]
+    model_db.add_all(events)
+    await model_db.flush()
+    connection = await model_db.connection()
+    budget = HeaderReadBudget()
+    for table, key in [("sessions", key) for key in keys] + [
+            ("work_board_events", event.event_id) for event in events]:
+        descriptor = COMPOSITION_DESCRIPTORS[table]
+        # Test-only physical observer: no production writer or body authority claim.
+        physical = await connection.run_sync(lambda conn: conn.exec_driver_sql(
+            'SELECT _rowid_,' + ','.join('"' + name + '"' for name in descriptor.columns)
+            + ' FROM "' + table + '" WHERE "' + descriptor.key + '"=?', (key,)).one())
+        expected = len(json.dumps(["native-composition-memory.v1", table, key,
+            [[name, None] for name in descriptor.columns]], ensure_ascii=True,
+            separators=(",", ":")).encode()) + 128
+        for value, kind in zip(physical[1:], descriptor.kinds):
+            if value is not None:
+                expected += (6 * len(value.encode("utf-8")) - 2 if kind == "text"
+                    else 16 if kind == "integer" else 60)
+        traces = []
+        results = []
+        for _ in range(2):
+            before = budget.remaining
+            with _trace_memory_numeric_charges(budget) as trace:
+                result = await connection.run_sync(lambda conn: headers._headers(
+                    conn, descriptor, (key,), _header_budget=budget))
+            assert before - budget.remaining == sum(amount for _, amount in trace)
+            assert [appearance[-1] for appearance, _ in trace] == [
+                "delivery", "row-copy", "encoded-copy", "skeleton-copy", "header-fact-copy"]
+            fact_charge = trace[-1][1]
+            entry = [[table, key], [physical[0], expected]]
+            assert len(json.dumps(entry, ensure_ascii=True,
+                separators=(",", ":")).encode()) <= fact_charge
+            assert result == {(table, key): (physical[0], expected)}
+            traces.append(trace)
+            results.append(result)
+        assert traces[0] == traces[1] and results[0] == results[1]
+
+
 async def test_descriptor_single_delivery_repeats_without_unused_json_copy(model_db, monkeypatch):
     connection = await model_db.connection()
     budget = HeaderReadBudget()

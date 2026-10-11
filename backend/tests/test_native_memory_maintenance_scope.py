@@ -1,6 +1,7 @@
 """FILE SQLite numeric scope mechanics; these fixtures grant no Memory authority."""
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import select, text, event
@@ -52,7 +53,17 @@ async def test_memory_scope_keeps_one_frame_and_charges_repeated_snapshots(async
         db.add(WorkflowRunState(run_identity="scope-memory", root_run_identity="scope-memory",
             workflow_name="numeric", job_kind="runtime_service_memory_v1", status="queued"))
     repository = DurableJobRepository()
-    monkeypatch.setattr(repository, "_session", async_db)
+    session_payers = []
+    @asynccontextmanager
+    async def sessions(*, header_budget=None):
+        scope = _original_memory_maintenance_scope(repository)
+        assert header_budget is (scope.header_budget if scope is not None else None)
+        session_payers.append(header_budget)
+        # Preserve this original real SQLite fixture's zero-argument factory.
+        # Current snapshot/payment remains in the original repository methods.
+        async with async_db() as db:
+            yield db
+    monkeypatch.setattr(repository, "_session", sessions)
     frames = []
     original_init = HeaderReadBudget.__init__
     def init(frame):
@@ -89,6 +100,7 @@ async def test_memory_scope_keeps_one_frame_and_charges_repeated_snapshots(async
     finally:
         event.remove(engine, "before_cursor_execute", trace)
     assert frames == [scope.header_budget]
+    assert session_payers == [None, scope.header_budget, scope.header_budget]
     assert "BEGIN IMMEDIATE" in statements
     writer_begin = statements.index("BEGIN IMMEDIATE")
     full_headers = next(i for i in range(writer_begin + 1, len(statements))

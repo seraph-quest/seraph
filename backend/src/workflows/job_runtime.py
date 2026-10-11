@@ -2799,7 +2799,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None and header_budget is not maintenance.header_budget:
                 raise DurableJobLeaseError("original_memory_maintenance_frame_changed")
             header_budget = maintenance.header_budget
-        async with self._session() as db:
+        async with self._session(**(
+            {"header_budget": header_budget} if header_budget is not None else {})) as db:
             if getattr(db, "info", {}).get("composition_read_guard") is not None:
                 from src.workspace.accounting_witness import prepare_composition_session
                 await prepare_composition_session(db, **(
@@ -4207,7 +4208,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None and header_budget is not maintenance.header_budget:
                 raise DurableJobLeaseError("original_memory_maintenance_frame_changed")
             header_budget = maintenance.header_budget
-        async with self._session() as db:
+        async with self._session(**(
+            {"header_budget": header_budget} if header_budget is not None else {})) as db:
             if maintenance is not None:
                 await _original_memory_maintenance_snapshot(self, db)
             if header_budget is not None:

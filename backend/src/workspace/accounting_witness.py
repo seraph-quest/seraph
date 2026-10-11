@@ -942,13 +942,8 @@ def _original_composition_metadata_rows(connection, query, parameters, columns, 
     budget = current_budget()
     if budget is None:
         return list(_sql(connection, query, parameters))
-    terms = [f'CASE typeof("{column}") WHEN \'null\' THEN 4 WHEN \'integer\' THEN 20 '
-        f'WHEN \'real\' THEN 64 WHEN \'text\' THEN 6*octet_length("{column}")+2 ELSE -1 END'
-        for column in columns]
-    scalar_query = ("WITH original_metadata AS (" + query + ") SELECT count(*),"
-        + "coalesce(sum(" + "+".join(terms) + "),0),coalesce(sum("
-        + "+".join(f'CASE WHEN typeof("{column}") IN (\'null\',\'integer\',\'real\',\'text\') THEN 0 ELSE 1 END'
-            for column in columns) + "),0) FROM original_metadata")
+    from src.memory.composition_headers import _original_metadata_census_sql
+    scalar_query = _original_metadata_census_sql(query, columns)
     facts = _metadata_rows(connection, scalar_query, parameters, _header_budget=budget,
         upper=_metadata_upper(2, (20, 20, 20)), appearance=("composition-schema-width", *appearance))
     if (len(facts) != 1 or any(type(value) is not int for value in facts[0])

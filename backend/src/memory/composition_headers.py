@@ -4,6 +4,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import asyncio
 import threading
+import sys
+import os
 from weakref import WeakValueDictionary
 import json
 import math
@@ -108,13 +110,121 @@ def _metadata_size(value):
     return 2 + sum(_metadata_size(item) for item in value) + max(0, len(value) - 1)
 
 
+# Only the eight original retained-schema metadata sources may use aggregates
+# on a rollback-owned connection. A matching SQL string alone grants nothing.
+_ORIGINAL_METADATA_CENSUS_SOURCES = (
+    ("SELECT name FROM sqlite_master WHERE type='table' ORDER BY rowid LIMIT 1360", ("name",)),
+    ('SELECT name FROM pragma_table_info(?) LIMIT ?', ("name",)),
+    ('SELECT cid,name,type,"notnull",dflt_value,pk FROM pragma_table_info(?) LIMIT 1360', ("cid", "name", "type", "notnull", "dflt_value", "pk")),
+    ("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=? LIMIT 1360", ("tbl_name",)),
+    ('SELECT id,seq,"table","from","to",on_update,on_delete,match FROM pragma_foreign_key_list(?) LIMIT 1360', ("id", "seq", "table", "from", "to", "on_update", "on_delete", "match")),
+    ('SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 1360', ("seq", "name", "unique", "origin", "partial")),
+    ('SELECT seqno,cid,name FROM pragma_index_info(?) LIMIT 1360', ("seqno", "cid", "name")),
+    ('SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 1360', ("seqno", "cid", "name", "desc", "coll", "key")),
+)
+
+
+def _original_metadata_census_sql(query, columns):
+    if (query, columns) not in _ORIGINAL_METADATA_CENSUS_SOURCES:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    terms = [f'CASE typeof("{column}") WHEN \'null\' THEN 4 WHEN \'integer\' THEN 20 '
+        f'WHEN \'real\' THEN 64 WHEN \'text\' THEN 6*octet_length("{column}")+2 ELSE -1 END'
+        for column in columns]
+    return ("WITH original_metadata AS (" + query + ") SELECT count(*),"
+        + "coalesce(sum(" + "+".join(terms) + "),0),coalesce(sum("
+        + "+".join(f'CASE WHEN typeof("{column}") IN (\'null\',\'integer\',\'real\',\'text\') THEN 0 ELSE 1 END'
+            for column in columns) + "),0) FROM original_metadata")
+
+
+_ORIGINAL_METADATA_CENSUS_SQL = frozenset(
+    _original_metadata_census_sql(query, columns)
+    for query, columns in _ORIGINAL_METADATA_CENSUS_SOURCES)
+_RAW_METADATA_CENSUS = ContextVar("original_raw_metadata_census", default=None)
+_RAW_METADATA_SNAPSHOT = ContextVar("original_raw_metadata_snapshot", default=None)
+
+
+def _raw_metadata_census_function_allowed(owner, function):
+    """Called by the installed authorizer, never a general SQL permission."""
+    scope = _RAW_METADATA_CENSUS.get()
+    if function not in {"count", "sum", "coalesce"} or scope is None:
+        return False
+    certificate, budget, query, parameters, task, thread, transaction = scope
+    if (type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or _CURRENT.get() is not certificate or certificate.raw_owner is not owner
+            or certificate.connection is not owner._db or certificate.driver is not owner._db
+            or certificate.budget is not budget or owner._budget is not budget
+            or certificate.transaction is not transaction or owner._token is not transaction
+            or not owner._live or owner._poisoned or not owner._db.in_transaction
+            or owner._db.total_changes != certificate.changes
+            or _RAW_METADATA_SNAPSHOT.get() != (certificate, task, thread)
+            or thread != threading.get_ident() or owner._thread != thread
+            or owner._pid != os.getpid() or task is not _snapshot_current_task()):
+        return False
+    # SQLite callbacks run inside the original uncached execute. A stolen scope
+    # cannot authorize direct execute, a different statement, or another task.
+    frame = sys._getframe(1)
+    for _ in range(4):
+        if frame is None:
+            return False
+        if frame.f_code is _sql.__code__:
+            caller = frame.f_back
+            from src.workspace.accounting_witness import _original_composition_metadata_rows
+            original = caller.f_back if caller is not None else None
+            return (caller is not None and caller.f_code is _metadata_rows.__code__
+                and original is not None and original.f_code is _original_composition_metadata_rows.__code__
+                and original.f_locals.get("connection") is owner._db
+                and original.f_locals.get("budget") is budget
+                and original.f_locals.get("parameters") is parameters
+                and original.f_locals.get("scalar_query") == query
+                and frame.f_locals.get("connection") is owner._db
+                and frame.f_locals.get("query") == query
+                and frame.f_locals.get("parameters") is parameters
+                and caller.f_locals.get("_header_budget") is budget
+                and query in _ORIGINAL_METADATA_CENSUS_SQL)
+        frame = frame.f_back
+    return False
+
+
 def _metadata_rows(connection, query, parameters, *, _header_budget, upper, appearance, bounded_query=None):
     if _header_budget is None:
         return list(_sql(connection, query, parameters))
+    statement = bounded_query or query
+    current = _CURRENT.get()
+    raw_census = (statement in _ORIGINAL_METADATA_CENSUS_SQL and current is not None
+        and current.raw_owner is not None)
+    if raw_census:
+        from src.workspace.accounting_continuity import _RawRollbackConnection
+        from src.workspace.accounting_witness import _original_composition_metadata_rows
+        owner = current.raw_owner
+        caller = sys._getframe(1)
+        facts = caller.f_locals
+        # Authenticate the original caller before even the numeric debit.
+        # Its fixed scalar bound and closed source/columns are the only census
+        # facts; matching generated SQL or an inherited certificate is not enough.
+        if (type(owner) is not _RawRollbackConnection or current.connection is not connection
+                or current.budget is not _header_budget
+                or _RAW_METADATA_SNAPSHOT.get() != (current, _snapshot_current_task(), threading.get_ident())
+                or caller.f_code is not _original_composition_metadata_rows.__code__
+                or facts.get("connection") is not connection or facts.get("budget") is not _header_budget
+                or facts.get("parameters") is not parameters
+                or (facts.get("query"), facts.get("columns")) not in _ORIGINAL_METADATA_CENSUS_SOURCES
+                or facts.get("scalar_query") != statement or bounded_query is not None
+                or upper != _metadata_upper(2, (20, 20, 20))
+                or appearance != ("composition-schema-width", *facts.get("appearance", ()))):
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
     # Delivery, original list-of-row copy and JSON metadata copy are distinct.
     for stage in ("delivery", "row-copy", "encoded-copy"):
         _metadata_precharge(connection, _header_budget, upper, (*appearance, stage))
-    rows = list(_sql(connection, bounded_query or query, parameters))
+    scope_token = None
+    if raw_census:
+        scope_token = _RAW_METADATA_CENSUS.set((current, _header_budget, statement, parameters,
+            _snapshot_current_task(), threading.get_ident(), current.transaction))
+    try:
+        rows = list(_sql(connection, statement, parameters))
+    finally:
+        if scope_token is not None:
+            _RAW_METADATA_CENSUS.reset(scope_token)
     if _metadata_size(rows) > upper:
         raise HeaderBoundsError("header_metadata_bound")
     return rows
@@ -1676,8 +1786,11 @@ async def validate_composition_certificate(db,certificate):
 def snapshot_reads(certificate):
     _validate(certificate.connection,certificate)
     token=_CURRENT.set(certificate)
+    raw_token = _RAW_METADATA_SNAPSHOT.set((certificate, _snapshot_current_task(), threading.get_ident()))
     try:yield
-    finally:_CURRENT.reset(token)
+    finally:
+        _RAW_METADATA_SNAPSHOT.reset(raw_token)
+        _CURRENT.reset(token)
 
 
 @asynccontextmanager

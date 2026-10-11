@@ -241,6 +241,10 @@ class _RawRollbackConnection:
         if action == sqlite3.SQLITE_FUNCTION and second in {
                 "typeof", "octet_length", "sqlite_version", "total_changes"}:
             return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_FUNCTION and second in {"count", "sum", "coalesce"}:
+            from src.memory.composition_headers import _raw_metadata_census_function_allowed
+            if _raw_metadata_census_function_allowed(self, second):
+                return sqlite3.SQLITE_OK
         # Closed read-only policy: temp/virtual schema DDL and every other
         # unneeded action deny too, rather than relying on a mutation blacklist.
         return sqlite3.SQLITE_DENY

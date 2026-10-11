@@ -202,7 +202,7 @@ def run(admission, authorize, *, process_observer=None):
     """Only the canonical caller can acknowledge each authority-sensitive step."""
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     deadline = admission.payload["deadline_at"]
-    process = subprocess.Popen([admission.payload["runtime"]["interpreter_path"], "-I", str(Path(__file__).absolute()),
+    process = subprocess.Popen([admission.payload["runtime"]["interpreter_path"], "-I", "-B", str(Path(__file__).absolute()),
                                 str(admission.path), str(child.fileno()), str(admission.guard_fd)],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                pass_fds=(child.fileno(), admission.guard_fd), start_new_session=True,

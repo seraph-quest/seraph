@@ -3251,7 +3251,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 raise RepoSandboxError("iterative_python_profile_unsupported")
             platform_ready()
             supervisor = Path(__file__).with_name("repo_supervisor.py")
-            subprocess.run([sys.executable, "-I", str(supervisor), "--probe"], check=True, capture_output=True, timeout=2, env={"PATH": "/usr/bin:/bin"})
+            subprocess.run([sys.executable, "-I", "-B", str(supervisor), "--probe"], check=True, capture_output=True, timeout=2, env={"PATH": "/usr/bin:/bin"})
             posture.update(process_supervision="linux_per_job_subreaper", supervisor_source_sha256=_digest_file(supervisor),
                 git_sha256=_digest_file(Path("/usr/bin/git").resolve()), iterative_python=True)
             return RepoSandboxPreflight(True, "ready", "iterative_python_supervision_available", info=dict(ordinary.info),
@@ -3275,7 +3275,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         request.write_text(json.dumps(payload, sort_keys=True))
         request.chmod(0o600)
         before_spawn()
-        process = subprocess.Popen([sys.executable, "-I", str(supervisor), str(request)],
+        process = subprocess.Popen([sys.executable, "-I", "-B", str(supervisor), str(request)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, start_new_session=True)
         pid_start = start_identity(process.pid)
         transport_complete = False

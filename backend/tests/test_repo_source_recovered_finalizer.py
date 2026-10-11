@@ -434,3 +434,103 @@ async def test_original_writer_rechecks_actual_root_inside_immediate(
                     iteration_index=1, completion_witness=completion)
         assert reached == ["checkpoint"]
         assert await _rows(flow["jobs"]) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_source", [
+    "repo_original_producer.py", "repo_original_producer_finalizer.py",
+    "repo_supervisor.py", "repo_sandbox.py", "repo_node.py", "repo_worker.py",
+])
+async def test_original_ownerless_stage_denies_each_changed_pinned_source(
+        accounting_db, monkeypatch, repository_admission_signer, tmp_path, changed_source):
+    """Current guard regression only; no historical module/restart/UI proof.
+
+    Only test-owned source copies change. The real admission, registration,
+    completion, physical verifier and source hash function remain original.
+    """
+    from src.execution import repo_original_producer as producer
+    from src.execution import repo_sandbox
+    import os
+    import stat
+
+    # Complete the actual producer before altering its __file__ read-location:
+    # that same attribute is also the real child's launch-script location.
+    flow = await _signed_ownerless_fixture(accounting_db, monkeypatch, "test_python")
+    registration = flow["registration"]
+    original_file = producer.__file__
+    source_directory = Path(original_file).parent
+    names = (
+        "repo_original_producer.py", "repo_original_producer_finalizer.py",
+        "repo_supervisor.py", "repo_sandbox.py", "repo_node.py", "repo_worker.py",
+    )
+    assert set(registration["producer_sources"]) == set(names)
+    copies = tmp_path / "owned-source-read-location"
+    copies.mkdir(mode=0o700)
+    for name in names:
+        (copies / name).write_bytes((source_directory / name).read_bytes())
+    independent_hashes = {name: hashlib.sha256((copies / name).read_bytes()).hexdigest()
+                          for name in names}
+    assert independent_hashes == registration["producer_sources"]
+    original_source_hashes = {name: hashlib.sha256((source_directory / name).read_bytes()).hexdigest()
+                             for name in names}
+
+    def material_snapshot():
+        directory = Path(registration["directory_path"])
+        paths = set(directory.rglob("*")) | {directory, Path(registration["guard_path"])}
+        observed = {}
+        for path in paths:
+            metadata = path.lstat()
+            body = (hashlib.sha256(path.read_bytes()).hexdigest() if stat.S_ISREG(metadata.st_mode)
+                    else os.readlink(path) if stat.S_ISLNK(metadata.st_mode) else None)
+            observed[str(path)] = (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                                  metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+                                  metadata.st_ctime_ns, body)
+        return observed
+
+    before_rows = await _rows(flow["jobs"])
+    before_material = material_snapshot()
+    bundles, guard_directories = [], []
+    actual_read_bundle = producer._read_registered_bundle
+    actual_open_directory = repo_sandbox._open_trusted_directory
+    guard_parent = Path(registration["guard_path"]).parent
+
+    def observe_bundle(actual_registration, ready):
+        assert actual_registration is registration
+        bundles.append(actual_registration)
+        return actual_read_bundle(actual_registration, ready)
+
+    def observe_directory(path):
+        if Path(path) == guard_parent:
+            guard_directories.append(Path(path))
+        return actual_open_directory(path)
+
+    # No await/spawn occurs inside this synchronous read-location seam. Both
+    # observers forward the real readers; neither replaces a verifier/grant.
+    with monkeypatch.context() as patch:
+        patch.setattr(producer, "__file__", str(copies / "repo_original_producer.py"))
+        patch.setattr(producer, "_read_registered_bundle", observe_bundle)
+        patch.setattr(repo_sandbox, "_open_trusted_directory", observe_directory)
+        with producer.stage_original_producer_completion(registration) as physical:
+            actual = producer.original_producer_completion_result(physical)
+            assert actual["original_producer_completion"] == flow["kwargs"]["actual_result"]["original_producer_completion"]
+            assert actual["outputs"] == flow["kwargs"]["actual_result"]["outputs"]
+        assert bundles == [registration]
+        assert guard_directories
+        assert material_snapshot() == before_material
+        bundles.clear()
+        guard_directories.clear()
+        (copies / changed_source).write_bytes((copies / changed_source).read_bytes() + b"\n# owned source drift regression\n")
+        changed_hashes = {name: hashlib.sha256((copies / name).read_bytes()).hexdigest()
+                          for name in names}
+        assert [name for name in names if changed_hashes[name] != independent_hashes[name]] == [changed_source]
+        with pytest.raises(ValueError, match="^original_producer_native_host_changed$"):
+            with producer.stage_original_producer_completion(registration):
+                pytest.fail("changed original source yielded a physical completion witness")
+        assert bundles == []
+        assert guard_directories == []
+    assert producer.__file__ == original_file
+    # The path seam is already restored before any async DB/session activity.
+    assert await _rows(flow["jobs"]) == before_rows
+    assert material_snapshot() == before_material
+    assert {name: hashlib.sha256((source_directory / name).read_bytes()).hexdigest()
+            for name in names} == original_source_hashes

@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from weakref import WeakValueDictionary
+from weakref import WeakSet, WeakValueDictionary
 
 from src.workspace.production import ProductionWorkspace, ProductionWorkspaceReconciliationError, read_lifecycle_receipt, LIFECYCLE_PATH_ENV, CANONICAL_CONTAINER_WORKSPACE, BIND_IDENTITY_ENV
 
@@ -2251,6 +2251,10 @@ async def prepare_composition_read_session(db, *, header_budget=None):
 
 
 _SESSION_ROW_FORECAST = ContextVar("session_row_forecast", default=None)
+# Ephemeral original issuer provenance; never a Source or writer permission.
+_WRITER_FIRST_METADATA_GUARDS = WeakSet()
+# A shallow copy never ran the original guard constructor.
+_COMPOSITION_METADATA_GUARDS = WeakSet()
 
 class CompositionSessionGuard:
     """One existing session, external lock and precommit publisher.
@@ -2272,6 +2276,8 @@ class CompositionSessionGuard:
         self._retention_closed = False
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
+        self._writer_first_metadata_mode = None
+        self._writer_first_metadata_frame = None
         self._selection = None
         self._prospective_admission = None
         self._prospective_admission_facts = None
@@ -2283,6 +2289,7 @@ class CompositionSessionGuard:
         self._session_reservation = None
         self._session_expected = None
         self._session_instance = None
+        _COMPOSITION_METADATA_GUARDS.add(self)
 
     def _programme_tables(self):
         return {"goals", "operator_sessions", "operator_identities"} if (
@@ -2308,7 +2315,8 @@ class CompositionSessionGuard:
                 raise ProductionWorkspaceReconciliationError("programme_current_writer_changed")
             return
         from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection
-        certificate = _certify_current_memory_snapshot_on_connection(connection, self.header_budget)
+        certificate = _certify_current_memory_snapshot_on_connection(connection, self.header_budget,
+            _header_budget=self._writer_metadata_budget(connection))
         observed, members = self._programme_snapshot(connection, certificate, self.base)
         if observed != self.base or members != self.members:
             raise ProductionWorkspaceReconciliationError("programme_fresh_writer_conflict")
@@ -2642,6 +2650,46 @@ class CompositionSessionGuard:
     def _capture_native_writer_snapshot(self, connection, budget, owner):
         # Called only by the existing successful BEGIN IMMEDIATE issuer.
         self._retention_writer_snapshot = self._native_writer_fields(connection, budget, owner)
+
+    def _issue_writer_first_metadata_mode(self, connection, budget):
+        """Only the genuine first-writer issuer selects its original mode."""
+        import inspect
+        from src.memory.header_bounds import HeaderBoundsError
+        from src.memory.composition_headers import _checked_current_snapshot_scope
+        if (inspect.currentframe().f_back.f_code is not _prepare_composition_writer_session.__code__
+                or self not in _COMPOSITION_METADATA_GUARDS
+                or self in _WRITER_FIRST_METADATA_GUARDS
+                or self._writer_first_metadata_mode is not None
+                or self._writer_first_metadata_frame is not None):
+            raise HeaderBoundsError("memory_retention_writer_unavailable")
+        self._validate_native_writer_snapshot(budget, connection)
+        scope = _checked_current_snapshot_scope(budget)
+        if scope is None:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+        self._writer_first_metadata_frame = (scope, budget, self._retention_writer_snapshot)
+        self._writer_first_metadata_mode = "original-budget-v1"
+        _WRITER_FIRST_METADATA_GUARDS.add(self)
+
+    def _writer_metadata_budget(self, connection=None):
+        """Select no default fallback for an issued original first-writer mode."""
+        from src.memory.header_bounds import HeaderBoundsError
+        from src.memory.composition_headers import _checked_current_snapshot_scope
+        if (self not in _COMPOSITION_METADATA_GUARDS or self._retention_closed
+                or self.db.info.get("composition_guard") is not self):
+            raise HeaderBoundsError("memory_retention_writer_changed")
+        mode, frame = self._writer_first_metadata_mode, self._writer_first_metadata_frame
+        if self not in _WRITER_FIRST_METADATA_GUARDS:
+            if mode is None and frame is None:
+                return None  # Unchanged genuinely unissued original guard.
+            raise HeaderBoundsError("memory_retention_writer_changed")
+        if (mode != "original-budget-v1" or type(frame) is not tuple or len(frame) != 3
+                or frame[1] is not self.header_budget
+                or frame[2] is not self._retention_writer_snapshot):
+            raise HeaderBoundsError("memory_retention_writer_changed")
+        self._validate_native_writer_snapshot(self.header_budget, connection)
+        if _checked_current_snapshot_scope(self.header_budget) is not frame[0]:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+        return self.header_budget
 
     @staticmethod
     def _retention_sql_start(statement):
@@ -3096,7 +3144,8 @@ class CompositionSessionGuard:
                     raise ProductionWorkspaceReconciliationError("programme_original_budget_required")
                 return composition_closure(conn, verify_files=native_composition_files)
             from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
-            certificate = _certify_current_memory_snapshot_on_connection(conn, self.header_budget)
+            certificate = _certify_current_memory_snapshot_on_connection(conn, self.header_budget,
+                _header_budget=self._writer_metadata_budget(conn))
             if type(self.base) is dict and self.base.get("schema_version") == 2:
                 return self._programme_snapshot(conn, certificate, self.base)
             with snapshot_reads(certificate):
@@ -3225,6 +3274,7 @@ class CompositionSessionGuard:
         reservation = self._session_reservation
         if reservation is not None:
             self._validate_session_reservation()
+        self._writer_metadata_budget()
         await self.db.flush()
         if self.db.info.get("composition_sticky_failure") is not None:
             raise self.db.info["composition_sticky_failure"]
@@ -3268,6 +3318,7 @@ class CompositionSessionGuard:
         self._finish_programme_admission_selection()
         self._retention_writer_snapshot = None
         self._retention_read_budget = None
+        self._writer_first_metadata_frame = None
         _HELD_COMPOSITION_WORKSPACE.reset(self.token)
         self.lock.__exit__(None, None, None)
 
@@ -3335,6 +3386,107 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
             _HELD_COMPOSITION_WORKSPACE.reset(programme_guard.token)
         lock.__exit__(None, None, None)
         raise
+
+
+async def _prepare_composition_writer_session(db, *, owner, header_budget):
+    """Private first retained writer; no admission or effect authority.
+
+    Default reader preparation remains above. This route requires the original
+    live numeric operation, preserves its frame, and retains the first writer.
+    """
+    from sqlalchemy import text
+    from config.settings import settings
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.memory.composition_headers import (
+        _checked_current_snapshot_scope, _certify_current_memory_snapshot_on_connection,
+        _metadata_cost, snapshot_reads)
+    if (owner not in {"native_ingress", "composition_maintenance", "durable_jobs", "finite_service"}
+            or type(header_budget) is not HeaderReadBudget
+            or _checked_current_snapshot_scope(header_budget) is None
+            or db.in_transaction() or db.in_nested_transaction()
+            or db.new or db.dirty or db.deleted
+            or db.info.get("composition_guard") is not None
+            or db.info.get("native_writer_started")):
+        raise ProductionWorkspaceReconciliationError("composition_writer_first_unavailable")
+    # Preserve the original two bounded inventory probes and actual result debit.
+    # They are not a zero-SQL precondition or a source/body permission.
+    try:
+        exists = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'"))
+        populated = await db.scalar(text("SELECT 1 FROM runtime_composition_states LIMIT 1")) if exists else None
+        header_budget.debit(_metadata_cost([exists, populated]), appearance=("composition-inventory-probes",))
+        await db.rollback()
+    except BaseException:
+        await db.rollback()
+        raise
+    if not populated:
+        raise ProductionWorkspaceReconciliationError("composition_writer_first_unavailable")
+    prior_owner_present = "composition_writer_owner" in db.info
+    prior_owner = db.info.get("composition_writer_owner")
+    prior_base_present = "composition_base_witness" in db.info
+    prior_base = db.info.get("composition_base_witness")
+    lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve(), header_budget=header_budget)
+    workspace = lock.__enter__()
+    guard = None
+    try:
+        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
+        expected = receipt.get("runtime_composition")
+        if type(expected) is dict and expected.get("schema_version") == 2:
+            _validate_programme_envelope(expected)
+            guard = CompositionSessionGuard(db, workspace, lock, expected, set(), header_budget=header_budget)
+            db.info["composition_guard"] = guard
+        await db.execute(text("BEGIN IMMEDIATE"))
+        connection = await db.connection()
+        def checked_snapshot(conn):
+            certificate = _certify_current_memory_snapshot_on_connection(
+                conn, header_budget, _header_budget=header_budget)
+            if guard is not None:
+                return guard._programme_snapshot(conn, certificate, expected)
+            with snapshot_reads(certificate):
+                return composition_closure(conn, verify_files=native_composition_files)
+        base, members = await connection.run_sync(checked_snapshot)
+        if base != expected:
+            raise ProductionWorkspaceReconciliationError("composition_continuity_unavailable")
+        from src.workspace.production import read_accounting_checkpoint
+        checkpoint = read_accounting_checkpoint(workspace, header_budget=header_budget)
+        if checkpoint and checkpoint.get("schema_version") == 2 and checkpoint.get("composition_target") != base:
+            raise ProductionWorkspaceReconciliationError("composition_pending_checkpoint_requires_reconciliation")
+        read_guard = db.info.pop("composition_read_guard", None)
+        if read_guard is not None:
+            read_guard.close()
+        guard = guard or CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
+        guard.base, guard.members = base, members
+        if type(expected) is dict and expected.get("schema_version") == 2:
+            guard._programme_base_leaves = dict(guard._programme_current_leaves)
+        db.info["composition_guard"] = guard
+        db.info["composition_base_witness"] = base
+        guard.install()
+        db.info["composition_writer_owner"] = owner
+        db.info["native_writer_started"] = True
+        await connection.run_sync(
+            lambda conn: guard._capture_native_writer_snapshot(conn, header_budget, owner))
+        guard._issue_writer_first_metadata_mode(connection.sync_connection, header_budget)
+        return guard
+    except BaseException:
+        try:
+            await db.rollback()
+        finally:
+            db.info.pop("native_writer_started", None)
+            if prior_owner_present:
+                db.info["composition_writer_owner"] = prior_owner
+            else:
+                db.info.pop("composition_writer_owner", None)
+            if prior_base_present:
+                db.info["composition_base_witness"] = prior_base
+            else:
+                db.info.pop("composition_base_witness", None)
+            if guard is not None:
+                if db.info.get("composition_guard") is guard:
+                    db.info.pop("composition_guard", None)
+                guard.close()
+            else:
+                lock.__exit__(None, None, None)
+        raise
+
 
 def utc_period(now=None):
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m")

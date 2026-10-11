@@ -56,6 +56,11 @@ def original_selection_accounting_setup():
 
 @pytest_asyncio.fixture
 async def genuine_live_selection(tmp_path, monkeypatch, request):
+    callspec = getattr(request.node, "callspec", None)
+    scenario = "positive" if callspec is None else callspec.params.get("scenario", "positive")
+    host_start_attempted = False
+    original_host_process = cordis_host.process
+    original_host_boot = cordis_host.boot_nonce
     # Imported users of this fixture need no new fixture dependency. Only the
     # payer test module supplies this explicitly named optional constructor.
     try:
@@ -120,7 +125,6 @@ async def genuine_live_selection(tmp_path, monkeypatch, request):
                     public_web_acknowledged=True, local_artifacts_acknowledged=True,
                     inference_ceiling_acknowledged=True))
             assert accepted["state"] == "active"
-            scenario = request.node.callspec.params["scenario"]
             if scenario == "goal_revision":
                 changed = await GoalRepository().update(goal.id, title="Changed by original Goal owner",
                     expected_revision=goal.revision, expected_owner_principal_id=operator.principal.principal_id,
@@ -144,17 +148,29 @@ async def genuine_live_selection(tmp_path, monkeypatch, request):
             assert cordis_host.process is None or cordis_host.process.returncode is not None
             monkeypatch.setattr(cordis_host, "node_path", Path(os.environ["SERAPH_CORDIS_TEST_NODE"]))
             async with current_goal_discovery():
+                host_start_attempted = True
                 assert await cordis_host.start(), cordis_host.snapshot()
                 assert cordis_host.admitting and cordis_host.reviewed is not None
                 yield case
     finally:
-        await cordis_host.stop()
-        if cordis_host._cleanup_task is not None:
-            await cordis_host._cleanup_task
-        assert cordis_host.snapshot()["cleanup"]["process_reaped"] is True
-        await goal_programme_service.stop()
-        await engine.dispose()
-        assert contacts == []
+        try:
+            await cordis_host.stop()
+            if cordis_host._cleanup_task is not None:
+                await cordis_host._cleanup_task
+            if host_start_attempted:
+                assert cordis_host.snapshot()["cleanup"]["process_reaped"] is True
+            else:
+                # Setup never reached the native start owner: prove absence of
+                # a new child/boot rather than claiming a nonexistent reap.
+                assert cordis_host.process is original_host_process
+                assert original_host_process is None or original_host_process.returncode is not None
+                assert cordis_host.boot_nonce == original_host_boot
+                assert not cordis_host.admitting
+                assert cordis_host.snapshot()["cleanup"]["resources_remaining"] == 0
+        finally:
+            await goal_programme_service.stop()
+            await engine.dispose()
+            assert contacts == []
 
 
 @contextmanager

@@ -32,14 +32,14 @@ async def test_paid_compact_constructor_matches_original_sqlite_rows(model_db, m
     monkeypatch.setattr(headers, "_sql", sql)
     await connection.run_sync(lambda conn: headers._projected_schema_objects(conn, budget, _header_budget=budget))
     assert len(queries) == 1 and queries[0] != original
-    assert len(queries[0]) == 43315 and queries[0].isascii()
+    assert len(queries[0]) == 32986 and queries[0].isascii()
     expected_mask = 0
     for ordinal in {row[2] for row in expected_rows if row[2]}:
         expected_mask |= 1 << (ordinal - 1)
     assert observed_rows == [(len(expected_rows), 0, expected_mask)]
     assert len(observed) == 1
     # Independent source ledger, not the candidate's own price as an oracle.
-    assert observed[0] == before - 216532 - 48 - 1488
+    assert observed[0] == before - 183913 - 48 - 1488
 
 
 @pytest.mark.parametrize("reserve", ["input", "delivery"])
@@ -47,7 +47,7 @@ async def test_insufficient_budget_never_constructs_or_queries(model_db, monkeyp
     connection = await model_db.connection()
     budget = HeaderReadBudget()
     # Input and one result appearance are independently source-derived literals.
-    upper = 216532
+    upper = 183913
     remaining = upper - 1 if reserve == "input" else upper + 16 - 1
     budget.debit(budget.remaining - remaining)
     reached = []
@@ -208,7 +208,7 @@ async def test_streamed_name_membership_real_sqlite_adversaries(model_db, name, 
             else:
                 with pytest.raises(HeaderBoundsError, match="^header_schema_object_unavailable$"):
                     headers._projected_schema_objects(conn, budget, _header_budget=budget)
-            assert budget.remaining == 1048576 - 218068
+            assert budget.remaining == 1048576 - 185449
     await connection.run_sync(compare)
 
 

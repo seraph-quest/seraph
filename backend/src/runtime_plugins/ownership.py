@@ -520,6 +520,13 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
     return guard
 
 
+
+async def _begin_native_writer_first(db, *, owner, header_budget):
+    """Private retained-writer foundation; existing native callers stay unchanged."""
+    from src.workspace.accounting_witness import _prepare_composition_writer_session
+    return await _prepare_composition_writer_session(db, owner=owner, header_budget=header_budget)
+
+
 def assert_session_physical_cleanup_allowed(db, session_id):
     """Closed retained membership must be checked before deleting private bytes."""
     if type(session_id) is not str or not session_id or len(session_id.encode()) > 512:

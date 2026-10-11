@@ -371,6 +371,8 @@ def _current_native_host_binding(binding):
 
 
 def _assert_registered_host(registration, ready):
+    if registration["producer_sources"] != original_producer_sources():
+        raise ValueError("original_producer_native_host_changed")
     host = registration["native_host_binding"]
     if (_current_native_host_binding(host) != host or host["boot_id"] != ready.boot_id
             or host["guard_path"] != registration["guard_path"]
@@ -660,7 +662,7 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
     pidfd = None
     ready = ack = None
     try:
-        process = subprocess.Popen([sys.executable, "-I", str(Path(__file__).absolute()),
+        process = subprocess.Popen([sys.executable, "-I", "-B", str(Path(__file__).absolute()),
             str(request), str(child.fileno()), str(owner.guard_fd)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=payload["environment"], start_new_session=True,

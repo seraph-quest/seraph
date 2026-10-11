@@ -37,7 +37,7 @@ def test_original_producer_requires_committed_registration_before_any_command(tm
             "sources": producer.original_producer_sources(),
             "job": {"execution_deadline_at": wall_cutoff}}}))
     request.chmod(0o600)
-    process = subprocess.Popen([sys.executable, "-I", producer.__file__, str(request),
+    process = subprocess.Popen([sys.executable, "-I", "-B", producer.__file__, str(request),
         str(child.fileno()), str(guard)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, pass_fds=(child.fileno(), guard), start_new_session=True)
     child.close()

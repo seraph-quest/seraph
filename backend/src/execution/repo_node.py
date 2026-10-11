@@ -116,7 +116,7 @@ def runtime_identity(config: Any) -> dict[str, Any]:
     npm_entry = npm_root / "bin/npm-cli.js"
     interpreter = Path(sys.executable).absolute()
     supervisor = Path(__file__).with_name("repo_supervisor.py")
-    subprocess.run([str(interpreter), "-I", str(supervisor), "--probe"],check=True,capture_output=True,timeout=2,env={"PATH":"/usr/bin:/bin"})
+    subprocess.run([str(interpreter), "-I", "-B", str(supervisor), "--probe"],check=True,capture_output=True,timeout=2,env={"PATH":"/usr/bin:/bin"})
     return {
         "node_path":str(node), "node_version":version, "node_sha256":before,
         "npm_version":npm.get("version"), "npm_package_sha256":hash_file(npm_root/"package.json"),
@@ -571,7 +571,7 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                         owner=producer_owner, observe_process=observe_original)
                     return self._finish_original_producer(job, result)
                 supervisor=Path(__file__).with_name("repo_supervisor.py")
-                process=subprocess.Popen([sys.executable,"-I",str(supervisor),str(request)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
+                process=subprocess.Popen([sys.executable,"-I","-B",str(supervisor),str(request)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=True)
                 pid_start=start_identity(process.pid)
                 if pid_start is None:
                     raise RepoSandboxError("Node supervisor identity unavailable",terminal_status="unknown_external_effect")

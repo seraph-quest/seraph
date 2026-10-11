@@ -740,7 +740,7 @@ def _write_payload(path: Path, payload: bytes, *, _closure_owner: _PayloadClosur
                 existing_metadata = os.fstat(existing_fd)
                 if not _private_input_file_metadata(existing_metadata):
                     raise OSError("existing input artifact is not private")
-                existing = os.read(existing_fd, INPUT_ARTIFACT_MAX_BYTES + 1)
+                existing = os.read(existing_fd, min(len(payload), INPUT_ARTIFACT_MAX_BYTES) + 1)
                 if len(existing) > INPUT_ARTIFACT_MAX_BYTES or existing != payload:
                     raise OSError("input artifact collision")
             finally:

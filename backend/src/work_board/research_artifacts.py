@@ -213,16 +213,15 @@ class _DiscoveryStagingReservation:
 
     def __init__(self, *, budget, path, reference, programme_id, kind, content):
         from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
-        from src.work_board.input_artifacts import INPUT_ARTIFACT_MAX_BYTES
         if type(budget) is not HeaderReadBudget:
             raise HeaderBoundsError("canonical_bound_not_certified")
         self.budget, self.path, self.reference = budget, path, reference
         self.programme_id, self.kind, self.content = programme_id, kind, content
         self.digest, self.size = sha(content), len(content)
         self.issued_id, self.started = id(self), False
-        # The original no-clobber writer can read a colliding file up to its
-        # full fixed cap. Reserve that appearance even when no race occurs.
-        budget.debit(self.size + INPUT_ARTIFACT_MAX_BYTES + 1 + self.size + 1,
+        # Pay the original write, size-plus-one collision read and readback
+        # before publication, including when no collision occurs.
+        budget.debit(3 * self.size + 2,
             appearance=("discovery-staging-reservation", reference, self.digest, self.size))
 
     def publish(self, *, budget, path, reference, programme_id, kind, content):

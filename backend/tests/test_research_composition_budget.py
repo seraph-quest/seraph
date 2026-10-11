@@ -47,7 +47,7 @@ def descriptors():
 
 def reserve_cost(values):
     size = len(values["content"])
-    return size + inputs.INPUT_ARTIFACT_MAX_BYTES + 1 + size + 1
+    return 3 * size + 2
 
 
 def test_new_staging_reserves_before_real_write_and_replay_pays_each_read(staging, monkeypatch):
@@ -106,7 +106,7 @@ def test_capacity_failure_precedes_body_or_file_effect(staging, monkeypatch, pha
     assert descriptors() == before_fds
 
 
-@pytest.mark.parametrize("collision", ["equal", "different"])
+@pytest.mark.parametrize("collision", ["equal", "different", "appended", "truncated"])
 def test_original_no_clobber_race_is_reserved_and_keeps_exact_bytes(staging, monkeypatch, collision):
     values, budget = request(), HeaderReadBudget()
     actual_write = inputs._write_payload
@@ -115,7 +115,8 @@ def test_original_no_clobber_race_is_reserved_and_keeps_exact_bytes(staging, mon
 
     def race(path, payload, **kwargs):
         assert budget.remaining == MAX_BYTES - len(payload) - 1 - reserve_cost(values)
-        raced = payload if collision == "equal" else b"different original racer"
+        raced = {"equal": payload, "different": b"different original racer",
+            "appended": payload + b"x", "truncated": payload[:-1]}[collision]
         actual_write(path, raced)
         return actual_write(path, payload, **kwargs)
 
@@ -131,8 +132,10 @@ def test_original_no_clobber_race_is_reserved_and_keeps_exact_bytes(staging, mon
     else:
         with pytest.raises(OSError, match="input artifact collision"):
             artifacts.stage_discovery_artifact(**values, header_budget=budget)
-    assert inputs.INPUT_ARTIFACT_MAX_BYTES + 1 in read_sizes
-    expected = values["content"] if collision == "equal" else b"different original racer"
+    assert len(values["content"]) + 1 in read_sizes
+    assert inputs.INPUT_ARTIFACT_MAX_BYTES + 1 not in read_sizes
+    expected = {"equal": values["content"], "different": b"different original racer",
+        "appended": values["content"] + b"x", "truncated": values["content"][:-1]}[collision]
     assert files(staging) == {reference(values): expected}
     assert descriptors() == before_fds
     assert budget.remaining == MAX_BYTES - len(values["content"]) - 1 - reserve_cost(values)
@@ -227,3 +230,71 @@ def test_default_original_stage_keeps_existing_output_without_budget(staging):
     first = artifacts.stage_discovery_artifact(**values)
     assert artifacts.stage_discovery_artifact(**values) == first
     assert files(staging) == {first.file_path: values["content"]}
+
+
+@pytest.mark.parametrize("case", ["equal", "different", "appended", "truncated",
+    "exact-cap", "exact-cap-appended", "above-cap-replay"])
+def test_shared_writer_collision_bounds_preserve_replay_and_cap(staging, monkeypatch, case):
+    cap = inputs.INPUT_ARTIFACT_MAX_BYTES
+    size = 98304 if case == "above-cap-replay" else cap if case.startswith("exact-cap") else 37
+    payload = b"x" * size
+    existing = (b"y" * size if case == "different" else payload + b"y"
+        if case in {"appended", "exact-cap-appended"} else payload[:-1]
+        if case == "truncated" else payload)
+    target = staging / "collision.json"
+    target.write_bytes(existing)
+    target.chmod(0o600)
+    before_fds = descriptors()
+    read_sizes = []
+    real_read = os.read
+    def observed_read(fd, count):
+        read_sizes.append(count)
+        return real_read(fd, count)
+    monkeypatch.setattr(os, "read", observed_read)
+    owner = inputs._PayloadClosureOwner(target, payload)
+    accepted = case in {"equal", "exact-cap"}
+    if accepted:
+        inputs._write_payload(target, payload, _closure_owner=owner)
+        closure = inputs._verified_payload_closure(owner)
+        assert closure.replayed and closure.size_bytes == len(payload)
+    else:
+        with pytest.raises(OSError, match="^input artifact collision$"):
+            inputs._write_payload(target, payload, _closure_owner=owner)
+        with pytest.raises(OSError, match="^original_private_payload_closure_required$"):
+            inputs._verified_payload_closure(owner)
+    expected_read = 38 if size == 37 else 65537
+    assert read_sizes == [expected_read]
+    assert target.read_bytes() == existing
+    assert list(staging.iterdir()) == [target]
+    assert descriptors() == before_fds
+
+
+@pytest.mark.parametrize("invalid", ["symlink", "mode", "hardlink"])
+def test_shared_writer_collision_metadata_denies_before_read_and_closes(staging, monkeypatch, invalid):
+    target = staging / "collision.json"
+    payload = b"original private collision"
+    other = staging / "other.json"
+    if invalid == "symlink":
+        other.write_bytes(payload)
+        other.chmod(0o600)
+        target.symlink_to(other.name)
+    else:
+        target.write_bytes(payload)
+        target.chmod(0o644 if invalid == "mode" else 0o600)
+        if invalid == "hardlink":
+            os.link(target, other)
+    initial_names = set(staging.iterdir())
+    before_bytes = files(staging)
+    before_fds = descriptors()
+    reads = []
+    real_read = os.read
+    def observed_read(fd, count):
+        reads.append(count)
+        return real_read(fd, count)
+    monkeypatch.setattr(os, "read", observed_read)
+    with pytest.raises(OSError):
+        inputs._write_payload(target, payload)
+    assert reads == [] and set(staging.iterdir()) == initial_names
+    assert files(staging) == before_bytes and descriptors() == before_fds
+    if invalid == "symlink":
+        assert target.is_symlink() and os.readlink(target) == other.name

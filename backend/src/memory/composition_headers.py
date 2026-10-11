@@ -55,6 +55,31 @@ def _metadata_upper(rows, widths):
     return 2 + rows * row + max(0, rows - 1)
 
 
+def _metadata_transaction_required(connection):
+    import sqlite3
+    from aiosqlite import Connection as AsyncSQLiteConnection
+    from sqlalchemy.engine import Connection as SQLAlchemyConnection
+    # The original retention owner passes its exact sqlite3 handle; live
+    # session owners pass the exact SQLAlchemy connection and SQLite driver.
+    # Neither attribute-shaped proxies nor a logical-only BEGIN qualify.
+    try:
+        if type(connection) is sqlite3.Connection:
+            active = connection.in_transaction is True
+        elif type(connection) is SQLAlchemyConnection:
+            active = (not connection.closed and not connection.invalidated
+                and connection.in_transaction() is True)
+            if active:
+                driver = connection.connection.driver_connection
+                active = (type(driver) in (sqlite3.Connection, AsyncSQLiteConnection)
+                    and driver.in_transaction is True)
+        else:
+            active = False
+    except (sqlite3.ProgrammingError, ValueError):
+        active = False  # Closed SQLite handles expose no active transaction.
+    if not active:
+        raise HeaderBoundsError("header_metadata_transaction_required")
+
+
 def _metadata_precharge(connection, budget, upper, appearance):
     if budget is None:
         return
@@ -62,8 +87,7 @@ def _metadata_precharge(connection, budget, upper, appearance):
     if (type(budget) is not HeaderReadBudget or type(upper) is not int or upper < 0
             or _SESSION_NUMERIC_READS.get() is not None or _MEMORY_LEDGER_PHASE.get() is not None):
         raise HeaderBoundsError("header_metadata_owner_unavailable")
-    if not connection.in_transaction() or not connection.connection.driver_connection.in_transaction:
-        raise HeaderBoundsError("header_metadata_transaction_required")
+    _metadata_transaction_required(connection)
     current = _CURRENT.get()
     if current is not None and (current.connection is not connection or current.budget is not budget):
         raise HeaderBoundsError("header_metadata_owner_unavailable")
@@ -1505,8 +1529,7 @@ def _selected_census_owner(connection, budget):
     if (type(budget) is not HeaderReadBudget or _SESSION_NUMERIC_READS.get() is not None
             or _MEMORY_LEDGER_PHASE.get() is not None):
         raise HeaderBoundsError("header_metadata_owner_unavailable")
-    if not connection.in_transaction() or not connection.connection.driver_connection.in_transaction:
-        raise HeaderBoundsError("header_metadata_transaction_required")
+    _metadata_transaction_required(connection)
     current = _CURRENT.get()
     if current is not None and (current.connection is not connection or current.budget is not budget):
         raise HeaderBoundsError("header_metadata_owner_unavailable")

@@ -81,6 +81,113 @@ Identity/programme revocation cannot be bypassed; the standing programme owner's
 existing distinction between issuer browser logout/expiry and grant validity is
 preserved.
 
+For the managed current-slot `goal_public_discovery_v1` candidate pass, the
+original operation belongs to the existing started `GoalDiscoveryService` and
+the same actual `asyncio.current_task()` executing the existing registered
+`_async_job_wrapper(run_goal_discovery_tick, ..., job_id="goal_public_discovery")`.
+Before any session pre-yield probe or Goal census/body, consume that original
+wrapper's current principal through `get_current_trust_principal()`: it must be
+the existing `TrustPrincipal` with `PrincipalType.SERVICE`, exact principal ID
+`service:scheduler:goal_public_discovery`, `authenticated=True`, `revoked=False`,
+empty grants, and its actual wrapper-generated job ID with prefix
+`scheduler:goal_public_discovery:`. For this operation-owner boundary, the accepted source-owned entry is the exact
+currently registered `goal_public_discovery` wrapper callable, including direct
+invocation of that exact registered callable. This does not prove, require or
+claim an APScheduler trigger event. Registration/callable identity proves the
+accepted entry path, not why it was invoked. Unwrapped `run_goal_discovery_tick`
+or `tick` invocation and reconstructed/look-alike wrappers are not accepted.
+The exact registration, callback, loop, principal-object, actual-task and live
+one-pass marker checks below remain mandatory; direct wrapper invocation grants
+no Goal authority, inference permission, budget or new slot semantics.
+
+
+The existing registered scheduler wrapper may establish one private live
+invocation marker solely for this original `goal_public_discovery` callback.
+Creation is confined to the real `_async_job_wrapper` invocation after its
+ordinary no-grants principal is bound and before awaiting the exact registered
+`run_goal_discovery_tick` callback. Authenticate the actual current scheduler's
+`goal_public_discovery` registration and its exact wrapper callable identity;
+a newly constructed look-alike wrapper or matching job-ID string is insufficient.
+Bind the marker to that callable/registration, exact callback, existing loop,
+actual `asyncio.current_task()`, exact current principal object and its actual
+execution job ID. It is a private invocation-lifetime marker, not a grant,
+Source, Goal authority, budget, durable receipt or registry entry.
+
+Before any candidate session pre-yield probe or Goal census/body, the original
+discovery owner consumes that live marker for one current-slot candidate pass
+and checks the unchanged required principal fields and exact principal-object,
+registration/callback/loop and actual-task identities. Tick and direct admission
+cannot create or reconstruct it. A missing, expired, already-consumed,
+copied/mismatched marker, replaced registration, copied/rebound principal,
+child/inherited-context task or unwrapped tick/callback invocation stops before
+those reads. Retain the same actual task and live marker through that one pass
+and its unwind, alongside the unchanged original service/jobs/dispatcher/
+reviewed-host/native-branch lifecycle. The wrapper invalidates it in `finally`
+and restores its prior private context together with its ordinary runtime
+context. Cancellation or exception cannot leave a usable marker. Inherited
+context possession never substitutes for originating-task identity; copying
+the exact principal object alone supplies no marker. No new grant, public
+setter/constructor, owner registry, durable ScheduledJobRun or Goal authority
+is permitted. All other R331 text and original admission authority remain
+unchanged.
+This scheduler principal proves operation ownership only; unchanged canonical
+Goal/programme/Identity and current authority checks still govern admission.
+Its lifetime begins before the earliest Goal candidate census and its pre-yield
+probes, and ends after every selected admission and its original queue/publication
+exit, or unwind. Allocate one original `HeaderReadBudget` before entering the one
+original session. All candidates and selected admissions in that pass retain
+that same session/connection and spent/reserved frame: no per-candidate renewal,
+new task, owner, grant, authority, allowance or budget. Existing recovery before
+the pass and later queued-job execution remain outside this admission lifetime
+under their unchanged original contracts. Direct admission retains its separate
+original contract; it cannot borrow a prior tick's frame or create a current-slot
+owner retroactively.
+
+Before any candidate Goal body, establish the genuine full composition issuer
+with `fresh=False`, its original lifecycle/base/checkpoint/accounting lock, and
+current common33 certification. Use only the existing source-owned bounded Goal
+header/census surface and physical-reference overflow witness. Reserve and
+explicitly debit full raw appearances, programme parsing/validation, ordering
+and candidate/call copies before their delivery or construction. Preserve the
+existing active predicate, sort_order/id order and current-day/no-catch-up
+semantics after paid body delivery. No silent candidate limit, unguarded JSON
+extraction, malformed-generation-to-empty conversion or all-Identity scan is
+permitted. Capacity exhaustion stops this pass before its next body/effect;
+another candidate cannot obtain a fresh frame. ADR-034's prospective selection
+and ADR-035's conditional current-pointer read remain applicable only to each
+actual original first insertion under their unchanged current-authority checks.
+
+A is the actual insertion writer: each fresh `BEGIN IMMEDIATE` recertifies and
+rederives current common33/required Identity3, canonical programme/issuer and
+current authority, and the current pointer/HMAC/version, comparing the staged
+pin without repinning. Matching insertion ends prospective selection. B is the
+original persisted queue CAS writer on that same operation/session/frame, using
+unchanged persisted selectors, immutable `validate_pinned` and current authority,
+deadline/fence/readback. Any discovery continuation must authenticate this exact
+lifetime; the existing native-memory-only restriction must remain effective for
+every other caller. C is conditional publication at that same B writer's session
+exit after successful CAS and before commit, not a third `BEGIN` or an after-commit
+publication. Recertify invalidated evidence before later bodies and debit physical
+checkpoint/delta/output/readback and all repeated appearances on the same frame.
+Rollback, drift or denial refunds nothing and renews no deadline or authority.
+
+On a blocked composed pass, emit at most one bounded warning through existing
+managed backend logs with a closed stable denial category. Cover candidate
+enumeration and admission failures; do not expose private values, identifiers or
+arbitrary exception text. Use a pre-insertion category only when the original
+operation proves that state; otherwise use a generic blocked-admission category.
+A genuine empty pass needs no warning. Do not fabricate a discovery job,
+ScheduledJobRun, audit row or durable UI receipt. This log surface establishes
+visibility only, not durable adoption, successful admission or permission.
+
+The original 128-distinct-reference/1,048,576-byte maximum, repeated-read/copy
+charges, unfiltered schema LIMIT1360/1359 ceiling, common33 and conditional
+Identity3 remain unchanged. No new witness, Source, Root, authority ledger,
+retention component or document/parser capacity is granted. Unknown complete
+closure or output cost, missing authentic owner, incompatible lifecycle/schema,
+current-authority/pin drift or exhaustion remains STOP before the next effect.
+
+
 Use the actual original operation/session/frame throughout common33 certification,
 canonical reads, prospective selection, Identity preflight/current validation,
 physical staging and original insertion. An independent session or newly created

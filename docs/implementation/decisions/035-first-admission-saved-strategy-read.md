@@ -94,10 +94,15 @@ authentic signed explicit baseline permits the original baseline behavior.
 ## Original owner, ordering and accounting
 
 Establish the real started service, original admission task, jobs owner, reviewed
-host and existing native branch through their original lifecycle. Allocate one
-original `HeaderReadBudget` before entering `database.get_session(header_budget=...)`,
-including its pre-yield probes. Use that exact session/connection/frame for
-authority, jobs lookup, strategy resolution, staging and insertion.
+host and existing native branch through their original lifecycle. For the managed
+current-slot candidate pass, establish that same original task's bounded
+candidate/admission lifetime before its earliest Goal census as specified by
+ADR-034; this decision does not independently establish a tick owner. Allocate
+one original `HeaderReadBudget` before entering
+`database.get_session(header_budget=...)`, including its pre-yield probes. Use
+that exact session/connection/frame for candidate discovery and every selected
+admission's authority, jobs lookup, strategy resolution, staging, insertion and
+original queue/publication exit, without per-candidate renewal.
 
 Before the first full canonical Goal/issuer/Identity read, use the existing
 `prepare_composition_session(db, fresh=False, header_budget=original_frame)`

@@ -176,6 +176,46 @@ async def test_genuine_identity_factory_and_validator_paid_separately(original_a
     assert sql_state(case) == before and private_files(case) == files
 
 
+async def test_locator_schema_width_cannot_escape_original_issuer(original_auth_composition):
+    case = original_auth_composition
+    before, files = sql_state(case), private_files(case)
+    budget = HeaderReadBudget()
+    class ObservedRollback(RuntimeError):
+        pass
+    with pytest.raises(ObservedRollback):
+        async with get_session(header_budget=budget) as db:
+            await begin_native_writer(db, owner="finite_service", header_budget=budget)
+            connection = await db.connection()
+            spent = budget.remaining
+            with original_effects(connection) as (queries, compiles):
+                result = await connection.run_sync(lambda conn: headers._original_locator_schema_width(
+                    conn, "operator_sessions", headers._compiler_models.OperatorSession, budget))
+            assert result is None and budget.remaining == spent
+            assert queries == [] and compiles == []
+            raise ObservedRollback
+    assert sql_state(case) == before and private_files(case) == files
+
+
+async def test_locator_schema_width_denies_copied_original_scope(original_auth_composition):
+    from dataclasses import replace
+    budget = HeaderReadBudget()
+    async with get_session(header_budget=budget) as db:
+        connection = await db.connection()
+        original = headers._checked_current_snapshot_scope(budget)
+        copied = replace(original)
+        token = headers._CURRENT_SNAPSHOT_SCOPE.set(copied)
+        try:
+            spent = budget.remaining
+            with original_effects(connection) as (queries, compiles):
+                with pytest.raises(HeaderBoundsError, match="memory_snapshot_scope_unavailable"):
+                    await connection.run_sync(lambda conn: headers._original_locator_schema_width(
+                        conn, "operator_sessions", headers._compiler_models.OperatorSession, budget))
+            assert budget.remaining == spent and queries == [] and compiles == []
+        finally:
+            headers._CURRENT_SNAPSHOT_SCOPE.reset(token)
+        await db.rollback()
+
+
 @pytest.mark.parametrize("table,column", [(table, column) for table, column in headers._COMPILER_ENUM_ROSTER])
 async def test_all_fifteen_original_enums_admitted_and_wrong_effective_length_denied(model_db, monkeypatch, table, column):
     connection = await model_db.connection()

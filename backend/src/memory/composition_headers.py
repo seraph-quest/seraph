@@ -716,6 +716,65 @@ def validate_descriptor_schema(connection, descriptor, *, _header_budget=None):
     return _metadata_cost([list(r) for r in schema]) if _header_budget is None else 0
 
 
+def _original_locator_schema_width(connection, table, model, budget, *, column_names=False):
+    """Numerical width only from this live issuer's already-paid schema checks."""
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is None or scope.session is None:
+        return None
+    _check_snapshot_scope_connection(scope, connection)
+    locator = sys._getframe(1)
+    schema = locator.f_back
+    discovery = schema.f_back if schema is not None else None
+    issuer = discovery.f_back if discovery is not None else None
+    wrapper = issuer.f_back if issuer is not None else None
+    if (locator.f_code is not _validate_locator.__code__
+            or schema is None or schema.f_code is not validate_descriptor_schema.__code__
+            or discovery is None or discovery.f_code is not _discover.__code__
+            or issuer is None or issuer.f_code is not preflight_composition_superset.__code__
+            or wrapper is None or wrapper.f_code is not _certify_current_memory_snapshot_on_connection.__code__):
+        return None
+    descriptor = schema.f_locals.get("descriptor")
+    state = issuer.f_locals.get("state")
+    cookies = wrapper.f_locals.get("cookies")
+    if (descriptor is not COMPOSITION_DESCRIPTORS.get(table)
+            or schema.f_locals.get("model") is not model
+            or schema.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("connection") is not connection
+            or issuer.f_locals.get("budget") is not budget
+            or issuer.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("raw_owner") is not None
+            or "present" not in issuer.f_locals
+            or wrapper.f_locals.get("scope") is not scope
+            or wrapper.f_locals.get("connection") is not connection
+            or wrapper.f_locals.get("budget") is not budget
+            or type(cookies) is not tuple or len(cookies) != 2
+            or type(state) is not tuple or len(state) != 3
+            or connection.get_transaction() is not state[0]
+            or connection.connection.driver_connection is not state[1]
+            or state[1].total_changes != state[2]):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # The original enclosing cache-miss owner checks these same paid cookies
+    # again before issuing a certificate. No schema/body authority is returned.
+    if column_names:
+        upper = 0
+        for name in descriptor.columns:
+            if not name.isascii():
+                return None
+            upper = max(upper, len(name) + 2)
+        return upper
+    upper = 0
+    for name in _NAMED_INDEXES:
+        if not name.isascii():
+            return None
+        upper = max(upper, len(name) + 2)
+    for name in _SCHEMA_TABLES:
+        if not name.isascii():
+            return None
+        upper = max(upper, len("sqlite_autoindex_") + len(name) + 1
+            + _census_decimal_width(_AUTO_MAX.get(name, 1)) + 2)
+    return upper
+
+
 def _validate_locator(connection, table, column, model=None, *, budget=None, _header_budget=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
@@ -724,14 +783,18 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
     if len(source) != 1:
         raise HeaderBoundsError("header_locator_unsupported")
     name = source[0].name
-    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770,20,14,20)), appearance=('locator-indexes',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?')
+    index_width = (_original_locator_schema_width(connection, table, model, _header_budget)
+        if _header_budget is not None else None)
+    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14,20)), appearance=('locator-indexes',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?')
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
     match = [r for r in rows if r[0] == name]
     if len(match) != 1 or tuple(match[0][1:]) != (1,"c",0):
         raise HeaderBoundsError("header_locator_changed")
-    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770,770,20,20,20)), appearance=('locator-parts',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3')
+    column_width = (_original_locator_schema_width(connection, table, model, _header_budget, column_names=True)
+        if _header_budget is not None else None)
+    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770 if column_width is None else column_width,770,20,20,20)), appearance=('locator-parts',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3')
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
@@ -995,10 +1058,10 @@ def _original_retained_schema_proved(connection, table, fields):
     if certificate is None:
         return False
     if (type(certificate) is not CompositionHeaderCertificate
-            or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate):
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)):
         raise HeaderBoundsError("header_certificate_unavailable")
     scope = _checked_current_snapshot_scope(certificate.budget)
-    if scope is None or scope.session is None:
+    if scope is None or scope.session is None or certificate.raw_owner is not None:
         return False
     _check_snapshot_scope_connection(scope, connection)
     current = scope.certificates.get(connection)

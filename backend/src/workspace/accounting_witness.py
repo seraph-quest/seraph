@@ -4774,11 +4774,14 @@ async def _prepare_composition_writer_session(db, *, owner, header_budget):
     prior_owner = db.info.get("composition_writer_owner")
     prior_base_present = "composition_base_witness" in db.info
     prior_base = db.info.get("composition_base_witness")
-    lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve(), header_budget=header_budget)
+    # Acquire the original lock before validating its deployment receipt, then
+    # retain the paid return instead of reading the same private file again.
+    lock = maintenance_accounting_lock(Path(settings.workspace_dir).resolve(),
+        require_binding=False, header_budget=header_budget)
     workspace = lock.__enter__()
     guard = None
     try:
-        receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
+        receipt = assert_deployment_binding(workspace, header_budget=header_budget)
         expected = receipt.get("runtime_composition")
         if type(expected) is dict and expected.get("schema_version") == 2:
             _validate_programme_envelope(expected)

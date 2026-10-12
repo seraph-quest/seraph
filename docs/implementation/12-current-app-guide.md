@@ -31,6 +31,27 @@ composed discovery admission on the same guarded session and spent frame.
 Implementation, complete resource fit and runtime admission remain unproved;
 pointer retention/restore and shipped availability are not established.
 
+### Explicit stopped native composition initialization (branch candidate)
+
+The #1007 candidate exposes the existing fresh-deployment owner through
+`./manage.sh -e dev local composition-initialize --confirm` and
+`./manage.sh -e prod composition-initialize --confirm`. Run it while the backend
+is stopped, using the existing prepared backend Python and reviewed Cordis
+package/Node. It acquires the shared maintenance fence, derives the actual
+reviewed composition and commits its fourteen inventory rows through the
+original canonical writer and protected lifecycle witness. Ordinary startup
+never reseeds inventory, and stock host readiness alone is not database
+composition readiness.
+
+The original freshness predicate rejects existing inventory, jobs, messages or
+composition base/witness; an OperatorSession alone is not a rejection condition.
+For a new deployment, initialize before first login/native work. Existing DB
+schema is never migrated by this command before that original predicate runs;
+only an absent database with absent composition witness/checkpoint target may
+use the original schema initializer. Partial, restored and repeated initialization
+remain blocked. This candidate is not shipped availability or a completed native
+Memory journey; focused and actual managed validation remain required.
+
 ### Reviewed optional Cordis lifecycle host
 
 This is the implementation contract for [#1006](https://github.com/seraph-quest/seraph/issues/1006)

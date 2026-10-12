@@ -634,7 +634,7 @@ function production_workspace_lifecycle() {
     # to that bind. It deliberately does not start Docker or contact a
     # provider.
     PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+        python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
         --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
 }
 
@@ -646,20 +646,20 @@ function refresh_production_bind_identity() {
     local identity_json identity
     if ! identity_json=$(
         PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-            python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+            python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
             --base-dir "$SCRIPT_DIR" identity
     ); then
         echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
         return 1
     fi
-    identity=$(printf '%s' "$identity_json" | python3 -c \
+    identity=$(printf '%s' "$identity_json" | python3 -B -c \
         'import json, sys; print(json.load(sys.stdin).get("bind_identity", ""))')
     if [[ ! "$identity" =~ ^[0-9a-f]{24}$ ]]; then
         echo "Error: production bind identity receipt is invalid; workspace startup is blocked." >&2
         return 1
     fi
     export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
-    SERAPH_WORKSPACE_LIFECYCLE_PATH=$(printf '%s' "$identity_json" | python3 -c \
+    SERAPH_WORKSPACE_LIFECYCLE_PATH=$(printf '%s' "$identity_json" | python3 -B -c \
         'import json, sys; print(json.load(sys.stdin).get("lifecycle_directory", ""))')
     if [[ ! -d "$SERAPH_WORKSPACE_LIFECYCLE_PATH" ]]; then
         echo "Error: production accounting continuity descriptor is unavailable." >&2
@@ -667,6 +667,30 @@ function refresh_production_bind_identity() {
     fi
     export SERAPH_WORKSPACE_LIFECYCLE_PATH
     echo "Production bind identity refreshed for managed startup."
+}
+
+# Explicit stopped initialization; ordinary startup never reseeds inventory.
+function initialize_runtime_composition() {
+    local local_mode="${1:-}"
+    shift
+    if [ "$#" -ne 1 ] || [ "$1" != "--confirm" ]; then
+        error_exit "Composition initialization requires explicit --confirm."
+    fi
+    local interpreter="$SCRIPT_DIR/backend/.venv/bin/python3"
+    if [ ! -x "$interpreter" ]; then
+        error_exit "Composition initialization requires the existing backend Python environment."
+    fi
+    if [ "$local_mode" = "local" ]; then
+        reject_prod_local_stack || return 1
+        mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR"
+        WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+            "$interpreter" -B "$SCRIPT_DIR/backend/workspace_cli.py" \
+            --base-dir "$SCRIPT_DIR" --local composition-initialize "$@"
+    else
+        PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+            "$interpreter" -B "$SCRIPT_DIR/backend/workspace_cli.py" \
+            --base-dir "$SCRIPT_DIR" composition-initialize "$@"
+    fi
 }
 
 # --- Local Stack Functions ---
@@ -688,7 +712,7 @@ function reject_prod_local_stack() {
 }
 
 function start_local_backend() {
-    python3 "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
+    python3 -B "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
     if local_backend_is_running; then
         local pid
         pid=$(cat "$LOCAL_BACKEND_PID_FILE")
@@ -703,14 +727,14 @@ function start_local_backend() {
     # backend's trusted-directory reader will keep rejecting an existing
     # broad workspace rather than silently repairing its root.
     mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
-    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -B -c \
         'import sys; from pathlib import Path; from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory; prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(sys.argv[1]).resolve()))' \
         "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; billable inference remains blocked." >&2
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
         export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
-        exec uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
+        exec uv run python -B -m uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_BACKEND_PID_FILE"
@@ -886,7 +910,7 @@ if [ "$COMMAND" = "cordis" ]; then
     # This finite keyless path never reads operator env, credentials or workspace.
     # Build uses already installed pins; probe launches/reaps the production host.
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -m src.runtime_plugins.cli "$@"
+        python3 -B -m src.runtime_plugins.cli "$@"
 fi
 COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"
@@ -947,7 +971,7 @@ if [ "$COMMAND" = "health" ]; then
     if [ "$ENV" != "prod" ]; then
         error_exit "'health' is supported only with '-e prod'."
     fi
-    exec python3 "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
+    exec python3 -B "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
 fi
 
 # --- Execution ---
@@ -956,6 +980,10 @@ if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"
     LOCAL_EXIT_STATUS=0
     case "$LOCAL_SUB" in
+        composition-initialize)
+            shift
+            initialize_runtime_composition local "$@" || LOCAL_EXIT_STATUS=$?
+            ;;
         up)
             local_up || LOCAL_EXIT_STATUS=$?
             ;;
@@ -973,10 +1001,18 @@ if [ "$COMMAND" = "local" ]; then
             local_logs "${1:-all}" || LOCAL_EXIT_STATUS=$?
             ;;
         *)
-            error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run"
+            error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run, composition-initialize"
             ;;
     esac
     exit "$LOCAL_EXIT_STATUS"
+fi
+
+if [ "$COMMAND" = "composition-initialize" ]; then
+    if [ "$ENV" != "prod" ]; then
+        error_exit "Use '-e dev local composition-initialize --confirm' for the local workspace."
+    fi
+    initialize_runtime_composition production "$@"
+    exit $?
 fi
 
 if [ "$ENV" = "prod" ] && [ "$COMMAND" = "up" ]; then

@@ -42,6 +42,7 @@ def _parser() -> argparse.ArgumentParser:
         default=Path.cwd(),
         help="base directory for relative BACKEND_DATA_PATH_PROD values",
     )
+    parser.add_argument("--local", action="store_true", help="use the configured local WORKSPACE_DIR for stopped composition initialization only")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     backup = subparsers.add_parser("backup", help="create a verified workspace archive")
@@ -85,6 +86,8 @@ def _parser() -> argparse.ArgumentParser:
     programme.add_argument("--confirm", action="store_true")
     programme.add_argument("--recover-pending", action="store_true",
         help="repair only the exact interrupted empty-programme transition")
+    composition = subparsers.add_parser("composition-initialize", help="initialize a stopped fresh deployment with the reviewed native composition")
+    composition.add_argument("--confirm", action="store_true")
     return parser
 
 
@@ -230,12 +233,59 @@ def _persist_result(workspace, operation: str, receipt: dict[str, Any]) -> None:
     write_lifecycle_receipt(workspace, durable)
 
 
+async def _initialize_composition(workspace) -> dict[str, Any]:
+    # Resolve the actual reviewed package before any schema/native SQL writes.
+    from src.runtime_plugins.composition import reviewed_composition
+    from src.runtime_plugins.ownership import DOMAINS, begin_native_writer, initialize_fresh_deployment
+    from src.db import engine as original
+    from config.settings import settings
+    reviewed = reviewed_composition()
+    if (Path(settings.workspace_dir).resolve() != workspace.host_root
+        or Path(original._db_path).resolve() != workspace.host_root / "seraph.db"):
+        raise WorkspaceLifecycleError("composition initialization workspace binding changed")
+    if not Path(original._db_path).exists():
+        from src.workspace.production import read_accounting_checkpoint
+        prior = read_lifecycle_receipt(workspace) or {}
+        checkpoint = read_accounting_checkpoint(workspace)
+        if (prior.get("runtime_composition") is not None
+            or (checkpoint and checkpoint.get("schema_version") == 2
+                and checkpoint.get("composition_target") is not None)):
+            raise WorkspaceLifecycleError("composition fresh deployment requires original absent witness")
+        await original.init_db()
+    async with original.get_session() as db:
+        await begin_native_writer(db, owner="composition_maintenance", fresh=True)
+        rows = await initialize_fresh_deployment(db,
+            composition_digests={domain: reviewed.composition_digest for domain in DOMAINS})
+        count = len(rows)
+    # The original session commits the rows and protected external witness.
+    retained = read_lifecycle_receipt(workspace)
+    if not retained or not isinstance(retained.get("runtime_composition"), dict):
+        raise WorkspaceLifecycleError("composition initialization committed witness unavailable")
+    return {"schema_version": "seraph.production-workspace-lifecycle.v1",
+        "status": "ready", "operation": "composition-initialize",
+        "composition_domains": count, "composition_digest": reviewed.composition_digest,
+        "package_digest": reviewed.package_digest, "secret_values_included": False}
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
-    workspace = resolve_production_workspace(
-        os.environ,
-        base_dir=args.base_dir,
-        allow_missing=args.command == "status",
-    )
+    if args.command == "composition-initialize" and not args.confirm:
+        raise WorkspaceLifecycleError("composition initialization requires explicit confirm=True")
+    if args.local:
+        if args.command != "composition-initialize":
+            raise WorkspaceLifecycleError("local lifecycle command unsupported")
+        from src.workspace.state_registry import canonical_workspace_root
+        if not os.environ.get("WORKSPACE_DIR", "").strip():
+            raise WorkspaceLifecycleError("local workspace configuration required")
+        workspace = ProductionWorkspace(host_root=canonical_workspace_root(os.environ["WORKSPACE_DIR"]))
+    else:
+        workspace = resolve_production_workspace(
+            os.environ,
+            base_dir=args.base_dir,
+            allow_missing=args.command == "status",
+        )
+    if args.command == "composition-initialize":
+        # Host maintenance targets the resolved bind, never the container alias.
+        os.environ["WORKSPACE_DIR"] = str(workspace.host_root)
     os.environ["SERAPH_WORKSPACE_LIFECYCLE_PATH"] = str(workspace.lifecycle_directory)
     try:
         if args.command == "status":
@@ -260,7 +310,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         registry = canonical_workspace_registry(workspace.host_root)
         prepare_lifecycle_directory(workspace)
         with maintenance_fence(workspace):
-            if args.command == "programme-envelope-transition":
+            if args.command == "composition-initialize":
+                import asyncio
+                receipt = asyncio.run(_initialize_composition(workspace))
+            elif args.command == "programme-envelope-transition":
                 if not args.confirm:
                     raise WorkspaceLifecycleError("programme envelope transition requires explicit confirm=True")
                 from src.memory.header_bounds import HeaderReadBudget

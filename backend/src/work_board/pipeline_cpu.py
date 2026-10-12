@@ -29,14 +29,67 @@ def job_id(task: WorkBoardTask, attempt: WorkBoardAttempt) -> str:
     return f"evidence-cpu:{task.task_id}:{attempt.attempt_id}"
 
 
-def spec_for(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, deadline: datetime) -> DurableJobSpec:
+def _original_report_cpu_authority_upper(task, model):
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper as width
+    from src.memory.header_bounds import _native_memory_ascii_string_width as text_width
+    upper = 2 + 12 + 13
+    for key, attribute in (("principal", "owner_principal_id"), ("session_id", "owner_session_id"),
+            ("goal_id", "goal_id"), ("goal_revision", "goal_revision"), ("capability_id", "capability_id")):
+        upper += text_width(key) + width(getattr(task, attribute))
+    for key, value in (("owner_kind", "user"), ("capability_version", "1"),
+            ("finite_authority", True), ("no_learning", True)):
+        upper += text_width(key) + width(value)
+    upper += text_width("operation_ref") + width(model.operation_ref)
+    upper += text_width("plan_version") + width(model.plan_version)
+    upper += text_width("permissions") + 3 + text_width("workspace_read") + text_width("workspace_write")
+    upper += (text_width("limits") + 2 + 2 + 3 + text_width("max_seconds") + width(30)
+        + text_width("max_output_bytes") + width(MAX_OUTPUT_BYTES) + text_width("max_attempts") + width(2))
+    return upper
+
+
+def spec_for(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, deadline: datetime,
+             _memory_header_budget=None) -> DurableJobSpec:
     if task.capability_id not in CPU_KINDS:
         raise ValueError("unregistered evidence CPU capability")
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.task_capability import (_report_memory_consumer_model_pay,
+            _report_memory_allocation_pay, _report_memory_canonical_pay)
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.memory.header_bounds import _native_memory_utf8_width
+        _report_memory_consumer_model_pay(inputs, _memory_header_budget, stage="spec-consumer")
     model = EvidenceConsumerInput.model_validate(dict(inputs))
+    if _memory_header_budget is not None:
+        upper = 6 * _native_memory_utf8_width(attempt.parent_handoff_context_json) + 2
+        _report_memory_allocation_pay(_memory_header_budget, "spec-handoff-parser", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-handoff-pairs", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-handoff-dicts", upper)
     handoffs = json.loads(attempt.parent_handoff_context_json)
+    if _memory_header_budget is not None and isinstance(handoffs, list) and len(handoffs) == 1:
+        _report_memory_canonical_pay(handoffs, _memory_header_budget, stage="spec-handoff-digest", digest_output=True)
     if not isinstance(handoffs, list) or len(handoffs) != 1 or digest(handoffs) != attempt.parent_handoff_digest:
         raise ValueError("evidence CPU handoff binding invalid")
+    if _memory_header_budget is not None:
+        # All ten fields are required; the accepted model inserts no defaults.
+        _report_memory_allocation_pay(_memory_header_budget, "spec-consumer-dump",
+            _native_memory_source_value_upper(inputs))
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        safe_upper = (2 + 2 + 3 + _native_memory_ascii_string_width("input")
+            + _native_memory_source_value_upper(inputs)
+            + _native_memory_ascii_string_width("parent_handoff_context")
+            + _native_memory_source_value_upper(handoffs)
+            + _native_memory_ascii_string_width("parent_handoff_digest")
+            + _native_memory_source_value_upper(attempt.parent_handoff_digest))
+        _report_memory_allocation_pay(_memory_header_budget, "spec-safe-inputs", safe_upper)
     safe_inputs = {"input": model.model_dump(mode="json"), "parent_handoff_context": handoffs, "parent_handoff_digest": attempt.parent_handoff_digest}
+    if _memory_header_budget is not None:
+        authority_upper = _original_report_cpu_authority_upper(task, model)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-permissions", 3
+            + _native_memory_ascii_string_width("workspace_read") + _native_memory_ascii_string_width("workspace_write"))
+        limits_upper = (2 + 2 + 3 + _native_memory_ascii_string_width("max_seconds") + 2
+            + _native_memory_ascii_string_width("max_output_bytes") + 5
+            + _native_memory_ascii_string_width("max_attempts") + 1)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-limits", limits_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-authority", authority_upper)
     authority = {
         "principal": task.owner_principal_id, "owner_kind": "user",
         "session_id": task.owner_session_id, "goal_id": task.goal_id,
@@ -47,8 +100,57 @@ def spec_for(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str
         "limits": {"max_seconds": 30, "max_output_bytes": MAX_OUTPUT_BYTES, "max_attempts": 2},
         "no_learning": True,
     }
+    if _memory_header_budget is not None:
+        fingerprint_upper = (2 + 3 + 4 + _native_memory_ascii_string_width("task_ref")
+            + _native_memory_source_value_upper(task.task_id)
+            + _native_memory_ascii_string_width("attempt_ref") + _native_memory_source_value_upper(attempt.attempt_id)
+            + _native_memory_ascii_string_width("inputs") + safe_upper
+            + _native_memory_ascii_string_width("authority") + authority_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-fingerprint-map", fingerprint_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-fingerprint-json", fingerprint_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-fingerprint-utf8", fingerprint_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-fingerprint-hexdigest", 66)
     fingerprint = digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
                           "inputs": safe_inputs, "authority": authority})
+    if _memory_header_budget is not None:
+        job_upper = (_native_memory_ascii_string_width("evidence-cpu:")
+            + _native_memory_ascii_string_width(task.task_id)
+            + _native_memory_ascii_string_width(":")
+            + _native_memory_ascii_string_width(attempt.attempt_id) - 6)
+        key_upper = (_native_memory_ascii_string_width(task.task_id)
+            + _native_memory_ascii_string_width(":")
+            + _native_memory_ascii_string_width(attempt.attempt_id) - 4)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-job-id", job_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-idempotency-key", key_upper)
+        identity_upper = (2 + 6 + 7 + _native_memory_ascii_string_width("job_id") + job_upper
+            + _native_memory_ascii_string_width("owner_kind") + _native_memory_ascii_string_width("user")
+            + _native_memory_ascii_string_width("owner_principal_id") + _native_memory_ascii_string_width(task.owner_principal_id)
+            + _native_memory_ascii_string_width("job_kind") + _native_memory_ascii_string_width(task.capability_id)
+            + _native_memory_ascii_string_width("capability_version") + _native_memory_ascii_string_width("1")
+            + _native_memory_ascii_string_width("idempotency_scope") + _native_memory_ascii_string_width("work-board-attempt")
+            + _native_memory_ascii_string_width("idempotency_key") + key_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-identity-constructor", identity_upper)
+        # Preserve the original seven __post_init__ str/strip invocations.
+        for name in ("job_id", "owner_kind", "owner_principal_id", "job_kind",
+                "capability_version", "idempotency_scope", "idempotency_key"):
+            if name == "job_id":
+                field_upper = job_upper
+            elif name == "idempotency_key":
+                field_upper = key_upper
+            elif name == "owner_kind":
+                field_upper = _native_memory_ascii_string_width("user")
+            elif name == "capability_version":
+                field_upper = _native_memory_ascii_string_width("1")
+            elif name == "idempotency_scope":
+                field_upper = _native_memory_ascii_string_width("work-board-attempt")
+            elif name == "owner_principal_id":
+                field_upper = _native_memory_ascii_string_width(task.owner_principal_id)
+            else:
+                field_upper = _native_memory_ascii_string_width(task.capability_id)
+            _report_memory_allocation_pay(_memory_header_budget, "spec-identity-str-" + name, field_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "spec-identity-strip-" + name, field_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-identity-owner-kinds", 3
+            + _native_memory_ascii_string_width("user") + _native_memory_ascii_string_width("service"))
     return DurableJobSpec(
         identity=DurableJobIdentity(job_id=job_id(task, attempt), owner_kind="user",
             owner_principal_id=task.owner_principal_id, job_kind=task.capability_id,

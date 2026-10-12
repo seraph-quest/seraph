@@ -116,11 +116,148 @@ class PreparedNativeMemoryMutation:
 
     def original_result(self):
         from copy import deepcopy
+        if _native_prepared_numeric_frame(self._db, self) is not None:
+            _native_prepared_allocation_debit(self._db, self, "original-result-copy",
+                _native_prepared_value_width(self._result))
         return deepcopy(self._result)
 
     @property
     def consumed(self):
         return self._consumed
+
+
+def _native_prepared_value_width(value):
+    """Original encoded-unit bound without copying/serializing plan values."""
+    from enum import Enum
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    if isinstance(value, Enum):
+        return _native_prepared_value_width(value.value)
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is str:
+        return _native_memory_ascii_string_width(value)
+    if type(value) is int and -(2**63) <= value < 2**63:
+        return 20
+    if type(value) is float and math.isfinite(value):
+        return 64
+    if type(value) is datetime:
+        return 44
+    if type(value) in {tuple, list}:
+        return 2 + max(0, len(value) - 1) + sum(_native_prepared_value_width(v) for v in value)
+    if type(value) is dict and all(type(key) is str for key in value):
+        return 2 + max(0, len(value) - 1) + sum(
+            _native_memory_ascii_string_width(key) + 1 + _native_prepared_value_width(v)
+            for key, v in value.items())
+    raise HeaderBoundsError("memory_prepared_numeric_shape_unavailable")
+
+
+def _native_prepared_numeric_frame(db, prepared):
+    import asyncio
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger, HeaderBoundsError
+    from src.workspace.accounting_witness import _native_memory_capacity_slots
+    active = _MEMORY_LEDGER_PHASE.get()
+    if active is None:
+        return None
+    ledger, phase = active
+    if type(ledger) is not _NativeMemoryNumericLedger or phase != "effect":
+        raise HeaderBoundsError("memory_prepared_numeric_owner_changed")
+    _native_memory_capacity_slots(ledger)
+    plan = ledger.prepared
+    binding = ledger.bindings[phase]
+    canonical = getattr(plan._prepared, "canonical", None)
+    if (binding[0] is not db or binding[5] is not asyncio.current_task() or plan._db is not db
+            or plan._transaction is not db.sync_session.get_transaction()
+            or not (prepared is plan or prepared is plan._prepared
+                or prepared is getattr(plan._prepared, "update_plan", None)
+                or (canonical is not None and prepared is canonical.memory_plan))):
+        raise HeaderBoundsError("memory_prepared_numeric_owner_changed")
+    return ledger.budget
+
+
+def _native_prepared_allocation_debit(db, prepared, name, upper):
+    frame = _native_prepared_numeric_frame(db, prepared)
+    if frame is not None:
+        frame.debit(upper, appearance=("memory-prepared", name))
+
+
+def _native_prepared_pairs_object_width(pairs):
+    return 2 + max(0, len(pairs) - 1) + sum(
+        _native_prepared_value_width(name) + 1 + _native_prepared_value_width(value)
+        for name, value in pairs)
+
+
+def _native_prepared_control_readback_width(prepared):
+    return 2 + max(0, len(prepared.before) - 1) + sum(
+        _native_prepared_value_width(name) + 1 + _native_prepared_value_width(
+            next((replacement for key, replacement in prepared.changes if key == name), value))
+        for name, value in prepared.before)
+
+
+def original_native_memory_prepared_numeric_schedule(plan):
+    """Pure effect terms from the registered original sealed constructor plan."""
+    if (type(plan) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+            or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or plan.consumed):
+        raise ValueError("prepared_memory_mutation_changed")
+    result = _native_prepared_value_width(plan._result)
+    entries = [("effect", ("memory-prepared", "plan-validation-values"),
+            _native_prepared_value_width(plan._row_values) + _native_prepared_value_width(plan._update_before))]
+    if plan._method != "memory.forget":
+        entries.append(("effect", ("memory-prepared", "result-copy"), result))
+    from src.memory.composition_headers import _metadata_upper
+    for _ in range(2):
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            entries.append(("effect", ("memory-prepared", "writer-state", stage),
+                _metadata_upper(1, (20,))))
+    if (plan._method == "memory.applyReviewed" and plan._prepared.canonical is not None
+            and plan._prepared.canonical.memory_plan.rows):
+        entries.append(("effect", ("memory-prepared", "canonical-rows-slice"),
+            _native_prepared_value_width(plan._row_values)))
+    if plan._method == "memory.forget":
+        event = plan._prepared.audit_event
+        entries.extend((("effect", ("memory-prepared", "forget-audit-json"),
+            _native_prepared_value_width(event.details_json)),
+            ("effect", ("memory-prepared", "forget-result-copy"), result),
+            ("effect", ("memory-prepared", "forget-memory-payload"), result)))
+        update_plan = plan._prepared.update_plan
+        entries.extend((("effect", ("memory-prepared", "control-update-values"),
+            _native_prepared_pairs_object_width(update_plan.changes)),
+            ("effect", ("memory-prepared", "control-readback-orm"),
+                _native_prepared_control_readback_width(update_plan)),
+            ("effect", ("memory-prepared", "control-conditions"),
+                _native_prepared_pairs_object_width(update_plan.before))))
+        metadata = next((value for name, value in update_plan.changes if name == "metadata_json"),
+            update_plan.memory.metadata_json)
+        entries.append(("effect", ("memory-prepared", "forget-metadata-json"),
+            _native_prepared_value_width(metadata or "{}")))
+        confirmed = next((value for name, value in update_plan.changes if name == "last_confirmed_at"),
+            update_plan.memory.last_confirmed_at)
+        for _ in range(2 + int(confirmed is not None)):
+            entries.append(("effect", ("memory-prepared", "forget-timestamp"), 44))
+    return tuple(entries)
+
+
+def original_native_memory_prepared_validation_numeric_schedule(plan, *, consumed=False):
+    """One additional original validator call; capacity, never permission.
+
+    The enclosing producer owns its pre-apply validation and post-effect
+    consumed validation. The integer-slot binder has one further consumed
+    validation only when the authentic sealed plan includes future slots.
+    The local apply schedule already includes its own validator call.
+    """
+    if (type(plan) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+            or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or type(consumed) is not bool):
+        raise ValueError("prepared_memory_mutation_changed")
+    from src.memory.composition_headers import _metadata_upper
+    entries = [("effect", ("memory-prepared", "writer-state", stage), _metadata_upper(1, (20,)))
+        for stage in ("delivery", "row-copy", "encoded-copy")]
+    if not consumed:
+        entries.append(("effect", ("memory-prepared", "plan-validation-values"),
+            _native_prepared_value_width(plan._row_values) + _native_prepared_value_width(plan._update_before)))
+    return tuple(entries)
 
 
 async def _native_memory_writer_state(db):
@@ -133,6 +270,15 @@ async def _native_memory_writer_state(db):
         driver = sync_connection.connection.driver_connection
         if not driver.in_transaction:
             raise ValueError("prepared_memory_writer_unavailable")
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is not None and type(active[0]) is _NativeMemoryNumericLedger and active[1] == "effect":
+            ledger = active[0]
+            frame = _native_prepared_numeric_frame(db, ledger.prepared)
+            from src.memory.composition_headers import _metadata_upper
+            for stage in ("delivery", "row-copy", "encoded-copy"):
+                frame.debit(_metadata_upper(1, (20,)),
+                    appearance=("memory-prepared", "writer-state", stage))
         changes = sync_connection.exec_driver_sql("SELECT total_changes()").scalar_one()
         return sync_connection.get_transaction(), driver, changes
     return await connection.run_sync(read_state)
@@ -155,6 +301,9 @@ async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, co
     if (sql_transaction is not plan._sql_transaction or driver is not plan._driver
         or changes != expected_changes):
         raise ValueError("prepared_memory_writer_changed")
+    if not consumed and _native_prepared_numeric_frame(db, plan) is not None:
+        _native_prepared_allocation_debit(db, plan, "plan-validation-values",
+            _native_prepared_value_width(plan._row_values) + _native_prepared_value_width(plan._update_before))
     if not consumed and (
         any(not inspect(row).transient or _native_memory_mapped_values(row) != values
             for row, values in zip(plan._rows, plan._row_values))
@@ -255,6 +404,8 @@ async def _apply_native_memory_mutation_plan(db, plan, *, method, native_memory_
     await validate_native_memory_mutation_plan(plan, db=db, candidate_digest=plan._candidate_digest)
     if plan._method != method or plan._report_context is not native_memory_report_source:
         raise ValueError("prepared_memory_owner_changed")
+    if method != "memory.forget" and _native_prepared_numeric_frame(db, plan) is not None:
+        _native_prepared_allocation_debit(db, plan, "result-copy", _native_prepared_value_width(plan._result))
     if method == "memory.propose":
         result = await _apply_prepared_m5_proposal(db, plan._prepared)
     elif method == "memory.applyReviewed":
@@ -411,11 +562,321 @@ async def _certify_original_memory_body(db, budget, model):
 
 async def _vault_rows_digest(db, *, header_budget=None) -> str:
     from src.db.models import Secret
-    await _certify_original_memory_body(db, header_budget, Secret)
-    rows = list((await db.execute(select(Secret).order_by(Secret.id))).scalars())
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    frame = _configured_mac_numeric_frame()
+    if header_budget is None and frame is None:
+        await _certify_original_memory_body(db, header_budget, Secret)
+        rows = list((await db.execute(select(Secret).order_by(Secret.id))).scalars())
+        return m5_digest([row.model_dump(mode="json") for row in rows])
+    budget = header_budget if header_budget is not None else frame
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, SECRET, validate_certificate
+    if type(budget) is not HeaderReadBudget or (frame is not None and budget is not frame):
+        raise HeaderBoundsError("original_memory_vault_numeric_frame_changed")
+    certificate = await budget.certify_all(db, SECRET, _header_budget=budget)
+    await validate_certificate(db, certificate, _header_budget=budget)
+    collection_upper = 2 + max(0, len(certificate.row_ids) - 1) + sum(certificate.row_upper_bytes)
+    budget.debit(collection_upper, appearance=("native-memory-vault-inventory", "mapped-result"))
+    result = await db.execute(select(Secret).order_by(Secret.id))
+    budget.debit(collection_upper, appearance=("native-memory-vault-inventory", "scalar-result"))
+    scalars = result.scalars()
+    budget.debit(collection_upper, appearance=("native-memory-vault-inventory", "row-list"))
+    rows = list(scalars)
+    if len(rows) != len(certificate.row_ids):
+        raise HeaderBoundsError("original_memory_vault_inventory_changed")
+    # Field values stay with this original owner. Only the real inventory's
+    # addresses and finite numeric dimensions are retained for future sizing.
+    budget.debit(collection_upper, appearance=("native-memory-vault-inventory", "model-list"))
+    models = []
+    numeric_upper = _original_memory_vault_numeric_rows_upper(certificate.row_ids)
+    budget.debit(numeric_upper, appearance=("native-memory-vault-inventory", "numeric-rows-list"))
+    numeric_rows = []
+    for row in rows:
+        if type(row) is not Secret or row.id not in certificate.row_ids:
+            raise HeaderBoundsError("original_memory_vault_inventory_changed")
+        budget.debit(65, appearance=("native-memory-vault-inventory", "field-widths", row.id))
+        field_widths = tuple(_original_memory_vault_field_width(getattr(row, name))
+            for name in _ORIGINAL_MEMORY_VAULT_FIELDS)
+        budget.debit(65, appearance=("native-memory-vault-inventory", "field-utf8-widths", row.id))
+        field_utf8 = tuple(_original_memory_vault_field_utf8(getattr(row, name))
+            for name in _ORIGINAL_MEMORY_VAULT_FIELDS)
+        model_upper = _original_memory_vault_object_upper(_ORIGINAL_MEMORY_VAULT_FIELDS, sum(field_widths))
+        budget.debit(model_upper, appearance=("native-memory-vault-inventory", "model-dump", row.id))
+        model = row.model_dump(mode="json")
+        models.append(model)
+        row_numeric_upper = _original_memory_vault_numeric_row_upper(row.id)
+        budget.debit(row_numeric_upper, appearance=("native-memory-vault-inventory", "numeric-row", row.id))
+        numeric_rows.append((row.id, model_upper, field_widths, field_utf8))
     # Secret has no revision. Bind its exact existing fields, including the
     # encrypted value, so inserts, replacements and deletions all fence staging.
-    return m5_digest([row.model_dump(mode="json") for row in rows])
+    planning_upper = _original_memory_vault_digest_numeric_storage_upper(numeric_rows)
+    budget.debit(planning_upper, appearance=("native-memory-vault-inventory", "digest-numeric-planning"))
+    for appearance, upper in _original_memory_vault_digest_numeric_entries(numeric_rows):
+        if appearance != ("native-memory-vault-inventory", "digest-numeric-planning"):
+            budget.debit(upper, appearance=appearance)
+    digest = m5_digest(models)
+    await validate_certificate(db, certificate, _header_budget=budget)
+    budget.debit(numeric_upper, appearance=("native-memory-vault-inventory", "numeric-rows-tuple"))
+    dimensions = tuple(numeric_rows)
+    _issue_original_memory_vault_numeric_inventory(db, budget, certificate, digest, dimensions, numeric_upper)
+    return digest
+
+
+_ORIGINAL_MEMORY_VAULT_FIELDS = ("owner_principal_id", "revoked_at", "id", "key",
+    "encrypted_value", "description", "created_at", "updated_at")
+_ORIGINAL_MEMORY_VAULT_NUMERIC_SEAL = object()
+_ORIGINAL_MEMORY_VAULT_NUMERIC = WeakValueDictionary()
+
+
+def _original_memory_vault_object_upper(names, value_upper):
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    upper = 2 + max(0, len(names) - 1) + value_upper
+    for name in names:
+        upper += _native_memory_ascii_string_width(name) + 1
+    return upper
+
+
+def _original_memory_vault_field_utf8(value):
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_utf8_width
+    if value is None:
+        return 0
+    if type(value) is str:
+        return _native_memory_utf8_width(value)
+    if type(value) is datetime and (value.tzinfo is None or value.tzinfo is timezone.utc):
+        # Original Pydantic JSON datetime: YYYY-MM-DDTHH:MM:SS, optional
+        # six-digit fraction, and Z only for the original UTC aware value.
+        return 19 + (7 if value.microsecond else 0) + (1 if value.tzinfo is timezone.utc else 0)
+    raise HeaderBoundsError("original_memory_vault_numeric_shape_unavailable")
+
+
+def _original_memory_vault_field_width(value):
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    if value is None:
+        return 4
+    if type(value) is str:
+        return _native_memory_ascii_string_width(value)
+    return _original_memory_vault_field_utf8(value) + 2
+
+
+def _original_memory_vault_numeric_row_upper(identity):
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    # Actual address, one bounded width, and two eight-number arrays. Each
+    # numeric byte width has at most seven digits under the original frame.
+    return 2 + 3 + _native_memory_ascii_string_width(identity) + 7 + 65 + 65
+
+
+def _original_memory_vault_numeric_rows_upper(identities):
+    upper = 2 + max(0, len(identities) - 1)
+    for identity in identities:
+        upper += _original_memory_vault_numeric_row_upper(identity)
+    return upper
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _OriginalMemoryVaultNumericInventory:
+    db: object
+    budget: object
+    certificate: object
+    task: object
+    transaction: object
+    driver: object
+    digest: str
+    dimensions: tuple
+    seal: object = _ORIGINAL_MEMORY_VAULT_NUMERIC_SEAL
+    issued_id: int = 0
+
+
+def _issue_original_memory_vault_numeric_inventory(db, budget, certificate, digest, dimensions, dimensions_upper):
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    task = asyncio.current_task()
+    transaction = db.sync_session.get_transaction()
+    if (task is None or certificate._db is not db or certificate._transaction is not transaction
+            or not certificate._driver.in_transaction):
+        raise HeaderBoundsError("original_memory_vault_numeric_owner_changed")
+    constructor_upper = _original_memory_vault_object_upper(("db", "budget", "certificate", "task",
+        "transaction", "driver", "digest", "dimensions", "seal", "issued_id"),
+        7 * 4 + 66 + dimensions_upper + 20)
+    budget.debit(constructor_upper, appearance=("native-memory-vault-inventory", "numeric-inventory"))
+    record = _OriginalMemoryVaultNumericInventory(db, budget, certificate, task, transaction,
+        certificate._driver, digest, dimensions)
+    object.__setattr__(record, "issued_id", id(record))
+    from src.workspace.accounting_witness import _native_memory_closed_value_width
+    registry_upper = 3 + _native_memory_closed_value_width(id(record)) + 4
+    budget.debit(4, appearance=("native-memory-vault-inventory", "numeric-weak-reference"))
+    budget.debit(registry_upper, appearance=("native-memory-vault-inventory", "numeric-registry-entry"))
+    _ORIGINAL_MEMORY_VAULT_NUMERIC[id(record)] = record
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    budget.debit(3 + _native_memory_ascii_string_width("_original_memory_vault_numeric_inventory") + 4,
+        appearance=("native-memory-vault-inventory", "numeric-frame-slot"))
+    budget._original_memory_vault_numeric_inventory = record
+    return record
+
+
+def _original_memory_vault_nfc_utf8_upper(amount):
+    """Root-adopted pinned NFC bound; another runtime requires its own proof."""
+    import sys
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    if (sys.version_info.major != 3 or sys.version_info.minor != 12
+            or sys.version_info.micro != 8 or unicodedata.unidata_version != "15.0.0"
+            or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+        raise HeaderBoundsError("original_memory_vault_nfc_proof_unavailable")
+    return 3 * amount
+
+
+def _original_memory_vault_digest_numeric_storage_upper(dimensions):
+    """Price the actual numeric label/pair/list/tuple planning allocations."""
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    label_sum = pair_sum = count = 0
+    prefix_upper = width("native-memory-vault-inventory")
+    for identity, _model_upper, field_widths, field_utf8 in dimensions:
+        for index in range(8):
+            for stage in ("digest-sort-key-str", "digest-key-str", "digest-key-nfc-scratch", "digest-key-nfc-output",
+                    "digest-value-nfc-scratch", "digest-value-nfc-output"):
+                if stage.startswith("digest-value") and field_utf8[index] == 0 and field_widths[index] == 4:
+                    continue
+                label_upper = 2 + 3 + prefix_upper + width(stage) + width(identity) + 1
+                label_sum += label_upper
+                pair_sum += 3 + label_upper + 20
+                count += 1
+        for stage in ("digest-items-view", "digest-sorted-pairs", "digest-normalized-map"):
+            label_upper = 2 + 2 + prefix_upper + width(stage) + width(identity)
+            label_sum += label_upper
+            pair_sum += 3 + label_upper + 20
+            count += 1
+    for stage in ("digest-normalized-list", "digest-canonical-json", "digest-utf8", "digest-hexdigest",
+            "digest-numeric-planning"):
+        label_upper = 3 + prefix_upper + width(stage)
+        label_sum += label_upper
+        pair_sum += 3 + label_upper + 20
+        count += 1
+    sequence_upper = 2 + max(0, count - 1) + pair_sum
+    return label_sum + pair_sum + 2 * sequence_upper
+
+
+def _original_memory_vault_digest_numeric_entries(dimensions):
+    """One original inventory digest using the adopted measured NFC bound.
+
+    Root's pinned CPython 3.12.8/UCD15 checker measured canonical-decomposition
+    UTF8 expansion 3/1 (table f4459fa522960409ac9b4d94207c615712a8a6c0df78bb9a9427eb5f3645f3c0).
+    Root adopted the independent proof; fresh integration review precedes use.
+    Inputs are only the original inventory owner's retained numeric dimensions.
+    """
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    entries = []
+    normalized_list_upper = 2 + max(0, len(dimensions) - 1)
+    for identity, _model_upper, field_widths, field_utf8 in dimensions:
+        sorted_pairs_upper = 2 + 7
+        normalized_values_upper = 0
+        for index, name in enumerate(_ORIGINAL_MEMORY_VAULT_FIELDS):
+            key_upper = width(name)
+            sorted_pairs_upper += 3 + key_upper + field_widths[index]
+            entries.append((("native-memory-vault-inventory", "digest-sort-key-str", identity, index), key_upper))
+            entries.append((("native-memory-vault-inventory", "digest-key-str", identity, index), key_upper))
+            # All eight original model field names are fixed ASCII. Their
+            # canonical decomposition and NFC output retain their exact width.
+            entries.append((("native-memory-vault-inventory", "digest-key-nfc-scratch", identity, index), key_upper))
+            entries.append((("native-memory-vault-inventory", "digest-key-nfc-output", identity, index), key_upper))
+            if field_utf8[index] == 0 and field_widths[index] == 4:
+                normalized_values_upper += 4
+            else:
+                normalized_upper = 6 * _original_memory_vault_nfc_utf8_upper(field_utf8[index]) + 2
+                entries.append((("native-memory-vault-inventory", "digest-value-nfc-scratch", identity, index), normalized_upper))
+                entries.append((("native-memory-vault-inventory", "digest-value-nfc-output", identity, index), normalized_upper))
+                normalized_values_upper += normalized_upper
+        entries.append((("native-memory-vault-inventory", "digest-items-view", identity), 4))
+        entries.append((("native-memory-vault-inventory", "digest-sorted-pairs", identity), sorted_pairs_upper))
+        normalized_upper = _original_memory_vault_object_upper(
+            _ORIGINAL_MEMORY_VAULT_FIELDS, normalized_values_upper)
+        entries.append((("native-memory-vault-inventory", "digest-normalized-map", identity), normalized_upper))
+        normalized_list_upper += normalized_upper
+    entries.append((("native-memory-vault-inventory", "digest-normalized-list"), normalized_list_upper))
+    entries.append((("native-memory-vault-inventory", "digest-canonical-json"), normalized_list_upper))
+    entries.append((("native-memory-vault-inventory", "digest-utf8"), normalized_list_upper))
+    entries.append((("native-memory-vault-inventory", "digest-hexdigest"), 66))
+    entries.append((("native-memory-vault-inventory", "digest-numeric-planning"),
+        _original_memory_vault_digest_numeric_storage_upper(dimensions)))
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    if any(type(upper) is not int or not 0 <= upper <= MAX_BYTES for _appearance, upper in entries):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return tuple(entries)
+
+
+def original_native_memory_vault_digest_numeric_schedule(operation, prepared):
+    """One original digest forecast from the registered final-writer owner.
+
+    This is a Vault contribution, never a complete authority reservation or a
+    read permission. The original digest invocation and queries are unchanged;
+    fresh independent integration review is required before runtime use.
+    """
+    record = _original_memory_vault_numeric_inventory_for_operation(operation, prepared)
+    return _original_memory_vault_digest_numeric_entries(record.dimensions)
+
+
+def _original_memory_vault_numeric_inventory_for_operation(operation, prepared):
+    """Retained numerical dimensions from the original final-writer read only.
+
+    This proves a sizing lineage, not a Secret read or memory permission. The
+    original preparation already consumed and checked the staged Vault digest
+    on this writer before registering its immutable mutation plan.
+    """
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError, HeaderCertificate, SECRET, MAX_BYTES, _SEAL
+    from src.runtime_plugins.memory_producer import (
+        _MemoryOwnerSourceOperation, _MEMORY_OPERATIONS, _MEMORY_SOURCES, _MEMORY_SOURCE_SEAL)
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if (type(operation) is not _MemoryOwnerSourceOperation
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or operation._seal is not _MEMORY_SOURCE_SEAL or operation._issued_id != id(operation)
+            or _MEMORY_SOURCES.get(id(operation.source)) is not operation.source
+            or operation.source._seal is not _MEMORY_SOURCE_SEAL
+            or operation.source._issued_id != id(operation.source) or not operation.source._live.is_set()
+            or operation.scope is not operation.source._scope
+            or type(prepared) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(prepared)) is not prepared
+            or operation._prepared is not prepared or prepared.consumed or operation._effect is not None
+            or prepared._candidate_digest != operation.source.admission.candidate_digest
+            or prepared._db is not operation.db or prepared._transaction is not operation.transaction
+            or prepared._driver is not operation.driver
+            or operation.transaction is not operation.db.sync_session.get_transaction()
+            or not operation.driver.in_transaction):
+        raise HeaderBoundsError("original_memory_vault_numeric_owner_changed")
+    guard = operation.db.info.get("composition_guard")
+    budget = operation.source.admission.header_budget
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    record = getattr(budget, "_original_memory_vault_numeric_inventory", None)
+    if (type(guard) is not CompositionSessionGuard or guard.db is not operation.db
+            or guard.header_budget is not budget
+            or owner is None or len(owner) != 6 or owner[0] is not operation
+            or owner[1] is not prepared or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.transaction or owner[5] is not operation.driver
+            or type(record) is not _OriginalMemoryVaultNumericInventory
+            or record.seal is not _ORIGINAL_MEMORY_VAULT_NUMERIC_SEAL
+            or record.issued_id != id(record) or _ORIGINAL_MEMORY_VAULT_NUMERIC.get(id(record)) is not record
+            or record.db is not operation.db or record.budget is not budget
+            or record.task is not asyncio.current_task() or record.transaction is not operation.transaction
+            or record.driver is not operation.driver
+            or type(record.certificate) is not HeaderCertificate
+            or record.certificate._seal is not _SEAL
+            or record.certificate._issued_id != id(record.certificate)
+            or record.certificate.descriptor is not SECRET
+            or record.certificate._db is not operation.db
+            or record.certificate._transaction is not operation.transaction
+            or record.certificate._driver is not operation.driver
+            or record.certificate._changes != prepared._total_changes
+            or type(record.dimensions) is not tuple
+            or len(record.dimensions) != len(record.certificate.row_ids)):
+        raise HeaderBoundsError("original_memory_vault_numeric_inventory_unavailable")
+    for index, dimensions in enumerate(record.dimensions):
+        if (type(dimensions) is not tuple or len(dimensions) != 4
+                or dimensions[0] not in record.certificate.row_ids
+                or any(record.dimensions[prior][0] == dimensions[0] for prior in range(index))
+                or type(dimensions[1]) is not int or not 0 <= dimensions[1] <= MAX_BYTES
+                or type(dimensions[2]) is not tuple or len(dimensions[2]) != 8
+                or type(dimensions[3]) is not tuple or len(dimensions[3]) != 8
+                or any(type(amount) is not int or not 0 <= amount <= MAX_BYTES for amount in dimensions[2])
+                or any(type(amount) is not int or not 0 <= amount <= MAX_BYTES for amount in dimensions[3])):
+            raise HeaderBoundsError("original_memory_vault_numeric_shape_unavailable")
+    return record
 
 
 async def prepare_m5_text(db, value: str, *, header_budget=None) -> PreparedM5Text:
@@ -424,26 +885,80 @@ async def prepare_m5_text(db, value: str, *, header_budget=None) -> PreparedM5Te
         raise RuntimeError("Vault staging must precede the native writer")
     if not isinstance(value, str):
         raise ValueError("M5 memory text must be a string")
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    frame = _configured_mac_numeric_frame()
+    budget = header_budget if header_budget is not None else frame
+    if budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, _native_memory_ascii_string_width, _native_memory_utf8_width
+        if type(budget) is not HeaderReadBudget or (frame is not None and frame is not budget):
+            raise HeaderBoundsError("original_memory_header_budget_invalid")
+        budget.debit(_native_memory_utf8_width(value),
+            appearance=("native-memory-source", "prepared-text-initial", "original-utf8"))
+        budget.debit(66, appearance=("native-memory-source", "prepared-text-initial", "original-hexdigest"))
+        if header_budget is not None:
+            budget.debit(3 + _native_memory_ascii_string_width("header_budget") + 4,
+                appearance=("native-memory-source", "prepared-text-initial", "before-vault-kwargs"))
     original_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     before = await _vault_rows_digest(db,
         **({"header_budget": header_budget} if header_budget is not None else {}))
+    if budget is not None and header_budget is not None:
+        budget.debit(3 + _native_memory_ascii_string_width("header_budget") + 4,
+            appearance=("native-memory-source", "prepared-text-initial", "redaction-kwargs"))
     redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True,
         **({"header_budget": header_budget} if header_budget is not None else {}))
     if redacted == "[redaction unavailable]":
         raise ValueError("memory proposal redaction is unavailable")
+    if budget is not None:
+        raw_upper = _native_memory_ascii_string_width(redacted)
+        normalized_upper = 6 * _original_memory_vault_nfc_utf8_upper(_native_memory_utf8_width(redacted)) + 2
+        budget.debit(raw_upper, appearance=("native-memory-source", "prepared-text-initial", "sanitize-crlf-replace"))
+        budget.debit(raw_upper, appearance=("native-memory-source", "prepared-text-initial", "sanitize-cr-replace"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "prepared-text-initial", "sanitize-nfc-scratch"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "prepared-text-initial", "sanitize-nfc-output"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "prepared-text-initial", "sanitize-strip"))
     text = sanitize_m5_memory_text(redacted)
+    if budget is not None and header_budget is not None:
+        budget.debit(3 + _native_memory_ascii_string_width("header_budget") + 4,
+            appearance=("native-memory-source", "prepared-text-initial", "after-vault-kwargs"))
     if await _vault_rows_digest(db,
         **({"header_budget": header_budget} if header_budget is not None else {})) != before:
         raise ValueError("memory proposal Vault changed during staging")
+    if budget is not None:
+        upper = (2 + 2 + 3 + 132 + _native_memory_ascii_string_width(text)
+            + _native_memory_ascii_string_width("original_digest")
+            + _native_memory_ascii_string_width("sanitized_text")
+            + _native_memory_ascii_string_width("vault_rows_digest"))
+        budget.debit(upper, appearance=("native-memory-source", "prepared-text-initial", "constructor"))
     return PreparedM5Text(original_digest, text, before)
 
 
 async def _consume_prepared_m5_text(db, original: str, prepared: PreparedM5Text, *, header_budget=None) -> str:
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    frame = _configured_mac_numeric_frame()
+    budget = header_budget if header_budget is not None else frame
+    if budget is not None:
+        from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, _native_memory_utf8_width
+        if type(budget) is not HeaderReadBudget or (frame is not None and frame is not budget):
+            raise HeaderBoundsError("original_memory_text_numeric_frame_changed")
+        if type(prepared) is PreparedM5Text and isinstance(original, str):
+            budget.debit(_native_memory_utf8_width(original),
+                appearance=("native-memory-source", "original-text", "original-utf8"))
+            budget.debit(66, appearance=("native-memory-source", "original-text", "original-hexdigest"))
     if (type(prepared) is not PreparedM5Text or not isinstance(original, str)
         or hashlib.sha256(original.encode("utf-8")).hexdigest() != prepared.original_digest
         or await _vault_rows_digest(db, header_budget=header_budget) != prepared.vault_rows_digest):
         raise ValueError("memory proposal staged Vault binding changed")
     # This is structural checking only: no file open, key lookup or decrypt.
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width, _native_memory_utf8_width
+        raw_upper = _native_memory_ascii_string_width(prepared.sanitized_text)
+        normalized_upper = 6 * _original_memory_vault_nfc_utf8_upper(
+            _native_memory_utf8_width(prepared.sanitized_text)) + 2
+        budget.debit(raw_upper, appearance=("native-memory-source", "original-text", "sanitize-crlf-replace"))
+        budget.debit(raw_upper, appearance=("native-memory-source", "original-text", "sanitize-cr-replace"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "original-text", "sanitize-nfc-scratch"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "original-text", "sanitize-nfc-output"))
+        budget.debit(normalized_upper, appearance=("native-memory-source", "original-text", "sanitize-strip"))
     return sanitize_m5_memory_text(prepared.sanitized_text)
 
 

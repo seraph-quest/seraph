@@ -614,7 +614,104 @@ async def _verified_workflow_readback(
     return proof if _safe_verification_receipt(proof, require_complete=True) else None
 
 
-async def _stage_terminal_report_input(db, task):
+@dataclass(frozen=True, eq=False, repr=False)
+class _MemoryReportDependencyNumericInventory:
+    db: object
+    budget: object
+    issuer_task: object
+    task_id: str
+    owner_principal_id: str
+    owner_session_id: str
+    transaction: object
+    driver: object
+    certificates: tuple
+    numeric_trace: tuple
+    _seal: object = field(default=None, init=False)
+    _issued_id: int = field(default=0, init=False)
+
+
+_MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL = object()
+_MEMORY_REPORT_DEPENDENCY_NUMERIC = WeakKeyDictionary()
+
+
+async def _memory_report_dependency_headers(db, task, header_budget, *, _original_source_certificates=None):
+    """Original Memory payer only; unsupported dependencies confer no read."""
+    if header_budget is None:
+        return
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, COMPOSITION_DESCRIPTORS
+    from src.memory.composition_headers import current_budget
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    from src.db.models import OperatorSession
+    current = current_budget()
+    frame = _configured_mac_numeric_frame()
+    if (type(header_budget) is not HeaderReadBudget
+            or (current is not None and current is not header_budget)
+            or (frame is not None and frame is not header_budget)):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # These are the original report owners' canonical bodies. Certify their
+    # complete current readset before their existing selectors deliver bodies.
+    # Retain only the existing certificates for the numerical owner. A
+    # certificate here remains resource evidence, never body/Root permission.
+    header_budget.debit(41, appearance=("native-memory-report-dependencies", "certificate-list"))
+    certificates = []
+    from src.runtime_plugins.memory_producer import _begin_memory_report_numeric_trace, _end_memory_report_numeric_trace
+    collector, active_token, trace_token = _begin_memory_report_numeric_trace(
+        db, task, header_budget, _original_source_certificates)
+    try:
+        for name in ("operator_sessions", "goals", "work_board_tasks", "work_board_attempts",
+                "workflow_run_states", "work_board_input_artifacts", "work_board_proposals", "work_board_events"):
+            certificates.append(await header_budget.certify_all(
+                db, COMPOSITION_DESCRIPTORS[name], _header_budget=header_budget))
+    finally:
+        _end_memory_report_numeric_trace(collector, active_token, trace_token)
+    from src.memory.composition_headers import _common_trace_label_width
+    trace_upper = 2 + max(0, len(collector.entries) - 1)
+    for appearance, amount in collector.entries:
+        trace_upper += 3 + _common_trace_label_width(appearance) + 20
+    header_budget.debit(trace_upper, appearance=("native-memory-report-trace", "retained-trace-tuple"))
+    numeric_trace = tuple(collector.entries)
+    root = await db.get(OperatorSession, task.owner_session_id, populate_existing=True)
+    if root is not None and root.operator_identity_id:
+        raise BoardError("pipeline_output_unverified", "Original Memory REPORT Identity certificate required")
+    operation = await db.get(WorkBoardProposal, task.pipeline_operation_id, populate_existing=True)
+    if operation is not None and operation.opportunity_id:
+        raise BoardError("pipeline_output_unverified", "Original Memory REPORT Guardian certificate required")
+    import asyncio
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    transaction = db.sync_session.get_transaction()
+    if (asyncio.current_task() is None or transaction is None
+            or any(certificate._db is not db or certificate._transaction is not transaction
+                or certificate._driver is not certificates[0]._driver
+                or certificate._changes != certificates[0]._changes for certificate in certificates)
+            or not certificates[0]._driver.in_transaction):
+        raise HeaderBoundsError("memory_report_dependency_numeric_owner_changed")
+    header_budget.debit(41, appearance=("native-memory-report-dependencies", "certificate-tuple"))
+    retained = tuple(certificates)
+    # Exact literal record names and existing scalar dimensions, without a
+    # sizing dictionary or body/model dump before the constructor payment.
+    upper = 2 + 11 + 6 * 4 + 41 + trace_upper + 20
+    for name in ("db", "budget", "issuer_task", "task_id", "owner_principal_id",
+            "owner_session_id", "transaction", "driver", "certificates", "numeric_trace", "_seal", "_issued_id"):
+        upper += _native_memory_ascii_string_width(name) + 1
+    upper += (_native_memory_ascii_string_width(task.task_id)
+        + _native_memory_ascii_string_width(task.owner_principal_id)
+        + _native_memory_ascii_string_width(task.owner_session_id))
+    header_budget.debit(upper, appearance=("native-memory-report-dependencies", "numeric-inventory"))
+    inventory = _MemoryReportDependencyNumericInventory(db, header_budget, asyncio.current_task(),
+        task.task_id, task.owner_principal_id, task.owner_session_id, transaction,
+        certificates[0]._driver, retained, numeric_trace)
+    object.__setattr__(inventory, "_seal", _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL)
+    object.__setattr__(inventory, "_issued_id", id(inventory))
+    header_budget.debit(4, appearance=("native-memory-report-dependencies", "numeric-weak-reference"))
+    header_budget.debit(11, appearance=("native-memory-report-dependencies", "numeric-registry-entry"))
+    _MEMORY_REPORT_DEPENDENCY_NUMERIC[inventory] = _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+    header_budget.debit(3 + _native_memory_ascii_string_width("_native_memory_report_dependency_numeric") + 4,
+        appearance=("native-memory-report-dependencies", "numeric-frame-slot"))
+    header_budget._native_memory_report_dependency_numeric = inventory
+    return retained
+
+
+async def _stage_terminal_report_input(db, task, *, header_budget=None, _original_source_certificates=None):
     if db.info.get("native_writer_started") and db.in_transaction():
         raise BoardError("pipeline_output_unverified", "Original report physical stage must precede writer")
     from src.work_board.input_artifacts import resolve_input_artifact_for_copy
@@ -623,6 +720,8 @@ async def _stage_terminal_report_input(db, task):
     from src.runtime_plugins.ownership import validate_run
     from src.auth.service import authenticate_principal
     from src.work_board.dispatcher import _decode_typed_input_payload, _typed_input_model
+    await _memory_report_dependency_headers(db, task, header_budget,
+        _original_source_certificates=_original_source_certificates)
     _typed_input_model(task.capability_id)
     await _report_current_authority(db, task)
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
@@ -637,12 +736,12 @@ async def _stage_terminal_report_input(db, task):
     source = await stage_accepted_plan_task(db, task, attempt=attempt)
     from src.work_board.pipelines import owned, row_token, canonical_bytes
     from src.security.site_policy import evaluate_site_access
-    operation, value = await owned(db, owner, task.pipeline_operation_id)
+    operation, value = await owned(db, owner, task.pipeline_operation_id, header_budget=header_budget)
     if operation.status != "accepted" or (operation.opportunity_id and source is None):
         raise BoardError("pipeline_source_changed", "The actual accepted report operation changed")
     resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=task.typed_input_ref,
         typed_input_digest=task.typed_input_digest, goal_id=task.goal_id, goal_revision=task.goal_revision,
-        capability_id=task.capability_id, allow_goal_change=False)
+        capability_id=task.capability_id, allow_goal_change=False, header_budget=header_budget)
     if resolved.row.state != "consumed" or resolved.row.bound_task_id != task.task_id:
         raise BoardError("pipeline_input_changed", "The actual consumed report Input is required")
     return resolved.payload, source, canonical_bytes(value["live_root"]), row_token(operation)
@@ -667,10 +766,10 @@ async def _report_current_authority(db, task):
     return principal, (row_token(root), row_token(goal), row_token(identity) if identity else "")
 
 
-async def _report_done_events(db, task, attempt, run):
+async def _report_done_events(db, task, attempt, run, *, header_budget=None):
     from src.runtime_plugins.task_capability import read_report_candidate
     from src.work_board.pipelines import row_token
-    value = read_report_candidate(run)
+    value = read_report_candidate(run, _memory_header_budget=header_budget)
     events = list((await db.scalars(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task.task_id,
         WorkBoardEvent.kind.in_(["attempt.linked", "attempt.done"])))).all())
     def chosen(kind):
@@ -699,23 +798,26 @@ async def _report_done_events(db, task, attempt, run):
 
 
 async def native_report_memory_metadata(db, task, attempt, run, *, _report_input_bytes=None,
-    _report_source_witness=None, _report_workspace_identity=None):
+    _report_source_witness=None, _report_workspace_identity=None, _report_operation_token=None,
+    header_budget=None, _original_source_certificates=None, _memory_report_input_stage=None):
     """Current terminal correlation; historical admission tokens grant no read."""
     if type(_report_input_bytes) is not bytes or type(_report_workspace_identity) is not bytes:
         raise BoardError("pipeline_output_unverified", "Original report physical stage required; M5 activation excluded")
+    await _memory_report_dependency_headers(db, task, header_budget,
+        _original_source_certificates=_original_source_certificates)
     from src.runtime_plugins.task_capability import read_report_candidate, validated_terminal_report_source, report_identity_matches_current
     from src.runtime_plugins.ownership import validate_run
     from src.db.models import WorkBoardInputArtifact
     from src.work_board.input_artifacts import _metadata_digest
     from src.work_board.dispatcher import _decode_typed_input_payload
-    from src.work_board.pipelines import task_guard
+    from src.work_board.pipelines import task_guard, row_token
     from src.guardian.opportunity_plans import recheck_accepted_plan_task
     if (task.capability_id != "work.local-evidence-report.v1" or task.status != WorkBoardStatus.done
         or attempt.task_id != task.task_id or attempt.ended_at is None or attempt.outcome != "verified"
         or attempt.lease_owner is not None or attempt.lease_expires_at is not None
         or run.status != "succeeded" or run.finished_at is None or attempt.workflow_run_id != run.run_identity):
         raise ValueError("native_memory_report_source_changed")
-    value = read_report_candidate(run)
+    value = read_report_candidate(run, _memory_header_budget=header_budget)
     await validate_run(db, run)
     artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
     latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
@@ -734,20 +836,25 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
         or hashlib.sha256(_report_input_bytes).hexdigest() != artifact.payload_sha256
         or _metadata_digest(artifact) != artifact.metadata_digest):
         raise ValueError("native_memory_report_source_changed")
-    await _report_done_events(db, task, attempt, run)
+    await _report_done_events(db, task, attempt, run, header_budget=header_budget)
     principal, _ = await _report_current_authority(db, task)
-    inputs = _decode_typed_input_payload(task, _report_input_bytes)
-    if not report_identity_matches_current(task, attempt, inputs, run, principal=principal):
+    inputs = _decode_typed_input_payload(task, _report_input_bytes, _memory_header_budget=header_budget,
+        _memory_report_input_stage=_memory_report_input_stage, _memory_db=db)
+    if not report_identity_matches_current(task, attempt, inputs, run, principal=principal,
+            _memory_header_budget=header_budget):
         raise ValueError("native_memory_report_source_changed")
     await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=_report_source_witness)
     operation, operation_value = await task_guard(db, task, attempt=attempt,
-        workspace_identity=_report_workspace_identity, source_witness=_report_source_witness)
+        workspace_identity=_report_workspace_identity, source_witness=_report_source_witness,
+        _memory_header_budget=header_budget)
+    if _report_operation_token is not None and row_token(operation) != _report_operation_token:
+        raise ValueError("native_memory_report_source_changed")
     reservation = operation_value["reservations"].get(task.pipeline_slot)
     if (not isinstance(reservation, Mapping) or reservation.get("state") != "bound"
         or reservation.get("artifact_ref") != artifact.artifact_id
         or artifact.bound_task_revision != reservation.get("consumer_revision", -2) + 1):
         raise ValueError("native_memory_report_source_changed")
-    terminal = validated_terminal_report_source(run)
+    terminal = validated_terminal_report_source(run, _memory_header_budget=header_budget)
     if (type(terminal) is not dict or set(terminal) != {"candidate", "output_reference", "output_sha256", "size_bytes"}
         or terminal["candidate"] != value or type(terminal["size_bytes"]) is not int
         or not 0 < terminal["size_bytes"] <= 65536 or type(terminal["output_reference"]) is not str

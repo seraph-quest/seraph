@@ -16,6 +16,7 @@ import json
 import math
 import re
 import asyncio
+import weakref
 from contextvars import ContextVar
 from functools import wraps
 from inspect import signature
@@ -255,6 +256,7 @@ class NativeServiceClaim:
     binding: RuntimeCompositionBinding
     host_boot_nonce: str
     _host: Any = field(default=None, repr=False, compare=False)
+    _memory_claim_read_numeric: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -274,11 +276,249 @@ class _NativeServiceClaimRequest:
             raise DurableJobLeaseError("original native service host changed before claim")
 
 
+_NATIVE_MEMORY_CLAIM_TRACES = weakref.WeakValueDictionary()
+_NATIVE_MEMORY_CLAIM_TRACE_ACTIVE = ContextVar("native_memory_claim_trace", default=None)
+
+
+class _NativeMemoryClaimTraceCollector:
+    """Paid original claim-owner read observations, before Source issuance."""
+    def __init__(self, db, run, request, driver, task, prior):
+        self.db, self.run, self.request = db, run, request
+        self.driver, self.task, self.prior = driver, task, prior
+        self.transaction = db.sync_session.get_transaction()
+        self.budget = request.header_budget
+        self.entries = []
+
+    def _checked(self):
+        from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget
+        from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        request = self.request
+        guard = self.db.info.get("composition_guard")
+        if (_NATIVE_MEMORY_CLAIM_TRACES.get(id(self)) is not self
+                or _NATIVE_MEMORY_CLAIM_TRACE_ACTIVE.get() is not self
+                or type(request) is not _NativeServiceClaimRequest
+                or type(request.native_memory_admission) is not NativeMemoryMutationAdmission
+                or request.native_memory_admission.header_budget is not self.budget
+                or type(self.budget) is not HeaderReadBudget
+                or type(guard) is not CompositionSessionGuard or guard.db is not self.db
+                or guard.header_budget is not self.budget
+                or self.transaction is not self.db.sync_session.get_transaction()
+                or not self.driver.in_transaction or self.task is not asyncio.current_task()
+                or self.run.job_kind != "runtime_service_memory_v1"):
+            raise HeaderBoundsError("memory_original_claim_numeric_owner_changed")
+        request.validate_host()
+
+    def _storage_debit(self, upper, stage):
+        from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
+        token = _MEMORY_CHARGE_TRACE.set(self.prior)
+        try:
+            self.budget.debit(upper, appearance=("native-memory-original-claim-trace", stage))
+        finally:
+            _MEMORY_CHARGE_TRACE.reset(token)
+
+    def append_charge(self, appearance, amount):
+        from src.memory.header_bounds import HeaderBoundsError
+        from src.memory.composition_headers import _common_trace_label_width
+        self._checked()
+        if type(amount) is not int or not 0 <= amount < 2**63:
+            raise HeaderBoundsError("memory_original_claim_numeric_shape_changed")
+        pair_upper = 3 + _common_trace_label_width(appearance) + 20
+        self._storage_debit(pair_upper, "pair")
+        self._storage_debit(pair_upper + 1, "list-slot")
+        entry = (appearance, amount)
+        self.entries.append(entry)
+        if self.prior is not None and self.prior[0] is self.budget:
+            outer = self.prior[1]
+            from src.memory.composition_headers import _CommonCertificationTraceCollector
+            from src.runtime_plugins.memory_producer import _MemoryAuthorityTraceCollector
+            if type(outer) in (_CommonCertificationTraceCollector, _MemoryAuthorityTraceCollector,
+                    _NativeMemoryClaimTraceCollector):
+                outer.append_charge(appearance, amount)
+            else:
+                outer.append(entry)
+
+
+@asynccontextmanager
+async def _native_memory_original_claim_read_capture(db, run, request):
+    """Observe the existing initial claim once; never query or issue a Source."""
+    if run.job_kind != "runtime_service_memory_v1" or request.native_memory_admission is None:
+        yield
+        return
+    from src.memory.header_bounds import _MEMORY_CHARGE_TRACE, HeaderReadBudget, HeaderBoundsError
+    from src.memory.composition_headers import _common_trace_label_width
+    from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    guard = db.info.get("composition_guard")
+    if (type(request) is not _NativeServiceClaimRequest
+            or type(request.native_memory_admission) is not NativeMemoryMutationAdmission
+            or type(request.header_budget) is not HeaderReadBudget
+            or request.native_memory_admission.header_budget is not request.header_budget
+            or type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard.header_budget is not request.header_budget):
+        raise HeaderBoundsError("memory_original_claim_numeric_owner_changed")
+    request.validate_host()
+    connection = await db.connection()
+    driver = (await connection.get_raw_connection()).driver_connection
+    budget = request.header_budget
+    budget.debit(2, appearance=("native-memory-original-claim-trace", "empty-list"))
+    # Ten original collector fields, each name <=32 ASCII octets, opaque4.
+    budget.debit(2 + 10 * (6 * 32 + 2 + 4 + 2),
+        appearance=("native-memory-original-claim-trace", "collector-construction"))
+    collector = _NativeMemoryClaimTraceCollector(db, run, request, driver,
+        asyncio.current_task(), _MEMORY_CHARGE_TRACE.get())
+    _NATIVE_MEMORY_CLAIM_TRACES[id(collector)] = collector
+    active_token = _NATIVE_MEMORY_CLAIM_TRACE_ACTIVE.set(collector)
+    trace_token = _MEMORY_CHARGE_TRACE.set((budget, collector))
+    try:
+        collector._checked()
+        yield
+        collector._checked()
+        upper = 2 + max(0, len(collector.entries) - 1)
+        for appearance, amount in collector.entries:
+            upper += 3 + _common_trace_label_width(appearance) + 20
+        collector._storage_debit(upper, "retained-vector")
+        collector._storage_debit(upper + 8 * 4 + 11 + 6 * 512 + 2, "retained-lineage")
+        entries = tuple(collector.entries)
+        # Identity-only custody plus ordered numeric pairs; no retained body grant.
+        object.__setattr__(request, "_memory_claim_read_numeric", (
+            request, request.native_memory_admission, budget, asyncio.current_task(),
+            run.run_identity, driver, collector.transaction, entries))
+    finally:
+        _MEMORY_CHARGE_TRACE.reset(trace_token)
+        _NATIVE_MEMORY_CLAIM_TRACE_ACTIVE.reset(active_token)
+        _NATIVE_MEMORY_CLAIM_TRACES.pop(id(collector), None)
+
+
+def original_native_memory_completion_claim_read_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Reuse ONE original claim's ordered paid numerical observations only."""
+    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.memory.header_bounds import HeaderBoundsError
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    source = operation.source
+    claim = source.claim
+    lineage = getattr(claim, "_memory_claim_read_numeric", None)
+    if (type(claim) is not NativeServiceClaim or type(lineage) is not tuple or len(lineage) != 8
+            or type(lineage[0]) is not _NativeServiceClaimRequest
+            or lineage[1] is not source.admission or lineage[2] is not certificate.budget
+            or lineage[3] is not source._owner_task or lineage[4] != operation.run.run_identity
+            or lineage[0].host is not source.host or claim._host is not source.host
+            or lineage[0].host_boot_nonce != claim.host_boot_nonce
+            or lineage[0].header_budget is not certificate.budget
+            or lineage[0].native_memory_admission is not source.admission
+            or getattr(lineage[0], "_memory_claim_read_numeric", None) is not lineage
+            or type(lineage[7]) is not tuple):
+        raise HeaderBoundsError("memory_original_claim_numeric_lineage_changed")
+    # No old driver/transaction is revived. Current Source/guard/facts checks
+    # above authorize only numerical forecast reuse, never old body reads.
+    return lineage[7]
+
+
+def _native_memory_claim_binding_parser_upper(text_bytes):
+    """Scalar sum of unchanged original60 binding-parser appearance prices."""
+    from src.runtime_plugins.ownership import DOMAINS, METHOD_DOMAINS
+    from src.memory.header_bounds import HeaderBoundsError
+    if type(text_bytes) is not int or not 0 <= text_bytes <= 8192:
+        raise HeaderBoundsError("memory_claim_binding_numeric_shape_unavailable")
+    domain = method = 0
+    for name in DOMAINS:
+        if not name.isascii():
+            raise HeaderBoundsError("memory_claim_binding_numeric_shape_unavailable")
+        domain = max(domain, len(name) + 2)
+    for name in METHOD_DOMAINS:
+        if not name.isascii():
+            raise HeaderBoundsError("memory_claim_binding_numeric_shape_unavailable")
+        method = max(method, len(name) + 2)
+    dependency = 2 + len("runtime_domain") + 3 + domain + len("owner_kind") + 3 + 9 + len("epoch") + 3 + 20 + len("composition_digest") + 3 + 66 + 3
+    domains = 2 + 14 * (domain + 1)
+    methods = 2 + 34 * (method + 1)
+    child_dependencies = 2 + 34 * (2 + method + 1 + domains + 1)
+    manifest = 7 + len("schema_version") + 3 + len("runtime-service-methods.v1") + 2
+    manifest += len("origin_method") + 3 + method
+    manifest += len("native_branch") + 3 + len("public_research") + 2
+    manifest += len("allowed_child_methods") + 3 + methods
+    manifest += len("origin_dependencies") + 3 + domains
+    manifest += len("child_dependencies") + 3 + child_dependencies
+    parsed = 6 * text_bytes + 2
+    return text_bytes + 9 * parsed + 13 * methods + 22 * domains + 14 * child_dependencies + 56 * dependency + 6 * manifest + 230
+
+
+def _native_memory_claim_producer_roster_upper():
+    """Original9 producer keys/22 method-branch tuples, conservative copies."""
+    pair = 3 + 2 * (6 * 32 + 2)
+    pairs = 22 * pair
+    sets = 9 * 2 + 22 * (pair + 1)
+    mapping = 2 + 8 + 9 * (6 * 64 + 2 + 1) + sets
+    # Price tuples, set storage, whole dict, lookup pair and empty fallback set.
+    return pairs + sets + mapping + pair + 2
+
+
+def _native_memory_claim_verifier_budget(db, run, request):
+    """Current original owner resource frame; never a body permission."""
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.runtime_plugins.memory_producer import NativeMemoryMutationAdmission, _native_memory_authority_capacity_checked
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if type(request) is not _NativeServiceClaimRequest:
+        raise HeaderBoundsError("memory_claim_verifier_numeric_owner_changed")
+    guard = db.info.get("composition_guard")
+    budget = request.header_budget
+    if (type(budget) is not HeaderReadBudget or type(guard) is not CompositionSessionGuard
+            or guard.db is not db or guard.header_budget is not budget
+            or not db.info.get("native_writer_started") or db.sync_session.get_transaction() is None):
+        raise HeaderBoundsError("memory_claim_verifier_numeric_owner_changed")
+    if request.native_memory_admission is not None:
+        if (type(request.native_memory_admission) is not NativeMemoryMutationAdmission
+                or request.native_memory_admission.header_budget is not budget):
+            raise HeaderBoundsError("memory_claim_verifier_numeric_owner_changed")
+    else:
+        owner = _native_memory_authority_capacity_checked(db)
+        if owner is None or owner.budget is not budget or owner.source.claim._host is not request.host:
+            raise HeaderBoundsError("memory_claim_verifier_numeric_owner_changed")
+    request.validate_host()
+    return budget
+
+
+def original_native_memory_claim_verifier_allocation_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """ONE completion verifier's allocations, separate from observed reads."""
+    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.memory.header_bounds import WRS_BY_RUN
+    from src.security.trust_contract import AuthorityGrant
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    text = facts["text_bytes"][(WRS_BY_RUN.table, operation.run.run_identity)]
+    grants = 2
+    count = 0
+    for grant in AuthorityGrant:
+        if grant.value in ("ingress", "model_inference", "capability_execute", "artifact_transfer"):
+            grants += 6 * len(grant.value) + 2 + (1 if count else 0)
+            count += 1
+    # The original Auth service constructor issues exactly these four grants.
+    if count != 4:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("memory_claim_verifier_numeric_grants_changed")
+    return (("completion", ("native-memory-claim-verifier", "binding-parser"),
+            _native_memory_claim_binding_parser_upper(retention_widths["binding_text_bytes"])),
+        ("completion", ("native-memory-claim-verifier", "producer-roster"), _native_memory_claim_producer_roster_upper()),
+        ("completion", ("native-memory-claim-verifier", "authority-json-parser"), 6 * max(2, text["declared_authority_json"]) + 2),
+        ("completion", ("native-memory-claim-verifier", "grant-generator"), grants),
+        ("completion", ("native-memory-claim-verifier", "grant-sort"), grants))
+
+
 async def _validate_native_service_claim(db, run, request):
     from src.auth.service import authenticate_principal
     from src.db.models import OperatorSession
     from src.runtime_plugins.ownership import validate_invocation
     request.validate_host()
+    verifier_budget = None
+    if run.job_kind == "runtime_service_memory_v1":
+        from src.memory.header_bounds import _native_memory_utf8_width
+        verifier_budget = _native_memory_claim_verifier_budget(db, run, request)
+        verifier_budget.debit(_native_memory_claim_binding_parser_upper(
+                _native_memory_utf8_width(run.composition_binding_json)),
+            appearance=("native-memory-claim-verifier", "binding-parser"))
+        verifier_budget.debit(_native_memory_claim_producer_roster_upper(),
+            appearance=("native-memory-claim-verifier", "producer-roster"))
     binding = RuntimeCompositionBinding.from_json(run.composition_binding_json)
     producers = {
         "goal_public_discovery_v1": {("research.executeAccepted", "programme_discovery")},
@@ -302,42 +542,54 @@ async def _validate_native_service_claim(db, run, request):
             or binding.host_package_digest is None or run.deadline_at is None):
         raise DurableJobLeaseError("original reviewed native service binding unavailable")
     memory_budget = request.header_budget if run.job_kind in {"runtime_service_memory_v1", "goal_public_discovery_v1"} else None
-    if run.job_kind == "runtime_service_memory_v1":
-        from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION
-        if type(memory_budget) is not HeaderReadBudget:
-            raise DurableJobLeaseError("native_memory_source_budget_unavailable")
-        await memory_budget.certify(db, OPERATOR_SESSION, (run.operator_session_id,))
-    await validate_invocation(db, binding, **(
-        {"header_budget": memory_budget} if memory_budget is not None else {}))
-    if run.job_kind == "goal_public_discovery_v1":
-        from src.runtime_plugins.programme_producer import _ProgrammeSource
-        from src.workflows.research_guard import assert_discovery_authority
-        source = request.native_programme_source
-        if (type(source) is not _ProgrammeSource or source.jobs is None
-                or source.job_id != run.run_identity or source.host is not request.host
-                or source.header_budget is not request.header_budget or source.state != "reserved"):
-            raise DurableJobLeaseError("native_programme_source_unavailable")
-        source.validate(owner=True)
-        await source.prepare_selection(db, run)
-        await validate_invocation(db, binding, header_budget=source.header_budget)
-        await assert_discovery_authority(db, run.declared_authority_json, run=run, native_programme_source=source)
-        return binding
-    now = _utc_now()
-    if run.owner_kind != "user" or run.operator_session_id != run.session_id:
-        raise DurableJobLeaseError("native service original operator provenance unavailable")
-    root = await db.scalar(select(OperatorSession).where(
-        OperatorSession.id == run.operator_session_id,
-        OperatorSession.principal_id == run.owner_principal_id,
-        OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
-        OperatorSession.is_bearer_tombstone.is_(False),
-        OperatorSession.idle_expires_at > now, OperatorSession.absolute_expires_at > now
-    ).execution_options(populate_existing=True))
-    if root is None:
-        raise DurableJobLeaseError("native service original operator inactive")
-    if memory_budget is not None:
-        from src.runtime_plugins.memory_producer import certify_original_memory_principal
-        await certify_original_memory_principal(db, run.owner_principal_id, memory_budget)
-    current_operator = await authenticate_principal(run.owner_principal_id, db=db)
+    async with _native_memory_original_claim_read_capture(db, run, request):
+        if run.job_kind == "runtime_service_memory_v1":
+            from src.memory.header_bounds import HeaderReadBudget, OPERATOR_SESSION
+            if type(memory_budget) is not HeaderReadBudget:
+                raise DurableJobLeaseError("native_memory_source_budget_unavailable")
+            memory_root_certificate = await memory_budget.certify(db, OPERATOR_SESSION,
+                (run.operator_session_id,), _header_budget=memory_budget)
+        await validate_invocation(db, binding, **(
+            {"header_budget": memory_budget} if memory_budget is not None else {}))
+        if run.job_kind == "goal_public_discovery_v1":
+            from src.runtime_plugins.programme_producer import _ProgrammeSource
+            from src.workflows.research_guard import assert_discovery_authority
+            source = request.native_programme_source
+            if (type(source) is not _ProgrammeSource or source.jobs is None
+                    or source.job_id != run.run_identity or source.host is not request.host
+                    or source.header_budget is not request.header_budget or source.state != "reserved"):
+                raise DurableJobLeaseError("native_programme_source_unavailable")
+            source.validate(owner=True)
+            await source.prepare_selection(db, run)
+            await validate_invocation(db, binding, header_budget=source.header_budget)
+            await assert_discovery_authority(db, run.declared_authority_json, run=run, native_programme_source=source)
+            return binding
+        if run.job_kind == "runtime_service_memory_v1":
+            memory_budget.debit(44, appearance=("native-memory-original-claim", "root-now"))
+        now = _utc_now()
+        if run.owner_kind != "user" or run.operator_session_id != run.session_id:
+            raise DurableJobLeaseError("native service original operator provenance unavailable")
+        if run.job_kind == "runtime_service_memory_v1":
+            # The original selected PK certificate is current on this same
+            # transaction/frame. Its header fee is distinct from this fresh
+            # ORM query/result construction; pay both before invoking scalar.
+            memory_budget.debit(memory_root_certificate.upper_bytes,
+                appearance=("native-memory-original-claim", "root-query"))
+            memory_budget.debit(memory_root_certificate.upper_bytes,
+                appearance=("native-memory-original-claim", "root-materialization"))
+        root = await db.scalar(select(OperatorSession).where(
+            OperatorSession.id == run.operator_session_id,
+            OperatorSession.principal_id == run.owner_principal_id,
+            OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
+            OperatorSession.is_bearer_tombstone.is_(False),
+            OperatorSession.idle_expires_at > now, OperatorSession.absolute_expires_at > now
+        ).execution_options(populate_existing=True))
+        if root is None:
+            raise DurableJobLeaseError("native service original operator inactive")
+        if memory_budget is not None:
+            from src.runtime_plugins.memory_producer import certify_original_memory_principal
+            await certify_original_memory_principal(db, run.owner_principal_id, memory_budget)
+        current_operator = await authenticate_principal(run.owner_principal_id, db=db)
     if run.job_kind == "work.local-evidence-report.v1":
         from src.runtime_plugins.task_capability import recheck_report_claim
         await recheck_report_claim(db, run, host_boot_nonce=request.host_boot_nonce,
@@ -352,6 +604,15 @@ async def _validate_native_service_claim(db, run, request):
     if run.job_kind == "runtime_service_memory_v1":
         from src.runtime_plugins.memory_producer import memory_context, NativeMemoryMutationAdmission, validate_original_memory_owner
         context = memory_context(run)
+        grants_upper = 2
+        grant_count = 0
+        for grant in current_operator.principal.grants:
+            grants_upper += 6 * _native_memory_utf8_width(getattr(grant, "value", grant)) + 2 + (1 if grant_count else 0)
+            grant_count += 1
+        verifier_budget.debit(6 * max(2, _native_memory_utf8_width(run.declared_authority_json)) + 2,
+            appearance=("native-memory-claim-verifier", "authority-json-parser"))
+        verifier_budget.debit(grants_upper, appearance=("native-memory-claim-verifier", "grant-generator"))
+        verifier_budget.debit(grants_upper, appearance=("native-memory-claim-verifier", "grant-sort"))
         if (context["candidate"]["host_boot_nonce"] != request.host_boot_nonce
             or json.loads(run.declared_authority_json).get("grants") != sorted(
                 str(getattr(grant, "value", grant)) for grant in current_operator.principal.grants)):
@@ -1545,6 +1806,64 @@ def _is_typed_admission_receipt(
     )
 
 
+def _native_memory_completion_goal_fence_payer(db, source):
+    """Exact completion resource custody; never a Goal/body permission."""
+    import asyncio
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger, HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _validate_memory_completion_capacity_source, _NativeMemoryDispatchSource
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if type(source) is not _NativeMemoryDispatchSource:
+        raise HeaderBoundsError("memory_completion_goal_fence_numeric_owner_changed")
+    source = _validate_memory_completion_capacity_source(source, source.claim)
+    retention = source._retention
+    active = _MEMORY_LEDGER_PHASE.get()
+    ledger = retention.ledger
+    binding = ledger.bindings.get("completion")
+    guard = db.info.get("composition_guard")
+    if (type(ledger) is not _NativeMemoryNumericLedger or active is None
+            or active[0] is not ledger or active[1] != "completion"
+            or type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard.header_budget is not source.admission.header_budget
+            or binding is None or binding[0] is not db
+            or binding[1] is not db.sync_session.get_transaction()
+            or binding[2].in_transaction is not True or binding[4] is not guard
+            or binding[5] is not asyncio.current_task()
+            or ledger.source is not source or retention.completed):
+        raise HeaderBoundsError("memory_completion_goal_fence_numeric_owner_changed")
+    ledger._checked()
+    return ledger.budget
+
+
+def original_native_memory_completion_goal_fence_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """ONE original user Goal fence's scalar copies and final JSON parser."""
+    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.memory.header_bounds import GOAL, WRS_BY_RUN, HeaderBoundsError
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    run = operation.run
+    if run.owner_kind != "user":
+        raise HeaderBoundsError("memory_completion_goal_fence_numeric_shape_unavailable")
+    if run.goal_id is None:
+        return ()
+    own = facts["text_bytes"][(WRS_BY_RUN.table, run.run_identity)]
+    goal = facts["text_bytes"][(GOAL.table, run.goal_id)]
+    def string(size):
+        if type(size) is not int or size < 0:
+            raise HeaderBoundsError("memory_completion_goal_fence_numeric_shape_unavailable")
+        return 6 * size + 2
+    owner, session = string(goal["owner_principal_id"]), string(goal["owner_session_id"])
+    pairs = (("goal-id-copy", string(own["goal_id"])),
+        ("goal-status-copy", string(goal["status"])),
+        ("goal-owner-copy", owner), ("goal-session-copy", session),
+        ("canonical-owner-tuple", 3 + owner + session),
+        ("caller-owner-copy", string(own["owner_principal_id"])),
+        ("caller-session-copy", string(own["session_id"])),
+        ("authority-parser-fallback", 2),
+        ("authority-json-parser", string(max(2, own["declared_authority_json"]))))
+    return tuple(("completion", ("native-memory-completion-goal-fence", stage), upper)
+        for stage, upper in pairs)
+
+
 async def _assert_canonical_goal_fence(
     db: Any,
     *,
@@ -1555,6 +1874,7 @@ async def _assert_canonical_goal_fence(
     session_id: str | None,
     authority: Any = None,
     discovery_session=None,
+    native_memory_source=None,
 ) -> Goal | None:
     """Check the canonical goal before a durable job can execute or mutate.
 
@@ -1564,6 +1884,19 @@ async def _assert_canonical_goal_fence(
     ``_append_goal_fence_condition`` repeats existence, active status, and
     revision at the final CAS boundary, closing the read/check/write race.
     """
+    memory_frame = None
+    if native_memory_source is not None:
+        if discovery_session is not None:
+            raise DurableJobLeaseError("native_memory_original_goal_payer_changed")
+        memory_frame = _native_memory_completion_goal_fence_payer(db, native_memory_source)
+        original = native_memory_source._retention.operation.run
+        if (goal_id != original.goal_id or goal_revision != original.goal_revision
+                or owner_kind != original.owner_kind or owner_principal_id != original.owner_principal_id
+                or session_id != original.session_id or authority != original.declared_authority_json):
+            raise DurableJobLeaseError("native_memory_original_goal_payer_changed")
+        if goal_id is not None:
+            memory_frame.debit(6 * _discovery_utf8_width(goal_id) + 2,
+                appearance=("native-memory-completion-goal-fence", "goal-id-copy"))
     if goal_id is None or not _text(goal_id):
         if goal_revision is not None:
             raise DurableJobTransitionError("goal_revision requires a canonical goal")
@@ -1594,14 +1927,27 @@ async def _assert_canonical_goal_fence(
     if canonical_revision != revision:
         raise DurableJobTransitionError("durable job goal revision is stale")
     goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
+    if memory_frame is not None:
+        memory_frame.debit(6 * _discovery_utf8_width(goal_status) + 2,
+            appearance=("native-memory-completion-goal-fence", "goal-status-copy"))
     if _text(goal_status) != "active":
         raise DurableJobTransitionError("canonical goal is not active")
     if discovery_session is not None:
         for appearance, upper in _discovery_goal_fence_numeric_entries(owned,
                 wire=not isinstance(authority, Mapping)):
             owned.header_budget.debit(upper, appearance=appearance)
+    if memory_frame is not None:
+        owner_upper = 6 * _discovery_utf8_width(goal.owner_principal_id) + 2
+        session_upper = 6 * _discovery_utf8_width(goal.owner_session_id) + 2
+        for stage, upper in (("goal-owner-copy", owner_upper), ("goal-session-copy", session_upper),
+                ("canonical-owner-tuple", 3 + owner_upper + session_upper)):
+            memory_frame.debit(upper, appearance=("native-memory-completion-goal-fence", stage))
     canonical_owner, canonical_session = _goal_owner_binding(goal)
     if owner_kind == "user":
+        if memory_frame is not None:
+            for stage, value in (("caller-owner-copy", owner_principal_id), ("caller-session-copy", session_id)):
+                memory_frame.debit(6 * _discovery_utf8_width(value) + 2,
+                    appearance=("native-memory-completion-goal-fence", stage))
         if _text(owner_principal_id) != canonical_owner:
             raise DurableJobTransitionError("durable job goal owner is stale")
         if _text(session_id) != canonical_session:
@@ -1620,6 +1966,10 @@ async def _assert_canonical_goal_fence(
             raise DurableJobTransitionError("service goal authority owner/session is stale")
     else:
         raise DurableJobTransitionError("durable job owner kind is invalid")
+    if memory_frame is not None:
+        memory_frame.debit(2, appearance=("native-memory-completion-goal-fence", "authority-parser-fallback"))
+        memory_frame.debit(6 * max(2, _discovery_utf8_width(authority)) + 2,
+            appearance=("native-memory-completion-goal-fence", "authority-json-parser"))
     authority_value = authority if isinstance(authority, Mapping) else _json_load(authority, {})
     if isinstance(authority_value, Mapping) and authority_value.get("authority_type") == "goal_programme_discovery_v1":
         from src.workflows.research_guard import assert_discovery_authority
@@ -2899,8 +3249,262 @@ async def original_discovery_queue_numeric_bounds(discovery_session):
         "plan_bytes": plan_bytes, "brief_bytes": brief_bytes, "physical_count": retained["count"]})
 
 
-def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None, discovery_session=None) -> dict[str, Any]:
+def _native_memory_completion_claim_request_upper():
+    # Seven original frozen request fields, three live owner pointers represented
+    # numerically by NULL-sized capacity markers; boot nonce is the fixed SHA64.
+    return 2 + 6 + sum(len(name) + 3 for name in (
+        "host", "reviewed", "host_boot_nonce", "native_report_candidate", "header_budget",
+        "native_memory_admission", "native_programme_source")) + 66 + 6 * 4
+
+
+def _native_memory_plain_copy_upper(value):
+    """Every container copied by original _native_plain, no copy to size it."""
+    if isinstance(value, Mapping):
+        return _discovery_encoded_upper(value) + sum(_native_memory_plain_copy_upper(item)
+            for item in value.values())
+    if type(value) in {tuple, list}:
+        return _discovery_encoded_upper(value) + sum(_native_memory_plain_copy_upper(item) for item in value)
+    return 0
+
+
+def original_native_memory_completion_output_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """One genuine successful completion's local/output allocations only.
+
+    DB reader/writer certification and body/authority calls remain separately
+    enumerated by the original startup call vector; no body or future receipt
+    is constructed here. Unsupported sealed outcomes retain original STOP.
+    """
+    from src.runtime_plugins.memory_producer import _MemoryOwnerSourceOperation, _MEMORY_OPERATIONS
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.memory.m5 import PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS, _NATIVE_MUTATION_PLAN_SEAL
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if (type(operation) is not _MemoryOwnerSourceOperation
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or type(prepared) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(prepared)) is not prepared
+            or prepared._seal is not _NATIVE_MUTATION_PLAN_SEAL
+            or operation._prepared is not prepared or prepared.consumed
+            or operation._effect is not None or prepared._db is not operation.db
+            or prepared._transaction is not operation.transaction or prepared._driver is not operation.driver
+            or prepared._candidate_digest != operation.source.admission.candidate_digest):
+        raise HeaderBoundsError("native_memory_completion_numeric_owner_changed")
+    guard = operation.db.info.get("composition_guard")
+    capacity = getattr(guard, "_native_memory_source_capacity_facts", None)
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    retained = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if (type(guard) is not CompositionSessionGuard
+            or capacity is None or capacity[0] is not operation or capacity[1] is not prepared
+            or capacity[2] is not certificate or capacity[3] is not facts
+            or retained is None or retained[0] is not operation or retained[1] is not prepared
+            or retained[2] is not certificate or retained[3] is not retention_widths
+            or owner is None or owner[0] is not operation or owner[1] is not prepared
+            or owner[2] is not certificate or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.transaction or owner[5] is not operation.driver
+            or operation.transaction is not operation.db.sync_session.get_transaction()
+            or not operation.driver.in_transaction
+            or certificate.budget is not operation.source.admission.header_budget):
+        raise HeaderBoundsError("native_memory_completion_numeric_owner_changed")
+    from src.memory.header_bounds import WRS_BY_RUN
+    from src.runtime_plugins.contracts import MEMORY_STATUS
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_binding_json_entries
+    method, result = prepared._method, prepared._result
+    if not ((method == "memory.propose" and result.get("status") == "proposed")
+            or (method == "memory.applyReviewed" and result.get("status") == "accepted"
+                and not result.get("idempotent_replay"))
+            or (method == "memory.forget" and type(result.get("memory")) is dict
+                and type(result["memory"].get("id")) is str)):
+        raise HeaderBoundsError("memory_source_retention_outcome_unavailable")
+    address = (WRS_BY_RUN.table, operation.run.run_identity)
+    numeric_map_upper = 2 + max(0, len(WorkflowRunState.model_fields) - 1) + sum(
+        6 * len(name) + 3 + 20 for name in WorkflowRunState.model_fields)
+    # The original constructor pays the new forecast width map before copying.
+    guard.header_budget.debit(numeric_map_upper,
+        appearance=("native-memory-completion-forecast", "width-map"))
+    widths = dict(facts["text_bytes"][address])
+    for name, upper in retention_widths["completion_future_text_bytes"].items():
+        widths[name] = max(widths.get(name, 0), upper)
+    for name in ("lease_owner", "lease_expires_at", "failure_reason"):
+        widths.pop(name, None)
+    run_id = operation.run.run_identity
+    journal = max(2, widths.get("checkpoint_receipts_json", 2))
+    pending_upper = (2 + 9 + sum(len(name) + 3 for name in ("status", "result_digest",
+        "result_summary", "failure_reason", "finished_at", "updated_at", "lease_owner",
+        "lease_expires_at", "revision", "checkpoint_context_json"))
+        + _discovery_encoded_upper("succeeded") + 66
+        + _discovery_encoded_upper("Native Memory owner result committed")
+        + 4 + 44 + 44 + 4 + 4 + 20 + 6 * widths["checkpoint_context_json"] + 2)
+    receipt_upper = (2 + 1 + len("kind") + 3 + len("memory_status") + 3
+        + _discovery_encoded_upper("native_memory_completed")
+        + _discovery_encoded_upper(MEMORY_STATUS[method]))
+    entries = [(("native-memory-completion", "claim-checkpoint-copy"),
+        _native_memory_plain_copy_upper(operation.source.claim.checkpoint)),
+        (("native-memory-completion", "claim-journal-parser"), 6 * journal + 2)]
+    entries.extend((("native-memory-completion-binding-json", appearance), upper)
+        for appearance, upper in _native_memory_dispatch_binding_json_entries(retention_widths["binding_text_bytes"]))
+    entries.extend((("native-memory-completion", stage), 44) for stage in (
+        "deadline-now", "deadline-replace", "deadline-astimezone", "lease-replace", "lease-astimezone", "lease-now", "timestamp"))
+    entries.append((("native-memory-completion", "claim-request-construction"),
+        _native_memory_completion_claim_request_upper()))
+    entries.extend((("native-memory-completion-serialize", run_id, "isoformat", name),44)
+        for name in ("deadline_at", "lease_expires_at", "started_at", "updated_at", "finished_at"))
+    entries.extend(((("native-memory-completion", "pending-changes"), pending_upper),
+        (("native-memory-completion", "receipt-construction"), receipt_upper),
+        (("native-memory-completion-serialize", run_id, "width-map"), numeric_map_upper)))
+    entries.extend((("native-memory-completion-serialize", *appearance[1:]), upper)
+        for appearance, upper in _discovery_serializer_numeric_entries(widths,job_id=run_id,receipt_upper=receipt_upper))
+    return tuple(("completion", appearance, upper) for appearance, upper in entries)
+
+
+def _native_memory_completion_certificate_labels(job_id, goal_id):
+    """Original WRS unique-key 21 slots and conditional Goal PK 15 slots."""
+    from src.memory.header_bounds import WRS_BY_RUN, GOAL
+    for descriptor, identity, locator in ((WRS_BY_RUN, job_id, True),
+            *(((GOAL, goal_id, False),) if goal_id is not None else ())):
+        yield ("exact-metadata", "initial-state")
+        yield ("metadata-prequery", "descriptor-compiler", descriptor.table)
+        yield ("metadata-prequery", "descriptor-xinfo", "delivery")
+        yield ("metadata-prequery", "descriptor-table", "delivery")
+        if locator:
+            for kind in ("locator-indexes", "locator-parts"):
+                for stage in ("delivery", "row-copy", "encoded-copy"):
+                    yield ("metadata-prequery", kind, stage)
+        yield ("exact-metadata", "sqlite-version")
+        yield ("exact-metadata", "encoding")
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            yield ("exact-metadata", "schema", descriptor.table, stage)
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            yield ("exact-metadata", "row-header", descriptor.table, identity, stage)
+        yield ("exact-metadata", "final-state")
+        yield ("exact-header", descriptor.table, descriptor.key, (identity,))
+        yield ("exact-metadata", "validation-state")
+
+
+async def original_native_memory_completion_certificate_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """The TWO explicit completion certifiers, separate from three snapshots.
+
+    Observe original current certifications once, keeping their actual debits
+    spent. Only WRS's future exact-header amount is projected from the original
+    retained MAX capture/completion header upper; metadata grammar is unchanged.
+    This does not certify a future row or authorize a body read.
+    """
+    import asyncio
+    from collections import Counter
+    from src.memory.header_bounds import WRS_BY_RUN, GOAL, MAX_BYTES, HeaderBoundsError, _trace_memory_numeric_charges
+    from src.memory.composition_headers import _common_trace_label_width
+    from src.runtime_plugins.memory_producer import (
+        _native_memory_dispatch_validation_numeric_owner,
+        _native_memory_source_numeric_frame)
+    # Reuse the exact original operation/plan/Source/guard/facts/task/TX gate.
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    budget = certificate.budget
+    if _native_memory_source_numeric_frame() is not budget:
+        raise HeaderBoundsError("memory_completion_certificate_numeric_owner_changed")
+    job_id, goal_id = operation.run.run_identity, operation.run.goal_id
+    if ((WRS_BY_RUN.table, job_id) not in certificate.rows
+            or (goal_id is not None and (GOAL.table, goal_id) not in certificate.rows)):
+        raise HeaderBoundsError("memory_completion_certificate_numeric_shape_unavailable")
+    future_header = retention_widths["own_upper"]
+    if type(future_header) is not int or not 0 <= future_header <= MAX_BYTES:
+        raise HeaderBoundsError("memory_completion_certificate_numeric_shape_unavailable")
+    count = 21 + (15 if goal_id is not None else 0)
+    # Pay before either roster generator or Counter: fixed labels fit256,
+    # plus four escaped identity appearances per selected row (UTF8 cap512).
+    # This scalar bound creates no label/container and grants no body access.
+    budget.debit(4 * (count * 256 + 4 * (1 + (goal_id is not None)) * (6 * 512 + 2)),
+        appearance=("memory-completion-certificate-trace", "planning-before-allocation"))
+    budget.debit(count * (256 + 20 + 3),
+        appearance=("memory-completion-certificate-trace", "multiplicity-map"))
+    pair_upper = sum(3 + _common_trace_label_width(label) + 20
+        for label in _native_memory_completion_certificate_labels(job_id, goal_id))
+    vector_upper = 2 + pair_upper + count - 1
+    for stage, upper in (("planning-roster", 4 * vector_upper),
+            ("trace-pairs", pair_upper), ("trace-list", vector_upper),
+            ("projected-pairs", pair_upper), ("projected-list", vector_upper),
+            ("retained-tuple", vector_upper), ("owner-lineage", vector_upper + 9 * 20 + 11)):
+        budget.debit(upper, appearance=("memory-completion-certificate-trace", stage))
+    expected = Counter(_native_memory_completion_certificate_labels(job_id, goal_id))
+    with _trace_memory_numeric_charges(budget) as trace:
+        await budget.certify(operation.db, WRS_BY_RUN, (job_id,), _header_budget=budget)
+        if goal_id is not None:
+            await budget.certify(operation.db, GOAL, (goal_id,), _header_budget=budget)
+    if (len(trace) != count or operation.transaction is not operation.db.sync_session.get_transaction()
+            or not operation.driver.in_transaction or asyncio.current_task() is not
+            operation.db.info["composition_guard"]._native_memory_source_capacity_owner[3]):
+        raise HeaderBoundsError("memory_completion_certificate_numeric_owner_changed")
+    projected = []
+    for label, upper in trace:
+        if expected[label] <= 0 or type(upper) is not int or not 0 <= upper < 2**63:
+            raise HeaderBoundsError("memory_completion_certificate_numeric_roster_changed")
+        expected[label] -= 1
+        if label == ("exact-header", WRS_BY_RUN.table, WRS_BY_RUN.key, (job_id,)):
+            upper = max(upper, future_header)
+        projected.append((label, upper))
+    if any(expected.values()):
+        raise HeaderBoundsError("memory_completion_certificate_numeric_roster_changed")
+    entries = tuple(projected)
+    operation.db.info["composition_guard"]._native_memory_completion_certificate_numeric = (
+        operation, prepared, certificate, facts, retention_widths, budget,
+        asyncio.current_task(), operation.transaction, operation.driver, entries)
+    return entries
+
+
+def original_native_memory_completion_startup_call_vector():
+    """Exact original positive path counts, never numeric/body authority."""
+    return (("prepare_composition_session.checked_snapshot",1),
+        ("begin_native_writer.certify_composition_superset",1),
+        ("begin_native_writer._prepare_composition_writer_session",1),
+        ("complete.WRS_BY_RUN.certify",1),("complete._fetch",1),
+        ("complete.memory_context.result_present",1),("complete._validate_native_service_claim",1),
+        ("complete.GOAL.certify.when_goal_present",1),("complete._assert_canonical_goal_fence",1),
+        ("complete.validate_native_memory_retention",1),
+        ("complete.prepare_native_memory_lifecycle",1),("complete.apply_native_memory_lifecycle",1),
+        ("complete._serialize",1),("original_engine.publish",1),
+        ("witness.completion._validate_memory_dispatch_source",3),
+        ("witness.completion.additional_memory_context",2))
+
+
+def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None, discovery_session=None,
+               native_memory_retention=None) -> dict[str, Any]:
     """Return an operator-safe durable job projection."""
+    if native_memory_retention is not None:
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+        from src.workspace.accounting_witness import _NativeMemoryRetention
+        retention = native_memory_retention
+        if (discovery_session is not None or type(retention) is not _NativeMemoryRetention
+                or not retention.completed or run.job_kind != "runtime_service_memory_v1"
+                or run.run_identity != retention.before["run_identity"]
+                or getattr(run, "github_capacity_closure_json", None)):
+            raise DurableJobLeaseError("native_memory_completion_output_owner_changed")
+        retention._checked()
+        ledger = retention.ledger
+        active = _MEMORY_LEDGER_PHASE.get()
+        binding = ledger.bindings.get("completion")
+        if (active is None or active[0] is not ledger or active[1] != "completion"
+                or binding is None or binding[5] is not asyncio.current_task()
+                or binding[0].sync_session.get_transaction() is not binding[1]
+                or not binding[2].in_transaction
+                or binding[0].info.get("composition_guard") is None
+                or binding[0].info["composition_guard"].header_budget is not ledger.budget
+                or getattr(binding[0].info["composition_guard"], "_native_memory_source_retention", None) is not retention):
+            raise DurableJobLeaseError("native_memory_completion_output_writer_changed")
+        # Width arithmetic reads only actual already-paid scalar fields. Debit
+        # the numeric map before its allocation, then every original serializer
+        # JSON/parser/container/lease/output appearance before _serialize builds it.
+        ledger.budget.debit(2 + max(0, len(WorkflowRunState.model_fields) - 1) + sum(
+            6 * len(name) + 3 + 20 for name in WorkflowRunState.model_fields),
+            appearance=("native-memory-completion-serialize", run.run_identity, "width-map"))
+        widths = {name: _discovery_utf8_width(value) for name in WorkflowRunState.model_fields
+            if type(value := getattr(run, name)) is str}
+        for appearance, upper in _discovery_serializer_numeric_entries(widths,
+                job_id=run.run_identity,
+                receipt_upper=_discovery_encoded_upper(receipt) if receipt is not None else 0):
+            ledger.budget.debit(upper, appearance=("native-memory-completion-serialize", *appearance[1:]))
+        for name in ("deadline_at", "lease_expires_at", "started_at", "updated_at", "finished_at"):
+            ledger.budget.debit(44, appearance=("native-memory-completion-serialize", run.run_identity, "isoformat", name))
     if discovery_session is not None:
         owned = discovery_session.jobs._validate_discovery_session(discovery_session)
         if run.job_kind != "goal_public_discovery_v1":
@@ -3149,9 +3753,73 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         return discovery_session.validate(db=db, header_budget=header_budget, jobs=self)
 
     @asynccontextmanager
-    async def _discovery_read_session(self, discovery_session=None, *, header_budget=None):
+    async def _native_programme_read_session(self, source, *, header_budget=None):
+        """Use the original session/continuity owner before native private reads."""
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        from src.workspace.accounting_witness import (CompositionSessionGuard,
+            prepare_composition_session)
+        if (type(source) is not _ProgrammeSource or source.jobs is not self
+                or source.state not in {"reserved", "claimed", "start_committed"}
+                or (header_budget is not None and header_budget is not source.header_budget)):
+            raise DurableJobLeaseError("native_programme_original_reader_changed")
+        source.validate()
+        if source.writer is not None:
+            raise DurableJobLeaseError("native_programme_original_reader_changed")
+        frame = source.header_budget
+        db = None
+        try:
+            async with self._session(header_budget=frame) as db:
+                # The factory's original inventory check has rolled back. Acquire
+                # the existing maintenance/continuity owner before any autobegin.
+                source.validate()
+                guard = await prepare_composition_session(db, header_budget=frame)
+                if (type(guard) is not CompositionSessionGuard or guard.db is not db
+                        or guard.header_budget is not frame
+                        or db.info.get("composition_guard") is not guard):
+                    raise DurableJobLeaseError("native_programme_original_reader_changed")
+                source.validate()
+                try:
+                    # Select from the genuine current certificate before returning
+                    # a caller capable of fetching a private persisted run.
+                    await source.prepare_selection(db)
+                    source.authority_selection(db)
+                    yield db
+                finally:
+                    if source.writer is not None and source.writer[1] is db:
+                        from types import MappingProxyType
+                        source._reader_numeric_facts = (
+                            MappingProxyType({key: row[1] for key, row in source.writer[4].common33.rows.items()}),
+                            MappingProxyType({key: row[1] for key, row in source.writer[5].rows.items()}))
+        finally:
+            # The original engine first publishes/commits/closes its guard.
+            # Clear only this reader's private transaction binding afterwards.
+            if source.writer is not None and source.writer[1] is db:
+                source.writer = None
+                source._writer_transaction = None
+
+    @asynccontextmanager
+    async def _native_programme_paid_row(self, source, db):
+        from src.memory.composition_headers import snapshot_reads_async, charge_row
+        source.authority_selection(db)
+        common = source.writer[4].common33
+        async with snapshot_reads_async(db, common):
+            connection = await db.connection()
+            await connection.run_sync(lambda current: charge_row(
+                current, "workflow_run_states", source.job_id))
+            yield
+
+    @asynccontextmanager
+    async def _discovery_read_session(self, discovery_session=None, *, header_budget=None,
+                                      native_programme_source=None):
+        if native_programme_source is not None:
+            if discovery_session is not None:
+                raise DurableJobLeaseError("native_programme_original_reader_changed")
+            async with self._native_programme_read_session(native_programme_source,
+                    header_budget=header_budget) as db:
+                yield db
+            return
         if discovery_session is None:
-            async with self._session() as db:
+            async with self._session(header_budget=header_budget) as db:
                 yield db
         else:
             owned = self._validate_discovery_session(discovery_session, header_budget=header_budget)
@@ -3166,8 +3834,52 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await connection.run_sync(lambda current: charge_row(current, "workflow_run_states", job_id))
             yield
 
+    async def _require_uncomposed_discovery_row(self, db, job_id, frame):
+        """Prove the legacy NULL branch before delivering a private run body."""
+        from src.memory.header_bounds import WRS_BY_RUN
+        await frame.certify(db, WRS_BY_RUN, (job_id,), _header_budget=frame)
+        frame.debit(1, appearance=("discovery-legacy-null-binding", job_id))
+        absent_binding = await db.scalar(select(
+            WorkflowRunState.composition_binding_json.is_(None)).where(
+                WorkflowRunState.run_identity == job_id))
+        if absent_binding is not True:
+            raise DurableJobLeaseError("native_programme_source_required")
+
     @asynccontextmanager
-    async def _writer_session(self, *, header_budget=None, discovery_session=None, discovery_phase=None, job_id=None):
+    async def _writer_session(self, *, header_budget=None, discovery_session=None, discovery_phase=None,
+                              job_id=None, native_programme_source=None, native_memory_source=None):
+        if native_memory_source is not None:
+            from src.runtime_plugins.memory_producer import _validate_memory_completion_capacity_source
+            from src.workspace.accounting_witness import (
+                CompositionSessionGuard, prepare_composition_session)
+            if discovery_session is not None or native_programme_source is not None:
+                raise DurableJobLeaseError("native_memory_completion_writer_owner_changed")
+            source = _validate_memory_completion_capacity_source(
+                native_memory_source, native_memory_source.claim)
+            frame = source.admission.header_budget
+            if header_budget is not None and header_budget is not frame:
+                raise DurableJobLeaseError("native_memory_completion_writer_frame_changed")
+            # The existing session owns its initial reader and original exit.
+            # Preparation owns guard/lock/read certification and original rollback;
+            # the Source seam binds prepaid capacity before those traversals.
+            async with self._session(header_budget=frame) as db:
+                guard = await prepare_composition_session(db, header_budget=frame,
+                    _native_memory_source=source)
+                if (type(guard) is not CompositionSessionGuard or guard.header_budget is not frame
+                        or guard.db is not db
+                        or getattr(guard, "_native_memory_source_retention", None) is not source._retention):
+                    raise DurableJobLeaseError("native_memory_completion_writer_guard_changed")
+                db.info["composition_writer_owner"] = "durable_jobs"
+                yield db
+            return
+        if native_programme_source is not None:
+            if discovery_session is not None:
+                raise DurableJobLeaseError("native_programme_original_reader_changed")
+            async with self._native_programme_read_session(native_programme_source,
+                    header_budget=header_budget) as db:
+                db.info["composition_writer_owner"] = "durable_jobs"
+                yield db
+            return
         if discovery_session is not None:
             owned = self._validate_discovery_session(discovery_session, header_budget=header_budget)
             if discovery_phase != "queue" or owned._candidate[0] != job_id:
@@ -6295,7 +7007,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
 
     async def complete_native_memory(self, original_claim: NativeServiceClaim, *, result, header_budget=None) -> dict[str, Any]:
         """Complete only the same-writer actual Memory result and retained owners."""
-        from src.runtime_plugins.memory_producer import memory_context
+        from contextlib import AsyncExitStack
+        from src.runtime_plugins.memory_producer import memory_context, _memory_completion_capacity_scope
         from src.runtime_plugins.ownership import begin_native_writer
         from src.workspace.accounting_witness import (
             validate_native_memory_retention,
@@ -6305,61 +7018,110 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if type(original_claim) is not NativeServiceClaim or original_claim._host is None:
             raise DurableJobLeaseError("original native Memory claim required")
         host = original_claim._host
-        async with self._writer_session(**(
-            {"header_budget": header_budget} if header_budget is not None else {})) as db:
-            await begin_native_writer(db, owner="durable_jobs", **(
-                {"header_budget": header_budget} if header_budget is not None else {}))
-            if header_budget is not None:
-                from src.memory.header_bounds import WRS_BY_RUN
-                await header_budget.certify(db, WRS_BY_RUN, (original_claim.job["job_id"],))
-            run = await self._fetch(db, original_claim.job["job_id"])
-            context = memory_context(run)
-            sealed = context["result"]
-            receipt = _native_plain(original_claim.checkpoint)
-            payload = receipt["payload"]
-            if (run.status != "running" or sealed is None or sealed["payload"] != result
-                or sealed["claim_ref"] != payload["claim_ref"]
-                or run.composition_binding_json != original_claim.binding.to_json()
-                or receipt not in _json_load(run.checkpoint_receipts_json, [])
-                or run.input_digest != payload["input_digest"] or run.authority_digest != payload["authority_digest"]
-                or run.run_fingerprint != payload["run_fingerprint"] or run.attempt_count != payload["attempt_count"]
-                or _deadline_expired(run, now=_utc_now())):
-                raise DurableJobLeaseError("original native Memory completion changed")
-            self._assert_lease(run, owner=payload["lease_owner"], fencing_token=payload["fencing_token"])
-            await _validate_native_service_claim(db, run,
-                _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce, header_budget=header_budget))
-            from src.memory.header_bounds import GOAL
-            if run.goal_id is not None:
-                await header_budget.certify(db, GOAL, (run.goal_id,))
-            await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
-                goal_revision=run.goal_revision, owner_kind=run.owner_kind,
-                owner_principal_id=run.owner_principal_id, session_id=run.session_id,
-                authority=run.declared_authority_json)
-            await validate_native_memory_retention(db, run, sealed)
-            now = _utc_now()
-            # Stage the original owner's whole causal patch before computing
-            # the self-containing Current envelope. The private preparation
-            # binds the actual registered claim, writer, prior row and journal;
-            # these values alone carry no publication authority.
-            pending_changes = {
-                "status": "succeeded" if result["status"] == "succeeded" else "blocked",
-                "result_digest": sealed["result_digest"],
-                "result_summary": "Native Memory owner result committed",
-                "failure_reason": result.get("reason_code"),
-                "finished_at": now,
-                "updated_at": now,
-                "lease_owner": None,
-                "lease_expires_at": None,
-                "revision": _revision(run) + 1,
-                "checkpoint_context_json": run.checkpoint_context_json,
-            }
-            lifecycle = await prepare_native_memory_lifecycle(db, run,
-                original_claim=original_claim, pending_changes=pending_changes,
-                header_budget=header_budget)
-            if not host.admitting or host.boot_nonce != original_claim.host_boot_nonce:
-                raise DurableJobLeaseError("original native Memory host changed before settlement")
-            await apply_native_memory_lifecycle(db, run, lifecycle)
-            return _serialize(run, receipt={"kind": "native_memory_completed", "memory_status": result["memory_status"]})
+        async with AsyncExitStack() as capacity:
+            source = await capacity.enter_async_context(_memory_completion_capacity_scope(
+                original_claim, header_budget=header_budget))
+            retention = source._retention
+            header_budget = source.admission.header_budget
+            async with self._writer_session(header_budget=header_budget, native_memory_source=source) as db:
+                try:
+                    await begin_native_writer(db, owner="durable_jobs", header_budget=header_budget,
+                        _native_memory_source=source)
+                    # Both original read preparation and this actual fresh writer
+                    # bind before their respective certificate/body traversals.
+                    await retention.ledger.bind(db, "completion")
+                    with retention.ledger.phase("completion"):
+                        if header_budget is not None:
+                            from src.memory.header_bounds import WRS_BY_RUN
+                            await header_budget.certify(db, WRS_BY_RUN, (original_claim.job["job_id"],), _header_budget=header_budget)
+                        run = await self._fetch(db, original_claim.job["job_id"])
+                        context = memory_context(run)
+                        sealed = context["result"]
+                        header_budget.debit(_native_memory_plain_copy_upper(original_claim.checkpoint),
+                            appearance=("native-memory-completion", "claim-checkpoint-copy"))
+                        receipt = _native_plain(original_claim.checkpoint)
+                        payload = receipt["payload"]
+                        from src.runtime_plugins.memory_producer import _native_memory_dispatch_binding_json_entries
+                        for appearance, upper in _native_memory_dispatch_binding_json_entries(
+                                _discovery_utf8_width(run.composition_binding_json)):
+                            header_budget.debit(upper,
+                                appearance=("native-memory-completion-binding-json", appearance))
+                        header_budget.debit(6 * max(2, _discovery_utf8_width(run.checkpoint_receipts_json or "[]")) + 2,
+                            appearance=("native-memory-completion", "claim-journal-parser"))
+                        for stage in ("deadline-now", "deadline-replace", "deadline-astimezone",
+                                "lease-replace", "lease-astimezone", "lease-now"):
+                            header_budget.debit(44, appearance=("native-memory-completion", stage))
+                        if (run.status != "running" or sealed is None or sealed["payload"] != result
+                            or sealed["claim_ref"] != payload["claim_ref"]
+                            or run.composition_binding_json != original_claim.binding.to_json()
+                            or receipt not in _json_load(run.checkpoint_receipts_json, [])
+                            or run.input_digest != payload["input_digest"] or run.authority_digest != payload["authority_digest"]
+                            or run.run_fingerprint != payload["run_fingerprint"] or run.attempt_count != payload["attempt_count"]
+                            or _deadline_expired(run, now=_utc_now())):
+                            raise DurableJobLeaseError("original native Memory completion changed")
+                        self._assert_lease(run, owner=payload["lease_owner"], fencing_token=payload["fencing_token"])
+                        header_budget.debit(_native_memory_completion_claim_request_upper(),
+                            appearance=("native-memory-completion", "claim-request-construction"))
+                        from src.runtime_plugins.memory_producer import _memory_completion_authority_capacity
+                        async with _memory_completion_authority_capacity(source, db):
+                            await _validate_native_service_claim(db, run,
+                                _NativeServiceClaimRequest(host, host.reviewed, original_claim.host_boot_nonce, header_budget=header_budget))
+                        from src.memory.header_bounds import GOAL
+                        if run.goal_id is not None:
+                            await header_budget.certify(db, GOAL, (run.goal_id,), _header_budget=header_budget)
+                        await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+                            goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+                            owner_principal_id=run.owner_principal_id, session_id=run.session_id,
+                            authority=run.declared_authority_json, native_memory_source=source)
+                        checked_retention = await validate_native_memory_retention(db, run, sealed)
+                        if checked_retention is not retention:
+                            raise DurableJobLeaseError("native_memory_completion_retention_changed")
+                        header_budget.debit(44, appearance=("native-memory-completion", "timestamp"))
+                        now = _utc_now()
+                        # Stage the original owner's whole causal patch before computing
+                        # the self-containing Current envelope. The private preparation
+                        # binds the actual registered claim, writer, prior row and journal;
+                        # these values alone carry no publication authority.
+                        pending_upper = (2 + 9
+                            + sum(len(name) + 3 for name in ("status", "result_digest", "result_summary",
+                                "failure_reason", "finished_at", "updated_at", "lease_owner", "lease_expires_at",
+                                "revision", "checkpoint_context_json"))
+                            + _discovery_encoded_upper("succeeded" if result["status"] == "succeeded" else "blocked")
+                            + _discovery_encoded_upper(sealed["result_digest"])
+                            + _discovery_encoded_upper("Native Memory owner result committed")
+                            + _discovery_encoded_upper(result.get("reason_code")) + 44 + 44 + 4 + 4 + 20
+                            + _discovery_encoded_upper(run.checkpoint_context_json))
+                        header_budget.debit(pending_upper, appearance=("native-memory-completion", "pending-changes"))
+                        pending_changes = {
+                            "status": "succeeded" if result["status"] == "succeeded" else "blocked",
+                            "result_digest": sealed["result_digest"],
+                            "result_summary": "Native Memory owner result committed",
+                            "failure_reason": result.get("reason_code"),
+                            "finished_at": now,
+                            "updated_at": now,
+                            "lease_owner": None,
+                            "lease_expires_at": None,
+                            "revision": _revision(run) + 1,
+                            "checkpoint_context_json": run.checkpoint_context_json,
+                        }
+                        lifecycle = await prepare_native_memory_lifecycle(db, run,
+                            original_claim=original_claim, pending_changes=pending_changes,
+                            header_budget=header_budget)
+                        if not host.admitting or host.boot_nonce != original_claim.host_boot_nonce:
+                            raise DurableJobLeaseError("original native Memory host changed before settlement")
+                        await apply_native_memory_lifecycle(db, run, lifecycle)
+                        receipt_upper = (2 + 1 + len("kind") + 3 + len("memory_status") + 3
+                            + _discovery_encoded_upper("native_memory_completed")
+                            + _discovery_encoded_upper(result["memory_status"]))
+                        header_budget.debit(receipt_upper,
+                            appearance=("native-memory-completion", "receipt-construction"))
+                        return _serialize(run,
+                            receipt={"kind": "native_memory_completed", "memory_status": result["memory_status"]},
+                            native_memory_retention=retention)
+                finally:
+                    # Original engine exit publishes under its own same-ledger
+                    # completion phase; never retain a caller phase across exit.
+                    await capacity.aclose()
 
     async def start_programme_service(self, db, run, *, called, payload):
         from src.runtime_plugins.programme_producer import write_programme_start
@@ -6407,13 +7169,22 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if expected_state != "queued":
             raise DurableJobTransitionError("durable job claims require the queued state")
         header_budget = _runtime_service_claim.header_budget if _runtime_service_claim is not None else None
+        programme_source = (_runtime_service_claim.native_programme_source
+            if _runtime_service_claim is not None else None)
+        if programme_source is not None and programme_source.job_id != job_id:
+            raise DurableJobLeaseError("native_programme_original_reader_changed")
         async with self._writer_session(**(
-            {"header_budget": header_budget} if header_budget is not None else {})) as db:
+            {"header_budget": header_budget} if header_budget is not None else {}),
+                native_programme_source=programme_source) as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 await header_budget.certify(db, WRS_BY_RUN, (job_id,))
-            preflight_run = await self._fetch(db, job_id)
+            if programme_source is not None:
+                async with self._native_programme_paid_row(programme_source, db):
+                    preflight_run = await self._fetch(db, job_id)
+            else:
+                preflight_run = await self._fetch(db, job_id)
             if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
@@ -6439,7 +7210,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if header_budget is not None:
                 from src.memory.header_bounds import WRS_BY_RUN
                 await header_budget.certify(db, WRS_BY_RUN, (job_id,))
-            run = await self._fetch(db, job_id)
+            if programme_source is not None:
+                await programme_source.prepare_selection(db)
+                async with self._native_programme_paid_row(programme_source, db):
+                    run = await self._fetch(db, job_id)
+            else:
+                run = await self._fetch(db, job_id)
             if run.job_kind == "work.local-evidence-report.v1" and run.composition_binding_json is not None:
                 if (_runtime_service_claim is None or continue_existing_attempt or run.attempt_count != 0):
                     raise DurableJobLeaseError("the original native report claim is exhausted or unavailable")
@@ -6882,7 +7658,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if service_checkpoint is not None:
                 return NativeServiceClaim(_frozen_native_value(_serialize(claimed, receipt=receipt)),
                     _frozen_native_value(service_checkpoint), service_binding, _runtime_service_claim.host_boot_nonce,
-                    _runtime_service_claim.host)
+                    _runtime_service_claim.host,
+                    getattr(_runtime_service_claim, "_memory_claim_read_numeric", None))
             return _serialize(claimed, receipt=receipt)
 
     @_original_memory_maintenance_entry

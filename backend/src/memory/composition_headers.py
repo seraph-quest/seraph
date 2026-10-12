@@ -80,14 +80,81 @@ def _metadata_transaction_required(connection):
         raise HeaderBoundsError("header_metadata_transaction_required")
 
 
+def _metadata_memory_capacity(connection, budget, active):
+    """Validate the original numerical payer; this grants no metadata access."""
+    import asyncio
+    from sqlalchemy.engine import Connection as SQLAlchemyConnection
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from src.memory.header_bounds import _NativeMemoryNumericLedger
+    from src.runtime_plugins.memory_producer import (
+        _NativeMemoryDispatchSource, _MEMORY_SOURCE_SEAL,
+        _validate_memory_completion_capacity_source,
+        _validate_memory_completion_publication_capacity_source)
+    from src.workspace.accounting_witness import (
+        CompositionSessionGuard, _COMPOSITION_METADATA_GUARDS, _NativeMemoryRetention)
+    from src.workflows.job_runtime import NativeServiceClaim
+    if type(active) is not tuple or len(active) != 2:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    ledger, phase = active
+    if (type(ledger) is not _NativeMemoryNumericLedger
+            or phase not in {"effect", "capture", "completion"}
+            or budget is not ledger.budget):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    ledger._checked()
+    source = ledger.source
+    retention = getattr(source, "_retention", None)
+    if (type(source) is not _NativeMemoryDispatchSource
+            or source._seal is not _MEMORY_SOURCE_SEAL or source._issued_id != id(source)
+            or type(source.claim) is not NativeServiceClaim
+            or type(retention) is not _NativeMemoryRetention
+            or retention.source is not source or retention.ledger is not ledger
+            or retention.operation is not ledger.operation or retention.prepared is not ledger.prepared):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    retention._checked()
+    binding = ledger.bindings.get(phase)
+    if (type(binding) is not tuple or len(binding) != 6
+            or type(binding[0]) is not AsyncSession
+            or binding[5] is not asyncio.current_task()
+            or binding[0].sync_session.get_transaction() is not binding[1]
+            or type(connection) is not SQLAlchemyConnection
+            or connection.connection.driver_connection is not binding[2]
+            or not binding[2].in_transaction
+            or (phase != "completion" and (binding[0] is not ledger.operation.db
+                or binding[1] is not ledger.operation.transaction
+                or binding[2] is not ledger.operation.driver))):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # Lookup only an already enrolled connection; do not acquire a connection
+    # or manufacture a certificate while checking resource ownership.
+    enrolled = binding[1]._connections.get(connection)
+    guard = binding[0].info.get("composition_guard")
+    if (type(enrolled) is not tuple or len(enrolled) != 4 or enrolled[0] is not connection
+            or connection.get_transaction() is not enrolled[1]
+            or type(guard) is not CompositionSessionGuard
+            or guard not in _COMPOSITION_METADATA_GUARDS or guard._retention_closed
+            or guard.db is not binding[0] or guard.header_budget is not budget
+            or getattr(guard, "_native_memory_source_retention", None) is not retention):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    if phase == "completion":
+        if retention.completed is True:
+            _validate_memory_completion_publication_capacity_source(
+                source, source.claim, guard=guard)
+        else:
+            _validate_memory_completion_capacity_source(source, source.claim)
+
+
 def _metadata_precharge(connection, budget, upper, appearance):
-    if budget is None:
-        return
     from src.memory.header_bounds import _SESSION_NUMERIC_READS, _MEMORY_LEDGER_PHASE
+    active = _MEMORY_LEDGER_PHASE.get()
+    if budget is None:
+        if active is not None:
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
+        return
     if (type(budget) is not HeaderReadBudget or type(upper) is not int or upper < 0
-            or _SESSION_NUMERIC_READS.get() is not None or _MEMORY_LEDGER_PHASE.get() is not None):
+            or _SESSION_NUMERIC_READS.get() is not None):
         raise HeaderBoundsError("header_metadata_owner_unavailable")
     _metadata_transaction_required(connection)
+    if active is not None:
+        _metadata_memory_capacity(connection, budget, active)
     current = _CURRENT.get()
     if current is not None and (current.connection is not connection or current.budget is not budget):
         raise HeaderBoundsError("header_metadata_owner_unavailable")
@@ -278,6 +345,184 @@ def _snapshot_schema_cookies(connection, budget, *, _header_budget=None):
     return cookies
 
 
+_COMMON_NUMERIC_TRACE_SEAL = object()
+_COMMON_NUMERIC_TRACES = WeakValueDictionary()
+_COMMON_TRACE_COLLECTORS = WeakValueDictionary()
+_COMMON_TRACE_COLLECTOR_ACTIVE = ContextVar("common_issuer_numeric_collector", default=None)
+
+
+@dataclass(frozen=True, eq=False)
+class _CommonCertificationNumericTrace:
+    certificate: object
+    budget: object
+    connection: object
+    transaction: object
+    driver: object
+    raw_owner: object
+    scope: object
+    invocation: object
+    task: object
+    thread: int
+    entries: tuple
+    seal: object = field(default=_COMMON_NUMERIC_TRACE_SEAL, repr=False)
+
+
+class _CommonCertificationTraceCollector:
+    """Keep original charge observations in every enclosing same-frame trace."""
+    def __init__(self, connection, budget, scope, prior):
+        self.connection = connection
+        self.budget = budget
+        self.scope = scope
+        self.task = _snapshot_current_task()
+        self.thread = threading.get_ident()
+        self.prior = prior
+        self.outer = prior[1] if prior is not None and prior[0] is budget else None
+        self.entries = []
+
+    def _checked(self, budget):
+        if (_COMMON_TRACE_COLLECTORS.get(id(self)) is not self
+                or _COMMON_TRACE_COLLECTOR_ACTIVE.get() is not self
+                or self.budget is not budget or self.task is not _snapshot_current_task()
+                or self.thread != threading.get_ident()
+                or self.scope is not _checked_current_snapshot_scope(budget)):
+            raise HeaderBoundsError("memory_common_numeric_trace_unavailable")
+
+    def _storage_debit(self, upper, stage):
+        from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
+        # Restore only the captured original enclosing trace while paying our
+        # own storage. It still sees this fee; the collector cannot recurse on
+        # its own pair/list allocation fee. Restore both tokens on failure.
+        parent = self.outer if type(self.outer) is _CommonCertificationTraceCollector else None
+        active_token = _COMMON_TRACE_COLLECTOR_ACTIVE.set(parent)
+        token = _MEMORY_CHARGE_TRACE.set(self.prior)
+        try:
+            _metadata_precharge(self.connection, self.budget, upper,
+                ("common-certification-trace", stage, len(self.entries)))
+        finally:
+            _MEMORY_CHARGE_TRACE.reset(token)
+            _COMMON_TRACE_COLLECTOR_ACTIVE.reset(active_token)
+
+    def _append_paid_slot(self, entry, pair_upper):
+        self._storage_debit(pair_upper + 1, "entry-list-slot")
+        self.entries.append(entry)
+        if type(self.outer) is _CommonCertificationTraceCollector:
+            token = _COMMON_TRACE_COLLECTOR_ACTIVE.set(self.outer)
+            try:
+                self.outer._checked(self.budget)
+                self.outer._append_paid_slot(entry, pair_upper)
+            finally:
+                _COMMON_TRACE_COLLECTOR_ACTIVE.reset(token)
+        elif self.outer is not None:
+            self.outer.append(entry)
+
+    def append_charge(self, appearance, amount):
+        self._checked(self.budget)
+        if type(amount) is not int or not 0 <= amount < 2**63:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        pair_upper = 2 + _common_trace_label_width(appearance) + 1 + 20
+        self._storage_debit(pair_upper, "entry-pair")
+        # Pay the retained list appearance BEFORE even constructing the pair.
+        self._storage_debit(pair_upper + 1, "entry-list-slot")
+        entry = (appearance, amount)
+        self.entries.append(entry)
+        if type(self.outer) is _CommonCertificationTraceCollector:
+            token = _COMMON_TRACE_COLLECTOR_ACTIVE.set(self.outer)
+            try:
+                self.outer._checked(self.budget)
+                self.outer._append_paid_slot(entry, pair_upper)
+            finally:
+                _COMMON_TRACE_COLLECTOR_ACTIVE.reset(token)
+        elif self.outer is not None:
+            self.outer.append(entry)
+
+
+def _common_trace_label_width(value):
+    if type(value) in (str, int, bool) or value is None:
+        return _metadata_size(value)
+    if type(value) is tuple:
+        return 2 + sum(_common_trace_label_width(item) for item in value) + max(0, len(value) - 1)
+    raise HeaderBoundsError("memory_common_numeric_trace_unavailable")
+
+
+def _complete_memory_certification_trace_unused(connection, budget):
+    """Exact completed-forecast phase; no certificate or read authorization.
+
+    The only planning-trace consumer is begin_native_memory_effect before
+    its complete reservation exists. Capture/completion consumers validate
+    current certificates and bodies without reading this planning record.
+    Their original issuer debits remain observable by any enclosing trace.
+    """
+    from src.memory.header_bounds import (_MEMORY_LEDGER_PHASE,
+        _NativeMemoryNumericLedger, _MEMORY_LEDGER_SEAL)
+    active = _MEMORY_LEDGER_PHASE.get()
+    if (type(active) is not tuple or len(active) != 2
+            or type(active[0]) is not _NativeMemoryNumericLedger
+            or active[0]._complete_owner is not _MEMORY_LEDGER_SEAL):
+        return False
+    _metadata_memory_capacity(connection, budget, active)
+    return True
+
+
+def _issue_current_memory_numeric_certificate(connection, budget, *, scope, raw_owner, _header_budget):
+    if _header_budget is None:
+        return preflight_composition_superset(connection, budget, raw_owner=raw_owner)
+    if raw_owner is None and _complete_memory_certification_trace_unused(connection, budget):
+        # No collector/list/pair/retained tuple is constructed in this branch.
+        # All original preflight charges reach the unchanged outer observer.
+        return preflight_composition_superset(connection, budget, raw_owner=raw_owner,
+            _header_budget=_header_budget)
+    from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
+    prior = _MEMORY_CHARGE_TRACE.get()
+    _metadata_precharge(connection, budget, 2, ("common-certification-trace", "collector-list"))
+    collector = _CommonCertificationTraceCollector(connection, budget, scope, prior)
+    _COMMON_TRACE_COLLECTORS[id(collector)] = collector
+    active_token = _COMMON_TRACE_COLLECTOR_ACTIVE.set(collector)
+    token = _MEMORY_CHARGE_TRACE.set((budget, collector))
+    try:
+        certificate = preflight_composition_superset(connection, budget, raw_owner=raw_owner,
+            _header_budget=_header_budget)
+    finally:
+        _MEMORY_CHARGE_TRACE.reset(token)
+        _COMMON_TRACE_COLLECTOR_ACTIVE.reset(active_token)
+        _COMMON_TRACE_COLLECTORS.pop(id(collector), None)
+    # Original encoded metadata units, without JSON/string/byte construction.
+    # This is the one new retained output, paid before copying its tuple.
+    _metadata_precharge(connection, budget, _metadata_size(collector.entries),
+        ("common-certification-trace", "retained-copy"))
+    entries = tuple(collector.entries)
+    record = _CommonCertificationNumericTrace(certificate, budget, connection,
+        certificate.transaction, certificate.driver, raw_owner, scope,
+        scope.invocation if scope is not None else None, _snapshot_current_task(),
+        threading.get_ident(), entries)
+    object.__setattr__(certificate, "_common_numeric_trace", record)
+    _COMMON_NUMERIC_TRACES[id(certificate)] = record
+    return certificate
+
+
+def native_memory_certification_numeric_trace(certificate, *, header_budget):
+    """The exact paid issuer facts, never a cached validator trace or a grant."""
+    if (type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or type(header_budget) is not HeaderReadBudget
+            or certificate.budget is not header_budget
+            or certificate.metadata_budget is not header_budget):
+        raise HeaderBoundsError("memory_common_numeric_trace_unavailable")
+    record = _COMMON_NUMERIC_TRACES.get(id(certificate))
+    if (type(record) is not _CommonCertificationNumericTrace
+            or getattr(certificate, "_common_numeric_trace", None) is not record
+            or record.seal is not _COMMON_NUMERIC_TRACE_SEAL
+            or record.certificate is not certificate or record.budget is not header_budget
+            or record.connection is not certificate.connection
+            or record.transaction is not certificate.transaction or record.driver is not certificate.driver
+            or record.raw_owner is not certificate.raw_owner
+            or record.task is not _snapshot_current_task() or record.thread != threading.get_ident()
+            or record.scope is not _checked_current_snapshot_scope(header_budget)
+            or (record.scope is not None and record.invocation is not record.scope.invocation)):
+        raise HeaderBoundsError("memory_common_numeric_trace_unavailable")
+    _validate(record.connection, certificate)
+    return record.entries
+
+
 def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_owner=None, _header_budget=None):
     """Reuse only an original issued certificate for this exact live snapshot."""
     if _header_budget is not None and _header_budget is not budget:
@@ -286,7 +531,8 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
         raise HeaderBoundsError("header_request_bound")
     scope = _checked_current_snapshot_scope(budget)
     if scope is None:
-        return preflight_composition_superset(connection, budget, raw_owner=raw_owner, _header_budget=_header_budget)
+        return _issue_current_memory_numeric_certificate(connection, budget, scope=None,
+            raw_owner=raw_owner, _header_budget=_header_budget)
     current = scope.certificates.get(connection)
     if current is not None:
         certificate, cookies = current
@@ -304,7 +550,8 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
             if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) == cookies:
                 return certificate
     cookies = _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget)
-    certificate = preflight_composition_superset(connection, budget, raw_owner=raw_owner, _header_budget=_header_budget)
+    certificate = _issue_current_memory_numeric_certificate(connection, budget, scope=scope,
+        raw_owner=raw_owner, _header_budget=_header_budget)
     if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) != cookies:
         raise HeaderBoundsError("header_schema_cookie_changed")
     _validate(connection, certificate)

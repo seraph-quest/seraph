@@ -333,6 +333,8 @@ def _operator_for_record(
     ownership_continuity: str = _OWNERSHIP_STABLE,
     ownership_recovery_action: str | None = None,
 ) -> AuthenticatedOperator:
+    from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
+    _native_memory_authority_owner_pay(None, "operator-constructor", record=record)
     return AuthenticatedOperator(
         record.id,
         _principal(record.id, record.principal_id),
@@ -369,6 +371,8 @@ async def _ownership_metadata(
         from src.memory.header_bounds import OPERATOR_SESSION
         await budget.certify_all(db, OPERATOR_SESSION)
         budget.debit(3 * (6 * 512 + 2) + 2, appearance=("auth-reverse-projection", record.id))
+    from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
+    _native_memory_authority_owner_pay(db, "reverse-results", record=record)
     try:
         non_tombstone_predecessors = (
             await db.execute(
@@ -677,6 +681,8 @@ async def authenticate_principal(principal_id: str, *, db=None) -> Authenticated
     if db is None:
         async with get_session() as session:
             return await authenticate_principal(principal_id, db=session)
+    from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
+    _native_memory_authority_owner_pay(db, "principal-query")
     record = (await db.execute(select(OperatorSession).where(
         OperatorSession.principal_id == principal_id,
         OperatorSession.is_bearer_tombstone.is_(False),

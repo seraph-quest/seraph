@@ -657,7 +657,23 @@ def physical_discovery_closure(raw_workflow_row, *, root, header_budget):
         return appearances
 
 
-async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None, discovery_session=None):
+async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None, discovery_session=None, native_programme_source=None):
+    if native_programme_source is not None:
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        source = native_programme_source
+        if (type(source) is not _ProgrammeSource or discovery_session is not None
+                or source.jobs is not jobs or source.job_id != job_id
+                or completed_read or stage_id is not None):
+            raise ValueError("native_programme_original_physical_source_changed")
+        source.validate()
+        with _original_discovery_physical_capacity_scope(source.header_budget):
+            # The original owner remains live through files, plan parsing,
+            # saved-pin validation and provenance. Its engine closes it only
+            # after all of those reads have finished.
+            async with jobs._native_programme_read_session(source,
+                    header_budget=source.header_budget) as db:
+                return await _physical_discovery_inputs(jobs, job_id,
+                    native_programme_source=source, _native_reader_db=db)
     if discovery_session is not None:
         owned = jobs._validate_discovery_session(discovery_session)
         with owned.guard._discovery_reservation.phase("queue"):
@@ -666,7 +682,9 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
     return await _physical_discovery_inputs(jobs, job_id, completed_read=completed_read, stage_id=stage_id)
 
 
-async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None, discovery_session=None):
+async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage_id=None,
+                                     discovery_session=None, native_programme_source=None,
+                                     _native_reader_db=None):
     """Reopen immutable programme inputs BEFORE a short native writer."""
     from src.work_board.research_parent import DISCOVERY_KIND
     from src.work_board.research_artifacts import read_discovery, DISCOVERY_ARTIFACT_LIMITS
@@ -677,12 +695,48 @@ async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stag
     if owned is not None:
         if completed_read or stage_id is not None or owned._candidate is None or owned._candidate[0] != job_id:
             raise ValueError("programme original physical read owner changed")
-    async with jobs._discovery_read_session(discovery_session) as db:
+    source = native_programme_source
+    if source is not None:
+        from src.runtime_plugins.programme_producer import _ProgrammeSource
+        if type(source) is not _ProgrammeSource:
+            raise ValueError("native_programme_original_physical_source_changed")
+        source.validate()
+        if source.jobs is not jobs or source.job_id != job_id or _native_reader_db is None:
+            raise ValueError("native_programme_original_physical_source_changed")
+        source.authority_selection(_native_reader_db)
+    elif _native_reader_db is not None:
+        raise ValueError("native_programme_original_physical_source_changed")
+    frame = source.header_budget if source is not None else owned.header_budget if owned is not None else None
+    if frame is None:
+        from src.memory.header_bounds import HeaderReadBudget
+        # This bounded legacy branch check confers no composed read authority.
+        frame = HeaderReadBudget()
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def reader():
+        if source is not None:
+            # A DB value alone cannot enter this branch: the exact Source
+            # validates the still-live original guard/task/transaction/frame.
+            source.validate()
+            source.authority_selection(_native_reader_db)
+            yield _native_reader_db
+        else:
+            async with jobs._discovery_read_session(discovery_session,
+                    header_budget=frame) as db:
+                yield db
+    async with reader() as db:
+        if source is None and owned is None:
+            await jobs._require_uncomposed_discovery_row(db, job_id, frame)
+        if source is not None:
+            from src.memory.header_bounds import WRS_BY_RUN
+            await frame.certify(db, WRS_BY_RUN, (job_id,), _header_budget=frame)
+
         if owned is not None:
             from src.memory.header_bounds import WRS_BY_RUN
             await owned.header_budget.certify(db, WRS_BY_RUN, (job_id,))
         from contextlib import nullcontext
-        async with (jobs._discovery_paid_row(owned, job_id) if owned is not None else nullcontext()):
+        async with (jobs._discovery_paid_row(owned, job_id) if owned is not None else
+                jobs._native_programme_paid_row(source, db) if source is not None else nullcontext()):
             run = await jobs._fetch(db, job_id)
         if run.job_kind != DISCOVERY_KIND:
             raise ValueError("programme physical inputs require native lineage")
@@ -690,19 +744,42 @@ async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stag
             raise ValueError("programme completed readback requires its original positive terminal job")
         if owned is not None:
             _discovery_physical_prepay(owned.header_budget, "input-reader", {"run_identity": job_id})
+        if source is not None:
+            from src.guardian.goal_programmes import goal_programme_service
+            from src.workflows.research_guard import discovery_writer_scope
+            from src.work_board.research_parent import discovery_authority
+            guard, identity = await source.prepare_selection(db, run)
+            source.authority_selection(db)
+            row_upper = source.writer[4].common33.rows[("workflow_run_states", job_id)][1]
+            frame.debit(row_upper, appearance=("native-programme-physical", job_id, "authority-model"))
+            authority = discovery_authority(run.declared_authority_json)
+            async with discovery_writer_scope() as policy:
+                await goal_programme_service.validate_current_binding(db=db,
+                    binding=authority.programme_binding, policy=policy,
+                    original_admission_guard=guard, identity_certificate=identity,
+                    native_programme_source=source)
+            frame.debit(row_upper, appearance=("native-programme-physical", job_id, "row-copy"))
         raw_row = run.model_dump(mode="python")
-    frame = owned.header_budget if owned is not None else None
     _, authority, inputs, history, _, _ = _discovery_original_rows(raw_row, header_budget=frame)
     references = discovery_physical_references(raw_row, header_budget=frame)
+    if source is not None:
+        source.validate()
+        sizes = {kind: size for _, _, size, kind in references}
+        _discovery_physical_prepay(frame, "input-reader", raw_row,
+            count=len(references), plan_bytes=sizes["plan"], brief_bytes=sizes["public_brief"])
     def physical_read(path, digest, max_bytes):
-        if owned is None:
+        if source is not None:
+            source.validate()
+            source.authority_selection(_native_reader_db)
+        if owned is None and source is None:
             return read_discovery(path, digest, programme_id=binding.programme_id, max_bytes=max_bytes)
         sizes = {size for selected_path, selected_digest, size, _ in references
             if selected_path == path and selected_digest == digest}
         if len(sizes) != 1:
             raise ValueError("programme original physical size changed")
         return read_discovery(path, digest, programme_id=binding.programme_id, max_bytes=max_bytes,
-            root=owned.guard.workspace.host_root, expected_size=next(iter(sizes)), header_budget=owned.header_budget)
+            root=(source.writer[3].workspace.host_root if source is not None else owned.guard.workspace.host_root),
+            expected_size=next(iter(sizes)), header_budget=frame)
     binding = authority.programme_binding
     contents = {}
     raw_plan = physical_read(inputs["plan_file_path"], ArtifactRef.model_validate(inputs["plan_ref"]).digest, 65536)
@@ -715,9 +792,21 @@ async def _physical_discovery_inputs(jobs, job_id, *, completed_read=False, stag
     if current_service is not None:
         if owned is not None and current_service is not owned.service:
             raise ValueError("programme original physical strategy owner changed")
-        async with jobs._discovery_read_session(discovery_session) as db:
+        if source is not None and current_service is not source.service:
+            raise ValueError("native_programme_original_strategy_owner_changed")
+        async with reader() as db:
+            if source is None and owned is None:
+                await jobs._require_uncomposed_discovery_row(db, job_id, frame)
+            if source is not None:
+                await frame.certify(db, WRS_BY_RUN, (job_id,), _header_budget=frame)
+                async with jobs._native_programme_paid_row(source, db):
+                    current_run = await jobs._fetch(db, job_id)
+                await source.prepare_selection(db, current_run)
             await current_service._validate_pinned_strategy(binding, plan.strategy_binding, db=db,
-                **({"discovery_session": owned} if owned is not None else {}))
+                **({"discovery_session": owned} if owned is not None else
+                    {"native_programme_source": source} if source is not None else {}))
+    elif source is not None:
+        raise ValueError("native_programme_original_strategy_owner_changed")
     elif plan.strategy_binding.status != "none":
         raise ValueError("programme active strategy requires its current native lifecycle owner")
     contents[inputs["public_brief_file_path"]] = physical_read(inputs["public_brief_file_path"],

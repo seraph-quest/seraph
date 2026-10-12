@@ -282,12 +282,20 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def root_binding() -> Mapping[str, Any]:
+def root_binding(*, header_budget=None) -> Mapping[str, Any]:
     # Existing canonical workspace identity includes the live path/device/inode.
-    return canonical_workspace_root_identity(settings.workspace_dir)
+    return (canonical_workspace_root_identity(settings.workspace_dir) if header_budget is None
+        else canonical_workspace_root_identity(settings.workspace_dir, header_budget=header_budget))
 
 
-def unpack(row: WorkBoardProposal) -> dict[str, Any]:
+def unpack(row: WorkBoardProposal, *, _memory_header_budget=None) -> dict[str, Any]:
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay, _report_memory_canonical_pay
+        from src.memory.header_bounds import _native_memory_utf8_width
+        upper = 6 * _native_memory_utf8_width(row.proposal_json) + 2
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-proposal-parser", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-proposal-pairs", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-proposal-dicts", upper)
     try:
         def pairs(items):
             result = {}
@@ -299,6 +307,8 @@ def unpack(row: WorkBoardProposal) -> dict[str, Any]:
         value = json.loads(row.proposal_json, object_pairs_hook=pairs)
     except (TypeError, ValueError) as exc:
         raise BoardError("pipeline_corrupt", "The reviewed operation metadata is unavailable", status_code=409) from exc
+    if _memory_header_budget is not None and isinstance(value, dict) and value.get("kind") == PIPELINE_KIND:
+        _report_memory_canonical_pay(value, _memory_header_budget, stage="pipeline-proposal-digest", digest_output=True)
     if not isinstance(value, dict) or value.get("kind") != PIPELINE_KIND or digest(value) != row.proposal_digest:
         raise BoardError("pipeline_corrupt", "The reviewed operation digest changed", status_code=409)
     validate_retired_cleanup(value.get("retired_input_cleanup"))
@@ -306,7 +316,7 @@ def unpack(row: WorkBoardProposal) -> dict[str, Any]:
 
 
 async def owned(db: Any, owner: WorkBoardOwner, operation_id: str, *, revision: int | None = None,
-                workspace_identity: bytes | None = None) -> tuple[WorkBoardProposal, dict[str, Any]]:
+                workspace_identity: bytes | None = None, header_budget=None) -> tuple[WorkBoardProposal, dict[str, Any]]:
     row = await db.scalar(select(WorkBoardProposal).where(WorkBoardProposal.proposal_id == operation_id,
         WorkBoardProposal.owner_principal_id == owner.principal_id, WorkBoardProposal.owner_session_id == owner.session_id,
         WorkBoardProposal.kind == PIPELINE_KIND).execution_options(populate_existing=True))
@@ -314,8 +324,12 @@ async def owned(db: Any, owner: WorkBoardOwner, operation_id: str, *, revision: 
         raise BoardError("pipeline_not_found", "The reviewed operation is unavailable", status_code=404)
     if revision is not None and row.revision != revision:
         raise BoardError("pipeline_revision_conflict", "The reviewed operation changed; read back before retry", status_code=409)
-    value = unpack(row)
-    if canonical_bytes(value["live_root"]) != (workspace_identity if workspace_identity is not None else canonical_bytes(root_binding())):
+    value = unpack(row, _memory_header_budget=header_budget)
+    if header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_canonical_pay
+        _report_memory_canonical_pay(value["live_root"], header_budget, stage="pipeline-live-root")
+    if canonical_bytes(value["live_root"]) != (workspace_identity if workspace_identity is not None
+            else canonical_bytes(root_binding() if header_budget is None else root_binding(header_budget=header_budget))):
         raise BoardError("pipeline_root_changed", "The original live workspace changed; this operation cannot move roots", status_code=409)
     return row, value
 
@@ -809,11 +823,21 @@ async def runtime_guard(task: WorkBoardTask, *, attempt: WorkBoardAttempt | None
 
 
 async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt | None = None,
-                     workspace_identity: bytes | None = None, source_witness=None) -> tuple[WorkBoardProposal, dict[str, Any]]:
+                     workspace_identity: bytes | None = None, source_witness=None,
+                     _memory_header_budget=None) -> tuple[WorkBoardProposal, dict[str, Any]]:
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        upper = (2 + 1 + 2 + _native_memory_ascii_string_width("principal_id")
+            + _native_memory_source_value_upper(task.owner_principal_id)
+            + _native_memory_ascii_string_width("session_id") + _native_memory_source_value_upper(task.owner_session_id))
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-owner-model", upper)
     owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
     if not task.pipeline_operation_id:
         raise BoardError("pipeline_binding_required", "Evidence leaves require an exact reviewed operation", status_code=409)
-    row, value = await owned(db, owner, task.pipeline_operation_id, workspace_identity=workspace_identity)
+    row, value = await owned(db, owner, task.pipeline_operation_id, workspace_identity=workspace_identity,
+        header_budget=_memory_header_budget)
     if getattr(row, "opportunity_id", None):
         from src.guardian.opportunity_plans import recheck_accepted_plan_task
         await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=source_witness)
@@ -835,6 +859,12 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
         await freeze_unfinished(db, row, value, "goal_changed")
         raise
     from src.goals.repository import deserialize_admission_budget
+    if _memory_header_budget is not None and goal.admission_budget_json:
+        from src.memory.header_bounds import _native_memory_utf8_width
+        upper = 6 * _native_memory_utf8_width(goal.admission_budget_json) + 2
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-parser", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-pairs", upper)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-dicts", upper)
     budget = deserialize_admission_budget(goal)
     if budget is None or not budget.reviewed_grant:
         raise BoardError("pipeline_goal_budget_required", "The current Goal no longer grants finite work", status_code=409)

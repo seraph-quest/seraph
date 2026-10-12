@@ -69,14 +69,15 @@ def test_cpu_rejects_changed_digest_wrong_producer_schema_and_capability():
         EvidenceConsumerInput.model_validate({**valid, "no_learning": False})
 
 
-async def setup_operation(async_db, monkeypatch, tmp_path):
+async def setup_operation(async_db, monkeypatch, tmp_path, *, owner=None):
     # This fixture owns its finite source permission independently of private
     # managed runtime configuration. Keep the production SitePolicy checks.
     monkeypatch.setattr(settings, "browser_site_allowlist", "fixture.example")
     monkeypatch.setattr(settings, "browser_site_blocklist", "")
     from tests.test_browser_task_runtime import _input
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    owner = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
+    owner = owner if owner is not None else WorkBoardOwner(
+        principal_id="operator:test-bypass", session_id="test-auth-bypass")
     repository = WorkBoardRepository()
     async with async_db() as db:
         db.add(Goal(id="goal-914", title="Finite public evidence", status="active", revision=1,

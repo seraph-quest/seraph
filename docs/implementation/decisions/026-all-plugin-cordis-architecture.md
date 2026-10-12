@@ -306,6 +306,8 @@ recovery cannot leave stale validated Current or reconstruct original capacity
 from snapshot counts. Missing genuine owner or original capacity blocks mutation
 while preserving Original, fences and liabilities.
 
+The [selected scheduler/Google dependency exception](#selected-scheduler-and-google-readonly-sync-dependency-exception-1007) below additionally permits only its named original selected owner dependencies. It does not broaden the programme-only Identity rule to generic reads or change common33.
+
 ### Bounded goal-programme continuity exception (#1007)
 
 This accepted-target amendment supersedes the fixed33/no-field-extension rule,
@@ -365,6 +367,71 @@ actual populated-event, no-body overflow, current-writer ordering, bounded
 physical-reader, original effect/readback and recovery proof plus independent
 cumulative review. Historical receipts or module/service availability establish
 no native Memory permission or completion.
+
+### Selected scheduler and Google readonly-sync dependency exception (#1007)
+
+The accepted **2026-10-11** narrow refinement for
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) permits only the
+conditional read-dependency boundary below. It is an accepted implementation
+target, not product activation, availability, validation or completion. The
+fixed fourteen-service/thirty-four-method migration remains **Planned** until
+its complete original-owner journey is proved. This target resolves the R1G
+additional-read-dependency STOP only for these selected existing owners;
+separate capability and implementation STOPs remain.
+
+Supersede the R1G no-additional-read-dependency rule and the programme-only named-certificate restriction solely to permit conditional certificates for these existing source-owned tables when required by the exact selected original scheduler or Google readonly-sync operation: scheduled_jobs, scheduled_job_runs, governed_schedule_bindings, governed_schedule_occurrences, google_service_connections, calendar_read_consents, calendar_event_bindings, operator_identities, mail_read_consents, mail_label_bindings and mail_message_bindings. The permitted complete source-order column tuples are exactly the durable roster below, subject to independent source/schema/locator validation before implementation. This creates no table, index, field, grant, authority owner, generic body API or new job permission. The common33 superset, its codecs and existing components remain unchanged. OperatorIdentity keeps exactly id,created_at,revoked_at; this addition permits its original operator-root Google sync use, and does not weaken the separate programme rule.
+
+Select rows only through the exact original request/claim and owner-derived relations below. Certify unchanged common33 and each required selected table/schema/locator and row header on the same current original connection/transaction before its private body. After every actual fresh BEGIN IMMEDIATE, recertify required current bodies; writes/rollback/schema changes invalidate certificates. All metadata, complete raw rows/ciphertexts, repeated appearances, files, parser/copy/serialization/output and prospective Original/Current/Unknown capacity use the same original 128-reference/1,048,576-byte frame. No per-component pool, reset, refund, headroom or legacy unmetered fallback. Original Source/current Root/grants/Identity/Goal/revocation/epoch/host/boot/lease/fence/deadline and effect/readback checks remain independent mandatory checks. Unknown rows, locators, dependencies, historical liabilities or costs stop before body/effect.
+
+Retain these additions in separately finite selected scheduler and Google components only after their complete raw tuple/relationship/file grammar and explicit version compatibility are frozen and independently reviewed. This target assigns no new component version identifier or manifest digest; do not reinterpret old receipts, silently append an absent component to history or activate from this table list. Preserve exact Core15/native.v3/Memory/common33 and the existing programme component bytes. A stopped transition under original lifecycle/accounting owners must prove the old closure and no pending gap; unsupported old-reader rollback remains blocked with liabilities intact. Restoration never recreates a Source, Root/grant/lease or deadline. Preserve current issuer/authentication invalidation ordering; retained ownership/revocation conflict stops before mutation, and jobs retain original blocked/fenced recovery behavior.
+
+Keep the current unfiltered schema ceiling1359/LIMIT1360 under [ADR-033](./033-task-method-composition-metadata.md); this amendment supplies no metadata headroom. Google retains original encrypted page bounds (256KiB plaintext/384KiB ciphertext, at most3 pages,20 items/page,50 total and10 private items), with every actual repeated file appearance paid; those maxima may exceed the native frame and honestly block. Keep ordinary host RPC at at most 30 seconds intersected with the earlier original invocation cutoff. Google retains its existing absolute 120-second job cutoff, without renewal; a shorter native RPC/cooldown may block a valid ordinary sync. Preserve actual negative local cleanup after positive authority revocation under original immutable provenance/current bearer/physical readback; it confers no positive effect, private release or replay permission.
+
+#### Exact finite source-order column roster
+
+The union contains **11 existing tables and 200 unique `(table,column)` pairs**. The scheduler seven-table scope contains136 fields; the Google seven-table scope contains129. Counting the three shared tables in both operation scopes gives **265 operation appearances**. These are derived inventory counts, not body fees, reference limits, certification or permission to select every listed row. Only the exact required owner-derived closure is eligible. Complete raw ciphertext/string/JSON fields are retained without projection or synthetic normalization; the physical schema, locators and raw codecs remain pre-activation review gates.
+
+- `scheduled_jobs` (scheduler): `id, name, enabled, trigger_type, trigger_spec_json, action_type, action_spec_json, session_id, created_by_session_id, last_run_at, last_outcome, last_error, last_approval_id, created_at, updated_at`.
+- `scheduled_job_runs` (scheduler): `id, scheduled_job_id, job_name, trigger_type, action_type, session_id, created_by_session_id, status, outcome, error, approval_id, started_at, finished_at, metadata_json`.
+- `governed_schedule_bindings` (scheduler): `binding_id, scheduled_job_id, owner_principal_id, owner_session_id, goal_id, goal_revision, capability_id, action_type, input_artifact_id, input_digest, action_digest, consent_kind, read_consent_id, consent_revision, consent_digest, schedule_idempotency_key, schedule_request_digest, cadence_kind, timezone, daily_hour, daily_minute, binding_revision, expires_at, state, last_slot_utc, created_at, updated_at`.
+- `governed_schedule_occurrences` (scheduler): `occurrence_id, binding_id, binding_revision, slot_utc, idempotency_key, request_digest, claim_token, fencing_token, lease_expires_at, state, work_board_task_id, durable_job_id, metadata_json, created_at, updated_at`.
+- `google_service_connections` (scheduler and Google): `connection_id, owner_principal_id, owner_session_id, service, label, vault_secret_key, credential_fingerprint, declared_scopes_json, provider_scopes_json, scope_status, setup_idempotency_key, setup_request_digest, state, revision, verified_setup_job_id, sync_active_job_id, sync_scope_digest, sync_cursor_job_id, sync_cursor_page, sync_cursor_revision, revoke_idempotency_key, revoke_request_digest, created_at, updated_at`.
+- `calendar_read_consents` (scheduler and Google): `consent_id, owner_principal_id, owner_session_id, connection_id, creation_idempotency_key, creation_request_digest, connection_revision, calendar_id, goal_id, goal_revision, allowed_fields_json, window_minutes, max_events, sync_metadata_limit, allow_remote_model, expires_at, state, revision, consent_digest, created_at, updated_at`.
+- `calendar_event_bindings` (scheduler and Google): `event_binding_id, owner_principal_id, owner_session_id, connection_id, connection_revision, consent_id, consent_revision, calendar_id_private, provider_event_id_private, recurrence_identity_private, provider_identity_digest, event_key, event_revision, calendar_list_revision, fetched_at, state, revision, snapshot_digest, created_at, updated_at`.
+- `operator_identities` (Google): `id, created_at, revoked_at`.
+- `mail_read_consents` (Google): `consent_id, owner_principal_id, owner_session_id, connection_id, connection_revision, creation_idempotency_key, creation_request_digest, goal_id, goal_revision, label_ids_json, window_days, max_messages, sync_metadata_limit, source_read_allowed, source_revision, source_digest, source_reviewed_at, model_egress_allowed, model_revision, model_digest, model_reviewed_at, allowed_body_fields_json, revoke_idempotency_key, revoke_request_digest, expires_at, state, revision, created_at, updated_at`.
+- `mail_label_bindings` (Google): `label_id, owner_principal_id, owner_session_id, connection_id, connection_revision, provider_label_id_ciphertext, provider_label_digest, label_name, label_type, state, revision, created_at, updated_at`.
+- `mail_message_bindings` (Google): `message_binding_id, owner_principal_id, owner_session_id, connection_id, connection_revision, source_consent_id, source_consent_revision, source_label_scope_digest, provider_message_id_ciphertext, provider_thread_id_ciphertext, message_key, thread_key, message_revision, received_at, fetched_at, status, revision, created_at, updated_at`.
+
+#### Selected keys and original owner seams
+
+| Operation | Original selection and body relations | Existing source seam |
+| --- | --- | --- |
+| scheduler.register | Authenticated actual ScheduleCreate captures consent, Goal revision, cadence, expiry, idempotency and issued input artifact. Consent PK with owner principal/session; connection PK from consent; Goal/OperatorSession/WorkBoardInputArtifact use common33. Binding lookup uses owner/session/idempotency unique key. ScheduledJob PK derives from original binding. Never infer cadence or authority from artifact possession. | api/calendar.py original create path; scheduled_jobs.py:666 load_governed_calendar_input_authority; governed_schedules.py:1215 create_binding and its guarded serialized BEGIN. |
+| scheduler.disable | Exact original binding PK plus owner/session and expected revision. ScheduledJob PK comes from binding; original deterministic ScheduledJobRun control receipt PK; occurrence binding/slot locators retain actual needed prior debt, not active-state-only history. Wire disabled maps existing pause, not a new state. | governed_schedules.py:1331 apply_control; protected immutable control receipt, existing fresh-BEGIN callback. |
+| scheduler.dispatchDue | Exact original registered canonical callback and actual slot; binding PK, unique binding/slot occurrence, actual prior lease/fence/debt. limit 1..20 cannot license a global body scan. **Still STOP:** original callback returns None and stores ScheduledJobRun identity as occurrence.durable_job_id, not a DurableJob result. | scheduler/engine.py:425 slot forwarding; scheduled_jobs.py:2642 execute_scheduled_job; scheduled_jobs.py:1067 and governed_schedules.py:189 existing identity semantics. A genuine callback-to-DurableJob same-root handoff still requires a separate concrete source disposition. |
+| connections.invokeBoundAdapter | Exact original SyncRequest connection PK and owner/session; OperatorIdentity PK from current OperatorSession; original Secret key from connection.vault_secret_key remains common33. Actual request consent IDs with owner/session/connection; actual requested label IDs; mail message owner/session/connection/message_key and Calendar event owner/session/connection/event_key/provider-identity uniqueness. Existing cursor/source WRS is common33. No arbitrary operation_ref reconstruction or all-owner/status-filter-only retention. | integrations/connection_sync.py:192 _authority, :284 _synchronize, :312 existing connection_source_sync spec, :513/:562 binding adoption; original adapter loop and positive durable writer APIs. |
+
+The same original connection_source_sync job and original _synchronize task remain the Google admission/claim owner, zero inference/max_attempts1/idempotency unchanged. Source/claim/dispatcher plumbing may be enabled only after its actual owner validators, complete certificate/retention path and full capacity forecast exist; a whitelist or method closure is insufficient. Each positive effect/artifact/readback/checkpoint/resource/success writer must recheck Source and current authority inside its original transaction. Original readonly Google contact includes OAuth refresh liability; provider429 cooldown and encrypted page limits remain unchanged. Real protected checkpoint/readback yields the fixed receipt/artifact result and no_learning.
+
+#### Remaining facts, acceptance and stop gates
+
+The eleven source tuples are concrete. Physical SQLite layout/nullability/storage/collation, complete supported locator/index predicates, relationship codecs, original selected historical/Unknown seeds, vault/adapter physical closure and future constructor costs are not certified by this source roster. Source index names do not constitute physical verification. Actual Google selectors without an established bounded unique locator must be certified as such or stop; this target creates no index. A complete source-derived finite codec/version/envelope compatibility diff must be independently reviewed before product activation. dispatchDue real-job handoff remains a semantic blocker separate from dependency selection; do not claim all34 complete.
+
+Acceptance for the adopted scope requires genuine original operator admission/claim → stock host → original owner effect → durable protected result/readback/no_learning; source-only fixtures do not satisfy it. Include missing/copied/stale Source, Root/Identity/consent/connection/Goal cutover, wrong task/session/frame/connection, fresh-BEGIN/retry races, unsupported schema/locator, no-body budget overflow, repeated-read/Unknown full-U failure, nonselected-row denial, revoked positive release with lawful negative cleanup, and old/new witness/restore/rollback negatives. No max-size operation is promised to fit the existing frame. Preserve ordinary non-native owner behavior and historical witness bytes. Before reviewed product activation there is no native activation to roll back; after an explicit transition, only the proven original compatibility/restore owner may dispose it, retaining unresolved debt.
+
+Independent review accepted this conditional boundary and retained every
+schema/locator, codec/version, Original/Current/Unknown, full-capacity,
+restore/rollback and actual DurableJob handoff gate. Its non-blocking arithmetic
+finding is accepted: the earlier handoff count264 was wrong; the complete names
+and tuples above are unchanged, with200 unique columns and265 operation
+appearances. Decision source SHA-256
+`756f9735e3fa29ce0ddf385ec647dc9f75d5d0c023a8abb6561d648b064b334f`;
+independent review SHA-256
+`cfea1946471d9b0cdcb64aeb4a34fa465f2dcd0c588fa0b7e8e5f630c93c4e5c`.
+These identify accepted target/review provenance only; no ignored evidence
+packet supplies normative field scope or runtime authority. A ready PR remains
+the whole #1007 milestone, not this documentation slice.
 
 ## Migration Boundaries And Open Decisions
 

@@ -179,6 +179,91 @@ def normalize_destination(destination: str) -> str:
     return posixpath.normpath(value.replace("\\", "/"))
 
 
+def _configured_mac_numeric_frame():
+    """Original allocation payer only; this grants no key/body/effect authority."""
+    from src.memory.composition_headers import current_budget
+    from src.memory.header_bounds import (
+        _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger, HeaderBoundsError)
+    budget = current_budget()
+    active = _MEMORY_LEDGER_PHASE.get()
+    if active is not None:
+        import asyncio
+        from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+        ledger, phase = active
+        if type(ledger) is not _NativeMemoryNumericLedger:
+            raise HeaderBoundsError("memory_configured_mac_owner_changed")
+        ledger._checked()
+        binding = ledger.bindings.get(phase)
+        if ((budget is not None and budget is not ledger.budget)
+                or phase not in {"effect", "capture", "completion"}
+                or binding is None or len(binding) != 6
+                or binding[0].sync_session.get_transaction() is not binding[1]
+                or not binding[2].in_transaction or binding[5] is not asyncio.current_task()
+                or _MEMORY_OPERATIONS.get(id(ledger.operation)) is not ledger.operation
+                or _MEMORY_SOURCES.get(id(ledger.source)) is not ledger.source
+                or (phase != "completion" and (binding[0] is not ledger.operation.db
+                    or binding[1] is not ledger.operation.transaction
+                    or binding[2] is not ledger.operation.driver))):
+            raise HeaderBoundsError("memory_configured_mac_owner_changed")
+        budget = ledger.budget
+    return budget
+
+
+def _configured_mac_string_widths(value):
+    """Size the original string/strip/UTF8 appearances without making copies."""
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    if type(value) is not str:
+        raise HeaderBoundsError("memory_configured_mac_scalar_unavailable")
+    start, end = 0, len(value)
+    while start < end and value[start].isspace():
+        start += 1
+    while end > start and value[end - 1].isspace():
+        end -= 1
+    trimmed_ascii, trimmed_utf8 = 2, 0
+    for index in range(start, end):
+        char = value[index]
+        point = ord(char)
+        if 0xD800 <= point <= 0xDFFF:
+            raise HeaderBoundsError("memory_configured_mac_scalar_unavailable")
+        trimmed_ascii += (2 if char in '"\\\b\f\n\r\t' else 6
+            if point < 32 or 127 <= point <= 65535 else 12 if point > 65535 else 1)
+        trimmed_utf8 += 1 if point < 128 else 2 if point < 2048 else 3 if point < 65536 else 4
+    return _native_memory_ascii_string_width(value), trimmed_ascii, trimmed_utf8, start < end
+
+
+def original_native_memory_configured_mac_numeric_schedule(kind="effect"):
+    """One original configured provider invocation, including nested calls.
+
+    Only numeric allocation evidence is returned. Original callers compose
+    repeated invocations; this neither retrieves a new key nor grants authority.
+    """
+    from src.memory.header_bounds import HeaderBoundsError
+    if kind not in {"journal", "server", "effect"}:
+        raise HeaderBoundsError("memory_configured_mac_kind_unavailable")
+    try:
+        from config.settings import settings
+    except Exception as exc:
+        raise CapabilityJournalError("execution journal MAC key unavailable") from exc
+    entries = []
+    for index, name in enumerate(("capability_journal_secret", "capability_journal_secret_hash",
+            "operator_auth_secret", "operator_auth_secret_hash")):
+        raw = getattr(settings, name, "")
+        string, stripped, utf8, selected = _configured_mac_string_widths(raw)
+        entries.append((("native-memory-mac-input", "journal", "string", index), string))
+        entries.append((("native-memory-mac-input", "journal", "strip", index), stripped))
+        if selected:
+            break
+    else:
+        raise CapabilityJournalError("execution journal MAC key unavailable")
+    if kind in {"server", "effect"}:
+        entries.extend(((('native-memory-mac-input', 'server', 'utf8'), utf8),
+            (('native-memory-mac-input', 'server', 'prefix'), len(b"seraph-capability-server-key-v1:") + utf8),
+            (('native-memory-mac-input', 'server', 'digest'), 32)))
+    if kind == "effect":
+        entries.append((("native-memory-mac-input", "effect", "digest"), 32))
+    return tuple(entries)
+
+
 def _journal_mac_secret() -> str:
     """Return configured server secret material without exposing it in errors."""
     try:
@@ -186,13 +271,22 @@ def _journal_mac_secret() -> str:
     except Exception as exc:  # pragma: no cover - settings is available in-app.
         raise CapabilityJournalError("execution journal MAC key unavailable") from exc
 
-    for name in (
+    budget = _configured_mac_numeric_frame()
+    for index, name in enumerate((
         "capability_journal_secret",
         "capability_journal_secret_hash",
         "operator_auth_secret",
         "operator_auth_secret_hash",
-    ):
-        value = str(getattr(settings, name, "") or "").strip()
+    )):
+        if budget is None:
+            value = str(getattr(settings, name, "") or "").strip()
+        else:
+            raw = getattr(settings, name, "")
+            string, stripped, _utf8, _selected = _configured_mac_string_widths(raw)
+            budget.debit(string, appearance=("native-memory-mac-input", "journal", "string", index))
+            value = str(raw or "")
+            budget.debit(stripped, appearance=("native-memory-mac-input", "journal", "strip", index))
+            value = value.strip()
         if value:
             return value
     raise CapabilityJournalError("execution journal MAC key unavailable")
@@ -200,15 +294,36 @@ def _journal_mac_secret() -> str:
 
 def _server_secret_key() -> bytes:
     """Derive MAC material from a configured server secret, never source text."""
-    return hashlib.sha256(
-        b"seraph-capability-server-key-v1:" + _journal_mac_secret().encode("utf-8")
-    ).digest()
+    budget = _configured_mac_numeric_frame()
+    if budget is None:
+        return hashlib.sha256(
+            b"seraph-capability-server-key-v1:" + _journal_mac_secret().encode("utf-8")
+        ).digest()
+    secret = _journal_mac_secret()
+    from src.memory.header_bounds import _native_memory_utf8_width
+    width = _native_memory_utf8_width(secret)
+    budget.debit(width, appearance=("native-memory-mac-input", "server", "utf8"))
+    encoded = secret.encode("utf-8")
+    budget.debit(len(b"seraph-capability-server-key-v1:") + width,
+        appearance=("native-memory-mac-input", "server", "prefix"))
+    material = b"seraph-capability-server-key-v1:" + encoded
+    budget.debit(32, appearance=("native-memory-mac-input", "server", "digest"))
+    return hashlib.sha256(material).digest()
 
 
 def _effect_mac_key() -> bytes:
     """Return the configured server-derived key for effect identities/records."""
+    budget = _configured_mac_numeric_frame()
+    if budget is None:
+        return hmac.new(
+            _server_secret_key(),
+            b"effect-identity-and-records-v1",
+            hashlib.sha256,
+        ).digest()
+    key = _server_secret_key()
+    budget.debit(32, appearance=("native-memory-mac-input", "effect", "digest"))
     return hmac.new(
-        _server_secret_key(),
+        key,
         b"effect-identity-and-records-v1",
         hashlib.sha256,
     ).digest()

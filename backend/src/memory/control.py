@@ -977,11 +977,27 @@ async def _apply_prepared_forget_memory_in_writer(db, prepared) -> dict[str, Any
     if prepared.update_plan.expected_owner_session_id is None:
         await ensure_sessions_exist(db, [memory.source_session_id])
     event = prepared.audit_event
+    from src.memory.m5 import (_native_prepared_numeric_frame, _native_prepared_allocation_debit,
+        _native_prepared_value_width)
+    frame = _native_prepared_numeric_frame(db, prepared)
+    if frame is not None:
+        _native_prepared_allocation_debit(db, prepared, "forget-audit-json",
+            _native_prepared_value_width(event.details_json))
     await audit_repository._log_event_in_session(db, actor=event.actor,
         event_type=event.event_type, tool_name=event.tool_name, risk_level=event.risk_level,
         policy_mode=event.policy_mode, session_id=event.session_id,
         summary=event.summary, details=json.loads(event.details_json), _prepared_event=event)
+    if frame is not None:
+        _native_prepared_allocation_debit(db, prepared, "forget-result-copy",
+            _native_prepared_value_width(prepared.result))
     result = dict(prepared.result)
+    if frame is not None:
+        _native_prepared_allocation_debit(db, prepared, "forget-metadata-json",
+            _native_prepared_value_width(memory.metadata_json or "{}"))
+        for _ in range(2 + int(memory.last_confirmed_at is not None)):
+            _native_prepared_allocation_debit(db, prepared, "forget-timestamp", 44)
+        _native_prepared_allocation_debit(db, prepared, "forget-memory-payload",
+            _native_prepared_value_width(prepared.result))
     result["memory"] = _memory_payload(memory)
     return result
 

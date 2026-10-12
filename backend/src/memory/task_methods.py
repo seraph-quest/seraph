@@ -42,6 +42,14 @@ _DISCOVERY_READ = ContextVar("owned_task_method_discovery_read", default=None)
 
 
 def _owned_method_selection(owned):
+    from src.runtime_plugins.programme_producer import _ProgrammeSource
+    if type(owned) is _ProgrammeSource:
+        owned.validate()
+        if owned.writer is None:
+            _fail("method_original_session_unavailable")
+        guard, identity = owned.authority_selection(owned.writer[1])
+        guard._validate_programme_selection(identity.original_selection)
+        return identity.original_selection
     owned.validate()
     selection = (owned.guard._prospective_admission[0]
         if owned.guard._prospective_admission is not None else owned.guard._selection)
@@ -56,7 +64,11 @@ async def _pay_owned_row(db, table, key):
     if state is None:
         return
     owned, certificate = state
-    owned.validate(db=db)
+    from src.runtime_plugins.programme_producer import _ProgrammeSource
+    if type(owned) is _ProgrammeSource:
+        owned.authority_selection(db)
+    else:
+        owned.validate(db=db)
     if (_owned_method_selection(owned).common33 is not certificate
             or certificate.budget is not owned.header_budget):
         _fail("method_original_session_unavailable")
@@ -533,8 +545,38 @@ class CurrentMethod:
         selected = ActiveMethodBinding.model_validate_json(pointer.binding_json)
         return await self._version(db, selected, identity, scope, allow_rollback=False)
 
-    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None):
+    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None, native_programme_source=None):
         try:
+            if native_programme_source is not None:
+                from src.runtime_plugins.programme_producer import _ProgrammeSource
+                from src.guardian.goal_programmes import goal_programme_service
+                from src.workflows.research_guard import discovery_writer_scope
+                from src.work_board.research_parent import DISCOVERY_SERVICE, DISCOVERY_CAPABILITY
+                from src.goals.contracts import GoalProgrammeAuthorityBinding
+                source = native_programme_source
+                if (type(source) is not _ProgrammeSource or discovery_session is not None
+                        or source.service.strategy_resolver.current is not self
+                        or owner.principal_id != DISCOVERY_SERVICE or owner.session_id != ""
+                        or programme_grant is None or programme_grant.goal_id != goal_ref
+                        or programme_grant.capability_id != DISCOVERY_CAPABILITY):
+                    _fail("method_programme_service_mismatch")
+                guard, identity = source.authority_selection(db)
+                async with discovery_writer_scope() as policy:
+                    programme = await goal_programme_service.validate_current_binding(db=db,
+                        binding=programme_grant, policy=policy, original_admission_guard=guard,
+                        identity_certificate=identity, native_programme_source=source)
+                token = _DISCOVERY_READ.set((source, identity.common_certificate))
+                try:
+                    await _pay_owned_row(db, "goals", programme.goal_id)
+                    if GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY) != programme_grant:
+                        _fail("method_programme_scope_mismatch")
+                    await _pay_owned_row(db, "goals", programme.goal_id)
+                    scope = LessonScope(goal_id=programme.goal_id,
+                        goal_revision=programme.goal_revision, family="research")
+                    return await self._validate_pinned(owner, goal_ref, binding, programme_grant,
+                        db, owned_scope=(programme.owner_identity_id, scope))
+                finally:
+                    _DISCOVERY_READ.reset(token)
             if discovery_session is not None:
                 from src.guardian.goal_discovery import _OwnedDiscoverySession
                 from src.guardian.goal_programmes import goal_programme_service
@@ -721,7 +763,12 @@ class TaskMethodStrategyResolver:
         return await self.current.resolve(owner, goal_ref, task_family, programme_grant,
             discovery_session=discovery_session)
 
-    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None):
+    async def validate_pinned(self, owner, goal_ref, binding, programme_grant=None, db=None, *, discovery_session=None, native_programme_source=None):
+        if native_programme_source is not None:
+            if discovery_session is not None:
+                _fail("method_programme_service_mismatch")
+            return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db,
+                native_programme_source=native_programme_source)
         if discovery_session is None:
             return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db)
         return await self.current.validate_pinned(owner, goal_ref, binding, programme_grant, db,

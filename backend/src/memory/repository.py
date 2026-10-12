@@ -3577,6 +3577,13 @@ class MemoryRepository:
             return prepared.memory
         db.add(prepared.memory)
         await db.flush()
+        from src.memory.m5 import (_native_prepared_numeric_frame, _native_prepared_allocation_debit,
+            _native_prepared_value_width)
+        if _native_prepared_numeric_frame(db, prepared) is not None:
+            from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+            plan = _MEMORY_LEDGER_PHASE.get()[0].prepared
+            _native_prepared_allocation_debit(db, prepared, "canonical-rows-slice",
+                _native_prepared_value_width(plan._row_values))
         for row in prepared.rows[1:]:
             db.add(row)
         if prepared.target is not None:
@@ -7437,6 +7444,12 @@ class MemoryRepository:
             or any(getattr(prepared.memory, name) != value for name, value in prepared.before)):
             raise ValueError("prepared_memory_control_changed")
         memory = prepared.memory
+        from src.memory.m5 import (_native_prepared_numeric_frame, _native_prepared_allocation_debit,
+            _native_prepared_pairs_object_width, _native_prepared_control_readback_width)
+        frame = _native_prepared_numeric_frame(db, prepared)
+        if frame is not None:
+            _native_prepared_allocation_debit(db, prepared, "control-conditions",
+                _native_prepared_pairs_object_width(prepared.before))
         normalized_memory_id = memory.id
         expected_owner_session_id = prepared.expected_owner_session_id
         expected_status = _coerce_enum(memory.status, MemoryStatus)
@@ -7450,6 +7463,9 @@ class MemoryRepository:
         expected_updated_at_guard = (Memory.updated_at.is_(None) if expected_updated_at is None
             else Memory.updated_at == expected_updated_at)
         db.expunge(memory)
+        if frame is not None:
+            _native_prepared_allocation_debit(db, prepared, "control-update-values",
+                _native_prepared_pairs_object_width(prepared.changes))
         guarded_update = await db.execute(
             update(Memory).where(
                 Memory.id == normalized_memory_id, Memory.status == expected_status,
@@ -7464,6 +7480,9 @@ class MemoryRepository:
                 "memory changed before control update; canonical deletion or another memory control won"
             )
         await _certify_original_memory_body(db, prepared.header_budget, Memory)
+        if frame is not None:
+            _native_prepared_allocation_debit(db, prepared, "control-readback-orm",
+                _native_prepared_control_readback_width(prepared))
         memory = (await db.execute(select(Memory).where(Memory.id == normalized_memory_id))).scalars().one()
         db.expunge(memory)
         return memory

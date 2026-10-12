@@ -168,7 +168,12 @@ class NativeServiceDispatcher:
         if memory_budget is not None:
             from src.memory.header_bounds import WRS_BY_RUN
             await memory_budget.certify(db, WRS_BY_RUN, (invocation_ref,))
-        run = await self.jobs._fetch(db, invocation_ref)
+        if programme_source is not None:
+            await programme_source.prepare_selection(db)
+            async with self.jobs._native_programme_paid_row(programme_source, db):
+                run = await self.jobs._fetch(db, invocation_ref)
+        else:
+            run = await self.jobs._fetch(db, invocation_ref)
         witness = _witness(run, original_scope)
         binding = RuntimeCompositionBinding.from_json(run.composition_binding_json)
         terminal_output_read = (method == "conversation.append" and run.job_kind == "conversation_turn_v1"

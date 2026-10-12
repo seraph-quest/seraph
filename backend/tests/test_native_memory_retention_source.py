@@ -8,6 +8,8 @@ from src.workspace.accounting_witness import (
     ProductionWorkspaceReconciliationError,
     _NativeMemoryRetention,
     _append_native_memory_original,
+    _native_memory_source_capacity_facts,
+    _native_memory_source_retention_widths,
     begin_native_memory_effect,
     capture_native_memory_retention,
     prepare_native_memory_lifecycle,
@@ -55,6 +57,63 @@ def test_unregistered_retention_never_reaches_ledger():
         {"run_identity": "forged"}, (), (), ())
     with pytest.raises(ProductionWorkspaceReconciliationError, match="memory_retention_source_unavailable"):
         retention.payload()
+
+
+@pytest.mark.asyncio
+async def test_capacity_facts_reject_unissued_source_before_row_access():
+    class Poison:
+        def __getattr__(self, name):
+            raise AssertionError("unissued numeric Source reached " + name)
+    poison = Poison()
+    with pytest.raises(NativeServiceBlocked, match="native_memory_actual_operation_unavailable"):
+        await _native_memory_source_capacity_facts(poison, poison, object(), poison, poison)
+
+
+def test_retention_widths_reject_numeric_fact_reconstruction_before_plan_access():
+    from src.memory.header_bounds import HeaderBoundsError
+    class Poison:
+        def __getattr__(self, name):
+            raise AssertionError("unissued numeric plan reached " + name)
+    poison = Poison()
+    with pytest.raises(HeaderBoundsError, match="memory_source_numeric_facts_changed"):
+        _native_memory_source_retention_widths(object(), poison, poison, poison, {})
+
+
+@pytest.mark.asyncio
+async def test_locator_exhaustion_precedes_header_delivery(monkeypatch):
+    from src.db.models import Goal
+    from src.memory import composition_headers
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _memory_locator_rows
+    frame = HeaderReadBudget()
+    frame.remaining = 0
+    monkeypatch.setattr(composition_headers, "current_budget", lambda: frame)
+    class PoisonDatabase:
+        async def execute(self, statement):
+            raise AssertionError("exhausted locator delivered metadata")
+    with pytest.raises(HeaderBoundsError):
+        await _memory_locator_rows(PoisonDatabase(), Goal, ("id",), limit=2)
+
+
+@pytest.mark.asyncio
+async def test_saturated_locator_stops_before_private_strings(monkeypatch):
+    from src.db.models import Goal
+    from src.memory import composition_headers
+    from src.memory.header_bounds import HeaderReadBudget
+    from src.runtime_plugins.memory_producer import _memory_locator_rows
+    frame = HeaderReadBudget()
+    monkeypatch.setattr(composition_headers, "current_budget", lambda: frame)
+    class HeaderOnlyDatabase:
+        calls = 0
+        async def execute(self, statement):
+            self.calls += 1
+            if self.calls != 1:
+                raise AssertionError("saturated locator delivered private strings")
+            return [(32, 1), (32, 1)]
+    db = HeaderOnlyDatabase()
+    with pytest.raises(NativeServiceBlocked, match="native_memory_retention_locator_bound"):
+        await _memory_locator_rows(db, Goal, ("id",), limit=2)
+    assert db.calls == 1
 
 
 def test_original_append_preserves_unrelated_lexemes():

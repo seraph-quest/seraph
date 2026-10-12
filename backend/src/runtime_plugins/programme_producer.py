@@ -6,6 +6,7 @@ No inference/result continuation is issued here.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 
 from sqlalchemy import event, update
@@ -29,11 +30,17 @@ class _ProgrammeSource:
         self.boot = self.host.boot_nonce
         self.reviewed, self.dispatcher = self.host.reviewed, self.host.service_dispatch
         self.header_budget = HeaderReadBudget()
+        self._original_header_budget = self.header_budget
         self.claim = self.scope = self.publication = self.response = None
         self._delivered_response = None
         self._numeric_reservation = None
         self._current_authority = self._current_authority_raw = None
+        self._physical_numeric_trace = self._physical_numeric_facts = None
+        self._physical_numeric_owner = None
+        self._reader_numeric_facts = None
         self.writer = None
+        self._writer_transaction = None
+        self._service_call = None
         self.state = "reserved"
         self.closed = False
 
@@ -49,9 +56,13 @@ class _ProgrammeSource:
                 or type(self.host) is not CordisHost or not self.host.admitting
                 or self.host.boot_nonce != self.boot or self.host.reviewed is not self.reviewed
                 or self.host.service_dispatch is not self.dispatcher
+                or self.header_budget is not self._original_header_budget
                 or self.dispatcher.jobs is not self.jobs
                 or service._lifecycle_dispatcher is not self.dispatcher):
             raise NativeServiceBlocked("native_programme_source_changed")
+        if (called is None and asyncio.current_task() is not self.task
+                and (self._service_call is None or self._service_call[1] is not asyncio.current_task())):
+            raise NativeServiceBlocked("native_programme_original_task_changed")
         if owner and asyncio.current_task() is not self.task:
             raise NativeServiceBlocked("native_programme_original_task_changed")
         if called is not None:
@@ -64,17 +75,47 @@ class _ProgrammeSource:
                     or pending.future.done() or pending.native_binding is not called
                     or pending.frame["method"] != called.method
                     or pending.frame["deadline_at"] != called.deadline_at
-                    or called.host_boot_nonce != self.boot):
+                    or called.host_boot_nonce != self.boot
+                    or (self._service_call is not None and (self._service_call[0] is not called
+                        or self._service_call[1] is not asyncio.current_task()))):
                 raise NativeServiceBlocked("native_programme_original_pending_changed")
         return self
+
+    @asynccontextmanager
+    async def service_call(self, called):
+        self.validate(called=called)
+        if self._service_call is not None:
+            raise NativeServiceBlocked("native_programme_original_pending_changed")
+        self._service_call = (called, asyncio.current_task())
+        try:
+            yield
+        finally:
+            self._service_call = None
 
     async def is_native_programme(self):
         from src.memory.header_bounds import WRS_BY_RUN
         from .ownership import RuntimeCompositionBinding
         self.validate(owner=True)
+        # Preserve genuine legacy jobs without allowing their unowned body
+        # reader to deliver a composed row. Only the paid NULL discriminator
+        # is read before the original native continuity owner is acquired.
+        from sqlalchemy import select
+        from src.db.models import WorkflowRunState
         async with self.jobs._session(header_budget=self.header_budget) as db:
-            await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,))
-            run = await self.jobs._fetch(db, self.job_id)
+            await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,),
+                _header_budget=self.header_budget)
+            self.header_budget.debit(1, appearance=("programme-source", "null-binding"))
+            absent_binding = await db.scalar(select(
+                WorkflowRunState.composition_binding_json.is_(None)).where(
+                    WorkflowRunState.run_identity == self.job_id))
+            if absent_binding is True:
+                return False
+            if absent_binding is None:
+                raise NativeServiceBlocked("native_programme_original_selection_missing")
+        async with self.jobs._native_programme_read_session(self, header_budget=self.header_budget) as db:
+            await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,), _header_budget=self.header_budget)
+            async with self.jobs._native_programme_paid_row(self, db):
+                            run = await self.jobs._fetch(db, self.job_id)
             if run is None or run.composition_binding_json is None:
                 return False
             self.header_budget.debit(len(run.composition_binding_json) * 6 + 2,
@@ -100,7 +141,7 @@ class _ProgrammeSource:
         self.state = "claimed"
         return self.scope
 
-    async def prepare_selection(self, db, run):
+    async def prepare_selection(self, db, run=None):
         """Issue persisted selectors only on this original writer/frame."""
         from src.memory.composition_headers import (certify_composition_superset,
             preflight_programme_identity_component)
@@ -108,7 +149,8 @@ class _ProgrammeSource:
         self.validate()
         guard = db.info.get("composition_guard")
         if (type(guard) is not CompositionSessionGuard or guard.db is not db
-                or guard.header_budget is not self.header_budget or run.run_identity != self.job_id):
+                or guard.header_budget is not self.header_budget
+                or (run is not None and run.run_identity != self.job_id)):
             raise NativeServiceBlocked("native_programme_original_writer_changed")
         common = await certify_composition_superset(db, self.header_budget,
             _header_budget=self.header_budget)
@@ -122,12 +164,18 @@ class _ProgrammeSource:
             return selection, identity
         selection, identity = await connection.run_sync(selected)
         self.writer = (asyncio.current_task(), db, connection, guard, selection, identity)
+        self._writer_transaction = (db.sync_session.get_transaction(),
+            connection.sync_connection.get_transaction())
         return guard, identity
 
     def authority_selection(self, db):
         self.validate()
         held = self.writer
         if (held is None or held[0] is not asyncio.current_task() or held[1] is not db
+                or self._writer_transaction is None or self._writer_transaction[0] is None
+                or db.sync_session.get_transaction() is not self._writer_transaction[0]
+                or held[2].closed
+                or held[2].sync_connection.get_transaction() is not self._writer_transaction[1]
                 or db.info.get("composition_guard") is not held[3]
                 or held[3].header_budget is not self.header_budget
                 or db.sync_session.connection() is not held[4].common33.connection):
@@ -136,13 +184,32 @@ class _ProgrammeSource:
         return held[3], held[5]
 
     async def physical_inputs(self):
-        from inspect import signature
-        from src.workflows.research_sources import physical_discovery_inputs
+        from types import MappingProxyType
+        from src.memory.header_bounds import _trace_memory_numeric_charges
+        from src.workflows.research_sources import (physical_discovery_inputs,
+            _original_discovery_physical_capacity_scope)
         self.validate()
-        # Dependency availability is not authority. The actual owner must
-        # implement the private Source seam; raw frame forwarding is forbidden.
-        if "native_programme_source" not in signature(physical_discovery_inputs).parameters:
-            raise NativeServiceBlocked("native_programme_physical_reader_unavailable")
+        if self.state == "claimed" and self._numeric_reservation is None:
+            if self._service_call is None:
+                raise NativeServiceBlocked("native_programme_original_pending_changed")
+            with _original_discovery_physical_capacity_scope(self.header_budget) as capacity:
+                with _trace_memory_numeric_charges(self.header_budget) as trace:
+                    result = await physical_discovery_inputs(self.jobs, self.job_id,
+                        native_programme_source=self)
+                held = capacity[self.job_id]
+                sizes = {item["kind"]: len(item["content"]) for item in result.artifacts.values()}
+                if self._reader_numeric_facts is None:
+                    raise NativeServiceBlocked("native_programme_original_reader_changed")
+                common_rows, identity_rows = self._reader_numeric_facts
+                self._physical_numeric_facts = MappingProxyType({
+                    "widths": MappingProxyType(dict(held["widths"])), "count": held["count"],
+                    "plan_bytes": sizes["plan"], "brief_bytes": sizes["public_brief"],
+                    "common_row_uppers": common_rows,
+                    "identity_row_uppers": identity_rows})
+                self._physical_numeric_trace = tuple(trace)
+                self._physical_numeric_owner = (self, self.claim, self.scope, self.header_budget,
+                    self._service_call[0])
+                return result
         return await physical_discovery_inputs(self.jobs, self.job_id, native_programme_source=self)
 
     async def preflight_current(self):
@@ -152,9 +219,10 @@ class _ProgrammeSource:
         from src.guardian.goal_programmes import goal_programme_service
         self.validate()
         async with discovery_writer_scope() as policy:
-            async with self.jobs._session(header_budget=self.header_budget) as db:
-                await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,))
-                run = await self.jobs._fetch(db, self.job_id)
+            async with self.jobs._native_programme_read_session(self, header_budget=self.header_budget) as db:
+                await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,), _header_budget=self.header_budget)
+                async with self.jobs._native_programme_paid_row(self, db):
+                    run = await self.jobs._fetch(db, self.job_id)
                 guard, identity = await self.prepare_selection(db, run)
                 upper = self.writer[4].common33.rows[("workflow_run_states", self.job_id)][1]
                 self.header_budget.debit(upper, appearance=("programme-source", "authority-model"))
@@ -164,9 +232,9 @@ class _ProgrammeSource:
                     native_programme_source=self)
                 self._current_authority, self._current_authority_raw = authority, run.declared_authority_json
         self.writer = None
+        self._writer_transaction = None
 
     async def delivered(self, result):
-        from src.workflows.job_runtime import _digest
         self.validate(owner=True)
         proof = self.publication
         if (self.state != "start_committed" or type(proof) is not _StartPublication
@@ -174,36 +242,55 @@ class _ProgrammeSource:
                 or result.get("status") != "succeeded" or result.get("memory_status") != "no_learning"
                 or result["value"]["job_ref"] != self.job_id):
             raise NativeServiceBlocked("native_programme_start_response_unavailable")
+        if self._delivered_response is not None:
+            raise NativeServiceBlocked("native_programme_start_response_already_consumed")
+        from src.memory.header_bounds import _NativeProgrammeNumericLedger
+        ledger = self._numeric_reservation
+        if type(ledger) is not _NativeProgrammeNumericLedger:
+            raise NativeServiceBlocked("native_programme_start_capacity_unavailable")
+        self._delivered_response = self.response = result
+        async with ledger.source_phase(self, "delivered"):
+            await self._delivered_current(proof, ledger)
+        self.validate(owner=True)
+        self.state = "executing"
+
+    async def _delivered_current(self, proof, ledger):
+        from src.workflows.job_runtime import _digest
         # Independently current after actual delivery, before original execution.
         from src.workflows.research_sources import physical_discovery_inputs
         from src.workflows.research_guard import discovery_writer_scope, assert_discovery_authority
         await self.preflight_current()
         witness = await self.physical_inputs()
         async with discovery_writer_scope(witness=witness):
-            async with self.jobs._writer_session(header_budget=self.header_budget) as db:
-                run = await self.jobs._fetch(db, self.job_id)
+            async with self.jobs._writer_session(header_budget=self.header_budget, native_programme_source=self) as db:
+                from src.memory.header_bounds import WRS_BY_RUN
+                await self.header_budget.certify(db, WRS_BY_RUN, (self.job_id,), _header_budget=self.header_budget)
+                async with self.jobs._native_programme_paid_row(self, db):
+                    run = await self.jobs._fetch(db, self.job_id)
                 await self.prepare_selection(db, run)
-                await assert_discovery_authority(db, run.declared_authority_json, run=run,
-                    native_programme_source=self)
-                from .ownership import validate_invocation
-                await validate_invocation(db, self.scope.binding, header_budget=self.header_budget)
-                self.jobs._assert_lease(run, owner=self.scope.witness["lease_owner"],
-                    fencing_token=self.scope.witness["fencing_token"])
-                self.header_budget.debit(self.writer[4].common33.rows[("workflow_run_states", self.job_id)][1],
-                    appearance=("programme-start", "delivered-journal"))
-                import json
-                matches = [r for r in json.loads(run.checkpoint_receipts_json)
-                    if r.get("checkpoint_id") == proof.receipt["checkpoint_id"]]
-                if matches != [proof.receipt] or _digest(matches[0]["payload"]) != proof.receipt["state_digest"]:
-                    raise NativeServiceBlocked("native_programme_start_receipt_changed")
+                await ledger.bind(db, "delivered")
+                with ledger.phase("delivered"):
+                    await assert_discovery_authority(db, run.declared_authority_json, run=run,
+                        native_programme_source=self)
+                    from .ownership import validate_invocation
+                    await validate_invocation(db, self.scope.binding, header_budget=self.header_budget)
+                    self.jobs._assert_lease(run, owner=self.scope.witness["lease_owner"],
+                        fencing_token=self.scope.witness["fencing_token"])
+                    self.header_budget.debit(self.writer[4].common33.rows[("workflow_run_states", self.job_id)][1],
+                        appearance=("programme-start", "delivered-journal"))
+                    import json
+                    matches = [r for r in json.loads(run.checkpoint_receipts_json)
+                        if r.get("checkpoint_id") == proof.receipt["checkpoint_id"]]
+                    if matches != [proof.receipt] or _digest(matches[0]["payload"]) != proof.receipt["state_digest"]:
+                        raise NativeServiceBlocked("native_programme_start_receipt_changed")
         self.validate(owner=True)
-        self.response = result
-        self.state = "executing"
 
     def close(self):
         self.closed = True
         self.writer = None
         if self.service._native_programme_sources.get(self.job_id) is self:
+            if self._numeric_reservation is not None:
+                self._numeric_reservation.close()
             self.service._native_programme_sources.pop(self.job_id)
 
 
@@ -307,6 +394,28 @@ def original_programme_start_numeric_facts(source, called, run):
         "actual_journal_charge": 3 * row_upper + 4096})
 
 
+async def original_programme_start_current_checks(source, called, run):
+    """Trusted read-only trace and actual START's identical current checks."""
+    from src.workflows.research_guard import assert_discovery_authority
+    from src.work_board.research_parent import discovery_authority
+    if type(source) is not _ProgrammeSource:
+        raise NativeServiceBlocked("native_programme_source_unavailable")
+    source.validate(called=called)
+    if source.writer is None or source.state != "claimed" or source.publication is not None:
+        raise NativeServiceBlocked("native_programme_start_exhausted")
+    db = source.writer[1]
+    source.authority_selection(db)
+    await assert_discovery_authority(db, run.declared_authority_json, run=run,
+        native_programme_source=source)
+    upper = source.writer[4].common33.rows[("workflow_run_states", source.job_id)][1]
+    source.header_budget.debit(upper, appearance=("programme-start", "authority-model"))
+    authority = discovery_authority(run.declared_authority_json)
+    pending = source.host._pending[called.parent_request_id]
+    if pending.frame["payload"]["plan_ref"] != authority.plan_ref.artifact_id:
+        raise NativeServiceBlocked("native_programme_plan_changed")
+    return authority
+
+
 async def write_programme_start(jobs, db, run, called, payload):
     """One protected CAS. Only the original session owner publishes/commits."""
     import json
@@ -331,62 +440,74 @@ async def write_programme_start(jobs, db, run, called, payload):
     if not callable(reserve):
         raise NativeServiceBlocked("native_programme_start_capacity_unavailable")
     await reserve(guard, native_programme_source=source, called=called, run=run)
-    source.validate(called=called)
-    source.authority_selection(db)
-    await assert_discovery_authority(db, run.declared_authority_json, run=run, native_programme_source=source)
-    witness = source.scope.witness
-    from src.work_board.research_parent import discovery_authority
-    authority = discovery_authority(run.declared_authority_json)
-    if payload["plan_ref"] != authority.plan_ref.artifact_id:
-        raise NativeServiceBlocked("native_programme_plan_changed")
-    upper = source.writer[4].common33.rows[("workflow_run_states", source.job_id)][1]
-    source.header_budget.debit(upper, appearance=("programme-start", "journal-decode"))
-    history = json.loads(run.checkpoint_receipts_json)
-    checkpoint_id = START_PREFIX + witness["claim_ref"]
-    if any(r.get("checkpoint_id", "").startswith(START_PREFIX) for r in history):
-        raise NativeServiceBlocked("native_programme_start_exhausted")
-    # Full current row plus bounded claim and ArtifactRef fields conservatively
-    # cover the exact closed receipt and journal construction before allocation.
-    receipt_upper = 2 * upper + 4096
-    source.header_budget.debit(receipt_upper, appearance=("programme-start", "receipt-construction"))
-    value = {"schema_version": 1, "invocation_ref": source.job_id,
-        "original_claim_digest": _digest(dict(witness)),
-        "composition_binding_digest": source.scope.binding.binding_digest,
-        "host_boot_nonce": source.boot, "plan_ref": authority.plan_ref.model_dump(mode="json"),
-        "input_digest": run.input_digest, "authority_digest": run.authority_digest,
-        "run_fingerprint": run.run_fingerprint, "attempt_count": run.attempt_count,
-        "lease_owner": run.lease_owner, "fencing_token": run.fencing_token,
-        "original_deadline_at": witness["original_deadline_at"], "no_learning": True}
-    receipt = {"checkpoint_id": checkpoint_id, "state_digest": _digest(value), "safe": True, "payload": value}
-    source.header_budget.debit(upper + receipt_upper, appearance=("programme-start", "journal-construction"))
-    after = _canonical(_bounded_checkpoint_receipts([*history, receipt]))
-    now = datetime.now(timezone.utc)
-    conditions = [WorkflowRunState.run_identity == source.job_id, WorkflowRunState.status == "running",
-        WorkflowRunState.revision == run.revision, WorkflowRunState.attempt_count == witness["attempt_count"],
-        WorkflowRunState.lease_owner == witness["lease_owner"], WorkflowRunState.fencing_token == witness["fencing_token"],
-        WorkflowRunState.deadline_at > now, WorkflowRunState.lease_expires_at > now,
-        WorkflowRunState.checkpoint_receipts_json == run.checkpoint_receipts_json]
-    _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
-    statement = update(WorkflowRunState).where(*conditions).execution_options(synchronize_session=False).values(
-        checkpoint_receipts_json=after, revision=WorkflowRunState.revision + 1, updated_at=now)
-    response = succeeded("research.executeAccepted", {"job_ref": source.job_id,
-        "revision": run.revision + 1, "state": "running"})
-    proof = _StartPublication(source, called, db, statement, run.checkpoint_receipts_json, after, receipt, response, _SEAL)
-    source.publication, source.state = proof, "start_pending"
-    db.info["composition_native_programme_start"] = proof
-    def committed(session):
-        if session is db.sync_session and proof.checked:
-            proof.committed = True
-            if not source.closed:
-                source.state = "start_committed"
-    event.listen(db.sync_session, "after_commit", committed, once=True)
-    result = await db.execute(statement)
-    if not _rowcount_is_one(result):
-        raise NativeServiceBlocked("native_programme_start_cas_changed")
-    return response
+    from src.memory.header_bounds import _NativeProgrammeNumericLedger
+    ledger = source._numeric_reservation
+    if type(ledger) is not _NativeProgrammeNumericLedger:
+        raise NativeServiceBlocked("native_programme_start_capacity_unavailable")
+    await ledger.bind(db, "start")
+    with ledger.phase("start"):
+        source.validate(called=called)
+        source.authority_selection(db)
+        authority = await original_programme_start_current_checks(source, called, run)
+        witness = source.scope.witness
+        if payload["plan_ref"] != authority.plan_ref.artifact_id:
+            raise NativeServiceBlocked("native_programme_plan_changed")
+        upper = source.writer[4].common33.rows[("workflow_run_states", source.job_id)][1]
+        source.header_budget.debit(upper, appearance=("programme-start", "journal-decode"))
+        history = json.loads(run.checkpoint_receipts_json)
+        checkpoint_id = START_PREFIX + witness["claim_ref"]
+        if any(r.get("checkpoint_id", "").startswith(START_PREFIX) for r in history):
+            raise NativeServiceBlocked("native_programme_start_exhausted")
+        # Full current row plus bounded claim and ArtifactRef fields conservatively
+        # cover the exact closed receipt and journal construction before allocation.
+        receipt_upper = 2 * upper + 4096
+        source.header_budget.debit(receipt_upper, appearance=("programme-start", "receipt-construction"))
+        value = {"schema_version": 1, "invocation_ref": source.job_id,
+            "original_claim_digest": _digest(dict(witness)),
+            "composition_binding_digest": source.scope.binding.binding_digest,
+            "host_boot_nonce": source.boot, "plan_ref": authority.plan_ref.model_dump(mode="json"),
+            "input_digest": run.input_digest, "authority_digest": run.authority_digest,
+            "run_fingerprint": run.run_fingerprint, "attempt_count": run.attempt_count,
+            "lease_owner": run.lease_owner, "fencing_token": run.fencing_token,
+            "original_deadline_at": witness["original_deadline_at"], "no_learning": True}
+        receipt = {"checkpoint_id": checkpoint_id, "state_digest": _digest(value), "safe": True, "payload": value}
+        source.header_budget.debit(upper + receipt_upper, appearance=("programme-start", "journal-construction"))
+        after = _canonical(_bounded_checkpoint_receipts([*history, receipt]))
+        now = datetime.now(timezone.utc)
+        conditions = [WorkflowRunState.run_identity == source.job_id, WorkflowRunState.status == "running",
+            WorkflowRunState.revision == run.revision, WorkflowRunState.attempt_count == witness["attempt_count"],
+            WorkflowRunState.lease_owner == witness["lease_owner"], WorkflowRunState.fencing_token == witness["fencing_token"],
+            WorkflowRunState.deadline_at > now, WorkflowRunState.lease_expires_at > now,
+            WorkflowRunState.checkpoint_receipts_json == run.checkpoint_receipts_json]
+        _append_parent_fence_condition(conditions, run, now=now, writer_db=db)
+        statement = update(WorkflowRunState).where(*conditions).execution_options(synchronize_session=False).values(
+            checkpoint_receipts_json=after, revision=WorkflowRunState.revision + 1, updated_at=now)
+        response = succeeded("research.executeAccepted", {"job_ref": source.job_id,
+            "revision": run.revision + 1, "state": "running"})
+        proof = _StartPublication(source, called, db, statement, run.checkpoint_receipts_json, after, receipt, response, _SEAL)
+        source.publication, source.state = proof, "start_pending"
+        db.info["composition_native_programme_start"] = proof
+        def committed(session):
+            if session is db.sync_session and proof.checked:
+                proof.committed = True
+                if not source.closed:
+                    source.state = "start_committed"
+        event.listen(db.sync_session, "after_commit", committed, once=True)
+        result = await db.execute(statement)
+        if not _rowcount_is_one(result):
+            raise NativeServiceBlocked("native_programme_start_cas_changed")
+        return response
 
 
 async def dispatch_programme(dispatcher, frame, payload, called):
+    source = called.original.native_programme_source
+    if type(source) is not _ProgrammeSource or source.jobs is not dispatcher.jobs:
+        raise NativeServiceBlocked("native_programme_source_unavailable")
+    async with source.service_call(called):
+        return await _dispatch_programme(dispatcher, frame, payload, called)
+
+
+async def _dispatch_programme(dispatcher, frame, payload, called):
     from src.workflows.research_sources import physical_discovery_inputs
     from src.workflows.research_guard import discovery_writer_scope
     from .contracts import succeeded, blocked
@@ -404,7 +525,7 @@ async def dispatch_programme(dispatcher, frame, payload, called):
     witness = await source.physical_inputs()
     response = None
     async with discovery_writer_scope(witness=witness):
-        async with dispatcher.jobs._session(header_budget=source.header_budget) as db:
+        async with dispatcher.jobs._native_programme_read_session(source, header_budget=source.header_budget) as db:
             run, _, _ = await dispatcher._current_in_db(db, source.job_id, called.method, called.original,
                 native_programme_call=called)
             if called.method == "research.executeAccepted":

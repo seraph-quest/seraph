@@ -200,7 +200,103 @@ class _ReportPublicationPermission:
     _issuance: Any = field(default=None, init=False, repr=False, compare=False)
 
 
-def _journal(raw):
+def _report_memory_allocation_pay(budget, stage, upper):
+    """Pay an original REPORT allocation; this conveys no read authority."""
+    if budget is None:
+        return
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    frame = _configured_mac_numeric_frame()
+    if type(budget) is not HeaderReadBudget or (frame is not None and frame is not budget):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    budget.debit(upper, appearance=("native-memory-report-allocation", stage))
+
+
+def _report_memory_canonical_pay(value, budget, *, stage, digest_output=False):
+    if budget is None:
+        return
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    upper = _native_memory_source_value_upper(value)
+    _report_memory_allocation_pay(budget, stage + "-json", upper)
+    _report_memory_allocation_pay(budget, stage + "-utf8", upper)
+    if digest_output:
+        _report_memory_allocation_pay(budget, stage + "-hexdigest", 66)
+
+
+def _report_memory_consumer_model_pay(inputs, budget, *, stage):
+    if budget is None:
+        return
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    from src.memory.header_bounds import _native_memory_utf8_width
+    upper = _native_memory_source_value_upper(inputs)
+    _report_memory_allocation_pay(budget, stage + "-input-copy", upper)
+    _report_memory_allocation_pay(budget, stage + "-model", upper)
+    quoted = inputs.get("quoted_source_data")
+    if type(quoted) is str:
+        width = _native_memory_utf8_width(quoted)
+        _report_memory_allocation_pay(budget, stage + "-quoted-bound-utf8", width)
+        _report_memory_allocation_pay(budget, stage + "-quoted-digest-utf8", width)
+        _report_memory_allocation_pay(budget, stage + "-quoted-hexdigest", 66)
+
+
+def _report_memory_safe_inputs_pay(inputs, budget):
+    if budget is None:
+        return
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    _report_memory_canonical_pay(inputs, budget, stage="identity-safe-input-digest", digest_output=True)
+    keys_upper = 2 + max(0, len(inputs) - 1)
+    for key in inputs:
+        if type(key) is not str:
+            raise ValueError("original report input keys changed")
+        width = _native_memory_ascii_string_width(key)
+        keys_upper += width
+        _report_memory_allocation_pay(budget, "identity-safe-input-key-str", width)
+    _report_memory_allocation_pay(budget, "identity-safe-input-keys-sorted", keys_upper)
+    projection_upper = (2 + 2 + 3 + _native_memory_ascii_string_width("redacted") + 4
+        + _native_memory_ascii_string_width("keys") + keys_upper
+        + _native_memory_ascii_string_width("shape") + _native_memory_ascii_string_width("dict"))
+    _report_memory_allocation_pay(budget, "identity-safe-input-projection", projection_upper)
+    _report_memory_allocation_pay(budget, "identity-safe-input-return", 3 + 66 + projection_upper)
+    _report_memory_allocation_pay(budget, "identity-durable-input-return", 3 + 66 + projection_upper)
+
+
+def _report_memory_fieldset_pay(value, budget, *, stage):
+    if budget is None:
+        return
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    upper = 2 + max(0, len(value) - 1)
+    for key in value:
+        if type(key) is not str:
+            raise ValueError("original report field names changed")
+        upper += _native_memory_ascii_string_width(key)
+    _report_memory_allocation_pay(budget, stage, upper)
+
+
+def _report_memory_journal_numeric_pay(raw, budget):
+    """Original JSON parser resource payment; never a report-read grant."""
+    if budget is None:
+        return
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, _native_memory_utf8_width, MAX_BYTES
+    frame = _configured_mac_numeric_frame()
+    if type(budget) is not HeaderReadBudget or (frame is not None and frame is not budget):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    text = raw or "[]"
+    if type(text) is not str:
+        raise ValueError("original report journal malformed")
+    # Same closed encoded-unit JSON parser/pairs/dicts grammar as the original
+    # Source candidate parser. Count UTF8 without allocating an encoded copy.
+    upper = 6 * _native_memory_utf8_width(text) + 2
+    if upper > MAX_BYTES:
+        raise HeaderBoundsError("memory_report_journal_numeric_bound")
+    budget.debit(upper, appearance=("native-memory-report-parser", "journal-parser"))
+    budget.debit(upper, appearance=("native-memory-report-parser", "journal-pairs"))
+    budget.debit(upper, appearance=("native-memory-report-parser", "journal-dicts"))
+
+
+def _journal(raw, *, _memory_header_budget=None):
+    _report_memory_journal_numeric_pay(raw, _memory_header_budget)
     def closed_pairs(pairs):
         result = {}
         for key, value in pairs:
@@ -301,19 +397,38 @@ def validate_task_publication(db, previous, current, *, run_id, previous_journal
     return (receipt,)
 
 
-def read_report_candidate(run, kind="admission"):
+def read_report_candidate(run, kind="admission", *, _memory_header_budget=None):
     """Canonical protected metadata locator; never a physical owner witness."""
     from src.runtime_plugins.contracts import ref, sha
     from src.runtime_plugins.ownership import RuntimeCompositionBinding
     from src.workflows.job_runtime import _digest
     if kind != "admission":
         raise ValueError("original report admission locator required")
-    history = _journal(run.checkpoint_receipts_json)
+    history = _journal(run.checkpoint_receipts_json, _memory_header_budget=_memory_header_budget)
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        selected_upper, selected_count = 2, 0
+        for item in history:
+            if item.get("checkpoint_id") == REPORT_CHECKPOINT_IDS[0]:
+                selected_upper += _native_memory_source_value_upper(item)
+                selected_count += 1
+        _report_memory_allocation_pay(_memory_header_budget, "candidate-selected-list",
+            selected_upper + max(0, selected_count - 1))
     selected = [item for item in history if item.get("checkpoint_id") == REPORT_CHECKPOINT_IDS[0]]
     if len(selected) != 1:
         raise ValueError("original report admission unavailable")
     receipt = selected[0]
     payload = receipt.get("payload")
+    if _memory_header_budget is not None:
+        _report_memory_fieldset_pay(receipt, _memory_header_budget, stage="candidate-receipt-fieldset")
+        _report_memory_fieldset_pay(("checkpoint_id", "safe", "payload", "state_digest", "fencing_token", "recorded_at"),
+            _memory_header_budget, stage="candidate-receipt-expected-fieldset")
+        if type(payload) is dict:
+            _report_memory_fieldset_pay(payload, _memory_header_budget, stage="candidate-payload-fieldset")
+            _report_memory_fieldset_pay(("schema_version", "context_tag", "phase", "job_id", "host_boot_nonce",
+                "candidate", "candidate_digest", "no_learning"), _memory_header_budget,
+                stage="candidate-payload-expected-fieldset")
+            _report_memory_canonical_pay(payload, _memory_header_budget, stage="candidate-payload-seal", digest_output=True)
     if (set(receipt) != {"checkpoint_id", "safe", "payload", "state_digest", "fencing_token", "recorded_at"}
         or type(receipt["fencing_token"]) is not int or receipt["fencing_token"] != 0
         or type(payload) is not dict or set(payload) != {"schema_version", "context_tag", "phase", "job_id",
@@ -324,6 +439,13 @@ def read_report_candidate(run, kind="admission"):
         or receipt.get("state_digest") != _digest(payload)):
         raise ValueError("original report admission seal changed")
     value = payload["candidate"]
+    if _memory_header_budget is not None and type(value) is dict:
+        _report_memory_fieldset_pay(value, _memory_header_budget, stage="candidate-fields")
+        _report_memory_canonical_pay(payload, _memory_header_budget, stage="candidate-payload-bound")
+        _report_memory_canonical_pay(value, _memory_header_budget, stage="candidate-digest", digest_output=True)
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        _report_memory_allocation_pay(_memory_header_budget, "candidate-slots-list",
+            _native_memory_source_value_upper(REPORT_CHECKPOINT_IDS))
     if (type(value) is not dict or set(value) != _ADMISSION_FIELDS
         or len(canonical_bytes(payload)) > REPORT_CANDIDATE_MAX_BYTES
         or payload["candidate_digest"] != hashlib.sha256(canonical_bytes(value)).hexdigest()
@@ -376,7 +498,7 @@ def checked_report_records(run):
         "link_id", "handoff_id", "producer_task_id", "producer_attempt_id", "goal_id")}
 
 
-def report_identity_matches_current(task, attempt, inputs, run, *, principal) -> bool:
+def report_identity_matches_current(task, attempt, inputs, run, *, principal, _memory_header_budget=None) -> bool:
     """Compare immutable report data; original callers retain all authority gates.
 
     The principal is the caller's current authenticated canonical principal.
@@ -388,7 +510,8 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal) ->
     from src.work_board.pipelines import utc
     from src.workflows.job_runtime import _admission_conflicts, _binding, _composition_fingerprint, _digest, _safe_durable_inputs
     try:
-        metadata = read_report_candidate(run)
+        metadata = read_report_candidate(run, _memory_header_budget=_memory_header_budget)
+        _report_memory_consumer_model_pay(inputs, _memory_header_budget, stage="identity-consumer")
         model = EvidenceConsumerInput.model_validate(dict(inputs))
         if (type(task) is not WorkBoardTask or type(attempt) is not WorkBoardAttempt
             or task.capability_id != REPORT or attempt.task_id != task.task_id
@@ -410,13 +533,15 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal) ->
             or model.producer_sha256 != metadata["producer_sha256"]
             or model.handoff_ref != metadata["handoff_id"]):
             return False
-        original = spec_for(task, attempt, inputs, deadline=datetime.fromisoformat(metadata["cutoff"]))
+        original = spec_for(task, attempt, inputs, deadline=datetime.fromisoformat(metadata["cutoff"]),
+            _memory_header_budget=_memory_header_budget)
         authority = {**original.declared_authority,
             "grants": sorted(str(getattr(grant, "value", grant)) for grant in principal.grants)}
         original = replace(original, declared_authority=authority,
             composition_binding=RuntimeCompositionBinding.from_json(run.composition_binding_json),
             run_fingerprint=digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
                 "inputs": original.inputs, "authority": authority}))
+        _report_memory_safe_inputs_pay(original.inputs, _memory_header_budget)
         input_digest, safe_inputs = _safe_durable_inputs(original.inputs)
         return (not _admission_conflicts(run, spec=original, input_digest=input_digest,
                     authority_digest=_digest(authority), deadline=original.deadline_at)
@@ -437,15 +562,29 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal) ->
         return False
 
 
-def validated_terminal_report_source(run):
+def validated_terminal_report_source(run, *, _memory_header_budget=None):
     """Historic metadata locator only; current/physical Memory owners recheck."""
     from src.workflows.job_runtime import _digest
     from .contracts import sha as validate_sha
-    candidate = read_report_candidate(run)
+    candidate = read_report_candidate(run, _memory_header_budget=_memory_header_budget)
     if run.status != "succeeded" or run.attempt_count != 1:
         raise ValueError("verified terminal report required")
-    history = _journal(run.checkpoint_receipts_json)
+    history = _journal(run.checkpoint_receipts_json, _memory_header_budget=_memory_header_budget)
     from .dispatch import _receipt_witness
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        claims_upper, claims_count = 2, 0
+        for item in history:
+            checkpoint = item.get("checkpoint_id", "")
+            if type(checkpoint) is not str:
+                raise ValueError("original report checkpoint shape changed")
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-checkpoint-str",
+                _native_memory_source_value_upper(checkpoint))
+            if checkpoint.startswith("runtime-service-invocation:") and checkpoint not in REPORT_CHECKPOINT_IDS:
+                claims_upper += _native_memory_source_value_upper(item)
+                claims_count += 1
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-claims-list",
+            claims_upper + max(0, claims_count - 1))
     claims = [item for item in history if str(item.get("checkpoint_id", "")).startswith("runtime-service-invocation:")
         and item.get("checkpoint_id") not in REPORT_CHECKPOINT_IDS]
     if len(claims) != 1:
@@ -460,6 +599,26 @@ def validated_terminal_report_source(run):
         or claim["run_fingerprint"] != candidate["run_fingerprint"]
         or claim["original_deadline_at"] != int(datetime.fromisoformat(candidate["cutoff"]).timestamp() * 1000)):
         raise ValueError("original terminal report claim changed")
+    if _memory_header_budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        common_upper = 7
+        for name in ("schema_version", "context_tag", "phase", "job_id", "candidate_digest", "no_learning"):
+            common_upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-common-fieldset", common_upper)
+        fields_upper = 7
+        for phase in ("source", "invoke", "outcome"):
+            suffix_upper = 6
+            names = (("task_id", "attempt_id", "input_id", "payload_sha256", "producer_sha256") if phase == "source"
+                else ("output_reference", "output_sha256", "size_bytes", "file_closed", "readback_verified") if phase == "invoke"
+                else ("output_reference", "output_sha256", "callback_closed", "file_closed", "readback_verified"))
+            for name in names:
+                suffix_upper += _native_memory_ascii_string_width(name)
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-suffix-fieldset", suffix_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-union-fieldset", common_upper + suffix_upper - 1)
+            fields_upper += _native_memory_ascii_string_width(phase) + common_upper + suffix_upper - 1
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-fields-by-phase-map", fields_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-map", 2)
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-indices-list", 2)
     common = {"schema_version", "context_tag", "phase", "job_id", "candidate_digest", "no_learning"}
     fields_by_phase = {
         "source": common | {"task_id", "attempt_id", "input_id", "payload_sha256", "producer_sha256"},
@@ -467,12 +626,35 @@ def validated_terminal_report_source(run):
         "outcome": common | {"output_reference", "output_sha256", "callback_closed", "file_closed", "readback_verified"}}
     phases, indices = {}, []
     for phase, expected_fields in fields_by_phase.items():
+        if _memory_header_budget is not None:
+            selected_upper, selected_count = 2, 0
+            numeric_index = 0
+            while numeric_index < len(history):
+                item = history[numeric_index]
+                pair_upper = (3 + _native_memory_source_value_upper(numeric_index)
+                    + _native_memory_source_value_upper(item))
+                _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-enumeration-pair", pair_upper)
+                if item.get("checkpoint_id") == REPORT_CHECKPOINT_IDS[REPORT_PHASES.index(phase)]:
+                    _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-selected-pair", pair_upper)
+                    selected_upper += pair_upper
+                    selected_count += 1
+                numeric_index += 1
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-selected-list",
+                selected_upper + max(0, selected_count - 1))
         selected = [(index, item) for index, item in enumerate(history)
             if item.get("checkpoint_id") == REPORT_CHECKPOINT_IDS[REPORT_PHASES.index(phase)]]
         if len(selected) != 1:
             raise ValueError("complete verified report history required")
         index, receipt = selected[0]
         value = receipt.get("payload")
+        if _memory_header_budget is not None:
+            _report_memory_fieldset_pay(receipt, _memory_header_budget, stage="terminal-receipt-fieldset")
+            _report_memory_fieldset_pay(("checkpoint_id", "safe", "payload", "state_digest", "fencing_token", "recorded_at"),
+                _memory_header_budget, stage="terminal-receipt-expected-fieldset")
+            if type(value) is dict:
+                _report_memory_fieldset_pay(value, _memory_header_budget, stage="terminal-payload-fieldset")
+                _report_memory_canonical_pay(value, _memory_header_budget, stage="terminal-payload-digest", digest_output=True)
+                _report_memory_canonical_pay(candidate, _memory_header_budget, stage="terminal-candidate-digest", digest_output=True)
         if (set(receipt) != {"checkpoint_id", "safe", "payload", "state_digest", "fencing_token", "recorded_at"}
             or type(receipt["fencing_token"]) is not int
             or type(value) is not dict or set(value) != expected_fields or type(value["schema_version"]) is not int
@@ -481,8 +663,17 @@ def validated_terminal_report_source(run):
             or receipt.get("state_digest") != _digest(value) or receipt.get("fencing_token") != run.fencing_token
             or value["candidate_digest"] != digest(candidate)):
             raise ValueError("verified report phase changed")
+        if _memory_header_budget is not None:
+            from src.memory.header_bounds import _native_memory_ascii_string_width
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-phase-map-slot",
+                _native_memory_ascii_string_width(phase) + 1 + _native_memory_source_value_upper(value))
+            _report_memory_allocation_pay(_memory_header_budget, "terminal-index-list-slot",
+                _native_memory_source_value_upper(index) + 1)
         phases[phase] = value
         indices.append(index)
+    if _memory_header_budget is not None:
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-indices-sort",
+            _native_memory_source_value_upper(indices))
     if indices != sorted(indices) or any(item.get("checkpoint_id") == REPORT_CHECKPOINT_IDS[4] for item in history):
         raise ValueError("verified report history order changed")
     source, invoked, outcome = (phases[phase] for phase in ("source", "invoke", "outcome"))
@@ -497,7 +688,8 @@ def validated_terminal_report_source(run):
         or outcome["callback_closed"] is not True or outcome["readback_verified"] is not True
         or type(invoked["size_bytes"]) is not int or not 1 <= invoked["size_bytes"] <= 65536):
         raise ValueError("verified report output changed")
-    artifacts, effects = _journal(run.artifact_receipts_json), _journal(run.effect_receipts_json)
+    artifacts, effects = (_journal(run.artifact_receipts_json, _memory_header_budget=_memory_header_budget),
+        _journal(run.effect_receipts_json, _memory_header_budget=_memory_header_budget))
     if (len(artifacts) != 1 or len(effects) != 1 or artifacts[0].get("file_path") != expected
         or artifacts[0].get("content_sha256") != sha or artifacts[0].get("exists") is not True
         or artifacts[0].get("artifact_type") != "evidence_local_report" or artifacts[0].get("producer") != REPORT

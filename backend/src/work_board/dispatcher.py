@@ -1499,32 +1499,76 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     return _decode_typed_input_payload(task, payload)
 
 
-def _decode_typed_input_payload(task: WorkBoardTask, payload: bytes) -> dict[str, Any]:
+def _decode_typed_input_payload(task: WorkBoardTask, payload: bytes, *, _memory_header_budget=None,
+        _memory_report_input_stage=None, _memory_db=None) -> dict[str, Any]:
     """Validate the original full envelope; held bytes carry no authority."""
     if type(payload) is not bytes:
         raise TypedInputError("typed_input_invalid", "typed input payload must be bytes")
     if len(payload) > 64 * 1024:
         raise TypedInputError("typed_input_too_large", "typed input exceeds 64 KiB")
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.memory_producer import (_memory_report_decoder_numeric_owner,
+            _native_memory_source_value_upper, _memory_report_stage_pay,
+            _OriginalMemoryReportInputNumericFacts, _MEMORY_REPORT_INPUT_NUMERIC_SEAL, _MEMORY_REPORT_INPUT_NUMERIC)
+        from src.runtime_plugins.task_capability import (_report_memory_allocation_pay,
+            _report_memory_fieldset_pay, _report_memory_consumer_model_pay)
+        from src.memory.header_bounds import _native_memory_ascii_string_width, HeaderBoundsError
+        _memory_report_decoder_numeric_owner(_memory_report_input_stage, task, payload, _memory_db, _memory_header_budget)
+        digest_upper = _native_memory_source_value_upper(task.typed_input_digest)
+        _report_memory_allocation_pay(_memory_header_budget, "input-expected-digest-str", digest_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-expected-digest-strip", digest_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-expected-digest-lower", digest_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-actual-hexdigest", 66)
     expected_digest = _text(task.typed_input_digest).lower()
     actual_digest = hashlib.sha256(payload).hexdigest()
     if not expected_digest or actual_digest != expected_digest:
         raise TypedInputError("typed_input_digest_mismatch", "typed input digest does not match the task")
+    if _memory_header_budget is not None:
+        decoded_upper = 6 * len(payload) + 2
+        _report_memory_allocation_pay(_memory_header_budget, "input-envelope-decode", decoded_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-envelope-parser", decoded_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-envelope-pairs", decoded_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-envelope-dicts", decoded_upper)
     try:
         envelope = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TypedInputError("typed_input_json_invalid", "typed input is not valid UTF-8 JSON") from exc
     if not isinstance(envelope, Mapping):
         raise TypedInputError("typed_input_envelope_invalid", "typed input envelope must be an object")
+    if _memory_header_budget is not None:
+        _report_memory_fieldset_pay(envelope, _memory_header_budget, stage="input-envelope-fieldset")
+        _report_memory_fieldset_pay(("schema_version", "capability_id", "input"), _memory_header_budget,
+            stage="input-envelope-expected-fieldset")
     if set(envelope) != {"schema_version", "capability_id", "input"}:
         raise TypedInputError("typed_input_envelope_invalid", "typed input envelope has unexpected fields")
     if envelope.get("schema_version") != 1:
         raise TypedInputError("typed_input_schema_invalid", "typed input schema_version must be 1")
+    if _memory_header_budget is not None:
+        capability_upper = _native_memory_source_value_upper(task.capability_id)
+        _report_memory_allocation_pay(_memory_header_budget, "input-capability-str", capability_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "input-capability-strip", capability_upper)
     capability_id = _text(task.capability_id)
     if envelope.get("capability_id") != capability_id:
         raise TypedInputError("typed_input_capability_mismatch", "typed input capability does not match the task")
     raw_input = envelope.get("input")
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
+    if _memory_header_budget is not None:
+        # The selected original REPORT input is ten required scalar fields.
+        # Other shapes retain their ordinary path when no Memory payer exists.
+        for key, child in raw_input.items():
+            if (key not in ("schema_version", "operation_ref", "plan_version", "producer_task_ref", "producer_attempt_ref",
+                    "handoff_ref", "producer_sha256", "producer_schema", "quoted_source_data", "no_learning")
+                    or type(child) not in (str, int, bool)):
+                raise HeaderBoundsError("memory_report_input_numeric_shape_unavailable")
+            key_upper = _native_memory_ascii_string_width(key)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-str", key_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-strip", key_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-casefold", key_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-replace", key_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-slice", key_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "input-authority-key-path",
+                _native_memory_ascii_string_width("input.") + key_upper - 2)
     try:
         if capability_id == "agent.task.v1" and _text(task.input_artifact_id):
             from src.work_board.general_task_proposal import stored_scan_input
@@ -1541,10 +1585,50 @@ def _decode_typed_input_payload(task: WorkBoardTask, payload: bytes) -> dict[str
     model_type = _typed_input_model(capability_id)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
+    if _memory_header_budget is not None:
+        _report_memory_consumer_model_pay(raw_input, _memory_header_budget, stage="input-decoder-consumer")
     try:
         validated = model_type.model_validate(dict(raw_input))
     except ValidationError as exc:
         raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
+    if _memory_header_budget is not None:
+        stage, db, budget, model = _memory_report_input_stage, _memory_db, _memory_header_budget, validated
+        inventory = _memory_report_decoder_numeric_owner(stage, task, payload, db, budget)
+        from src.work_board.pipeline_contracts import EvidenceConsumerInput
+        from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width, _native_memory_utf8_width
+        if type(model) is not EvidenceConsumerInput:
+            raise HeaderBoundsError("memory_report_input_numeric_shape_unavailable")
+        _memory_report_stage_pay(budget, "input-dimensions-list", 2)
+        dimensions = []
+        input_upper = 2 + 9 + 10
+        for name in ("schema_version", "operation_ref", "plan_version", "producer_task_ref", "producer_attempt_ref",
+                "handoff_ref", "producer_sha256", "producer_schema", "quoted_source_data", "no_learning"):
+            value = getattr(model, name)
+            width = _native_memory_source_value_upper(value)
+            utf8 = _native_memory_utf8_width(value) if type(value) is str else 0
+            input_upper += _native_memory_ascii_string_width(name) + width
+            pair_upper = 4 + _native_memory_ascii_string_width(name) + _native_memory_source_value_upper(width) + _native_memory_source_value_upper(utf8)
+            _memory_report_stage_pay(budget, "input-dimension-tuple", pair_upper)
+            _memory_report_stage_pay(budget, "input-dimension-list-slot", pair_upper + 1)
+            dimensions.append((name, width, utf8))
+        dimensions_upper = _native_memory_source_value_upper(dimensions)
+        _memory_report_stage_pay(budget, "input-dimensions-tuple", dimensions_upper)
+        record_upper = (2 + 7 + 8 + 8 + _native_memory_source_value_upper(task.task_id)
+            + _native_memory_source_value_upper(task.typed_input_digest) + _native_memory_source_value_upper(input_upper)
+            + dimensions_upper + 4 + 20)
+        for name in ("stage", "inventory", "task_id", "input_digest", "input_upper", "dimensions", "_seal", "_issued_id"):
+            record_upper += _native_memory_ascii_string_width(name)
+        _memory_report_stage_pay(budget, "input-numeric-record", record_upper)
+        record = _OriginalMemoryReportInputNumericFacts(stage, inventory, task.task_id, task.typed_input_digest,
+            input_upper, tuple(dimensions))
+        object.__setattr__(record, "_seal", _MEMORY_REPORT_INPUT_NUMERIC_SEAL)
+        object.__setattr__(record, "_issued_id", id(record))
+        _memory_report_stage_pay(budget, "input-numeric-weak-reference", 4)
+        _memory_report_stage_pay(budget, "input-numeric-registry-entry", 3 + _native_memory_source_value_upper(id(record)) + 4)
+        _MEMORY_REPORT_INPUT_NUMERIC[id(record)] = record
+        _memory_report_stage_pay(budget, "input-stage-numeric-slot", 3 + _native_memory_ascii_string_width("_numeric_inputs") + 4)
+        object.__setattr__(stage, "_numeric_inputs", record)
+        _report_memory_allocation_pay(_memory_header_budget, "input-consumer-dump", input_upper)
     result = validated.model_dump(mode="json", exclude_none=True)
     if capability_id in {"guardian-routine.v1", "guardian-routine.v2"}:
         if (

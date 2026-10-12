@@ -1495,7 +1495,7 @@ def canonical_workspace_root(root: str | os.PathLike[str]) -> Path:
     return candidate.resolve(strict=True)
 
 
-def canonical_workspace_root_identity(root: str | os.PathLike[str]) -> dict[str, int | str]:
+def canonical_workspace_root_identity(root: str | os.PathLike[str], *, header_budget=None) -> dict[str, int | str]:
     """Return the non-secret identity of the current canonical root directory.
 
     A lexical path digest alone cannot detect a directory that was removed and
@@ -1512,8 +1512,33 @@ def canonical_workspace_root_identity(root: str | os.PathLike[str]) -> dict[str,
         raise UnsupportedWorkspaceEntryError("canonical workspace root must not be a symlink")
     if not stat.S_ISDIR(metadata.st_mode):
         raise WorkspaceStateError("canonical workspace root must be a directory")
+    if header_budget is not None:
+        from src.memory.header_bounds import (HeaderReadBudget, HeaderBoundsError,
+            _native_memory_ascii_string_width, _native_memory_utf8_width, _native_memory_object_width)
+        from src.extensions.capability_execution import _configured_mac_numeric_frame
+        payer = _configured_mac_numeric_frame()
+        if type(header_budget) is not HeaderReadBudget or (payer is not None and payer is not header_budget):
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
+        # The original owner has resolved and validated its actual directory.
+        # Size its POSIX rendering without first constructing that string.
+        parts = resolved.parts
+        if not parts or parts[0] != "/":
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        separators = max(0, len(parts) - 2)
+        string_upper = 2 + sum(_native_memory_ascii_string_width(part) - 2 for part in parts) + separators
+        utf8_upper = sum(_native_memory_utf8_width(part) for part in parts) + separators
+        header_budget.debit(string_upper, appearance=("native-memory-report-workspace", "path-string"))
+        path = str(resolved)
+        header_budget.debit(utf8_upper, appearance=("native-memory-report-workspace", "path-utf8"))
+        encoded = path.encode("utf-8")
+        header_budget.debit(66, appearance=("native-memory-report-workspace", "path-digest"))
+        path_digest = hashlib.sha256(encoded).hexdigest()
+        header_budget.debit(_native_memory_object_width({"path_digest": 66, "device": 22, "inode": 22}),
+            appearance=("native-memory-report-workspace", "identity"))
+    else:
+        path_digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
     return {
-        "path_digest": hashlib.sha256(str(resolved).encode("utf-8")).hexdigest(),
+        "path_digest": path_digest,
         "device": int(metadata.st_dev),
         "inode": int(metadata.st_ino),
     }

@@ -68,6 +68,7 @@ _MEMORY_PUBLICATIONS = WeakValueDictionary()
 _ARMED_MEMORY_PUBLICATION = ContextVar("armed_native_memory_publication", default=None)
 _MEMORY_RETENTIONS = WeakValueDictionary()
 _MEMORY_RETENTION_PROOFS = ContextVar("original_memory_retention_proofs", default=None)
+_MEMORY_INTEGER_SLOTS = WeakValueDictionary()
 
 MEMORY_REFERENCE_PROFILE = "native-composition-memory-reference.v2"
 MEMORY_ORIGINAL_CHECKPOINT = "memory:original-reference.v2"
@@ -85,7 +86,14 @@ _MEMORY_UNKNOWN_REASONS = frozenset(("canonical_body_over_limit", "canonical_bou
 _MEMORY_NATIVE_OPERATIONS = frozenset(("memory.propose", "memory.applyReviewed", "memory.forget"))
 
 
-def preflight_native_memory_reference_payload(payload, *, current=False):
+def _native_memory_key_set_width(value):
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    if type(value) is not dict or any(type(name) is not str for name in value):
+        raise HeaderBoundsError("memory_reference_payload_invalid")
+    return 2 + max(0, len(value) - 1) + sum(_native_memory_ascii_string_width(name) for name in value)
+
+
+def preflight_native_memory_reference_payload(payload, *, current=False, header_budget=None):
     """Closed byte-shape parser only; no source, row, MAC or effect authority.
 
     Actual owner publication and current-row validation remain mandatory and
@@ -93,6 +101,12 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
     """
     import re
     from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, MAX_ROWS, MEMORY_DESCRIPTORS
+    from src.memory.composition_headers import current_budget
+    from src.memory.header_bounds import _native_memory_utf8_width, _native_memory_ascii_string_width
+    payer = header_budget if header_budget is not None else current_budget()
+    def pay(stage, upper):
+        if payer is not None:
+            payer.debit(upper, appearance=("memory-reference-payload", "current" if current else "original", stage))
     def denied():
         raise HeaderBoundsError("memory_reference_payload_invalid")
     def sha(value):
@@ -100,6 +114,8 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
             denied()
     def key(value):
         try:
+            if type(value) is str:
+                pay("key-utf8", _native_memory_utf8_width(value))
             valid = type(value) is str and bool(value) and len(value.encode("utf-8")) <= 512
         except UnicodeEncodeError:
             valid = False
@@ -109,20 +125,32 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
         if type(value) is not int or not 0 <= value <= upper:
             denied()
     def reference(value):
+        if type(value) is dict:
+            pay("reference-field-set", _native_memory_key_set_width(value))
+        pay("reference-table-set", 2 + sum(_native_memory_ascii_string_width(name) + 1
+            for name in RETAINED_FIELDS) + sum(_native_memory_ascii_string_width(name) + 1
+            for name in MEMORY_DESCRIPTORS))
         if (type(value) is not dict or set(value) != {"table", "key"}
                 or type(value["table"]) is not str
                 or value["table"] not in {*RETAINED_FIELDS, *MEMORY_DESCRIPTORS}):
             denied()
         key(value["key"])
+        pay("reference-tuple", 3 + _native_memory_ascii_string_width(value["table"])
+            + _native_memory_ascii_string_width(value["key"]))
         return value["table"], value["key"]
     def reference_list(values):
         if type(values) is not list or len(values) > MAX_ROWS:
             denied()
+        upper = _native_memory_closed_value_width(values)
+        for stage in ("reference-list", "reference-set", "reference-sort"):
+            pay(stage, upper)
         result = [reference(item) for item in values]
         if result != sorted(set(result)):
             denied()
         return result
     fields = _MEMORY_CURRENT_FIELDS if current else _MEMORY_ORIGINAL_FIELDS
+    if type(payload) is dict:
+        pay("payload-field-set", _native_memory_key_set_width(payload))
     if (type(current) is not bool or type(payload) is not dict or set(payload) != fields
             or type(payload["schema_version"]) is not int or payload["schema_version"] != 2
             or payload["profile"] != MEMORY_REFERENCE_PROFILE):
@@ -140,8 +168,11 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
             denied()
         if type(payload["absences"]) is not list or len(payload["absences"]) > MAX_ROWS:
             denied()
+        pay("absence-list", _native_memory_closed_value_width(payload["absences"]))
         absent = []
         for item in payload["absences"]:
+            if type(item) is dict:
+                pay("absence-field-set", _native_memory_key_set_width(item))
             if type(item) is not dict or set(item) != {"ref", "reason", "original_binding_digest"}:
                 denied()
             ref = reference(item["ref"])
@@ -151,6 +182,9 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
                 denied()
             sha(item["original_binding_digest"])
             absent.append(ref)
+        union_upper = _native_memory_closed_value_width(refs) + _native_memory_closed_value_width(events)
+        for stage in ("absence-set", "absence-sort", "reference-union-tuple", "reference-union-set"):
+            pay(stage, union_upper)
         if absent != sorted(set(absent)) or len(set((*refs, *events))) > MAX_ROWS:
             denied()
         if payload["original_checkpoint_digest"] is None:
@@ -169,13 +203,18 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
                     or len(payload["rows"]) > MAX_ROWS):
                 denied()
             sha(payload["rows_digest"])
+            pay("row-reference-list", _native_memory_closed_value_width(payload["rows"]))
             row_refs = []
             for row in payload["rows"]:
+                if type(row) is dict:
+                    pay("row-field-set", _native_memory_key_set_width(row))
                 if type(row) is not dict or set(row) != {"ref", "tuple_digest", "encoded_bytes"}:
                     denied()
                 row_refs.append(reference(row["ref"]))
                 sha(row["tuple_digest"])
                 bounded_integer(row["encoded_bytes"], MAX_BYTES)
+            for stage in ("row-reference-union", "row-reference-set", "row-reference-sort"):
+                pay(stage, union_upper)
             if (row_refs != sorted(set((*refs, *events)))
                     or sum(row["encoded_bytes"] for row in payload["rows"]) != payload["encoded_bytes"]):
                 denied()
@@ -192,6 +231,8 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
         if type(payload["method"]) is not str or payload["method"] not in _MEMORY_NATIVE_OPERATIONS:
             denied()
         audit = payload["original_audit"]
+        if type(audit) is dict:
+            pay("audit-field-set", _native_memory_key_set_width(audit))
         if type(audit) is not dict or set(audit) != {"ref", "tuple_digest"}:
             denied()
         audit_ref = reference(audit["ref"])
@@ -199,11 +240,16 @@ def preflight_native_memory_reference_payload(payload, *, current=False):
             denied()
         sha(audit["tuple_digest"])
         try:
+            for stage in ("deadline-parse", "deadline-zone", "deadline-isoformat"):
+                pay(stage, _native_memory_closed_value_width(payload["original_deadline"]))
             deadline = datetime.fromisoformat(payload["original_deadline"])
             if deadline.tzinfo is None or deadline.astimezone(timezone.utc).isoformat() != payload["original_deadline"]:
                 denied()
         except (TypeError, ValueError):
             denied()
+    upper = _native_memory_closed_value_width(payload)
+    pay("canonical", upper)
+    pay("encoded", upper)
     try:
         encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True,
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -252,7 +298,7 @@ def _native_memory_unknown_replacement_upper_bytes(refs, *, original_checkpoint_
                           separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
-def preflight_native_memory_reference_journal(raw):
+def preflight_native_memory_reference_journal(raw, *, header_budget=None):
     """Bounded closed checkpoint parser, never a mint/copy/adoption permission.
 
     Invalid Original is reported to the actual reduction owner; it cannot be
@@ -260,10 +306,18 @@ def preflight_native_memory_reference_journal(raw):
     The original owner must first certify this raw column's whole-row header.
     """
     from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
+    from src.memory.header_bounds import _native_memory_utf8_width
+    from src.memory.composition_headers import current_budget
     from src.workflows.job_runtime import _digest
+    payer = header_budget if header_budget is not None else current_budget()
+    if payer is not None:
+        payer.debit(6 * _native_memory_utf8_width(raw) + 2,
+            appearance=("memory-reference-journal", "decode"))
     records = strict_json_loads(raw)
     if type(records) is not list:
         raise HeaderBoundsError("memory_reference_journal_invalid")
+    if payer is not None:
+        payer.debit(2, appearance=("memory-reference-journal", "found-map"))
     found = {}
     for record in records:
         if type(record) is not dict:
@@ -271,17 +325,72 @@ def preflight_native_memory_reference_journal(raw):
         identifier = record.get("checkpoint_id")
         if identifier not in (MEMORY_ORIGINAL_CHECKPOINT, MEMORY_CURRENT_CHECKPOINT):
             continue
+        if payer is not None:
+            payer.debit(_native_memory_key_set_width(record),
+                appearance=("memory-reference-journal", "record-field-set", identifier))
         if (identifier in found or set(record) != {"checkpoint_id", "state_digest", "safe", "payload"}
                 or record["safe"] is not True):
             raise HeaderBoundsError("memory_reference_journal_invalid")
-        preflight_native_memory_reference_payload(record["payload"], current=identifier == MEMORY_CURRENT_CHECKPOINT)
+        preflight_native_memory_reference_payload(record["payload"],
+            current=identifier == MEMORY_CURRENT_CHECKPOINT, header_budget=payer)
+        if payer is not None:
+            upper = _native_memory_closed_value_width(record["payload"])
+            for stage in ("digest-canonical", "digest-encoded"):
+                payer.debit(upper, appearance=("memory-reference-journal", stage, identifier))
+            payer.debit(66, appearance=("memory-reference-journal", "digest-result", identifier))
         if record["state_digest"] != _digest(record["payload"]):
             raise HeaderBoundsError("memory_reference_journal_invalid")
         found[identifier] = record
+    if payer is not None:
+        payer.debit(4, appearance=("memory-reference-journal", "return"))
     return found.get(MEMORY_ORIGINAL_CHECKPOINT), found.get(MEMORY_CURRENT_CHECKPOINT)
 
 
-def _splice_native_memory_current_checkpoint(raw, replacement):
+def _native_memory_lexical_token_upper(raw, position):
+    """Size an already strictly validated lexical token without decoding it."""
+    from src.memory.header_bounds import HeaderBoundsError
+    start = position
+    depth = 0
+    quoted = False
+    escaped = False
+    container = raw[position] in "[{"
+    while position < len(raw):
+        char = raw[position]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+                if not container:
+                    position += 1
+                    break
+        elif char == '"':
+            quoted = True
+        elif container:
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth -= 1
+                if depth == 0:
+                    position += 1
+                    break
+        elif char in ",]} \t\r\n":
+            break
+        position += 1
+    if position <= start or quoted or depth:
+        raise HeaderBoundsError("memory_reference_journal_invalid")
+    utf8 = sum(1 if ord(raw[index]) < 128 else 2 if ord(raw[index]) < 2048
+        else 3 if ord(raw[index]) <= 65535 else 4 for index in range(start, position))
+    # For a valid ASCII JSON string the existing escapes already bound its
+    # canonical representation. DEL/nonASCII requires the original 6x upper.
+    if raw[start] == '"' and all(ord(raw[index]) < 127 for index in range(start, position)):
+        return position - start
+    return 6 * utf8 + 2
+
+
+def _splice_native_memory_current_checkpoint(raw, replacement, *, header_budget=None):
     """Bounded lexical replacement only; never publication or owner authority.
 
     Preserve every character outside the old Current record, including other
@@ -290,6 +399,14 @@ def _splice_native_memory_current_checkpoint(raw, replacement):
     """
     from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, strict_json_loads
     from src.workflows.job_runtime import _canonical, _digest
+    from src.memory.composition_headers import current_budget
+    from src.memory.header_bounds import _native_memory_utf8_width
+    payer = header_budget if header_budget is not None else current_budget()
+    raw_upper = 6 * _native_memory_utf8_width(raw) + 2 if payer is not None else 0
+    def pay(stage, upper):
+        if payer is not None:
+            payer.debit(upper, appearance=("memory-current-splice", stage))
+    pay("journal-decode", raw_upper)
     # Old Original/Current can be invalid precisely when the real reduction
     # owner must publish Unknown. Parsing their lexical containers here does
     # not attest their payloads; preserve Original without adopting it.
@@ -305,16 +422,24 @@ def _splice_native_memory_current_checkpoint(raw, replacement):
             or replacement["safe"] is not True
             or type(replacement["state_digest"]) is not str):
         raise HeaderBoundsError("memory_reference_journal_invalid")
-    preflight_native_memory_reference_payload(replacement["payload"], current=True)
+    preflight_native_memory_reference_payload(replacement["payload"], current=True, header_budget=payer)
+    replacement_upper = _native_memory_closed_value_width(replacement) if payer is not None else 0
+    payload_upper = _native_memory_closed_value_width(replacement["payload"]) if payer is not None else 0
+    for stage in ("payload-canonical", "payload-encoded"):
+        pay(stage, payload_upper)
+    pay("payload-digest", 66)
     if replacement["state_digest"] != _digest(replacement["payload"]):
         raise HeaderBoundsError("memory_reference_journal_invalid")
     # The exact wrapper parser checks shape, safe=True and the existing runtime
     # digest codec. This does not authorize the Current represented by it.
     try:
+        pay("record-canonical", replacement_upper)
         encoded = _canonical(replacement)
     except (ValueError, TypeError, RecursionError, OverflowError):
         raise HeaderBoundsError("memory_reference_journal_invalid") from None
-    preflight_native_memory_reference_journal("[" + encoded + "]")
+    pay("wrapper-copy", replacement_upper + 2)
+    preflight_native_memory_reference_journal("[" + encoded + "]", header_budget=payer)
+    pay("span-list", raw_upper)
     decoder = json.JSONDecoder()
     position = 0
     whitespace = " \t\r\n"
@@ -326,28 +451,39 @@ def _splice_native_memory_current_checkpoint(raw, replacement):
         while raw[position] in whitespace:
             position += 1
         start = position
+        # The selected raw journal is bounded before each original decoder
+        # appearance, including the repeated lexical pass over its records.
+        pay("record-decode", _native_memory_lexical_token_upper(raw, position) if payer is not None else 0)
         _, position = decoder.raw_decode(raw, position)
         spans.append((start, position))
         while raw[position] in whitespace:
             position += 1
         if raw[position] == ",":
             position += 1
+    pay("matches", raw_upper)
     matches = [index for index, record in enumerate(records)
                if record.get("checkpoint_id") == MEMORY_CURRENT_CHECKPOINT]
     if matches:
         start, end = spans[matches[0]]
+        pay("prefix-copy", raw_upper)
+        pay("suffix-copy", raw_upper)
+        pay("join-copy", raw_upper + replacement_upper)
         result = raw[:start] + encoded + raw[end:]
     else:
         # Insert after the last record, preserving its trailing whitespace, or
         # directly after '[' for an empty array. Only one delimiter is added.
         insert_at = spans[-1][1] if spans else position
+        pay("prefix-copy", raw_upper)
+        pay("suffix-copy", raw_upper)
+        pay("join-copy", raw_upper + replacement_upper + 1)
         result = raw[:insert_at] + ("," if spans else "") + encoded + raw[insert_at:]
+    pay("size-utf8", raw_upper + replacement_upper + 1)
     if len(result.encode("utf-8")) > MAX_BYTES:
         raise HeaderBoundsError("header_json_bound")
     return result
 
 
-def _native_memory_planned_sql_row(instance, changes=None, *, transient=False):
+def _native_memory_planned_sql_row(instance, changes=None, *, transient=False, _capacity_slot=None):
     """Closed deterministic SQLite binding of a real transient constructor row.
 
     This byte projection does not enroll the instance or issue source authority.
@@ -359,6 +495,8 @@ def _native_memory_planned_sql_row(instance, changes=None, *, transient=False):
     from sqlmodel.sql.sqltypes import AutoString
     from src.db.models import AuditEvent, WorkflowRunState
     from src.memory.header_bounds import HeaderBoundsError, MEMORY_DESCRIPTORS, _MEMORY_MODELS, AUDIT_EVENT, WRS_BY_RUN
+    if _capacity_slot is not None and type(_capacity_slot) is not _NativeMemoryFutureIntegerSlot:
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
     table = getattr(type(instance), "__tablename__", None)
     model = {"audit_events": AuditEvent, "workflow_run_states": WorkflowRunState}.get(table, _MEMORY_MODELS.get(table))
     if model is None or type(instance) is not model or (transient and not inspect(instance).transient):
@@ -393,7 +531,15 @@ def _native_memory_planned_sql_row(instance, changes=None, *, transient=False):
         except (TypeError, ValueError, OverflowError):
             raise HeaderBoundsError("memory_transient_bind_value_invalid") from None
         if value is None:
-            if not nullable:
+            capacity_key = (_capacity_slot is not None and name == descriptor.key
+                and descriptor.table == "work_board_events" and kind == "integer")
+            if capacity_key:
+                _capacity_slot._checked()
+                if (_capacity_slot.instance is not instance or _capacity_slot.descriptor is not descriptor
+                        or _capacity_slot.bound_key is not None or not transient
+                        or not column.primary_key):
+                    raise HeaderBoundsError("memory_future_integer_slot_changed")
+            elif not nullable:
                 raise HeaderBoundsError("memory_transient_bind_value_invalid")
         elif ((kind == "text" and type(value) is not str)
               or (kind == "integer" and (type(value) is not int or not -(2**63) <= value < 2**63))
@@ -453,25 +599,36 @@ async def _native_memory_read_reference_rows(db, references, header_budget):
     return tuple(result)
 
 
-def _native_memory_own_journal_projection(raw, run_identity):
+def _native_memory_own_journal_projection(raw, run_identity, *, header_budget=None):
     """Replace exactly the adopted three lexical values in a temporary copy."""
     from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
+    from src.memory.composition_headers import current_budget
+    from src.memory.header_bounds import _native_memory_utf8_width
+    payer = header_budget if header_budget is not None else current_budget()
+    upper = 6 * _native_memory_utf8_width(raw) + 2 if payer is not None else 0
+    def pay(stage, amount=upper):
+        if payer is not None:
+            payer.debit(amount, appearance=("memory-own-journal", run_identity, stage))
+    pay("decode")
     records = strict_json_loads(raw)
-    _, current = preflight_native_memory_reference_journal(raw)
+    _, current = preflight_native_memory_reference_journal(raw, header_budget=payer)
     if current is None or current["payload"]["state"] != "validated":
         raise HeaderBoundsError("memory_current_self_projection_unavailable")
     record_index = next(index for index, record in enumerate(records)
         if record.get("checkpoint_id") == MEMORY_CURRENT_CHECKPOINT)
+    pay("own-list")
     own = [index for index, row in enumerate(current["payload"]["rows"])
         if row["ref"] == {"table": "workflow_run_states", "key": run_identity}]
     if len(own) != 1:
         raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    pay("replacement-map")
     replacements = {
         (record_index, "state_digest"): '"' + "0" * 64 + '"',
         (record_index, "payload", "rows", own[0], "tuple_digest"): '"' + "0" * 64 + '"',
         (record_index, "payload", "rows", own[0], "encoded_bytes"): "0",
     }
     decoder = json.JSONDecoder()
+    pay("span-list")
     spans = []
     def whitespace(position):
         while position < len(raw) and raw[position] in " \t\r\n":
@@ -481,12 +638,14 @@ def _native_memory_own_journal_projection(raw, run_identity):
         position = whitespace(position)
         start = position
         if path in replacements:
+            pay("token-decode", _native_memory_lexical_token_upper(raw, position) if payer is not None else 0)
             _, end = decoder.raw_decode(raw, position)
             spans.append((start, end, replacements[path]))
             return end
         if raw[position] == "{":
             position = whitespace(position + 1)
             while raw[position] != "}":
+                pay("key-decode", _native_memory_lexical_token_upper(raw, position) if payer is not None else 0)
                 key, position = decoder.raw_decode(raw, position)
                 position = whitespace(position)
                 if raw[position] != ":":
@@ -503,11 +662,15 @@ def _native_memory_own_journal_projection(raw, run_identity):
                 if raw[position] == ",":
                     position = whitespace(position + 1)
             return position + 1
+        pay("token-decode", _native_memory_lexical_token_upper(raw, position) if payer is not None else 0)
         return decoder.raw_decode(raw, position)[1]
     visit(0, ())
     if len(spans) != 3:
         raise HeaderBoundsError("memory_current_self_projection_unavailable")
+    pay("span-sort")
     for start, end, replacement in sorted(spans, reverse=True):
+        for stage in ("prefix-copy", "suffix-copy", "join-copy"):
+            pay(stage)
         raw = raw[:start] + replacement + raw[end:]
     return raw
 
@@ -543,7 +706,16 @@ def _native_memory_closed_value_width(value):
     if type(value) is str:
         return _native_memory_ascii_string_width(value)
     if type(value) is int and -(2**63) <= value < 2**63:
-        return 20
+        # Decimal width without constructing the serializer's temporary text.
+        number = abs(value)
+        width = 1 + (value < 0)
+        while number >= 10:
+            number //= 10
+            width += 1
+        return width
+    if type(value) is float and math.isfinite(value):
+        # Preserve the original finite-real encoded-unit upper.
+        return 64
     if type(value) is list or type(value) is tuple:
         return 2 + max(0, len(value) - 1) + sum(
             _native_memory_closed_value_width(item) for item in value)
@@ -563,6 +735,46 @@ def _native_memory_current_tuple_upper(raw_row, journal_utf8_upper):
         for name, value in raw_row.items())
 
 
+def _native_memory_current_allocation_entries(identity, *, row_upper, payload_upper,
+        rows_upper, record_upper, stage):
+    """Source-owned Current allocation grammar; no values or permissions.
+
+    This is one setup/build/finalization invocation, not a complete effect
+    forecast. The effect owner must separately include the original payload
+    preflight, lexical splice and journal normalization owners' appearances.
+    """
+    from src.memory.header_bounds import HeaderBoundsError
+    if (type(identity) is not str or stage not in {"setup", "build", "finish"}
+            or any(type(value) is not int or value < 0 for value in (
+                row_upper, payload_upper, rows_upper, record_upper))):
+        raise HeaderBoundsError("memory_current_numeric_shape_unavailable")
+    amounts = {
+        "setup": (("row-copy", row_upper), ("payload-copy", payload_upper),
+            ("own-row-list", rows_upper), ("own-row-update", rows_upper),
+            ("rows-normalized-copy", rows_upper), ("rows-canonical", rows_upper),
+            ("rows-encoded", rows_upper), ("rows-digest", 66)),
+        "build": (("count-update", 20), ("payload-canonical", payload_upper),
+            ("payload-encoded", payload_upper), ("payload-digest", 66),
+            ("record", record_upper), ("candidate-copy", row_upper),
+            ("raw-codec-fields", row_upper), ("raw-codec-canonical", row_upper),
+            ("raw-codec-encoded", row_upper), ("return", row_upper + record_upper)),
+        "finish": (("projection-copy", row_upper), ("projection-codec-fields", row_upper),
+            ("projection-codec-canonical", row_upper), ("projection-codec-encoded", row_upper),
+            ("projection-digest", 66), ("digest-update", 66),
+            ("return", row_upper + record_upper)),
+    }[stage]
+    return tuple((("memory-current-allocation", identity, name), amount)
+        for name, amount in amounts)
+
+
+def _native_memory_reference_record_upper(payload_upper, *, current):
+    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    return _native_memory_object_width({
+        "checkpoint_id": _native_memory_ascii_string_width(
+            MEMORY_CURRENT_CHECKPOINT if current else MEMORY_ORIGINAL_CHECKPOINT),
+        "safe": 4, "state_digest": 66, "payload": payload_upper})
+
+
 def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
     """Finite numeric convergence over real pending WRS values, no writer grant.
 
@@ -575,8 +787,21 @@ def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
     from src.workflows.job_runtime import _canonical, _digest
     if type(header_budget) is not HeaderReadBudget:
         raise HeaderBoundsError("memory_current_budget_unavailable")
+    row_width = _native_memory_closed_value_width(raw_row)
+    payload_width = _native_memory_closed_value_width(payload)
+    rows_width = _native_memory_closed_value_width(payload["rows"])
+    identity = raw_row["run_identity"]
+    # The existing full raw-row upper also covers every closed dict/list
+    # envelope used by its codec. These are separate paid appearances.
+    def pay(stage, *, candidate_width=row_width,
+            record_width=_native_memory_reference_record_upper(payload_width, current=True)):
+        for appearance, amount in _native_memory_current_allocation_entries(identity,
+                row_upper=candidate_width, payload_upper=_native_memory_closed_value_width(payload),
+                rows_upper=rows_width, record_upper=record_width,
+                stage=stage):
+            header_budget.debit(amount, appearance=appearance)
+    pay("setup")
     row, payload = dict(raw_row), deepcopy(payload)
-    identity = row["run_identity"]
     own = [item for item in payload["rows"]
            if item["ref"] == {"table": "workflow_run_states", "key": identity}]
     if len(own) != 1:
@@ -586,20 +811,34 @@ def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
     payload["rows_digest"] = _native_memory_current_rows_digest(payload["rows"], identity)
     original_journal = row["checkpoint_receipts_json"]
     def build():
+        header_budget.debit(20, appearance=("memory-current-allocation", identity, "count-update"))
         payload["encoded_bytes"] = sum(item["encoded_bytes"] for item in payload["rows"])
-        preflight_native_memory_reference_payload(payload, current=True)
+        preflight_native_memory_reference_payload(payload, current=True, header_budget=header_budget)
+        payload_upper = _native_memory_closed_value_width(payload)
+        record_upper = _native_memory_reference_record_upper(payload_upper, current=True)
+        for name, amount in (("payload-canonical", payload_upper), ("payload-encoded", payload_upper),
+                ("payload-digest", 66), ("record", record_upper)):
+            header_budget.debit(amount, appearance=("memory-current-allocation", identity, name))
         record = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "safe": True,
                   "state_digest": _digest(payload), "payload": payload}
-        journal = _splice_native_memory_current_checkpoint(original_journal, record)
+        journal = _splice_native_memory_current_checkpoint(original_journal, record, header_budget=header_budget)
         # Count all temporary raw appearances before encoding the full tuple.
         # Six times UTF8 is a conservative bound for canonical ASCII escaping.
-        candidate = dict(row, checkpoint_receipts_json=journal)
+        candidate_width = (row_width - _native_memory_closed_value_width(original_journal)
+            + _native_memory_closed_value_width(journal))
+        header_budget.debit(candidate_width,
+            appearance=("memory-current-allocation", identity, "candidate-copy"))
         from src.memory.header_bounds import _native_memory_utf8_width
-        upper = _native_memory_current_tuple_upper(candidate, _native_memory_utf8_width(journal))
+        upper = _native_memory_current_tuple_upper(row, _native_memory_utf8_width(journal))
+        for name in ("raw-codec-fields", "raw-codec-canonical", "raw-codec-encoded"):
+            header_budget.debit(upper, appearance=("memory-current-allocation", identity, name))
+        candidate = dict(row, checkpoint_receipts_json=journal)
         header_budget.debit(upper)
         encoded = _native_memory_row_bytes(WRS_BY_RUN, identity, candidate)
         if len(encoded) > MAX_BYTES:
             raise HeaderBoundsError("canonical_bound_not_certified")
+        header_budget.debit(candidate_width + record_upper,
+            appearance=("memory-current-allocation", identity, "return"))
         return candidate, record, encoded
     for _ in range(32):
         candidate, record, encoded = build()
@@ -611,17 +850,1064 @@ def _native_memory_prepare_current_row(raw_row, payload, *, header_budget):
         own["encoded_bytes"] = measured
     else:
         raise HeaderBoundsError("memory_current_count_not_convergent")
+    from src.memory.header_bounds import _native_memory_utf8_width
+    pay("finish", candidate_width=_native_memory_current_tuple_upper(candidate,
+        _native_memory_utf8_width(candidate["checkpoint_receipts_json"])),
+        record_width=_native_memory_closed_value_width(record))
     projected = dict(candidate)
     # The normalized temporary tuple is also a charged byte appearance.
     header_budget.debit(len(encoded))
     projected["checkpoint_receipts_json"] = _native_memory_own_journal_projection(
-        candidate["checkpoint_receipts_json"], identity)
+        candidate["checkpoint_receipts_json"], identity, header_budget=header_budget)
     own["tuple_digest"] = hashlib.sha256(_native_memory_row_bytes(WRS_BY_RUN, identity, projected)).hexdigest()
     candidate, record, final_bytes = build()
     if len(final_bytes) != measured or record["payload"]["encoded_bytes"] != sum(
             item["encoded_bytes"] for item in record["payload"]["rows"]):
         raise HeaderBoundsError("memory_current_count_not_convergent")
     return candidate, record
+
+
+def _native_memory_reference_preflight_numeric_entries(operation, prepared, *, certificate,
+        retention_widths, current):
+    """One closed own Original/validated Current payload parser appearance.
+
+    References remain genuine Source addresses or their private numeric slot.
+    The vector conveys capacity only; no payload, Ref or certificate is made.
+    """
+    from src.memory.header_bounds import (MAX_BYTES, HeaderBoundsError, MEMORY_DESCRIPTORS,
+        _native_memory_ascii_string_width as width, _native_memory_utf8_width as utf8)
+    from src.runtime_plugins import memory_producer as source_owner
+    if (type(operation) is not source_owner._MemoryOwnerSourceOperation
+            or source_owner._MEMORY_OPERATIONS.get(id(operation)) is not operation):
+        raise HeaderBoundsError("memory_current_numeric_owner_unavailable")
+    guard = operation.db.info.get("composition_guard")
+    facts = guard._native_memory_source_capacity_facts[3]
+    _guard, rows, own, audit, new_addresses, value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    if type(current) is not bool:
+        raise HeaderBoundsError("memory_current_numeric_shape_unavailable")
+    w, result = retention_widths, []
+    prefix = ("memory-reference-payload", "current" if current else "original")
+    def pay(stage, upper):
+        result.append(((*prefix, stage), upper))
+    def field_set(names):
+        return 2 + max(0, len(names) - 1) + sum(width(name) for name in names)
+    def pair(address):
+        table, key = address
+        return 3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
+    def pairs(addresses):
+        return 2 + max(0, len(addresses) - 1) + sum(pair(address) for address in addresses)
+    def reference(address):
+        table, key = address
+        pay("reference-field-set", field_set(("table", "key")))
+        pay("reference-table-set", 2 + sum(width(name) + 1 for name in RETAINED_FIELDS)
+            + sum(width(name) + 1 for name in MEMORY_DESCRIPTORS))
+        pay("key-utf8", 20 if type(key) is _NativeMemoryFutureIntegerSlot else utf8(key))
+        pay("reference-tuple", pair(address))
+    refs = tuple(rows)
+    events = tuple(address for address in new_addresses if address[0] in {"audit_events", "work_board_events"})
+    pay("payload-field-set", field_set(_MEMORY_CURRENT_FIELDS if current else _MEMORY_ORIGINAL_FIELDS))
+    for stage in ("reference-list", "reference-set", "reference-sort"):
+        pay(stage, w["refs_upper"])
+    for address in refs:
+        reference(address)
+    if current:
+        event_upper = 2 + max(0, len(events) - 1) + sum(
+            field_set(("table", "key")) + 2 + width(table)
+            + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) for table, key in events)
+        for stage in ("reference-list", "reference-set", "reference-sort"):
+            pay(stage, event_upper)
+        for address in events:
+            reference(address)
+        pay("absence-list", 2)
+        union_upper = pairs(refs) + pairs(events)
+        for stage in ("absence-set", "absence-sort", "reference-union-tuple", "reference-union-set"):
+            pay(stage, union_upper)
+        pay("row-reference-list", w["rows_upper"])
+        for address in refs:
+            pay("row-field-set", field_set(("ref", "tuple_digest", "encoded_bytes")))
+            reference(address)
+        for stage in ("row-reference-union", "row-reference-set", "row-reference-sort"):
+            pay(stage, union_upper)
+    else:
+        for scalar in (own[1], operation.scope.witness["claim_ref"],
+                operation.source.operator.principal.principal_id, operation.source.operator.session_id):
+            pay("key-utf8", utf8(scalar))
+        pay("audit-field-set", field_set(("ref", "tuple_digest")))
+        reference(audit)
+        candidate_json = operation.source.admission.candidate_json
+        marker = '"original_deadline":'
+        position = candidate_json.find(marker)
+        if position < 0:
+            raise HeaderBoundsError("memory_current_deadline_numeric_unavailable")
+        deadline_upper = _native_memory_lexical_token_upper(candidate_json, position + len(marker))
+        for stage in ("deadline-parse", "deadline-zone", "deadline-isoformat"):
+            pay(stage, deadline_upper)
+    for stage in ("canonical", "encoded"):
+        pay(stage, w["current_upper" if current else "original_upper"])
+    maxima = {}
+    for appearance, upper in result:
+        maxima[appearance] = max(upper, maxima.get(appearance, 0))
+    result = tuple((appearance, maxima[appearance]) for appearance, _upper in result)
+    if any(type(upper) is not int or not 0 <= upper <= MAX_BYTES for _appearance, upper in result):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return result
+
+
+def _native_memory_original_preflight_numeric_entries(operation, prepared, *, certificate, retention_widths):
+    """ONE original capture payload preflight, separately composed by its owner."""
+    return _native_memory_reference_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=retention_widths, current=False)
+
+
+def _native_memory_current_construction_numeric_entries(operation, prepared, *, certificate, retention_widths):
+    """ONE own Current construction, including all 33 guarded build liabilities.
+
+    Supplied-current-certificate numeric facts only. This excludes certificate
+    acquisition, capture, publication and subsequent cold body readers.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    from src.runtime_plugins import memory_producer as source_owner
+    if (type(operation) is not source_owner._MemoryOwnerSourceOperation
+            or source_owner._MEMORY_OPERATIONS.get(id(operation)) is not operation):
+        raise HeaderBoundsError("memory_current_numeric_owner_unavailable")
+    guard = operation.db.info.get("composition_guard")
+    facts = guard._native_memory_source_capacity_facts[3]
+    _guard, rows, own, audit, new_addresses, value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    w, identity = retention_widths, own[1]
+    current = _native_memory_reference_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=w, current=True)
+    original = _native_memory_original_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=w)
+    raw = value(own, "checkpoint_receipts_json")
+    if type(raw) is not str:
+        raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+    # Structural lexical arithmetic on an already-paid strict original column.
+    # Retain numerical token/record widths; no decoded record or future body.
+    lexical, prior_records = [], []
+    position, depth = 0, 0
+    while position < len(raw):
+        char = raw[position]
+        if char in " \t\r\n,:":
+            position += 1
+            continue
+        if char in "[{":
+            if char == "{" and depth == 1:
+                prior_records.append(_native_memory_lexical_token_upper(raw, position))
+            depth += 1
+            position += 1
+            continue
+        if char in "]}":
+            depth -= 1
+            position += 1
+            continue
+        start = position
+        if char == '"':
+            position += 1
+            while position < len(raw):
+                if raw[position] == "\\":
+                    position += 2
+                elif raw[position] == '"':
+                    position += 1
+                    break
+                else:
+                    position += 1
+        else:
+            while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                position += 1
+        after = position
+        while after < len(raw) and raw[after] in " \t\r\n":
+            after += 1
+        lexical.append((("memory-own-journal", identity,
+            "key-decode" if after < len(raw) and raw[after] == ":" else "token-decode"),
+            _native_memory_lexical_token_upper(raw, start)))
+    if depth != 0:
+        raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+    def journal(current_only):
+        result = [(("memory-reference-journal", "decode"), w["journal_upper"]),
+            (("memory-reference-journal", "found-map"), 2)]
+        for is_current, entries in ((False, original), (True, current)):
+            if current_only and not is_current:
+                continue
+            identifier = MEMORY_CURRENT_CHECKPOINT if is_current else MEMORY_ORIGINAL_CHECKPOINT
+            result.append((("memory-reference-journal", "record-field-set", identifier),
+                5 + sum(width(name) for name in ("checkpoint_id", "safe", "state_digest", "payload"))))
+            result.extend(entries)
+            result.extend((("memory-reference-journal", stage, identifier),
+                w["current_upper" if is_current else "original_upper"])
+                for stage in ("digest-canonical", "digest-encoded"))
+            result.append((("memory-reference-journal", "digest-result", identifier), 66))
+        result.append((("memory-reference-journal", "return"), 4))
+        return tuple(result)
+    splice = [(("memory-current-splice", "journal-decode"), w["journal_upper"]), *current]
+    splice.extend((("memory-current-splice", stage), upper) for stage, upper in (
+        ("payload-canonical", w["current_upper"]), ("payload-encoded", w["current_upper"]),
+        ("payload-digest", 66), ("record-canonical", w["current_record_upper"]),
+        ("wrapper-copy", w["current_record_upper"] + 2)))
+    splice.extend(journal(True))
+    splice.append((("memory-current-splice", "span-list"), w["journal_upper"]))
+    splice.extend((("memory-current-splice", "record-decode"), upper)
+        for upper in (*prior_records, w["original_record_upper"]))
+    splice.extend((("memory-current-splice", stage), upper) for stage, upper in (
+        ("matches", w["journal_upper"]), ("prefix-copy", w["journal_upper"]),
+        ("suffix-copy", w["journal_upper"]), ("join-copy", w["journal_upper"] + w["current_record_upper"] + 1),
+        ("size-utf8", w["journal_upper"] + w["current_record_upper"] + 1)))
+    result = list(_native_memory_current_allocation_entries(identity, row_upper=w["row_upper"],
+        payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+        record_upper=w["current_record_upper"], stage="setup"))
+    for _ in range(33):
+        result.extend(_native_memory_current_allocation_entries(identity, row_upper=max(w["own_raw_upper"], w["own_upper"]),
+            payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+            record_upper=w["current_record_upper"], stage="build"))
+        result.extend(current)
+        result.extend(splice)
+        result.append((None, w["own_raw_upper"]))
+    result.extend(_native_memory_current_allocation_entries(identity, row_upper=w["own_raw_upper"],
+        payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+        record_upper=w["current_record_upper"], stage="finish"))
+    result.append((None, w["own_raw_upper"]))
+    for stage in ("decode", "own-list", "replacement-map", "span-list", "span-sort"):
+        result.append((("memory-own-journal", identity, stage), w["journal_upper"]))
+    result.extend(journal(False))
+    result.extend(lexical)
+    events = tuple(address for address in new_addresses if address[0] in {"audit_events", "work_board_events"})
+    key_upper = max(width(name) for name in (*_MEMORY_ORIGINAL_FIELDS, *_MEMORY_CURRENT_FIELDS,
+        "checkpoint_id", "safe", "state_digest", "payload", "ref", "table", "key", "tuple_digest", "encoded_bytes"))
+    scalar_upper = max(w["source_upper"], w["original_upper"], 122,
+        *(max(width(table), 22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) for table, key in rows))
+    result.extend((("memory-own-journal", identity, "key-decode"), key_upper)
+        for _ in range(42 + 9 * len(rows) + 2 * len(events)))
+    result.extend((("memory-own-journal", identity, "token-decode"), scalar_upper)
+        for _ in range(33 + 8 * len(rows) + 2 * len(events)))
+    for _ in range(3):
+        result.extend((("memory-own-journal", identity, stage), w["journal_upper"])
+            for stage in ("prefix-copy", "suffix-copy", "join-copy"))
+    maxima = {}
+    for appearance, upper in result:
+        maxima[appearance] = max(upper, maxima.get(appearance, 0))
+    result = tuple((appearance, maxima[appearance]) for appearance, _upper in result)
+    if any(type(upper) is not int or not 0 <= upper <= MAX_BYTES for _appearance, upper in result):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return result
+
+
+def _native_memory_current_lifecycle_numeric_entries(operation, prepared, *, certificate,
+        retention_widths):
+    """Two own Current builders, retaining completion's old Current decoder.
+
+    Capture splices the original journal plus Original. Completion splices
+    that same journal plus both Original and the actual capture Current. The
+    unchanged splice decodes every existing record on each guarded build.
+    The prior Current is therefore one extra decoder appearance per build;
+    it is not a new physical reference or a second Current authority.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    entries = _native_memory_current_construction_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=retention_widths)
+    record_upper = retention_widths["current_record_upper"]
+    if type(record_upper) is not int or not 0 <= record_upper <= MAX_BYTES:
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    # The original 32-iteration guard and final build remain unchanged.
+    # This conservative forecast retains all 33 build liabilities in each
+    # owner call; no successful-convergence discount is applied here.
+    return tuple((phase, appearance, upper)
+        for phase in ("capture", "completion")
+        for appearance, upper in entries) + tuple(
+        ("completion", ("memory-current-splice", "record-decode"), record_upper)
+        for _ in range(33))
+
+
+def _native_memory_six_current_construction_numeric_entries(operation, prepared, *, certificate, retention_widths, _construction_only=False):
+    """ONE own Current construction, constructing six guarded build liabilities directly.
+
+    Supplied-current-certificate numeric facts only. This excludes certificate
+    acquisition, capture, publication and subsequent cold body readers.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    from src.runtime_plugins import memory_producer as source_owner
+    if (type(operation) is not source_owner._MemoryOwnerSourceOperation
+            or source_owner._MEMORY_OPERATIONS.get(id(operation)) is not operation):
+        raise HeaderBoundsError("memory_current_numeric_owner_unavailable")
+    guard = operation.db.info.get("composition_guard")
+    facts = guard._native_memory_source_capacity_facts[3]
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_current_construction_mode_unavailable")
+    w = retention_widths
+    if _construction_only:
+        from src.memory.header_bounds import MAX_ROWS
+        source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+            certificate=certificate, facts=facts, retention_widths=w)
+        from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+        source = operation.source
+        if (source_owner._MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+                or type(certificate) is not CompositionHeaderCertificate
+                or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+                or certificate.driver is not operation.driver
+                or certificate.metadata_budget is not guard.header_budget
+                or guard.header_budget is not certificate.budget
+                or source_owner._native_memory_source_numeric_frame() is not certificate.budget):
+            raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
+        selected = guard._native_memory_existing_source_rows
+        projection = guard._native_memory_source_projection
+        if selected[0] is not operation or selected[1] is not certificate or projection[0] is not operation:
+            raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
+        own = None
+        raw = None
+        for address in facts["raw_tuple_uppers"]:
+            if address[0] == "workflow_run_states" and address[1] == operation.run.run_identity:
+                own = address
+        for descriptor, key, row, encoded in selected[2]:
+            if descriptor.table == "workflow_run_states" and key == operation.run.run_identity:
+                raw = row["checkpoint_receipts_json"]
+        if own is None or type(raw) is not str:
+            raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+        identity = own[1]
+        raw_total = 0
+        for address in facts["raw_tuple_uppers"]:
+            raw_total += facts["raw_tuple_uppers"][address]
+        raw_total = raw_total - facts["raw_tuple_uppers"][own] + w["own_raw_upper"]
+        row_count = len(facts["raw_tuple_uppers"])
+        event_count = 0
+        wrs_count = 0
+        for address in facts["raw_tuple_uppers"]:
+            if address[0] == "workflow_run_states":
+                wrs_count += 1
+        for descriptor, key, row in projection[1]:
+            if descriptor.table in ("audit_events", "work_board_events"):
+                event_count += 1
+        if (not 1 <= row_count <= MAX_ROWS or wrs_count != 1
+                or own[0] != "workflow_run_states" or own[1] != operation.run.run_identity
+                or not 0 <= raw_total <= MAX_BYTES or w["own_raw_upper"] > MAX_BYTES
+                or max(w["original_upper"], w["current_upper"]) > 262144):
+            raise HeaderBoundsError("memory_current_successful_recurrence_unavailable")
+        # SAME paid-column lexical traversal as the default branch, retaining
+        # only scalar counts. No lexical/record/vector/container is built.
+        position, depth, prior_count, lexical_count = 0, 0, 0, 0
+        while position < len(raw):
+            char = raw[position]
+            if char in " \t\r\n,:":
+                position += 1
+                continue
+            if char in "[{":
+                if char == "{" and depth == 1:
+                    prior_count += 1
+                depth += 1
+                position += 1
+                continue
+            if char in "]}":
+                depth -= 1
+                position += 1
+                continue
+            if char == '"':
+                position += 1
+                while position < len(raw):
+                    if raw[position] == "\\":
+                        position += 2
+                    elif raw[position] == '"':
+                        position += 1
+                        break
+                    else:
+                        position += 1
+            else:
+                while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                    position += 1
+            lexical_count += 1
+        if depth != 0:
+            raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+        current_count = 18 + 9 * row_count + 4 * event_count
+        original_count = 18 + 4 * row_count
+        current_journal_count = 7 + current_count
+        both_journal_count = 11 + original_count + current_count
+        splice_count = 20 + 2 * current_count + prior_count
+        selected_count = (302 + 19 * current_count + original_count
+            + 17 * row_count + 4 * event_count + 6 * prior_count + lexical_count)
+        # Numeric planning creates owner tuples, not serialized bodies. Its
+        # immutable Source-created names/identity/appearance references retain
+        # the existing opaque-pointer width4; integer slots retain width20.
+        # Actual JSON/codec/copy appearances stay fully priced in the vector.
+        # A newly constructed label has <=3 pointers:16; a pair is27; a
+        # lifecycle triplet is32. List/tuple pointer slots cost5; a maxima
+        # dictionary key-pointer/int slot costs26. No label/identity is copied.
+        preflight_storage = 20 + 106 * (current_count + original_count) + 10 * (row_count + event_count)
+        lexical_storage = 4 + 48 * lexical_count + 21 * prior_count
+        journal_storage = 8 + 53 * (current_journal_count + both_journal_count)
+        splice_storage = 2 + 5 * splice_count + 43 * (13 + prior_count)
+        tail_new_pairs = 89 + 17 * row_count + 4 * event_count
+        result_storage = 6 + 63 * selected_count + 43 * tail_new_pairs + 7 * 27
+        # Eight allocation helpers construct all25 original stage pairs and
+        # three stage tuples/maps before selecting setup8/build10/finish7.
+        # 8calls*(25pairs27 +25pointer slots5+6 +dict32 +argtuple86 +base2)
+        # plus75 returned label/pair/tuple slots48.
+        allocation_storage = 8 * (25 * 27 + 25 * 5 + 6 + 32 + 86 + 2) + 75 * 48
+        # The starred scalar-generator tuple and combined max-argument tuple
+        # are distinct: preserve the extra2+21R before constructing either.
+        auxiliary_storage = 2 + 5 * event_count + 197 + 65 * row_count + 65 + 2 + 21 * row_count
+        # First2N-triplet tuple, separate6 completion-decoder tuple, and final
+        # concatenated2N+6-pointer tuple ALL remain distinct allocations.
+        lifecycle_storage = 258 + 84 * selected_count
+        # Fixed64 original generator/function/context owner slots, each<=32,
+        # cover scalar-control bookkeeping; no data-dependent storage hidden.
+        return (preflight_storage + lexical_storage + journal_storage + splice_storage
+            + result_storage + allocation_storage + auxiliary_storage + lifecycle_storage + 2048
+            + 4 * (1024 + 128 * row_count))
+
+    _guard, rows, own, audit, new_addresses, value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    identity = own[1]
+    raw = value(own, "checkpoint_receipts_json")
+    if type(raw) is not str:
+        raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+    current = _native_memory_reference_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=w, current=True)
+    original = _native_memory_original_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=w)
+    # Structural lexical arithmetic on an already-paid strict original column.
+    # Retain numerical token/record widths; no decoded record or future body.
+    lexical, prior_records = [], []
+    position, depth = 0, 0
+    while position < len(raw):
+        char = raw[position]
+        if char in " \t\r\n,:":
+            position += 1
+            continue
+        if char in "[{":
+            if char == "{" and depth == 1:
+                prior_records.append(_native_memory_lexical_token_upper(raw, position))
+            depth += 1
+            position += 1
+            continue
+        if char in "]}":
+            depth -= 1
+            position += 1
+            continue
+        start = position
+        if char == '"':
+            position += 1
+            while position < len(raw):
+                if raw[position] == "\\":
+                    position += 2
+                elif raw[position] == '"':
+                    position += 1
+                    break
+                else:
+                    position += 1
+        else:
+            while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                position += 1
+        after = position
+        while after < len(raw) and raw[after] in " \t\r\n":
+            after += 1
+        lexical.append((("memory-own-journal", identity,
+            "key-decode" if after < len(raw) and raw[after] == ":" else "token-decode"),
+            _native_memory_lexical_token_upper(raw, start)))
+    if depth != 0:
+        raise HeaderBoundsError("memory_current_prior_journal_unavailable")
+    def journal(current_only):
+        result = [(("memory-reference-journal", "decode"), w["journal_upper"]),
+            (("memory-reference-journal", "found-map"), 2)]
+        for is_current, entries in ((False, original), (True, current)):
+            if current_only and not is_current:
+                continue
+            identifier = MEMORY_CURRENT_CHECKPOINT if is_current else MEMORY_ORIGINAL_CHECKPOINT
+            result.append((("memory-reference-journal", "record-field-set", identifier),
+                5 + sum(width(name) for name in ("checkpoint_id", "safe", "state_digest", "payload"))))
+            result.extend(entries)
+            result.extend((("memory-reference-journal", stage, identifier),
+                w["current_upper" if is_current else "original_upper"])
+                for stage in ("digest-canonical", "digest-encoded"))
+            result.append((("memory-reference-journal", "digest-result", identifier), 66))
+        result.append((("memory-reference-journal", "return"), 4))
+        return tuple(result)
+    splice = [(("memory-current-splice", "journal-decode"), w["journal_upper"]), *current]
+    splice.extend((("memory-current-splice", stage), upper) for stage, upper in (
+        ("payload-canonical", w["current_upper"]), ("payload-encoded", w["current_upper"]),
+        ("payload-digest", 66), ("record-canonical", w["current_record_upper"]),
+        ("wrapper-copy", w["current_record_upper"] + 2)))
+    splice.extend(journal(True))
+    splice.append((("memory-current-splice", "span-list"), w["journal_upper"]))
+    splice.extend((("memory-current-splice", "record-decode"), upper)
+        for upper in (*prior_records, w["original_record_upper"]))
+    splice.extend((("memory-current-splice", stage), upper) for stage, upper in (
+        ("matches", w["journal_upper"]), ("prefix-copy", w["journal_upper"]),
+        ("suffix-copy", w["journal_upper"]), ("join-copy", w["journal_upper"] + w["current_record_upper"] + 1),
+        ("size-utf8", w["journal_upper"] + w["current_record_upper"] + 1)))
+    result = list(_native_memory_current_allocation_entries(identity, row_upper=w["row_upper"],
+        payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+        record_upper=w["current_record_upper"], stage="setup"))
+    for _ in range(6):
+        result.extend(_native_memory_current_allocation_entries(identity, row_upper=max(w["own_raw_upper"], w["own_upper"]),
+            payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+            record_upper=w["current_record_upper"], stage="build"))
+        result.extend(current)
+        result.extend(splice)
+        result.append((None, w["own_raw_upper"]))
+    result.extend(_native_memory_current_allocation_entries(identity, row_upper=w["own_raw_upper"],
+        payload_upper=w["current_upper"], rows_upper=w["rows_upper"],
+        record_upper=w["current_record_upper"], stage="finish"))
+    result.append((None, w["own_raw_upper"]))
+    for stage in ("decode", "own-list", "replacement-map", "span-list", "span-sort"):
+        result.append((("memory-own-journal", identity, stage), w["journal_upper"]))
+    result.extend(journal(False))
+    result.extend(lexical)
+    events = tuple(address for address in new_addresses if address[0] in {"audit_events", "work_board_events"})
+    key_upper = max(width(name) for name in (*_MEMORY_ORIGINAL_FIELDS, *_MEMORY_CURRENT_FIELDS,
+        "checkpoint_id", "safe", "state_digest", "payload", "ref", "table", "key", "tuple_digest", "encoded_bytes"))
+    scalar_upper = max(w["source_upper"], w["original_upper"], 122,
+        *(max(width(table), 22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) for table, key in rows))
+    result.extend((("memory-own-journal", identity, "key-decode"), key_upper)
+        for _ in range(42 + 9 * len(rows) + 2 * len(events)))
+    result.extend((("memory-own-journal", identity, "token-decode"), scalar_upper)
+        for _ in range(33 + 8 * len(rows) + 2 * len(events)))
+    for _ in range(3):
+        result.extend((("memory-own-journal", identity, stage), w["journal_upper"])
+            for stage in ("prefix-copy", "suffix-copy", "join-copy"))
+    maxima = {}
+    for appearance, upper in result:
+        maxima[appearance] = max(upper, maxima.get(appearance, 0))
+    result = tuple((appearance, maxima[appearance]) for appearance, _upper in result)
+    if any(type(upper) is not int or not 0 <= upper <= MAX_BYTES for _appearance, upper in result):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return result
+
+
+def _native_memory_successful_current_lifecycle_numeric_entries(operation, prepared, *, certificate,
+        retention_widths):
+    """Successful fixed-field Current liability: six builds and normalization.
+
+    The original builder still has its 32-iteration fail-closed guard. This
+    forecast applies only to the Source's closed, one-own-WRS projection. In
+    that projection the normalized own digest is constant; the only variable
+    serialized scalars are the own encoded count and the total encoded count.
+    R403 bounds convergence by five loop builds, followed by the final build.
+    Every allocation, parser and splice of those six builds is retained.
+    This is not an authority to execute an unsupported or failed projection.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, MAX_ROWS
+    from src.runtime_plugins import memory_producer as source_owner
+    if (type(operation) is not source_owner._MemoryOwnerSourceOperation
+            or source_owner._MEMORY_OPERATIONS.get(id(operation)) is not operation):
+        raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
+    guard = operation.db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_source_capacity_facts", None)
+    if retained is None or retained[0] is not operation or retained[1] is not prepared:
+        raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
+    facts = retained[3]
+    _guard, rows, own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    w = retention_widths
+    # These are original schema maxima, not a new convergence guard. The
+    # seven-digit count proof fails if the complete selected tuple capacity
+    # exceeds the original frame or an envelope cannot be preflighted.
+    raw_total = (sum(facts["raw_tuple_uppers"].values())
+        - facts["raw_tuple_uppers"][own] + w["own_raw_upper"])
+    if (not 1 <= len(rows) <= MAX_ROWS
+            or sum(address[0] == "workflow_run_states" for address in rows) != 1
+            or own != ("workflow_run_states", operation.run.run_identity)
+            or raw_total > MAX_BYTES
+            or w["own_raw_upper"] > MAX_BYTES
+            or max(w["original_upper"], w["current_upper"]) > 262144):
+        raise HeaderBoundsError("memory_current_successful_recurrence_unavailable")
+    selected = _native_memory_six_current_construction_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=w)
+    build_marker = ("memory-current-allocation", own[1], "count-update")
+    finish_marker = ("memory-current-allocation", own[1], "projection-copy")
+    if (sum(appearance == build_marker for appearance, upper in selected) != 6
+            or sum(appearance == finish_marker for appearance, upper in selected) != 1
+            or sum(appearance is None for appearance, upper in selected) != 7):
+        raise HeaderBoundsError("memory_current_source_tuple_grammar_changed")
+    record_upper = w["current_record_upper"]
+    return tuple((phase, appearance, upper)
+        for phase in ("capture", "completion")
+        for appearance, upper in selected) + tuple(
+        ("completion", ("memory-current-splice", "record-decode"), record_upper)
+        for _ in range(6))
+
+
+def _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, widths):
+    """Authenticate numeric Source facts; this grants no future read permission."""
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, MAX_ROWS, COMPOSITION_DESCRIPTORS
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    from src.memory.m5 import PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS
+    from src.runtime_plugins.memory_producer import (
+        _MemoryOwnerSourceOperation, _MEMORY_OPERATIONS, _MEMORY_SOURCES, _MEMORY_SOURCE_SEAL)
+    guard = operation.db.info.get("composition_guard") if type(operation) is _MemoryOwnerSourceOperation else None
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    retained = getattr(guard, "_native_memory_source_capacity_facts", None)
+    retention = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    baseline = getattr(guard, "_native_memory_baseline_numeric", None)
+    selected = getattr(guard, "_native_memory_existing_source_rows", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    proofs = getattr(guard, "_native_memory_retained_proofs", None)
+    if (type(guard) is not CompositionSessionGuard
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or _MEMORY_SOURCES.get(id(operation.source)) is not operation.source
+            or operation._seal is not _MEMORY_SOURCE_SEAL or operation._issued_id != id(operation)
+            or operation.source._seal is not _MEMORY_SOURCE_SEAL
+            or operation.source._issued_id != id(operation.source) or not operation.source._live.is_set()
+            or operation.scope is not operation.source._scope
+            or operation.source.claim._host is not operation.source.host
+            or not operation.source.host.admitting or operation.source.host.reviewed is None
+            or operation.source.host.boot_nonce != operation.scope.host_boot_nonce
+            or operation.source.claim.host_boot_nonce != operation.scope.host_boot_nonce
+            or operation.source.host.reviewed.package_digest != operation.scope.witness["package_digest"]
+            or operation.source.host.reviewed.composition_digest != operation.scope.witness["host_composition_digest"]
+            or operation.run.run_identity != operation.source.claim.job["job_id"]
+            or operation.scope.binding is not operation.source.claim.binding
+            or type(prepared) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(prepared)) is not prepared
+            or operation._prepared is not prepared or prepared.consumed or operation._effect is not None
+            or type(certificate) is not CompositionHeaderCertificate or certificate.seal is not _SEAL
+            or certificate.issued_id != id(certificate) or certificate.budget is not guard.header_budget
+            or certificate.driver is not operation.driver
+            or certificate.metadata_budget is not guard.header_budget
+            or certificate.common_certificate is not None
+            or operation.source.admission.header_budget is not guard.header_budget
+            or guard.db is not operation.db or not operation.driver.in_transaction
+            or owner is None or len(owner) != 6 or owner[0] is not operation
+            or owner[1] is not prepared or owner[2] is not certificate
+            or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.transaction
+            or owner[4] is not operation.db.sync_session.get_transaction()
+            or owner[5] is not operation.driver
+            or type(facts) is not MappingProxyType or type(widths) is not MappingProxyType
+            or retained is None or retained[0] is not operation or retained[1] is not prepared
+            or retained[2] is not certificate or retained[3] is not facts
+            or retention is None or retention[0] is not operation or retention[1] is not prepared
+            or retention[2] is not certificate or retention[3] is not widths
+            or baseline is None or baseline[0] is not operation or baseline[1] is not certificate
+            or facts.get("baseline_trace") is not baseline[2]
+            or selected is None or selected[0] is not operation
+            or projection is None or projection[0] is not operation
+            or proofs is None or proofs[0] is not operation):
+        raise HeaderBoundsError("memory_future_body_owner_changed")
+    # Invalidating another retained Current changes that owner's WRS grammar.
+    # Only the original owner's exact paid proof cohort can supply that bound.
+    if proofs[2]:
+        affected = getattr(guard, "_native_memory_affected_numeric_facts", None)
+        if (affected is None or affected[0] is not operation or affected[1] is not prepared
+                or affected[2] is not certificate or affected[3] is not proofs[2]
+                or type(affected[4]) is not MappingProxyType
+                or set(affected[4]) != {proof.before["run_identity"] for proof in proofs[2]}
+                or any(type(dimensions) is not MappingProxyType
+                    or any(type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                        for name, amount in dimensions.items() if name != "future_text_bytes")
+                    or type(dimensions.get("future_text_bytes")) is not MappingProxyType
+                    for dimensions in affected[4].values())):
+            raise HeaderBoundsError("memory_future_body_affected_unknown_width_unavailable")
+    needed = {"row_upper", "own_upper", "own_raw_upper", "context_upper", "arguments_upper",
+        "authority_upper", "journal_upper", "binding_text_bytes", "effect_upper", "source_upper",
+        "original_upper", "original_record_upper", "current_upper", "current_record_upper",
+        "rows_upper", "row_count", "refs_upper", "selected_rows_upper", "own_journal_upper",
+        "audit_upper", "details_upper", "future_text_bytes", "completion_future_text_bytes", "claimed", "result_upper"}
+    if (set(widths) != needed or widths["claimed"] is not True
+            or type(widths["future_text_bytes"]) is not MappingProxyType
+            or set(widths["future_text_bytes"]) != {"checkpoint_context_json", "checkpoint_receipts_json", "updated_at"}
+            or any(type(name) is not str or type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                for name, amount in widths["future_text_bytes"].items())
+            or type(widths["completion_future_text_bytes"]) is not MappingProxyType
+            or set(widths["completion_future_text_bytes"]) != {"checkpoint_context_json", "checkpoint_receipts_json",
+                "updated_at", "status", "result_digest", "result_summary", "finished_at"}
+            or any(type(name) is not str or type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                for name, amount in widths["completion_future_text_bytes"].items())
+            or any(type(widths[name]) is not int or not 0 <= widths[name] <= MAX_BYTES
+                for name in needed - {"future_text_bytes", "completion_future_text_bytes", "claimed"})
+            or not 1 <= widths["row_count"] <= MAX_ROWS
+            or any(type(facts.get(name)) is not MappingProxyType
+                for name in ("row_uppers", "raw_tuple_uppers", "text_bytes"))):
+        raise HeaderBoundsError("memory_future_body_numeric_shape_unavailable")
+    rows = {}
+    for descriptor, key, row, _encoded in selected[2]:
+        address = (descriptor.table, key)
+        if descriptor is not COMPOSITION_DESCRIPTORS.get(descriptor.table) or type(row) is not dict:
+            raise HeaderBoundsError("memory_future_body_projection_changed")
+        changes = next((values for changed, address_key, values in projection[2]
+            if changed is descriptor and address_key == key), None)
+        # Read the sealed original mapping and scalar overrides without a future row.
+        rows[address] = (row, changes)
+    for descriptor, key, row in projection[1]:
+        address = (descriptor.table, key)
+        if descriptor is not COMPOSITION_DESCRIPTORS.get(descriptor.table) or address in rows or type(row) is not dict:
+            raise HeaderBoundsError("memory_future_body_projection_changed")
+        if type(key) is _NativeMemoryFutureIntegerSlot:
+            if (_MEMORY_INTEGER_SLOTS.get(id(key)) is not key or key.operation is not operation
+                    or key.prepared is not prepared or key.descriptor is not descriptor
+                    or key.task is not asyncio.current_task() or key.db is not operation.db
+                    or key.transaction is not operation.transaction or key.driver is not operation.driver
+                    or key.budget is not guard.header_budget or key.bound_key is not None):
+                raise HeaderBoundsError("memory_future_integer_slot_changed")
+        elif type(key) is not str or not key:
+            raise HeaderBoundsError("memory_future_body_projection_changed")
+        if descriptor.table not in {"audit_events", "memories", "memory_proposals",
+                "work_board_decision_receipts", "work_board_events"}:
+            raise HeaderBoundsError("memory_future_body_new_graph_unsupported")
+        rows[address] = (row, None)
+    if (set(rows) != set(facts["row_uppers"]) or set(rows) != set(facts["raw_tuple_uppers"])
+            or set(rows) != set(facts["text_bytes"]) or len(rows) != widths["row_count"]
+            or not facts["selected_addresses"] <= facts["baseline_members"]):
+        raise HeaderBoundsError("memory_future_body_unpaid_predecessor")
+    own = ("workflow_run_states", operation.run.run_identity)
+    if own not in rows or own not in facts["baseline_members"]:
+        raise HeaderBoundsError("memory_future_body_own_root_unavailable")
+    def value(address, name):
+        row, changes = rows[address]
+        return changes[name] if changes is not None and name in changes else row[name]
+    audit = prepared.audit_event.id if prepared.audit_event is not None else prepared._result.get("audit_event_id")
+    audit_address = ("audit_events", audit)
+    new_addresses = frozenset((descriptor.table, key) for descriptor, key, _row in projection[1])
+    if (audit_address not in new_addresses or audit_address in facts["baseline_members"]
+            or any(address[0] == "audit_events" and address != audit_address for address in new_addresses)
+            or ("sessions", value(audit_address, "session_id")) not in facts["baseline_members"]):
+        raise HeaderBoundsError("memory_future_body_audit_graph_unsupported")
+    for address in new_addresses:
+        if address[0] == "work_board_events" and ("work_board_tasks", value(address, "task_id")) not in facts["selected_addresses"]:
+            raise HeaderBoundsError("memory_future_body_unpaid_predecessor")
+    return guard, rows, own, audit_address, new_addresses, value
+
+
+def _native_memory_postoriginal_cold_numeric_entries(operation, prepared, *, certificate, facts, retention_widths):
+    """One successful own-root cold inspection, including its repeated readers."""
+    from src.memory.header_bounds import (HeaderBoundsError, MEMORY_DESCRIPTORS,
+        _native_memory_ascii_string_width as width, _native_memory_utf8_width,
+        _native_memory_object_width as obj)
+    from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+    guard, rows, own, audit, new_addresses, value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    w, run_id = retention_widths, own[1]
+    entries = list(_native_memory_cold_candidate_numeric_entries(run_id,
+        row_upper=w["row_upper"], context_upper=w["context_upper"],
+        arguments_upper=w["arguments_upper"], authority_upper=w["authority_upper"]))
+    from src.runtime_plugins.memory_producer import original_native_memory_source_context_numeric_entries
+    locator_upper = obj({"profile": width(MEMORY_REFERENCE_PROFILE),
+        "invocation_ref": width(run_id), "original_checkpoint_id": width(MEMORY_ORIGINAL_CHECKPOINT),
+        "original_checkpoint_digest": 66})
+    entries.extend(original_native_memory_source_context_numeric_entries(
+        context_upper=w["context_upper"], candidate_upper=w["source_upper"],
+        binding_text_bytes=w["binding_text_bytes"], result_upper=w["result_upper"],
+        effect_upper=w["effect_upper"], locator_upper=locator_upper, result_present=True))
+    for _ in range(2):  # direct candidate binding and nested Original claim
+        entries.extend(_original_native_binding_numeric_entries(run_id, w["binding_text_bytes"]))
+    for owner, count in (("candidate", 2), ("claim", 1), ("original", 2)):
+        entries.extend(_native_memory_cold_binding_digest_numeric_entries(run_id,
+            w["binding_text_bytes"], owner=owner, occurrences=count))
+    entries.extend(_native_memory_cold_claim_numeric_entries(run_id, w["journal_upper"], claimed=True))
+    entries.extend(_native_memory_cold_original_numeric_entries(run_id, effect_upper=w["effect_upper"],
+        source_upper=w["source_upper"], original_upper=w["original_record_upper"]))
+    entries.extend(_native_memory_cold_reference_numeric_entries(run_id,
+        rows_upper=w["rows_upper"], row_count=w["row_count"], selected_rows_upper=w["selected_rows_upper"],
+        own_upper=w["own_upper"], own_journal_upper=w["own_journal_upper"]))
+    entries.extend(_native_memory_cold_audit_numeric_entries(run_id,
+        audit_upper=w["audit_upper"], details_upper=w["details_upper"]))
+    entries.append((None, w["own_raw_upper"]))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-output",
+        w["context_upper"] + width(audit[1]) + 72, ("audit-tuple", "result-tuple")))
+    refs = tuple(rows)
+    pair_upper = sum(3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) + 1
+        for table, key in refs) + 2
+    events = tuple(address for address in new_addresses if address[0] in {"audit_events", "work_board_events"})
+    event_pair_upper = sum(3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) + 1
+        for table, key in events) + 2
+    events_upper = 2 + sum(obj({"table": width(table), "key":
+        22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)}) + 1 for table, key in events)
+    def key_set(names):
+        return 2 + sum(width(name) + 1 for name in names)
+    def payload(current):
+        result = []
+        prefix = ("memory-reference-payload", "current" if current else "original")
+        def pay(stage, amount):
+            result.append(((*prefix, stage), amount))
+        def reference(address):
+            table, key = address
+            pay("reference-field-set", key_set(("table", "key")))
+            pay("reference-table-set", 2 + sum(width(name) + 1 for name in RETAINED_FIELDS)
+                + sum(width(name) + 1 for name in MEMORY_DESCRIPTORS))
+            pay("key-utf8", 20 if type(key) is _NativeMemoryFutureIntegerSlot else _native_memory_utf8_width(key))
+            pay("reference-tuple", 3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)))
+        pay("payload-field-set", key_set(_MEMORY_CURRENT_FIELDS if current else _MEMORY_ORIGINAL_FIELDS))
+        for stage in ("reference-list", "reference-set", "reference-sort"):
+            pay(stage, w["refs_upper"])
+        for address in refs:
+            reference(address)
+        if current:
+            for stage in ("reference-list", "reference-set", "reference-sort"):
+                pay(stage, events_upper)
+            for address in events:
+                reference(address)
+            pay("absence-list", 2)
+            for stage in ("absence-set", "absence-sort", "reference-union-tuple", "reference-union-set"):
+                pay(stage, pair_upper + event_pair_upper)
+            pay("row-reference-list", w["rows_upper"])
+            for address in refs:
+                pay("row-field-set", key_set(("ref", "tuple_digest", "encoded_bytes")))
+                reference(address)
+            for stage in ("row-reference-union", "row-reference-set", "row-reference-sort"):
+                pay(stage, pair_upper + event_pair_upper)
+        else:
+            for scalar in (run_id, operation.source._scope.witness["claim_ref"],
+                    operation.source.operator.principal.principal_id, operation.source.operator.session_id):
+                pay("key-utf8", _native_memory_utf8_width(scalar))
+            pay("audit-field-set", key_set(("ref", "tuple_digest")))
+            reference(audit)
+            for stage in ("deadline-parse", "deadline-zone", "deadline-isoformat"):
+                pay(stage, 34)
+        for stage in ("canonical", "encoded"):
+            pay(stage, w["current_upper" if current else "original_upper"])
+        return result
+    # The direct journal parser and the normalization parser each inspect both records.
+    for _ in range(2):
+        entries.extend(((("memory-reference-journal", "decode"), w["journal_upper"]),
+            (("memory-reference-journal", "found-map"), 2)))
+        for current, identifier in ((False, MEMORY_ORIGINAL_CHECKPOINT), (True, MEMORY_CURRENT_CHECKPOINT)):
+            entries.append((("memory-reference-journal", "record-field-set", identifier),
+                key_set(("checkpoint_id", "safe", "state_digest", "payload"))))
+            entries.extend(payload(current))
+            for stage in ("digest-canonical", "digest-encoded"):
+                entries.append((("memory-reference-journal", stage, identifier),
+                    w["current_upper" if current else "original_upper"]))
+            entries.append((("memory-reference-journal", "digest-result", identifier), 66))
+        entries.append((("memory-reference-journal", "return"), 4))
+    for stage in ("decode", "own-list", "replacement-map", "span-list", "span-sort"):
+        entries.append((("memory-own-journal", run_id, stage), w["own_journal_upper"]))
+    for _ in range(3):
+        for stage in ("prefix-copy", "suffix-copy", "join-copy"):
+            entries.append((("memory-own-journal", run_id, stage), w["own_journal_upper"]))
+    # Existing journal is an already-paid strict JSON string. Tokenize lexically;
+    # no JSON object, future payload, reference or decoded token is constructed.
+    raw = value(own, "checkpoint_receipts_json")
+    position = 0
+    while position < len(raw):
+        char = raw[position]
+        if char in " \t\r\n{}[],:":
+            position += 1
+            continue
+        start = position
+        if char == '"':
+            position += 1
+            while position < len(raw):
+                if raw[position] == "\\":
+                    position += 2
+                elif raw[position] == '"':
+                    position += 1
+                    break
+                else:
+                    position += 1
+        else:
+            while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                position += 1
+        after = position
+        while after < len(raw) and raw[after] in " \t\r\n":
+            after += 1
+        stage = "key-decode" if after < len(raw) and raw[after] == ":" else "token-decode"
+        entries.append((("memory-own-journal", run_id, stage), _native_memory_lexical_token_upper(raw, start)))
+    literal_keys = (*_MEMORY_ORIGINAL_FIELDS, *_MEMORY_CURRENT_FIELDS,
+        "checkpoint_id", "safe", "state_digest", "payload", "ref", "table", "key", "tuple_digest", "encoded_bytes")
+    key_upper = max(width(name) for name in literal_keys)
+    scalar_upper = max(122, 66, 34, width(MEMORY_REFERENCE_PROFILE), width(prepared._method),
+        width(MEMORY_ORIGINAL_CHECKPOINT), width(MEMORY_CURRENT_CHECKPOINT), width("validated"),
+        width(run_id), width(operation.source._scope.witness["claim_ref"]),
+        width(operation.source.operator.principal.principal_id), width(operation.source.operator.session_id),
+        *(max(width(table), 22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) for table, key in refs))
+    for _ in range(42 + 9 * len(refs) + 2 * len(events)):
+        entries.append((("memory-own-journal", run_id, "key-decode"), key_upper))
+    for _ in range(33 + 8 * len(refs) + 2 * len(events)):
+        entries.append((("memory-own-journal", run_id, "token-decode"), scalar_upper))
+    from src.extensions.capability_execution import original_native_memory_configured_mac_numeric_schedule
+    for address in refs:
+        if address[0] == "work_board_decision_receipts":
+            proposal = ("memory_proposals", value(address, "source_proposal_id"))
+            entries.extend(_native_memory_cold_receipt_numeric_entries(run_id,
+                receipt_upper=facts["row_uppers"][address],
+                proposal_upper=facts["row_uppers"].get(proposal, 0),
+                evidence_upper=6 * facts["text_bytes"][address]["retrieval_evidence_ids_json"] + 2))
+            entries.extend(original_native_memory_configured_mac_numeric_schedule(kind="effect"))
+        if address[0] == "memory_proposals" and value(address, "status") == "accepted":
+            memory = ("memories", value(address, "accepted_memory_id"))
+            if memory not in rows:
+                raise HeaderBoundsError("memory_future_body_accepted_memory_unavailable")
+            entries.extend(_native_memory_cold_selection_numeric_entries(run_id,
+                memory_upper=facts["row_uppers"][memory], proposal_upper=facts["row_uppers"][address],
+                metadata_upper=6 * facts["text_bytes"][memory]["metadata_json"] + 2,
+                scope_upper=6 * facts["text_bytes"][address]["memory_scope_json"] + 2))
+            for _ in range(2):
+                entries.extend(original_native_memory_configured_mac_numeric_schedule(kind="effect"))
+    return tuple(entries)
+
+
+def _native_memory_generic_future_numeric_schedule(operation, prepared, *, certificate, facts, retention_widths):
+    """ONE supplied-current-certificate BODY snapshot; common certification excluded.
+
+    Retain every real baseline appearance. The outer source owner must add its
+    genuine common metadata/certification vector for every invocation before
+    issuing a reservation. This vector cannot authorize reads or effects.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    from src.workspace.production import _publication_json_upper
+    guard, rows, own, audit, new_addresses, value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    trace = facts["baseline_trace"]
+    if type(trace) is not tuple or not trace:
+        raise HeaderBoundsError("memory_future_body_baseline_unavailable")
+    validation = None
+    validation_names = (("state-changes", "schema-main", "schema-temp")
+        if certificate.schema_cookies is not None else ("state-changes",))
+    expected_validation = tuple(("metadata-prequery", name, stage)
+        for name in validation_names
+        for stage in ("delivery", "row-copy", "encoded-copy"))
+    validation_count = len(expected_validation)
+    for index, (appearance, _upper) in enumerate(trace):
+        if appearance == ("body", *own) and index >= validation_count:
+            candidate = trace[index - validation_count:index]
+            if tuple(item[0] for item in candidate) == expected_validation:
+                validation = candidate
+                break
+    if validation is None:
+        raise HeaderBoundsError("memory_future_body_validation_trace_unavailable")
+    tail_stages = {appearance[1] for appearance, _upper in trace
+        if type(appearance) is tuple and len(appearance) == 2 and appearance[0] == "native-closure-tail"}
+    if not {"visited-sort", "visited-return", "table-counts", "role-counts", "relations-sort",
+            "relations-json", "relations-utf8", "relations-hash", "result"} <= tail_stages:
+        raise HeaderBoundsError("memory_future_body_tail_trace_unavailable")
+    projected = dict(facts["row_uppers"])
+    projected[own] = retention_widths["own_upper"]
+    affected = getattr(guard, "_native_memory_affected_numeric_facts", None)
+    affected_widths = {} if not guard._native_memory_retained_proofs[2] else affected[4]
+    for run_id, dimensions in affected_widths.items():
+        if ("workflow_run_states", run_id) not in facts["baseline_members"]:
+            raise HeaderBoundsError("memory_future_body_affected_root_unpaid")
+        projected[("workflow_run_states", run_id)] = dimensions["row_upper"]
+    added_by_table = {}
+    for descriptor, key, _row in guard._native_memory_source_projection[1]:
+        if descriptor.table in added_by_table:
+            raise HeaderBoundsError("memory_future_body_same_table_insertion_order_unavailable")
+        added_by_table[descriptor.table] = key
+    def roster(table, original):
+        actual = tuple(key for name, key in certificate.rows if name == table)
+        if original != actual:
+            raise HeaderBoundsError("memory_future_body_original_roster_changed")
+        return original + ((added_by_table[table],) if table in added_by_table else ())
+    def table_growth(table):
+        increase = 0
+        for (name, key), upper in projected.items():
+            if name != table:
+                continue
+            old_key = int(key) if name == "work_board_events" and type(key) is str else key
+            old = certificate.rows.get((name, old_key))
+            increase += upper if old is None else max(0, upper - old[1])
+        return increase
+    codecs = {address: dict(_original_native_row_digest_entries(address[0], address[1], upper))
+        for address, upper in projected.items() if type(address[1]) is str
+        and (address[0] in NATIVE_EXTENSION_FIELDS or address[0] in COMPOSITION_FIELDS)}
+    cold = _native_memory_postoriginal_cold_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    maxima = {}
+    for appearance, upper in cold:
+        maxima[appearance] = max(upper, maxima.get(appearance, 0))
+    for run_id, dimensions in affected_widths.items():
+        for appearance, upper in _native_memory_cold_candidate_numeric_entries(run_id,
+                row_upper=dimensions["row_upper"], context_upper=dimensions["context_upper"],
+                arguments_upper=dimensions["arguments_upper"], authority_upper=dimensions["authority_upper"]):
+            maxima[appearance] = max(upper, maxima.get(appearance, 0))
+        from src.runtime_plugins.memory_producer import original_native_memory_source_context_numeric_entries
+        # Unknown changes this paid existing root's journal, not its candidate
+        # authority. Its whole retained context bounds every nested subvalue.
+        source_entries = original_native_memory_source_context_numeric_entries(
+            context_upper=dimensions["context_upper"], candidate_upper=dimensions["context_upper"],
+            binding_text_bytes=dimensions["binding_text_bytes"], result_upper=dimensions["context_upper"],
+            effect_upper=dimensions["context_upper"], locator_upper=dimensions["context_upper"], result_present=True)
+        original_appearances = {appearance for appearance, _upper in trace}
+        if any(appearance not in original_appearances for appearance, _upper in source_entries):
+            raise HeaderBoundsError("memory_future_body_source_trace_unavailable")
+        for appearance, upper in source_entries:
+            maxima[appearance] = max(upper, maxima.get(appearance, 0))
+        # Unknown still parses the same fourteen-field Current record and
+        # immutable Original. Its empty rows/events take fewer baseline calls.
+        for appearance, upper in (
+                (("memory-reference-journal", "decode"), dimensions["journal_upper"]),
+                (("memory-reference-journal", "digest-canonical", MEMORY_CURRENT_CHECKPOINT), dimensions["current_upper"]),
+                (("memory-reference-journal", "digest-encoded", MEMORY_CURRENT_CHECKPOINT), dimensions["current_upper"]),
+                (("memory-reference-payload", "current", "canonical"), dimensions["current_upper"]),
+                (("memory-reference-payload", "current", "encoded"), dimensions["current_upper"])):
+            maxima[appearance] = max(upper, maxima.get(appearance, 0))
+    pair_delta = 3 + width(audit[0]) + width(audit[1]) + 1
+    counts_delta = width(audit[0]) + 22
+    role = ("audit_event_session_fk", audit[0], audit[1], "sessions", value(audit, "session_id"))
+    relation_delta = _publication_json_upper(role) + 1
+    role_count_delta = width(role[0]) + 22
+    result_delta = counts_delta + role_count_delta + 20
+    result = []
+    for appearance, upper in trace:
+        if type(upper) is not int or not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_future_body_trace_invalid")
+        if type(appearance) is tuple:
+            if appearance[:1] == ("body",) and len(appearance) == 3:
+                upper = max(upper, projected.get(appearance[1:], upper))
+            elif appearance[:1] == ("memory-reference-output",) and len(appearance) == 4:
+                upper = max(upper, projected.get(appearance[2:], upper))
+            elif appearance[:1] == ("native-row-digest",) and len(appearance) >= 4:
+                upper = max(upper, codecs.get(appearance[1:3], {}).get(appearance, upper))
+            elif appearance[0] in {"table-body", "complete-headers"} and len(appearance) == 3:
+                upper += table_growth(appearance[1])
+                appearance = (appearance[0], appearance[1], roster(appearance[1], appearance[2]))
+            elif appearance[0] == "locator-metadata" and len(appearance) == 5:
+                if appearance[1] in added_by_table:
+                    # The locator owner must provide its original selected
+                    # metadata formula, not a body-byte substitute.
+                    raise HeaderBoundsError("memory_future_body_locator_projection_unavailable")
+            elif len(appearance) == 2 and appearance[0] == "native-closure-tail":
+                if appearance[1] in {"visited-sort", "visited-return"}:
+                    upper += pair_delta
+                elif appearance[1] == "table-counts":
+                    upper += counts_delta
+                elif appearance[1] == "role-counts":
+                    upper += role_count_delta
+                elif appearance[1] in {"relations-sort", "relations-json", "relations-utf8", "relations-hash"}:
+                    upper += relation_delta
+                elif appearance[1] == "result":
+                    upper += result_delta
+            elif len(appearance) == 2 and appearance[0] == "programme-snapshot-envelope":
+                if appearance[1] in {"construction", "return"}:
+                    upper += result_delta
+                elif appearance[1] == "members-union":
+                    upper += pair_delta
+        upper = max(upper, maxima.get(appearance, 0))
+        result.append((appearance, upper))
+    def body(address, reference=False):
+        result.extend(validation)
+        result.append((("body", *address), projected[address]))
+        if reference:
+            result.extend((("memory-reference-output", stage, *address), projected[address])
+                for stage in ("mapping", "canonical", "encoded-return"))
+    # All Current rows are cold raw reads. Own row uses its original raw codec.
+    # Audit has an additional integrity read and generic native-audit read.
+    for address in rows:
+        if address != own:
+            body(address, reference=True)
+    body(audit, reference=True)
+    body(audit, reference=True)
+    # Only the returned native audit becomes newly generic-reachable. Source
+    # tasks/attempts and its session were proved in the paid baseline roster.
+    body(audit)
+    body(audit)
+    result.extend(_original_native_row_digest_entries(*audit, projected[audit]))
+    result.append((("native-closure-tail", "key-utf8", *audit),
+        sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in audit[1])))
+    for field, scalar_upper in (("table", len(audit[0])),
+            ("key", sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in audit[1])),
+            ("leaf", 64)):
+        for stage, amount in (("utf8", scalar_upper), ("length-prefix", 8), ("hash-prefix", 8), ("hash-value", scalar_upper)):
+            result.append((("native-closure-tail", stage, *audit, field), amount))
+    result.extend((appearance, max(upper, maxima[appearance])) for appearance, upper in cold)
+    # FIFO queues for a repeated lexical stage must cover whichever literal
+    # token reaches that queue first; reserve every actual occurrence, no refund.
+    normalized = {}
+    for appearance, upper in result:
+        normalized[appearance] = max(upper, normalized.get(appearance, 0))
+    result = tuple((appearance, max(upper, normalized.get(appearance, upper))) for appearance, upper in result)
+    if any(upper > MAX_BYTES for _appearance, upper in result):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return result
 
 
 def _native_memory_selected_delta_preimage(new_rows, updates, owner_events):
@@ -713,10 +1999,431 @@ async def reserve_native_memory_pending_run(db, run, pending_changes, header_bud
     return amount
 
 
-def _native_memory_statement_signature(statement):
+def _native_memory_source_publication_vector_upper(kind):
+    """Encoded storage of the closed <=22-entry numeric vector, no bodies."""
+    if kind not in {"capture", "completion", "affected-unknown"}:
+        raise ProductionWorkspaceReconciliationError("memory_publication_numeric_shape_unavailable")
+    # Four ASCII appearance fields at most, plus one int64 bound per pair.
+    # The longest actual label is numeric-consume-tuple (21 ASCII bytes).
+    pair = (3 + 20 + 2 + 3 + len("memory-source-sql") + 2 + len(kind) + 2
+        + len("consume") + 2 + len("numeric-consume-tuple") + 2)
+    return 2 + 21 + 22 * pair
+
+
+def _native_memory_source_publication_numeric_entries(operation, prepared, *, certificate, retention_widths, kind):
+    """Closed SQL owner appearances; numeric lineage is not read permission."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_utf8_width
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+    if _MEMORY_OPERATIONS.get(id(operation)) is not operation:
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    source = operation.source
+    import asyncio
+    try:
+        task = asyncio.current_task()
+    except RuntimeError as error:
+        raise HeaderBoundsError("memory_publication_numeric_owner_unavailable") from error
+    owner = getattr(operation.db.info.get("composition_guard"), "_native_memory_source_capacity_owner", None)
+    effect = getattr(getattr(source, "_retention", None), "ledger", None)
+    effect_binding = None if effect is None else effect.bindings.get("effect")
+    if (_MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set() or task is None
+            or not ((type(owner) is tuple and len(owner) >= 4 and owner[0] is operation and owner[3] is task)
+                or (type(effect_binding) is tuple and len(effect_binding) == 6 and effect_binding[5] is task)
+                or source._owner_task is task)):
+        raise HeaderBoundsError("memory_publication_numeric_owner_unavailable")
+    retention = getattr(source, "_retention", None)
+    if retention is not None:
+        if type(retention) is not _NativeMemoryRetention:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        retention._checked()
+    facts = (getattr(retention, "_publication_numeric_facts", None) if retention is not None
+        else getattr(operation.db.info.get("composition_guard"), "_native_memory_retention_numeric_facts", None))
+    if (_MEMORY_OPERATIONS.get(id(operation)) is not operation or operation._prepared is not prepared
+            or type(retention_widths) is not MappingProxyType or type(facts) is not tuple or len(facts) != 4
+            or facts[0] is not operation or facts[1] is not prepared or facts[2] is not certificate
+            or kind not in {"capture", "completion", "affected-unknown"}):
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    if kind == "affected-unknown":
+        affected = (getattr(retention, "_affected_publication_numeric_facts", None) if retention is not None
+            else getattr(operation.db.info.get("composition_guard"), "_native_memory_affected_numeric_facts", None))
+        if (type(affected) is not tuple or len(affected) != 5
+                or affected[0] is not operation or affected[1] is not prepared or affected[2] is not certificate
+                or type(affected[4]) is not MappingProxyType):
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        targets = tuple(key for key, widths in affected[4].items() if widths is retention_widths)
+        if len(targets) != 1:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        proofs = tuple(proof for proof in affected[3] if proof.before['run_identity'] == targets[0])
+        if len(proofs) != 1 or proofs[0].operation is not operation:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        before = proofs[0].before
+    elif facts[3] is not retention_widths:
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    elif retention is not None:
+        retention._checked()
+        before = retention.before
+    else:
+        selected = operation.db.info["composition_guard"]._native_memory_existing_source_rows
+        if selected[0] is not operation:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        before = next(row for descriptor, key, row in selected[2]
+            if descriptor.table == "workflow_run_states" and key == operation.run.run_identity)
+    set_names = (("checkpoint_receipts_json", "revision", "updated_at") if kind == "affected-unknown" else ("checkpoint_context_json", "checkpoint_receipts_json", "revision", "updated_at")
+        if kind == "capture" else ("status", "result_digest", "result_summary", "failure_reason",
+            "checkpoint_context_json", "finished_at", "updated_at", "lease_owner", "lease_expires_at",
+            "revision", "checkpoint_receipts_json"))
+    where_names = ("run_identity", "status", "revision", "attempt_count", "lease_owner",
+        "fencing_token", "checkpoint_receipts_json", "checkpoint_context_json")
+    text = retention_widths["completion_future_text_bytes" if kind == "completion" else "future_text_bytes"]
+    def old_width(name):
+        value = before[name]
+        if value is None: return 4
+        if type(value) is str: return 6 * _native_memory_utf8_width(value) + 2
+        if type(value) is int: return 20
+        if type(value) is float and math.isfinite(value): return 64
+        raise HeaderBoundsError("memory_publication_bind_unsupported")
+    def future_width(name):
+        if name in {"updated_at", "finished_at"}: return 194
+        if name == "revision": return 20
+        if name in {"failure_reason", "lease_owner", "lease_expires_at"}: return 4
+        if name in text: return 6 * text[name] + 2
+        return old_width(name)
+    # UPDATE/SET/WHERE are fixed by the source owner. Identifier quotes and
+    # per-predicate parentheses are bounded even when SQLite omits them.
+    table = len("workflow_run_states") + 2
+    predicates = where_names if kind == "affected-unknown" else (*where_names, "deadline_at", "lease_expires_at")
+    sql = (len("UPDATE ") + table + len(" SET ")
+        + sum(len(name) + 2 + len("=?") for name in set_names) + 2 * (len(set_names) - 1)
+        + len(" WHERE ") + sum(table + 1 + len(name) + 2 + len(" IS NOT NULL") + 2
+            for name in predicates) + len(" AND ") * (len(predicates) - 1))
+    # At most 21 binds: generated names have column + '_' + <=2 digits.
+    values = sum(future_width(name) for name in set_names) + sum(old_width(name) for name in where_names) + (0 if kind == "affected-unknown" else 2 * 194)
+    param_keys = sum(len(name) + 5 + 1 for name in (*set_names, *predicates))
+    params = 2 + param_keys + values + len(set_names) + len(predicates) - 1
+    pending = 2 + sum(len(name) + 3 + future_width(name) for name in set_names) + len(set_names) - 1
+    entries = [(('memory-source-sql', kind, 'pending-copy'), pending),
+        (('memory-source-sql', kind, 'planned-row'), retention_widths['raw_tuple_upper' if kind == 'affected-unknown' else 'own_raw_upper']),
+        (('memory-source-sql', kind, 'conditions'), sql + sum(old_width(name) for name in where_names) + (0 if kind == 'affected-unknown' else 2 * 194)),
+        (('memory-source-sql', kind, 'statement'), sql + params)]
+    if kind == 'affected-unknown':
+        entries = [entry for entry in entries if entry[0][-1] != 'planned-row']
+    for stage in ('prepare', 'consume'):
+        for appearance, upper in (('compile', sql + params), ('parameters', params),
+                ('processed-copy', params), ('sql-text', sql), ('parameter-json', params),
+                ('signature', 6 * (sql + params) + 7)):
+            entries.append((('memory-source-sql', kind, stage, appearance), upper))
+    vector_upper = _native_memory_source_publication_vector_upper(kind)
+    for stage in ('plan', 'prepare', 'consume'):
+        for copy in ('list', 'tuple'):
+            entries.append((('memory-source-sql', kind, 'numeric-' + stage + '-' + copy), vector_upper))
+    return tuple(entries)
+
+
+
+def _native_memory_engine_publication_numeric_entries(operation, prepared, *, certificate, retention_widths, publication_widths):
+    """Original prepare/output allocations, separate from SQL and body traces."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+    if _MEMORY_OPERATIONS.get(id(operation)) is not operation:
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    source = operation.source
+    import asyncio
+    try:
+        task = asyncio.current_task()
+    except RuntimeError as error:
+        raise HeaderBoundsError("memory_publication_numeric_owner_unavailable") from error
+    owner = getattr(operation.db.info.get("composition_guard"), "_native_memory_source_capacity_owner", None)
+    effect = getattr(getattr(source, "_retention", None), "ledger", None)
+    effect_binding = None if effect is None else effect.bindings.get("effect")
+    if (_MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set() or task is None
+            or not ((type(owner) is tuple and len(owner) >= 4 and owner[0] is operation and owner[3] is task)
+                or (type(effect_binding) is tuple and len(effect_binding) == 6 and effect_binding[5] is task)
+                or source._owner_task is task)):
+        raise HeaderBoundsError("memory_publication_numeric_owner_unavailable")
+    retention = getattr(operation.source, "_retention", None)
+    if retention is not None:
+        if type(retention) is not _NativeMemoryRetention:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        retention._checked()
+    facts = (getattr(retention, "_engine_publication_numeric_facts", None) if retention is not None
+        else getattr(operation.db.info.get("composition_guard"), "_native_memory_publication_numeric_facts", None))
+    if (_MEMORY_OPERATIONS.get(id(operation)) is not operation or operation._prepared is not prepared
+            or type(facts) is not tuple or len(facts) != 5
+            or facts[0] is not operation or facts[1] is not prepared or facts[2] is not certificate
+            or facts[3] is not retention_widths or facts[4] is not publication_widths
+            or type(publication_widths) is not MappingProxyType):
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    w = publication_widths
+    # Each entry describes one existing appearance in _prepare_publication.
+    # Actual row/snapshot/accounting and prior-file reads remain their distinct
+    # source traces; this helper never substitutes output width for body fees.
+    amounts = (("members-difference", 2 * w["members_bytes"]),
+        ("delta-key-union", 2 * w["delta_key_bytes"]),
+        ("changed-touched-map", w["changed_touched_bytes"]),
+        ("delta-sort", w["changed_touched_bytes"] + 2 * w["delta_key_bytes"]),
+        ("delta-construction", w["delta_bytes"]),
+        ("checkpoint-construction", w["checkpoint_bytes"]),
+        ("receipt-default", w["receipt_default_bytes"]),
+        ("receipt-target-update", w["receipt_target_update_bytes"]),
+        ("receipt-witness-update", w["receipt_witness_update_bytes"]),
+        ("checkpoint-size-json", w["checkpoint_bytes"]),
+        ("checkpoint-size-utf8", w["checkpoint_bytes"]),
+        ("receipt-size-json", w["receipt_bytes"]),
+        ("receipt-size-utf8", w["receipt_bytes"]),
+        ("return", w["target_bytes"] + w["checkpoint_bytes"] + w["receipt_bytes"] + 4))
+    if any(type(upper) is not int or upper < 0 for _, upper in amounts):
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    entries = [(('composition-prepare-publication', appearance), upper) for appearance, upper in amounts]
+    # Original private atomic writers and verification each encode precisely
+    # the actual publisher's closed payload, never a fabricated future payload.
+    for label, key in (("checkpoint", "checkpoint_bytes"), ("receipt", "receipt_bytes")):
+        for appearance in ("dict-copy", "json", "utf8", "readback-dict", "readback-json", "readback-utf8"):
+            entries.append((("composition-publication", label, appearance), w[key]))
+        entries.append((None, w[key] + 1))  # one original safe readback per output
+    return tuple(entries)
+
+
+def _native_memory_prior_publication_vector_upper():
+    """Encoded bound for vector and exact-trace-check list/tuple copies."""
+    # 28 output pairs plus 4 checkpoint and 5 receipt grammar-check pairs.
+    # Each pair has <=3 ASCII appearance fields and one int64 bound.
+    pair = 3 + 20 + 2 + 2 + sum(2 + len(name) for name in
+        ("composition-publication", "checkpoint", "materialization"))
+    return 2 + 36 + 37 * pair
+
+
+_NATIVE_MEMORY_ACCOUNTING_TRACES = WeakValueDictionary()
+_NATIVE_MEMORY_ACCOUNTING_TRACE_ACTIVE = ContextVar("native_memory_accounting_certification_trace", default=None)
+
+
+class _NativeMemoryAccountingTraceCollector:
+    """Only existing original publication-owner metadata debit observations."""
+    def __init__(self, guard, operation, certificate, facts, widths, prior):
+        import asyncio
+        self.guard, self.operation, self.certificate = guard, operation, certificate
+        self.prepared, self.facts, self.widths = operation._prepared, facts, widths
+        self.budget, self.task, self.prior = guard.header_budget, asyncio.current_task(), prior
+        self.entries = []
+
+    def _checked(self):
+        import asyncio
+        from src.memory.header_bounds import HeaderBoundsError
+        if (_NATIVE_MEMORY_ACCOUNTING_TRACES.get(id(self)) is not self
+                or _NATIVE_MEMORY_ACCOUNTING_TRACE_ACTIVE.get() is not self
+                or self.guard.db is not self.operation.db
+                or self.guard.header_budget is not self.budget
+                or self.operation.db.info.get("composition_guard") is not self.guard
+                or self.task is not asyncio.current_task()):
+            raise HeaderBoundsError("memory_accounting_certification_numeric_owner_changed")
+        _native_memory_generic_future_bound_inputs(self.operation, self.prepared,
+            self.certificate, self.facts, self.widths)
+
+    def _storage_debit(self, upper, stage):
+        from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
+        token = _MEMORY_CHARGE_TRACE.set(self.prior)
+        try:
+            self.budget.debit(upper, appearance=("native-memory-accounting-certification-trace", stage))
+        finally:
+            _MEMORY_CHARGE_TRACE.reset(token)
+
+    def append_charge(self, appearance, amount):
+        from src.memory.header_bounds import HeaderBoundsError
+        from src.memory.composition_headers import _common_trace_label_width, _CommonCertificationTraceCollector
+        self._checked()
+        if type(amount) is not int or not 0 <= amount < 2**63:
+            raise HeaderBoundsError("memory_accounting_certification_numeric_shape_changed")
+        pair_upper = 3 + _common_trace_label_width(appearance) + 20
+        self._storage_debit(pair_upper, "pair")
+        self._storage_debit(pair_upper + 1, "list-slot")
+        entry = (appearance, amount)
+        self.entries.append(entry)
+        if self.prior is not None and self.prior[0] is self.budget:
+            from src.runtime_plugins.memory_producer import _MemoryAuthorityTraceCollector
+            from src.workflows.job_runtime import _NativeMemoryClaimTraceCollector
+            outer = self.prior[1]
+            if type(outer) in (_CommonCertificationTraceCollector, _MemoryAuthorityTraceCollector,
+                    _NativeMemoryClaimTraceCollector, _NativeMemoryAccountingTraceCollector):
+                outer.append_charge(appearance, amount)
+            else:
+                outer.append(entry)
+
+
+@asynccontextmanager
+async def _native_memory_accounting_certification_capture(guard, operation, certificate):
+    """Record only the existing three certifiers; no extra query/body read."""
+    if operation is None:
+        yield
+        return
+    import asyncio
+    from src.memory.header_bounds import _MEMORY_CHARGE_TRACE, HeaderBoundsError
+    from src.memory.composition_headers import _common_trace_label_width
+    capacity = getattr(guard, "_native_memory_source_capacity_facts", None)
+    retained = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if (type(guard) is not CompositionSessionGuard or capacity is None or retained is None
+            or capacity[0] is not operation or retained[0] is not operation
+            or capacity[1] is not operation._prepared or retained[1] is not operation._prepared
+            or capacity[2] is not certificate or retained[2] is not certificate):
+        raise HeaderBoundsError("memory_accounting_certification_numeric_owner_changed")
+    facts, widths = capacity[3], retained[3]
+    _native_memory_generic_future_bound_inputs(operation, operation._prepared, certificate, facts, widths)
+    budget = guard.header_budget
+    budget.debit(2, appearance=("native-memory-accounting-certification-trace", "empty-list"))
+    # Ten owner fields, fixed source ASCII names<=32, opaque pointers4.
+    budget.debit(2 + 10 * (6 * 32 + 2 + 4 + 2),
+        appearance=("native-memory-accounting-certification-trace", "collector-construction"))
+    # Distinct original owner structures are paid before any registration or
+    # ContextVar mutation. These match the existing REPORT observer grammar.
+    budget.debit(4, appearance=("native-memory-accounting-certification-trace", "collector-weak-reference"))
+    budget.debit(27, appearance=("native-memory-accounting-certification-trace", "collector-registry-entry"))
+    budget.debit(4, appearance=("native-memory-accounting-certification-trace", "active-context-token"))
+    budget.debit(4, appearance=("native-memory-accounting-certification-trace", "trace-context-token"))
+    budget.debit(11, appearance=("native-memory-accounting-certification-trace", "trace-binding-tuple"))
+    collector = _NativeMemoryAccountingTraceCollector(guard, operation, certificate,
+        facts, widths, _MEMORY_CHARGE_TRACE.get())
+    _NATIVE_MEMORY_ACCOUNTING_TRACES[id(collector)] = collector
+    active_token = _NATIVE_MEMORY_ACCOUNTING_TRACE_ACTIVE.set(collector)
+    trace_token = _MEMORY_CHARGE_TRACE.set((budget, collector))
+    try:
+        collector._checked()
+        yield
+        collector._checked()
+        upper = 2 + max(0, len(collector.entries) - 1)
+        for appearance, amount in collector.entries:
+            upper += 3 + _common_trace_label_width(appearance) + 20
+        collector._storage_debit(upper, "retained-vector")
+        collector._storage_debit(upper + 5 * 4 + 7, "retained-lineage")
+        guard._native_memory_accounting_certification_numeric = (
+            operation, operation._prepared, certificate, budget, asyncio.current_task(),
+            tuple(collector.entries))
+    finally:
+        _MEMORY_CHARGE_TRACE.reset(trace_token)
+        _NATIVE_MEMORY_ACCOUNTING_TRACE_ACTIVE.reset(active_token)
+        _NATIVE_MEMORY_ACCOUNTING_TRACES.pop(id(collector), None)
+
+
+def original_native_memory_accounting_certification_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """ONE unchanged accounting locate/certify sequence, numerical reuse only."""
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    guard = operation.db.info["composition_guard"]
+    lineage = getattr(guard, "_native_memory_accounting_certification_numeric", None)
+    projection = guard._native_memory_source_projection
+    if (type(lineage) is not tuple or len(lineage) != 6
+            or lineage[0] is not operation or lineage[1] is not prepared
+            or lineage[2] is not certificate or lineage[3] is not certificate.budget
+            or lineage[4] is not asyncio.current_task() or type(lineage[5]) is not tuple):
+        raise HeaderBoundsError("memory_accounting_certification_numeric_lineage_changed")
+    # Sealed M5 projection does not mutate accounting models; no future row or
+    # certificate is inferred, and original metadata/query order is preserved.
+    for descriptor, key, row in projection[1]:
+        if descriptor.table in ("inference_accounting_owners", "inference_cost_reservations"):
+            raise HeaderBoundsError("memory_accounting_certification_numeric_projection_changed")
+    for descriptor, key, row in projection[2]:
+        if descriptor.table in ("inference_accounting_owners", "inference_cost_reservations"):
+            raise HeaderBoundsError("memory_accounting_certification_numeric_projection_changed")
+    return lineage[5]
+
+
+def _native_memory_prior_publication_numeric_entries(operation, prepared, *, certificate,
+        retention_widths, publication_widths, prior_reads):
+    """Original prior private reads, preserving actual old raw-byte bounds."""
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+    if _MEMORY_OPERATIONS.get(id(operation)) is not operation:
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    source = operation.source
+    retention = getattr(source, "_retention", None)
+    guard = operation.db.info.get("composition_guard")
+    lineage = (getattr(retention, "_prior_publication_numeric", None) if retention is not None
+        else getattr(guard, "_native_memory_prior_publication_numeric", None))
+    engine = (getattr(retention, "_engine_publication_numeric_facts", None) if retention is not None
+        else getattr(guard, "_native_memory_publication_numeric_facts", None))
+    try:
+        task = asyncio.current_task()
+    except RuntimeError as error:
+        raise HeaderBoundsError("memory_publication_numeric_owner_unavailable") from error
+    if (_MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or operation._prepared is not prepared or task is None
+            or type(prior_reads) is not tuple or len(prior_reads) != 7 or lineage is not prior_reads
+            or prior_reads[0] is not operation or prior_reads[1] is not prepared
+            or prior_reads[2] is not certificate or prior_reads[3] is not source.admission.header_budget
+            or prior_reads[4] is not task
+            or type(engine) is not tuple or len(engine) != 5
+            or engine[0] is not operation or engine[1] is not prepared or engine[2] is not certificate
+            or engine[3] is not retention_widths or engine[4] is not publication_widths
+            or type(publication_widths) is not MappingProxyType):
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    if retention is not None:
+        if type(retention) is not _NativeMemoryRetention:
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        retention._checked()
+    def raw_size(trace, label):
+        if type(trace) is not tuple:
+            raise HeaderBoundsError("memory_publication_private_trace_invalid")
+        if not trace: return 0
+        if any(type(item) is not tuple or len(item) != 2 or type(item[1]) is not int or item[1] < 0
+                for item in trace):
+            raise HeaderBoundsError("memory_publication_private_trace_invalid")
+        if (type(trace[0]) is not tuple or len(trace[0]) != 2 or trace[0][0] is not None
+                or type(trace[0][1]) is not int or trace[0][1] < 1):
+            raise HeaderBoundsError("memory_publication_private_trace_invalid")
+        size = trace[0][1] - 1
+        expected = [(None, size + 1)]
+        if label == "receipt":
+            expected.append((("composition-publication", label, "decode"), size))
+        for appearance in ("json-parse", "materialization", "return"):
+            expected.append((("composition-publication", label, appearance), 6 * size + 2))
+        if trace != tuple(expected):
+            raise HeaderBoundsError("memory_publication_private_trace_invalid")
+        return size
+    checkpoint = raw_size(prior_reads[5], "checkpoint")
+    receipt = raw_size(prior_reads[6], "receipt")
+    if any(type(publication_widths[key]) is not int or publication_widths[key] < 0
+            for key in ("checkpoint_bytes", "receipt_bytes")):
+        raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+    # Capture reads the measured old files; completion can read capture's
+    # actual canonical output. Both possibilities are retained, without refund.
+    entries = []
+    for label, old, key, repeats in (("checkpoint", checkpoint, "checkpoint_bytes", 2),
+            ("receipt", receipt, "receipt_bytes", 4)):
+        upper = max(old, publication_widths[key])
+        for _ in range(repeats):
+            entries.append((None, upper + 1))
+            if label == "receipt":
+                entries.append((("composition-publication", label, "decode"), upper))
+            for appearance in ("json-parse", "materialization", "return"):
+                entries.append((("composition-publication", label, appearance), 6 * upper + 2))
+    return tuple(entries)
+
+
+def _native_memory_statement_signature(statement, *, native_memory_retention=None, kind=None, publication_widths=None):
     """Bind the original WHERE and the actual SQLite processed parameters."""
     from sqlalchemy.dialects.sqlite import dialect
     from src.workflows.job_runtime import _canonical
+    if native_memory_retention is not None:
+        import sys
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+        retention = native_memory_retention._checked()
+        issuer = sys._getframe(1).f_code
+        stage = ("prepare" if issuer is _prepare_native_memory_source_publication.__code__
+            else "consume" if issuer is _consume_native_memory_source_publication.__code__ else None)
+        active = _MEMORY_LEDGER_PHASE.get()
+        if stage is None or active is None or active[0] is not retention.ledger:
+            raise ProductionWorkspaceReconciliationError("memory_publication_numeric_owner_unavailable")
+        for copy in ('list', 'tuple'):
+            retention.source.admission.header_budget.debit(_native_memory_source_publication_vector_upper(kind),
+                appearance=('memory-source-sql', kind, 'numeric-' + stage + '-' + copy))
+        facts = retention._publication_numeric_facts
+        entries = _native_memory_source_publication_numeric_entries(retention.operation, retention.prepared,
+            certificate=facts[2], retention_widths=facts[3] if publication_widths is None else publication_widths, kind=kind)
+        for appearance, upper in entries:
+            if appearance[:3] == ("memory-source-sql", kind, stage):
+                retention.source.admission.header_budget.debit(upper, appearance=appearance)
     compiled = statement.compile(dialect=dialect())
     parameters = compiled.construct_params()
     processed = {}
@@ -762,9 +2469,33 @@ class _NativeMemorySourcePublication:
     task: object
     signature: tuple
     kind: str
+    affected_proof: object = None
     consumed: bool = False
     applied: bool = False
     seal: object = field(default=_MEMORY_PUBLICATION_SEAL, repr=False)
+
+
+def _native_memory_retention_locator_numeric_entries(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """ONE actual retention.payload() map and Original digest allocation."""
+    from src.memory.header_bounds import _native_memory_object_width as obj, _native_memory_ascii_string_width as width
+    _guard, _rows, own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    locator = obj({"profile": width(MEMORY_REFERENCE_PROFILE), "invocation_ref": width(own[1]),
+        "original_checkpoint_id": width(MEMORY_ORIGINAL_CHECKPOINT), "original_checkpoint_digest": 66})
+    return tuple((("memory-retention-locator", stage), upper) for stage, upper in (
+        ("original-canonical", retention_widths["original_record_upper"]),
+        ("original-utf8", retention_widths["original_record_upper"]),
+        ("original-digest", 66), ("map", locator)))
+
+
+def _native_memory_retention_validation_numeric_entries(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """ONE original completion retention lookup, excluding context/body checks."""
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    return tuple((("memory-retention-validation", stage), upper) for stage, upper in (
+        ("registry-view", 4), ("registry-iterator", 4),
+        ("matching-count", 20), ("matching-count", 20)))
 
 
 @dataclass(eq=False)
@@ -778,6 +2509,7 @@ class _NativeMemoryRetention:
     updates: tuple
     existing_references: tuple
     affected: tuple = ()
+    future_slots: tuple = ()
     original: object = None
     captured: bool = False
     completed: bool = False
@@ -821,9 +2553,24 @@ class _NativeMemoryRetention:
 
     def payload(self):
         from src.workflows.job_runtime import _digest
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _native_memory_object_width as obj, _native_memory_ascii_string_width as width
         self._checked()
         if not self.captured or self.original is None:
             raise ProductionWorkspaceReconciliationError("memory_retention_original_unavailable")
+        active = _MEMORY_LEDGER_PHASE.get()
+        if active is None or active[0] is not self.ledger or active[1] not in {"capture", "completion"}:
+            raise ProductionWorkspaceReconciliationError("memory_retention_locator_numeric_owner_unavailable")
+        _native_memory_capacity_slots(self.ledger)
+        retained = getattr(self, "_publication_numeric_facts", None)
+        if (retained is None or retained[0] is not self.operation or retained[1] is not self.prepared):
+            raise ProductionWorkspaceReconciliationError("memory_retention_locator_numeric_owner_unavailable")
+        original_upper = retained[3]["original_record_upper"]
+        locator_upper = obj({"profile": width(MEMORY_REFERENCE_PROFILE),
+            "invocation_ref": width(self.before["run_identity"]),
+            "original_checkpoint_id": width(MEMORY_ORIGINAL_CHECKPOINT), "original_checkpoint_digest": 66})
+        for stage, amount in (("original-canonical", original_upper), ("original-utf8", original_upper),
+                ("original-digest", 66), ("map", locator_upper)):
+            self.ledger.budget.debit(amount, appearance=("memory-retention-locator", stage))
         return {"profile": MEMORY_REFERENCE_PROFILE,
             "invocation_ref": self.before["run_identity"],
             "original_checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT,
@@ -834,19 +2581,1132 @@ async def _native_memory_source_snapshot(db, budget):
     from src.memory.universe import native_memory_universe
     from src.memory.composition_headers import _certify_current_memory_snapshot
     await native_memory_universe(db, _header_budget=budget)
-    return await _certify_current_memory_snapshot(db, budget)
+    return await _certify_current_memory_snapshot(db, budget, _header_budget=budget)
+
+
+def _native_memory_future_common_numeric_components(operation, prepared, *, certificate,
+        facts, retention_widths, _construction_only=False):
+    """Separate full common issuance from its current-cache MISS/HIT wrapper.
+
+    Numerical capacity only: no Memory Universe, accessor validation, future
+    certificate or body permission. MISS conservatively includes a stale-cache
+    probe even when the future original scope has no cached certificate.
+    """
+    from src.runtime_plugins import memory_producer as source_owner
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_common_construction_mode_unavailable")
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info.get("composition_guard")
+    original = getattr(guard, "_native_memory_source_common_numeric", None)
+    snapshot = getattr(guard, "_native_memory_source_snapshot_numeric", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (type(original) is not tuple or len(original) != 3
+            or original[0] is not operation or original[1] is not certificate
+            or type(original[2]) is not tuple
+            or type(snapshot) is not tuple or len(snapshot) != 3
+            or snapshot[0] is not operation or snapshot[1] is not certificate
+            or type(snapshot[2]) is not tuple
+            or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation
+            or guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget
+            or certificate.metadata_budget is not certificate.budget
+            or certificate.common_certificate is not None or certificate.raw_owner is not None):
+        raise HeaderBoundsError("memory_common_components_numeric_unavailable")
+    # Original _metadata_scalar(width=20) has the SAME three scalar fees for
+    # state-changes and each schema cookie. Authenticate every value against
+    # the genuine observed Source snapshot before constructing any vector.
+    from src.memory.composition_headers import _metadata_upper
+    scalar_upper = _metadata_upper(2, (20,))
+    for name in ("state-changes", "schema-main", "schema-temp"):
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            seen = False
+            for appearance, amount in snapshot[2]:
+                if appearance == ("metadata-prequery", name, stage):
+                    if amount != scalar_upper:
+                        raise HeaderBoundsError("memory_common_components_numeric_unavailable")
+                    seen = True
+            if not seen:
+                raise HeaderBoundsError("memory_common_components_numeric_unavailable")
+    row_count = len(facts["row_uppers"])
+    creating = len(projection[1])
+    if not 1 <= row_count <= MAX_ROWS or len(certificate.rows) > row_count:
+        raise HeaderBoundsError("memory_common_components_numeric_unavailable")
+    issuer_count = len(original[2])
+    core_count = issuer_count + 5 * creating
+    validation_count = 9 if certificate.schema_cookies is not None else 3
+    miss_count, hit_count = 2 * validation_count + 12, validation_count + 6
+    if _construction_only:
+        # Immutable owner references use 4-slot capacity, numbers int64 width20.
+        # Existing projected issuer: two generic owner traversals; copied header
+        # map, old-id/added/future-id maps (33 descriptors), sorting/slot arrays,
+        # result list+tuple/pairs, changed labels with <=128 retained identities.
+        # Every issuer item receives the largest source label shape (5 fixed
+        # references + one row-id tuple); this overprices unchanged labels.
+        owner_storage = 2 * (1024 + 128 * row_count)
+        header_storage = 2 + 65 * row_count
+        descriptor_maps = 3 * (2 + 33 * 11) + 8 * (2 + 5 * row_count)
+        projected_result = 4 + core_count * (37 + 2 + 4 * (5 + row_count))
+        # Each new-row header helper constructs its 3*column width list, starred
+        # width tuple and three-entry + two-entry + five-entry pair tuples.
+        # Actual descriptor column count, never a row/header price substitute.
+        row_helpers = 0
+        for descriptor, identity, row in projection[1]:
+            columns = len(descriptor.columns)
+            row_helpers += (2 + 5 * (3 * columns)) + (2 + 21 * (1 + 3 * columns)) + 10 * 32 + 3 * 2
+        wrappers = 8 + 43 * (3 * validation_count + 18) + 5 * (5 * validation_count + 36)
+        outer = 2 + 3 * 11
+        # Four original local functions and their generator objects use the
+        # same 32-slot control bound; no planner builds a vector to price itself.
+        return owner_storage + header_storage + descriptor_maps + projected_result + row_helpers + wrappers + outer + 32 * 20
+    from src.memory.header_bounds import _native_memory_projected_superset_charges
+    core, _headers = _native_memory_projected_superset_charges(certificate, original[2],
+        projection[1], projection[2], source_operation=operation)
+    if len(core) != core_count:
+        raise HeaderBoundsError("memory_common_components_numeric_unavailable")
+    def validation():
+        return tuple((("metadata-prequery", name, stage), scalar_upper)
+            for name in (("state-changes", "schema-main", "schema-temp")
+                if certificate.schema_cookies is not None else ("state-changes",))
+            for stage in ("delivery", "row-copy", "encoded-copy"))
+    def cookies():
+        return tuple((("metadata-prequery", name, stage), scalar_upper)
+            for name in ("schema-main", "schema-temp")
+            for stage in ("delivery", "row-copy", "encoded-copy"))
+    # Stale validation, before-issue cookies, after-issue cookies, fresh validate.
+    miss = validation() + cookies() + cookies() + validation()
+    hit = validation() + cookies()
+    return (("core", core), ("miss", miss), ("hit", hit))
+
+
+def _native_memory_source_snapshot_numeric_entries(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """ONE future original Source snapshot metadata without unused planning storage.
+
+    Body callbacks remain separate. This projects the original full-common
+    issuer and retains the actual universe/cache-wrapper appearances. It
+    constructs no future certificate, database row or reference permission.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_projected_superset_charges
+    guard, _rows, _own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    original = getattr(guard, "_native_memory_source_common_numeric", None)
+    snapshot = getattr(guard, "_native_memory_source_snapshot_numeric", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    slots = getattr(guard, "_native_memory_integer_slots", None)
+    if (type(original) is not tuple or len(original) != 3
+            or original[0] is not operation or original[1] is not certificate
+            or type(original[2]) is not tuple
+            or type(snapshot) is not tuple or len(snapshot) != 3
+            or snapshot[0] is not operation or snapshot[1] is not certificate
+            or type(snapshot[2]) is not tuple
+            or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation
+            or type(slots) is not tuple or len(slots) != 2 or slots[0] is not operation):
+        raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+    core, _headers = _native_memory_projected_superset_charges(certificate, original[2],
+        projection[1], projection[2], source_operation=operation)
+    start_label = ("metadata-prequery", "common-certification-trace", "collector-list")
+    end_label = ("metadata-prequery", "common-certification-trace", "retained-copy")
+    baseline = snapshot[2]
+    starts = tuple(index for index, (appearance, _upper) in enumerate(baseline)
+        if appearance == start_label)
+    ends = tuple(index for index, (appearance, _upper) in enumerate(baseline)
+        if appearance == end_label)
+    if starts or ends:
+        if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+            raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+        # Exact source collector grammar: pair storage, list-slot storage,
+        # then the identical original issuer charge, once per ordinal.
+        delivered = baseline[starts[0] + 1:ends[0]]
+        if len(delivered) != 3 * len(original[2]):
+            raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+        for ordinal, source_entry in enumerate(original[2]):
+            pair, slot, entry = delivered[3 * ordinal:3 * ordinal + 3]
+            if (pair[0] != ("metadata-prequery", "common-certification-trace", "entry-pair", ordinal)
+                    or slot[0] != ("metadata-prequery", "common-certification-trace", "entry-list-slot", ordinal)
+                    or entry != source_entry):
+                raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+        wrapper = baseline[:starts[0]] + baseline[ends[0] + 1:]
+    else:
+        # A cache hit still has the original genuine issued core supplied by
+        # its authenticated accessor. The actual hit validation/cookie costs
+        # remain paid; do not pretend that the future issuer costs zero.
+        wrapper = baseline
+        if certificate.schema_cookies is None:
+            # With no certificate cookie fields the actual hit has only one
+            # wrapper cookie query pair. A subsequent data-change MISS uses
+            # both its before-issuance and after-issuance pair. Preserve the
+            # exact original scalar grammar for that second appearance.
+            cookies = tuple(entry for entry in baseline
+                if type(entry[0]) is tuple and len(entry[0]) == 3
+                and entry[0][0] == "metadata-prequery"
+                and entry[0][1] in {"schema-main", "schema-temp"})
+            expected = tuple(("metadata-prequery", name, stage)
+                for name in ("schema-main", "schema-temp")
+                for stage in ("delivery", "row-copy", "encoded-copy"))
+            if tuple(appearance for appearance, _upper in cookies) != expected:
+                raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+            wrapper = wrapper + cookies
+    # M5 updates/creates no WRS job identity, job_kind or schema. Thus the
+    # original unfiltered native-memory census and fixed schema/cache wrapper
+    # are unchanged. The genuine begin snapshot also validates the accessor;
+    # this conservatively covers the stale-probe/fresh-issuance validations.
+    if not any(appearance == ("metadata-prequery", "memory-universe", "rowid-census", "delivery")
+            for appearance, _upper in wrapper):
+        raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+    # The complete original Memory phase authenticates the issuer's storage-free
+    # branch. Its original common/header/schema charges still execute and reach
+    # every enclosing observer; only the unused local planning trace is absent.
+    # Initial pre-effect issuance above retains and validates its complete trace.
+    return tuple(wrapper) + tuple(core)
+
+
+def _native_memory_source_rows_numeric_entries(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """Source-owned all-ref and own-only collection allocations; no bodies."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    _guard, rows, own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
+        operation, prepared, certificate, facts, retention_widths)
+    def entries(addresses):
+        refs_upper = 2 + max(0, len(addresses) - 1) + sum(
+            3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
+            for table, key in addresses)
+        result_upper = 2 + max(0, len(addresses) - 1) + sum(
+            5 + 4 + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
+            + 2 * (retention_widths["own_upper"] if (table, key) == own
+                else facts["row_uppers"][(table, key)]) for table, key in addresses)
+        return tuple((("memory-source-rows", stage), upper) for stage, upper in (
+            ("reference-set", refs_upper), ("reference-sort", refs_upper),
+            ("reference-tuple", refs_upper), ("result-tuples", result_upper),
+            ("result-return", result_upper)))
+    return MappingProxyType({"all": entries(tuple(rows)), "own": entries((own,))})
 
 
 async def _native_memory_source_rows(db, certificate, references):
     from src.memory.composition_headers import snapshot_reads
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    # Collection capacity uses only this genuine current certificate. It
+    # neither selects a new row nor grants a Source body read.
+    refs_upper = 2 + max(0, len(references) - 1) + sum(
+        3 + width(table) + width(key) for table, key in references)
+    for stage in ("reference-set", "reference-sort", "reference-tuple"):
+        certificate.budget.debit(refs_upper, appearance=("memory-source-rows", stage))
     references = tuple(sorted(set(references)))
+    result_upper = 2 + max(0, len(references) - 1) + sum(
+        5 + 4 + width(key) + 2 * certificate.rows[(table,
+            int(key) if table == "work_board_events" else key)][1]
+        for table, key in references)
+    certificate.budget.debit(result_upper, appearance=("memory-source-rows", "result-tuples"))
     def read(connection):
         with snapshot_reads(certificate):
             return tuple((descriptor, key, row, encoded)
                 for table, key in references
                 for descriptor, row, encoded in (
                     _native_memory_reference_row_on_connection(connection, table, key),))
-    return await (await db.connection()).run_sync(read)
+    result = await (await db.connection()).run_sync(read)
+    certificate.budget.debit(result_upper, appearance=("memory-source-rows", "result-return"))
+    return result
+
+
+@dataclass(eq=False)
+class _NativeMemoryFutureIntegerSlot:
+    """One original plan's numerical liability, never a reference/read grant."""
+    operation: object
+    prepared: object
+    instance: object
+    descriptor: object
+    db: object
+    transaction: object
+    driver: object
+    task: object
+    budget: object
+    ordinal: int
+    bound_key: object = None
+    expected_columns: object = None
+    prior_keys: object = None
+    seal: object = _MEMORY_PUBLICATION_SEAL
+
+    def __post_init__(self):
+        import sys
+        from sqlalchemy import inspect
+        from src.db.models import WorkBoardEvent
+        from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
+        if (sys._getframe(2).f_code is not begin_native_memory_effect.__code__
+                or self.descriptor is not COMPOSITION_DESCRIPTORS["work_board_events"]
+                or type(self.instance) is not WorkBoardEvent
+                or not inspect(self.instance).transient or self.instance.event_id is not None
+                or self.prepared.consumed or self.prepared._method not in _MEMORY_NATIVE_OPERATIONS
+                or any(slot.instance is self.instance for slot in _MEMORY_INTEGER_SLOTS.values())):
+            raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_owner_changed")
+        _MEMORY_INTEGER_SLOTS[id(self)] = self
+        try:
+            self._checked()
+        except BaseException:
+            _MEMORY_INTEGER_SLOTS.pop(id(self), None)
+            raise
+
+    def _checked(self):
+        import asyncio
+        from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+        guard = self.db.info.get("composition_guard")
+        if (type(self) is not _NativeMemoryFutureIntegerSlot
+                or self.seal is not _MEMORY_PUBLICATION_SEAL
+                or _MEMORY_INTEGER_SLOTS.get(id(self)) is not self
+                or _MEMORY_OPERATIONS.get(id(self.operation)) is not self.operation
+                or _MEMORY_SOURCES.get(id(self.operation.source)) is not self.operation.source
+                or not self.operation.source._live.is_set()
+                or self.operation._prepared is not self.prepared
+                or self.operation.db is not self.db
+                or self.operation.transaction is not self.transaction
+                or self.operation.driver is not self.driver
+                or self.db.sync_session.get_transaction() is not self.transaction
+                or asyncio.current_task() is not self.task
+                or self.budget is not self.operation.source.admission.header_budget
+                or type(guard) is not CompositionSessionGuard or guard.header_budget is not self.budget
+                or self.descriptor.table != "work_board_events"
+                or not any(row is self.instance for row in self.prepared._rows)):
+            raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_changed")
+        return self
+
+
+async def _bind_native_memory_future_integer_slots(db, operation, prepared):
+    """Bind only after the genuine flush and original consumed-plan validation."""
+    import asyncio
+    import sys
+    from src.runtime_plugins.memory_producer import perform_memory_mutation
+    from src.memory.m5 import validate_native_memory_mutation_plan
+    if sys._getframe(1).f_code is not perform_memory_mutation.__code__:
+        raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_owner_changed")
+    retention = getattr(operation.source, "_retention", None)
+    if (type(retention) is not _NativeMemoryRetention or retention.operation is not operation
+            or retention.prepared is not prepared or operation.db is not db):
+        raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_owner_changed")
+    retention._checked()
+    if not retention.future_slots:
+        return
+    await validate_native_memory_mutation_plan(prepared, db=db,
+        candidate_digest=operation.source.admission.candidate_digest, consumed=True)
+    keys = set()
+    bound = []
+    for slot in retention.future_slots:
+        slot._checked()
+        if slot.bound_key is not None:
+            raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_already_bound")
+        row = _native_memory_planned_sql_row(slot.instance)
+        actual_key = row[slot.descriptor.key]
+        if type(actual_key) is not int or not -(2**63) <= actual_key < 2**63:
+            raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_address_unavailable")
+        key = _composition_address(slot.descriptor.table, actual_key)
+        if (key in keys or slot.prior_keys is None or key in slot.prior_keys
+                or (slot.descriptor.table, key) in retention.existing_references
+                or any(row[name] != expected for name, expected in slot.expected_columns.items())
+                or slot.task is not asyncio.current_task()):
+            raise ProductionWorkspaceReconciliationError("memory_future_integer_slot_changed")
+        keys.add(key)
+        bound.append((slot, key, row))
+    # Publish the numerical bindings only after the whole cohort is checked.
+    for slot, key, row in bound:
+        slot.bound_key = key
+    retention.new_rows = tuple((descriptor, key.bound_key, _native_memory_planned_sql_row(key.instance))
+        if type(key) is _NativeMemoryFutureIntegerSlot else (descriptor, key, row)
+        for descriptor, key, row in retention.new_rows)
+
+
+def _native_memory_capacity_slots(ledger):
+    """Authenticate a capacity binding without granting a row read."""
+    import asyncio
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger, HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+    if type(ledger) is not _NativeMemoryNumericLedger:
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    ledger._checked()
+    active = _MEMORY_LEDGER_PHASE.get()
+    if active is None or active[0] is not ledger:
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    binding = ledger.bindings.get(active[1])
+    if (binding is None or binding[0].sync_session.get_transaction() is not binding[1]
+            or not binding[2].in_transaction
+            or len(binding) != 6 or binding[5] is not asyncio.current_task()
+            or _MEMORY_OPERATIONS.get(id(ledger.operation)) is not ledger.operation
+            or _MEMORY_SOURCES.get(id(ledger.source)) is not ledger.source):
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    retention = _MEMORY_RETENTIONS.get(id(ledger.source))
+    if (type(retention) is not _NativeMemoryRetention or retention.ledger is not ledger
+            or retention.operation is not ledger.operation or retention.prepared is not ledger.prepared
+            or ledger.source._retention is not retention):
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    for slot in retention.future_slots:
+        if (type(slot) is not _NativeMemoryFutureIntegerSlot
+                or _MEMORY_INTEGER_SLOTS.get(id(slot)) is not slot
+                or slot.seal is not _MEMORY_PUBLICATION_SEAL
+                or slot.operation is not ledger.operation or slot.prepared is not ledger.prepared
+                or slot.budget is not ledger.budget
+                or not any(row is slot.instance for row in ledger.prepared._rows)):
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+    return retention.future_slots
+
+
+def _native_memory_resolve_numeric_slot(ledger, descriptor, identity, rowid, database_identity):
+    """Resolve one paid liability only to its genuine postflush integer key."""
+    from sqlalchemy import inspect
+    from src.memory.header_bounds import HeaderBoundsError
+    retention = _MEMORY_RETENTIONS.get(id(ledger.source))
+    if retention is None or not retention.future_slots:
+        return None
+    slots = _native_memory_capacity_slots(ledger)
+    if descriptor.table != "work_board_events" or type(identity) not in {int, str}:
+        return None
+    address = _composition_address(descriptor.table, identity)
+    matches = [slot for slot in slots if slot.descriptor is descriptor and slot.bound_key == address]
+    if not matches:
+        return None
+    if (len(matches) != 1 or database_identity is not None
+            or type(rowid) is not int or not -(2**63) <= rowid < 2**63
+            or not ledger.prepared.consumed):
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    slot = matches[0]
+    value = inspect(slot.instance).attrs[descriptor.key].loaded_value
+    if (type(value) is not int or value != rowid
+            or _composition_address(descriptor.table, value) != address
+            or slot.prior_keys is None or address in slot.prior_keys):
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    return slot
+
+
+def _native_memory_normalize_numeric_appearance(ledger, appearance):
+    """Alias only original address-bearing fees to their prepaid capacity slot."""
+    if (type(appearance) is not tuple or not appearance or appearance[0] not in {
+            "body", "memory-reference-output", "native-row-digest", "memory-row-witness",
+            "native-closure-tail", "complete-headers", "table-body", "locator-metadata"}):
+        # Original completion startup can consume numerical metadata before its
+        # fresh writer exists. Those fees contain no physical address to bind.
+        return appearance
+    if ((appearance[0] == "native-closure-tail" and len(appearance) not in {4, 5})
+            or (appearance[0] == "native-row-digest" and len(appearance) not in {4, 5})
+            or (appearance[0] in {"body", "complete-headers", "table-body"} and len(appearance) != 3)
+            or (appearance[0] in {"memory-reference-output", "memory-row-witness"} and len(appearance) != 4)
+            or (appearance[0] == "locator-metadata" and len(appearance) != 5)):
+        return appearance
+    retention = _MEMORY_RETENTIONS.get(id(ledger.source))
+    if retention is None or not retention.future_slots:
+        return appearance
+    slots = _native_memory_capacity_slots(ledger)
+    if not slots or type(appearance) is not tuple or not appearance:
+        return appearance
+    def address(table, key):
+        selected_key = (_composition_address(table, key)
+            if table == "work_board_events" and type(key) in {int, str} else key)
+        matched = [slot for slot in slots if slot.descriptor.table == table
+            and slot.bound_key is not None and slot.bound_key == selected_key]
+        if len(matched) > 1:
+            from src.memory.header_bounds import HeaderBoundsError
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+        return matched[0] if matched else key
+    if appearance[0] == "body" and len(appearance) == 3:
+        return (appearance[0], appearance[1], address(appearance[1], appearance[2]))
+    if appearance[0] == "memory-reference-output" and len(appearance) == 4:
+        return (*appearance[:3], address(appearance[2], appearance[3]))
+    if appearance[0] == "native-row-digest" and len(appearance) in {4, 5}:
+        return (appearance[0], appearance[1], address(appearance[1], appearance[2]), *appearance[3:])
+    if appearance[0] == "memory-row-witness" and len(appearance) == 4:
+        return (appearance[0], appearance[1], address(appearance[1], appearance[2]), appearance[3])
+    if appearance[0] == "native-closure-tail" and len(appearance) in {4, 5}:
+        return (*appearance[:3], address(appearance[2], appearance[3]), *appearance[4:])
+    if appearance[0] in {"complete-headers", "table-body"} and len(appearance) == 3:
+        return (appearance[0], appearance[1], tuple(address(appearance[1], key) for key in appearance[2]))
+    if appearance[0] == "locator-metadata" and len(appearance) == 5:
+        return (appearance[0], appearance[1], address(appearance[1], appearance[2]),
+            appearance[3], tuple(address(appearance[1], key) for key in appearance[4]))
+    # An arbitrary integer/string nested in a fee is never an address alias.
+    return appearance
+
+
+@dataclass(eq=False)
+class _NativeMemoryRetainedCurrentProof:
+    operation: object
+    guard: object
+    connection: object
+    task: object
+    before: dict
+    original: dict
+    current: dict
+    seal: object = _MEMORY_PUBLICATION_SEAL
+
+
+def _record_native_memory_retained_current(connection, row, original, current):
+    """Retain successful accounting evidence without restoring an old Source."""
+    import asyncio
+    import sys
+    from copy import deepcopy
+    from src.memory.composition_headers import _CURRENT
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS
+    collected = _MEMORY_RETENTION_PROOFS.get()
+    if collected is None:
+        return
+    operation, guard, task, proofs = collected
+    certificate = _CURRENT.get()
+    if (sys._getframe(1).f_code is not _checked_memory_reference_row.__code__
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or asyncio.current_task() is not task or operation.db is not guard.db
+            or guard.db.info.get("composition_guard") is not guard
+            or certificate is None or certificate.connection is not connection
+            or certificate.budget is not operation.source.admission.header_budget
+            or certificate.budget is not guard.header_budget
+            or operation._effect is not None or original is None
+            or current["payload"]["state"] != "validated"):
+        raise ProductionWorkspaceReconciliationError("memory_retained_current_owner_changed")
+    upper = certificate.rows[("workflow_run_states", row["run_identity"])][1]
+    for stage, amount in (("raw-copy", upper),
+            ("original-copy", _native_memory_closed_value_width(original)),
+            ("current-copy", _native_memory_closed_value_width(current))):
+        certificate.budget.debit(amount,
+            appearance=("memory-retained-current", stage, row["run_identity"]))
+    proofs.append(_NativeMemoryRetainedCurrentProof(operation, guard, connection, task,
+        dict(row), deepcopy(original), deepcopy(current)))
+
+
+async def _native_memory_retained_current_roster(db, run, operation, certificate):
+    """Pay the existing full accounting readset; do not add a foreign-body scan."""
+    import asyncio
+    from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+    from src.memory.header_bounds import _trace_memory_numeric_charges
+    source = await _validate_memory_owner_source(db, run, operation)
+    guard = db.info.get("composition_guard")
+    if (type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard.header_budget is not source.admission.header_budget
+            or certificate.budget is not guard.header_budget
+            or _MEMORY_RETENTION_PROOFS.get() is not None):
+        raise ProductionWorkspaceReconciliationError("memory_retained_current_owner_changed")
+    connection = await db.connection()
+    proofs = []
+    token = _MEMORY_RETENTION_PROOFS.set((operation, guard, asyncio.current_task(), proofs))
+    try:
+        with _trace_memory_numeric_charges(guard.header_budget) as trace:
+            baseline, members = await connection.run_sync(
+                lambda current: guard._programme_snapshot(current, certificate, guard.base))
+    finally:
+        _MEMORY_RETENTION_PROOFS.reset(token)
+    guard._native_memory_baseline_numeric = (operation, certificate, tuple(trace))
+    guard._native_memory_baseline_numeric_members = (operation, frozenset(members))
+    changed = {(instance.__tablename__, _composition_address(instance.__tablename__, key))
+        for instance, key, _changes in operation._prepared.original_update_rows()}
+    affected = tuple(proof for proof in proofs if any(
+        (ref["table"], ref["key"]) in changed for ref in proof.current["payload"]["refs"]))
+    guard._native_memory_retained_proofs = (operation, tuple(proofs), affected)
+    return affected
+
+
+async def _native_memory_source_capacity_facts(db, run, operation, prepared, certificate):
+    """Retain numeric dimensions of the paid Source roster and sealed binds.
+
+    The keys are capacity addresses, including private unbound integer slots.
+    This record is not a prospective certificate or a read permission.
+    """
+    import asyncio
+    from types import MappingProxyType
+    from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+    from src.memory.composition_headers import validate_composition_certificate
+    from src.memory.header_bounds import (
+        COMPOSITION_DESCRIPTORS, HeaderBoundsError, MAX_ROWS,
+        _native_memory_resolved_row_widths, _native_memory_integer_slot_row_widths,
+        _native_memory_utf8_width, _native_memory_ascii_string_width)
+    source = await _validate_memory_owner_source(db, run, operation)
+    guard = db.info.get("composition_guard")
+    selected = getattr(guard, "_native_memory_existing_source_rows", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    baseline = getattr(guard, "_native_memory_baseline_numeric", None)
+    members = getattr(guard, "_native_memory_baseline_numeric_members", None)
+    if (type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard.header_budget is not source.admission.header_budget
+            or certificate.budget is not guard.header_budget
+            or operation._prepared is not prepared or prepared.consumed
+            or operation._effect is not None
+            or selected is None or selected[0] is not operation
+            or projection is None or projection[0] is not operation
+            or baseline is None or baseline[0] is not operation or baseline[1] is not certificate
+            or members is None or members[0] is not operation):
+        raise HeaderBoundsError("memory_source_numeric_facts_changed")
+    await validate_composition_certificate(db, certificate)
+    selected_rows = selected[2]
+    new_rows, updates = projection[1:]
+    if len(selected_rows) + len(new_rows) > MAX_ROWS:
+        raise HeaderBoundsError("composition_row_bound")
+    # Pay these numeric maps and the temporary merged bind maps before copying.
+    # Actual row bodies were delivered by the original selected read above.
+    def numeric_row_width(descriptor, key):
+        address_upper = (3 + _native_memory_ascii_string_width(descriptor.table)
+            + (22 if type(key) is _NativeMemoryFutureIntegerSlot
+               else _native_memory_ascii_string_width(key)))
+        text_columns = sum(kind == "text" for kind in descriptor.kinds)
+        text_map_upper = (2 + max(0, text_columns - 1) + sum(
+            _native_memory_ascii_string_width(name) + 1 + 7
+            for name, kind in zip(descriptor.columns, descriptor.kinds) if kind == "text"))
+        # Three dimension-map keys and one selected-address entry. All width
+        # values are bounded by the unchanged seven-digit MAX_BYTES count.
+        return 4 * address_upper + 7 + 7 + text_map_upper + 4
+    numeric_maps_upper = (2 + sum(_native_memory_ascii_string_width(name) + 1
+        for name in ("row_uppers", "raw_tuple_uppers", "text_bytes",
+            "selected_addresses", "baseline_members", "baseline_trace"))
+        + sum(numeric_row_width(descriptor, key)
+        for descriptor, key, _row, _encoded in selected_rows)
+        + sum(numeric_row_width(descriptor, key) for descriptor, key, _row in new_rows))
+    guard.header_budget.debit(numeric_maps_upper,
+        appearance=("memory-source-capacity", "numeric-maps", run.run_identity))
+    headers, tuples, texts = {}, {}, {}
+    paid_addresses = frozenset((descriptor.table, key)
+        for descriptor, key, _row, _encoded in selected_rows)
+    if any((descriptor.table, key) not in paid_addresses for descriptor, key, _changes in updates):
+        raise HeaderBoundsError("memory_source_projection_row_unpaid")
+    for descriptor, key, row, _encoded in selected_rows:
+        changes = next((values for changed, address, values in updates
+            if changed is descriptor and address == key), None)
+        if changes is not None:
+            guard.header_budget.debit(certificate.rows[(descriptor.table,
+                int(key) if descriptor.table == "work_board_events" else key)][1],
+                appearance=("memory-source-capacity", "merged-bind-copy", descriptor.table, key))
+            row = dict(row, **changes)
+        upper, raw_upper = _native_memory_resolved_row_widths(descriptor, key, row)
+        address = (descriptor.table, key)
+        headers[address], tuples[address] = upper, raw_upper
+        texts[address] = MappingProxyType({name: _native_memory_utf8_width(row[name])
+            for name, kind in zip(descriptor.columns, descriptor.kinds)
+            if kind == "text" and row[name] is not None})
+    for descriptor, key, row in new_rows:
+        address = (descriptor.table, key)
+        if address in headers or descriptor is not COMPOSITION_DESCRIPTORS[descriptor.table]:
+            raise HeaderBoundsError("memory_source_projection_row_collision")
+        upper, raw_upper = (_native_memory_integer_slot_row_widths(key, row)
+            if type(key) is _NativeMemoryFutureIntegerSlot
+            else _native_memory_resolved_row_widths(descriptor, key, row))
+        headers[address], tuples[address] = upper, raw_upper
+        texts[address] = MappingProxyType({name: _native_memory_utf8_width(row[name])
+            for name, kind in zip(descriptor.columns, descriptor.kinds)
+            if kind == "text" and row[name] is not None})
+    facts = MappingProxyType({"row_uppers": MappingProxyType(headers),
+        "raw_tuple_uppers": MappingProxyType(tuples), "text_bytes": MappingProxyType(texts),
+        "selected_addresses": paid_addresses, "baseline_members": members[1],
+        "baseline_trace": baseline[2]})
+    guard._native_memory_source_capacity_facts = (operation, prepared, certificate, facts)
+    guard._native_memory_source_capacity_owner = (
+        operation, prepared, certificate, asyncio.current_task(),
+        db.sync_session.get_transaction(), operation.driver)
+    return facts
+
+
+def _native_memory_source_retention_widths(operation, prepared, before, certificate, facts):
+    """Closed Original/Current dimensions of a successful sealed owner plan.
+
+    Only numeric widths are constructed. In particular, an unbound event slot
+    never becomes a reference, receipt, row value or certificate here.
+    """
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import (
+        HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width,
+        _native_memory_utf8_width, _native_memory_object_width,
+        _native_memory_array_width, _native_memory_future_wrs_widths)
+    from src.runtime_plugins.contracts import MEMORY_STATUS
+    from src.runtime_plugins.memory_producer import _MemoryOwnerSourceOperation, _MEMORY_OPERATIONS
+    from src.memory.m5 import PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS
+    if (type(operation) is not _MemoryOwnerSourceOperation
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or type(prepared) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(prepared)) is not prepared):
+        raise HeaderBoundsError("memory_source_numeric_facts_changed")
+    guard = operation.db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_source_capacity_facts", None)
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    if (type(guard) is not CompositionSessionGuard or retained is None
+            or owner is None or owner[0] is not operation or owner[1] is not prepared
+            or owner[2] is not certificate or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.db.sync_session.get_transaction()
+            or owner[4] is not operation.transaction or owner[5] is not operation.driver
+            or not operation.driver.in_transaction
+            or retained[0] is not operation or retained[1] is not prepared
+            or retained[2] is not certificate or retained[3] is not facts
+            or prepared.consumed or operation._effect is not None
+            or operation._prepared is not prepared
+            or before["run_identity"] != operation.run.run_identity
+            or not any(descriptor.table == "workflow_run_states" and key == before["run_identity"]
+                and row == before for descriptor, key, row, _encoded
+                in guard._native_memory_existing_source_rows[2])):
+        raise HeaderBoundsError("memory_source_numeric_facts_changed")
+    if type(before["revision"]) is not int or not -(2**63) <= before["revision"] <= 2**63 - 3:
+        raise HeaderBoundsError("memory_source_completion_revision_unavailable")
+    width, obj, array = (_native_memory_ascii_string_width,
+        _native_memory_object_width, _native_memory_array_width)
+    method, result = prepared._method, prepared._result
+    if method == "memory.propose" and result.get("status") == "proposed":
+        proposal = result["proposal_id"]
+        record = None
+        value_upper = obj({"proposal_ref": width(proposal), "revision": 20, "state": width("proposed")})
+    elif (method == "memory.applyReviewed" and result.get("status") == "accepted"
+            and not result.get("idempotent_replay")):
+        proposal, record = result["proposal_id"], result["accepted_memory_id"]
+        value_upper = obj({"record_ref": width(record)})
+    elif method == "memory.forget":
+        proposal, record = None, result["memory"]["id"]
+        value_upper = obj({"record_ref": width(record)})
+    else:
+        raise HeaderBoundsError("memory_source_retention_outcome_unavailable")
+    audit = (prepared.audit_event.id if prepared.audit_event is not None
+        else result.get("audit_event_id"))
+    if type(audit) is not str or ("audit_events", audit) not in facts["row_uppers"]:
+        raise HeaderBoundsError("memory_source_retention_audit_unavailable")
+    addresses = tuple(facts["row_uppers"])
+    refs = tuple(obj({"table": width(table), "key": (
+        22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))})
+        for table, key in addresses)
+    refs_upper = array(refs)
+    rows_upper = array(tuple(obj({"ref": ref, "tuple_digest": 66, "encoded_bytes": 7}) for ref in refs))
+    event_widths = tuple(ref for (table, _key), ref in zip(addresses, refs)
+        if table in {"audit_events", "work_board_events"}
+        and any(descriptor.table == table and (key is _key or key == _key)
+            for descriptor, key, _row in guard._native_memory_source_projection[1]))
+    if len(event_widths) > 2:
+        raise HeaderBoundsError("memory_source_retention_events_unavailable")
+    events_upper = array(event_widths)
+    principal = operation.source.operator.principal.principal_id
+    session = operation.source.operator.session_id
+    original_fields = {"schema_version": 1, "profile": width(MEMORY_REFERENCE_PROFILE),
+        "invocation_ref": width(before["run_identity"]), "claim_ref": width(operation.source._scope.witness["claim_ref"]),
+        "candidate_digest": 66, "composition_binding_digest": 66, "method": width(method),
+        "owner_principal_id": width(principal), "operator_session_id": width(session),
+        "original_deadline": 34, "source_binding_digest": 66, "original_effect_digest": 66,
+        "original_audit": obj({"ref": obj({"table": width("audit_events"), "key": width(audit)}), "tuple_digest": 66}),
+        "refs": refs_upper, "rows_digest": 66, "encoded_bytes": 7}
+    current_fields = {"schema_version": 1, "profile": width(MEMORY_REFERENCE_PROFILE),
+        "original_checkpoint_digest": 66, "projection_revision": 20, "state": width("validated"),
+        "reason_code": 4, "refs": refs_upper, "absences": 2, "rows": rows_upper,
+        "rows_digest": 66, "encoded_bytes": 7, "owner_operation_kind": width(method),
+        "owner_events": events_upper, "selected_delta_digest": 66}
+    if original_fields.keys() != _MEMORY_ORIGINAL_FIELDS or current_fields.keys() != _MEMORY_CURRENT_FIELDS:
+        raise HeaderBoundsError("memory_source_retention_shape_changed")
+    original_upper, current_upper = obj(original_fields), obj(current_fields)
+    original_record = _native_memory_reference_record_upper(original_upper, current=False)
+    current_record = _native_memory_reference_record_upper(current_upper, current=True)
+    effect_upper = obj({"method": width(method), "candidate_digest": 66, "status": width("succeeded"),
+        "value_json": 6 * value_upper + 2, "audit_event_id": width(audit),
+        "proposal_id": 4 if proposal is None else width(proposal), "record_id": 4 if record is None else width(record)})
+    protocol_value = value_upper
+    if method != "memory.propose":
+        # Original returned value adds the fixed prefix and SHA locator.
+        protocol_value += width("receipt_ref") + 1 + width("native-memory-receipt:") + 64 + 1
+    result_upper = obj({"status": width("succeeded"), "value": protocol_value,
+        "memory_status": width(MEMORY_STATUS[method])})
+    locator_upper = obj({"profile": width(MEMORY_REFERENCE_PROFILE),
+        "invocation_ref": width(before["run_identity"]), "original_checkpoint_id": width(MEMORY_ORIGINAL_CHECKPOINT),
+        "original_checkpoint_digest": 66})
+    sealed_upper = obj({"invocation_ref": width(before["run_identity"]),
+        "claim_ref": width(operation.source._scope.witness["claim_ref"]), "candidate_digest": 66,
+        "result_digest": 66, "payload": result_upper, "effect": effect_upper, "retention": locator_upper})
+    future_context = _native_memory_utf8_width(before["checkpoint_context_json"]) + sealed_upper
+    future_journal = (_native_memory_utf8_width(before["checkpoint_receipts_json"])
+        + original_record + current_record + 2)
+    future_text_values = {"checkpoint_context_json": future_context,
+        "checkpoint_receipts_json": future_journal, "updated_at": 32}
+    own_upper, own_raw_upper = _native_memory_future_wrs_widths(before,
+        text_bytes=future_text_values, integer_fields=("revision",))
+    completion_text_values = dict(future_text_values,
+        status=len("succeeded"), result_digest=64,
+        result_summary=len("Native Memory owner result committed"), finished_at=32)
+    completion_upper, completion_raw_upper = _native_memory_future_wrs_widths(before,
+        text_bytes=completion_text_values,
+        null_fields=("lease_owner", "lease_expires_at", "failure_reason"),
+        integer_fields=("revision",))
+    # The identical reserved owner continues through original completion.
+    # Its additional fixed result/time columns must fit before the first effect.
+    own_upper = max(own_upper, completion_upper)
+    own_raw_upper = max(own_raw_upper, completion_raw_upper)
+    future_text = MappingProxyType(future_text_values)
+    if max(original_upper, current_upper, sealed_upper, future_context, future_journal) > MAX_BYTES:
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    own_address = ("workflow_run_states", before["run_identity"])
+    own_text = facts["text_bytes"][own_address]
+    audit_address = ("audit_events", audit)
+    selected_rows_upper = (sum(facts["row_uppers"].values())
+        - facts["row_uppers"][own_address] + own_upper)
+    return MappingProxyType({"effect_upper": effect_upper, "result_upper": result_upper,
+        "original_upper": original_upper, "original_record_upper": original_record,
+        "current_upper": current_upper, "current_record_upper": current_record,
+        "rows_upper": rows_upper, "row_count": len(addresses), "refs_upper": refs_upper,
+        "row_upper": own_upper, "own_upper": own_upper, "own_raw_upper": own_raw_upper,
+        "selected_rows_upper": selected_rows_upper,
+        "own_journal_upper": 6 * future_journal + 2, "context_upper": 6 * future_context + 2,
+        "journal_upper": 6 * future_journal + 2, "claimed": True,
+        "arguments_upper": 6 * own_text["arguments_json"] + 2,
+        "authority_upper": 6 * own_text["declared_authority_json"] + 2,
+        "source_upper": 6 * _native_memory_utf8_width(operation.source.admission.candidate_json) + 2,
+        "binding_text_bytes": own_text["composition_binding_json"],
+        "audit_upper": facts["row_uppers"][audit_address],
+        "details_upper": 6 * facts["text_bytes"][audit_address]["details_json"] + 2,
+        "future_text_bytes": future_text,
+        "completion_future_text_bytes": MappingProxyType(completion_text_values)})
+
+
+def _native_memory_source_affected_widths(operation, prepared, certificate, proofs):
+    """Numeric Unknown liabilities for exactly the paid affected proof cohort."""
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import (HeaderBoundsError, _native_memory_current_payload_upper,
+        _native_memory_future_wrs_widths, _native_memory_utf8_width,
+        _native_memory_ascii_string_width, _native_memory_object_width)
+    guard = operation.db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_retained_proofs", None)
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    if (type(guard) is not CompositionSessionGuard or retained is None
+            or retained[0] is not operation or retained[2] is not proofs
+            or owner is None or owner[0] is not operation or owner[1] is not prepared
+            or owner[2] is not certificate or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.db.sync_session.get_transaction()
+            or owner[5] is not operation.driver or not operation.driver.in_transaction
+            or prepared.consumed or operation._effect is not None):
+        raise HeaderBoundsError("memory_affected_numeric_facts_changed")
+    frame = certificate.budget
+    numeric = {}
+    footprint = {(descriptor.table, key) for descriptor, key, _changes in guard._native_memory_source_projection[2]}
+    for proof in proofs:
+        if (type(proof) is not _NativeMemoryRetainedCurrentProof or proof.operation is not operation
+                or proof.guard is not guard or proof.task is not asyncio.current_task()
+                or proof.seal is not _MEMORY_PUBLICATION_SEAL
+                or not any((ref["table"], ref["key"]) in footprint for ref in proof.current["payload"]["refs"])):
+            raise HeaderBoundsError("memory_affected_numeric_facts_changed")
+        row = proof.before
+        target = row["run_identity"]
+        if target in numeric or ("workflow_run_states", target) not in certificate.rows:
+            raise HeaderBoundsError("memory_affected_numeric_facts_changed")
+        if row["revision"] == 2**63 - 1 or proof.current["payload"]["projection_revision"] == 2**63 - 1:
+            raise HeaderBoundsError("memory_affected_numeric_revision_unavailable")
+        refs_upper = _native_memory_closed_value_width(proof.current["payload"]["refs"])
+        frame.debit(refs_upper, appearance=("memory-source-capacity", "affected-reference-tuples", target))
+        refs = tuple((ref["table"], ref["key"]) for ref in proof.current["payload"]["refs"])
+        payload, record = _native_memory_current_payload_upper(refs, (), method=prepared._method,
+            unknown_reason="current_source_unavailable")
+        journal_bytes = _native_memory_utf8_width(row["checkpoint_receipts_json"]) + record + 1
+        future_text = {"checkpoint_receipts_json": journal_bytes, "updated_at": 32}
+        header, raw = _native_memory_future_wrs_widths(row, text_bytes=future_text, integer_fields=("revision",))
+        frame.debit(2 + sum(_native_memory_ascii_string_width(name) + 1 + 7 + 1
+            for name in ("row_upper", "raw_tuple_upper", "journal_upper", "context_upper",
+                "arguments_upper", "authority_upper", "binding_text_bytes", "original_upper",
+                "current_upper", "current_record_upper", "refs_upper"))
+            + _native_memory_ascii_string_width(target) + 1,
+            appearance=("memory-source-capacity", "affected-numeric-map", target))
+        fields = {"row_upper": header, "raw_tuple_upper": raw,
+            "journal_upper": 6 * journal_bytes + 2,
+            "context_upper": 6 * _native_memory_utf8_width(row["checkpoint_context_json"]) + 2,
+            "arguments_upper": 6 * _native_memory_utf8_width(row["arguments_json"]) + 2,
+            "authority_upper": 6 * _native_memory_utf8_width(row["declared_authority_json"]) + 2,
+            "binding_text_bytes": _native_memory_utf8_width(row["composition_binding_json"]),
+            "original_upper": _native_memory_closed_value_width(proof.original),
+            "current_upper": payload, "current_record_upper": record, "refs_upper": refs_upper}
+        numeric[target] = MappingProxyType(dict(fields, future_text_bytes=MappingProxyType(future_text)))
+    result = MappingProxyType(numeric)
+    guard._native_memory_affected_numeric_facts = (operation, prepared, certificate, proofs, result)
+    return result
+
+
+def _native_memory_minimal_call_vector(operation, prepared, *, certificate, facts,
+        retention_widths):
+    """Literal owner-call roster for the sealed successful propose path.
+
+    Common acquisition, body traversal and cold readback are distinct calls.
+    The first-write programme check is conservatively retained in effect,
+    where the sealed M5 plan first writes. Once that check has run, capture
+    reuses the same writer; completion starts its own original writer.
+    An affected retained root requires its own whole Unknown path, not this
+    one-root roster.
+    """
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    proofs = getattr(operation.db.info["composition_guard"], "_native_memory_retained_proofs", None)
+    if (prepared._method != "memory.propose" or prepared._result.get("status") != "proposed"
+            or type(proofs) is not tuple or len(proofs) != 3
+            or proofs[0] is not operation or proofs[2]):
+        raise HeaderBoundsError("memory_complete_numeric_graph_unavailable")
+    # Effect's Source validators: phase entry + perform entry + perform final.
+    # Capture's: phase entry + capture entry + Source publication consumer.
+    # Completion's: validateRetention + prepareLifecycle + publication consumer.
+    # Source snapshots include their own universe/cache path. Engine/reader/
+    # first-write common certificates do not execute that universe helper.
+    return (
+        ("effect", "dispatch-validator", 3),
+        ("effect", "dispatch-authority", 2),
+        ("effect", "original-memory-owner", 1),
+        ("effect", "prepared-apply", 1),
+        ("effect", "prepared-outer-validation", 1),
+        ("effect", "prepared-consumed-validation", 1),
+        ("effect", "prepared-audit", 1),
+        ("effect", "first-write-common", 1),
+        ("effect", "generic-body", 1),
+        ("capture", "dispatch-validator", 3),
+        ("capture", "dispatch-authority", 1),
+        ("capture", "source-snapshot", 2),
+        ("capture", "engine-common", 1),
+        ("capture", "generic-body", 1),
+        ("capture", "cold-readback", 1),
+        ("capture", "all-source-rows", 1),
+        ("capture", "row-witnesses", 1),
+        ("capture", "engine-publication", 1),
+        ("completion", "dispatch-validator", 3),
+        ("completion", "source-snapshot", 3),
+        ("completion", "reader-common", 1),
+        ("completion", "writer-superset", 1),
+        ("completion", "first-write-common", 1),
+        ("completion", "engine-common", 1),
+        ("completion", "generic-body", 3),
+        ("completion", "cold-readback", 2),
+        ("completion", "own-source-rows", 1),
+        ("completion", "all-source-rows", 1),
+        ("completion", "row-witnesses", 1),
+        ("completion", "engine-publication", 1),
+        ("completion", "writer-snapshot-fields", 1),
+        ("completion", "claim-verifier", 1),
+        ("completion", "goal-fence", 1))
+
+
+def _native_memory_capture_planning_upper(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """Storage for ONE capture forecast constructor, before it is called.
+
+    This prices numeric maps/lists and the source-labelled pair vector, not
+    future payloads. Original Source candidate/context and binding builders
+    have their own closed scalar planning companions.
+    """
+    from src.runtime_plugins import memory_producer
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width as width
+    memory_producer._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info["composition_guard"]
+    projection = guard._native_memory_source_projection
+    source_upper_owner = getattr(memory_producer,
+        "_original_native_memory_source_schedule_planning_upper", None)
+    if source_upper_owner is None:
+        raise HeaderBoundsError("memory_capture_source_planning_contribution_unavailable")
+    source_upper = source_upper_owner(result_present=False)
+    # Same60-entry original binding grammar as the Source planning owner,
+    # with this real run identity rather than that owner's None label slot.
+    run_width = width(operation.run.run_identity)
+    nested = 3 + len("constructor-dependencies") + 2 + len("domain-values") + 2
+    name = max(nested, len("required-plus-goals-inference-set") + 2)
+    binding_label = 5 + len("composition-binding-parser") + 2 + run_width + name
+    binding_pair = 3 + binding_label + 20
+    input_pair = 3 + name + 20
+    binding_upper = (60 * (binding_label + binding_pair) + 35 * nested
+        + 2 + 2 * (2 + 60 * binding_pair + 59)
+        + 23 * input_pair + (2 + 23 * input_pair + 22)
+        + 2 * (7 * input_pair + (2 + 7 * input_pair + 6))
+        + 6 * input_pair + (2 + 6 * input_pair + 5)
+        + (2 + 14 * 20 + 13) + (2 + 34 * 20 + 33) + (2 + 6 * 20 + 5))
+    cold_label = (2 + 5 + width("native-memory-cold") + width("binding-digest")
+        + run_width + width("capture") + 20 + name)
+    cold_pair = 3 + cold_label + 20
+    payload_names = (len("payload-methods-list") + len("payload-dependencies-list")
+        + len("binding-payload") + len("binding-canonical") + len("binding-encoded")
+        + len("binding-digest") + len("dependency-payloads"))
+    binding_upper += (2 + payload_names + 7 * 2 + 6
+        + 21 * (cold_label + cold_pair) + 2 + 2 * (2 + 21 * cold_pair + 20))
+    row_count, new_count, update_count = len(facts["row_uppers"]), len(projection[1]), len(projection[2])
+    real_count = event_count = event_tuple_width = 0
+    max_fields = 0
+    field_width = 0
+    for descriptor, _key, row in projection[1]:
+        max_fields = max(max_fields, len(descriptor.columns))
+        if descriptor.table in ("audit_events", "work_board_events"):
+            event_count += 1
+            event_tuple_width += 3 + width(descriptor.table) + (
+                22 if type(_key) is _NativeMemoryFutureIntegerSlot else width(_key))
+        for name, kind in zip(descriptor.columns, descriptor.kinds):
+            field_width = max(field_width, width(name))
+            if kind == "real" and row[name] is not None:
+                real_count += 1
+    for descriptor, _key, _changes in projection[2]:
+        max_fields = max(max_fields, len(descriptor.columns))
+        for name in descriptor.columns:
+            field_width = max(field_width, width(name))
+    from src.memory.header_bounds import WRS_BY_RUN
+    max_fields = max(max_fields, len(WRS_BY_RUN.columns))
+    for name in WRS_BY_RUN.columns:
+        field_width = max(field_width, width(name))
+    field_width = max(field_width, width("original_checkpoint_digest"),
+        width("original_checkpoint_id"))
+    # 100 literal capture appearances; seven/new row, four/update and one
+    # non-null real conversion. All literal stage names fit64 ASCII chars.
+    # The ordinal and each numeric capacity use the original int64 width20.
+    delta_count = 7 * new_count + 4 * update_count + real_count
+    ordinary_label = 2 + 2 + width("native-memory-capture") + run_width + 66
+    delta_label = ordinary_label + 2 + 3 + 20 + field_width + 66
+    # The21 retained binding-digest labels embed the original six-field cold
+    # label, including its own run identity and nested manifest stage.
+    binding_label = ordinary_label + 2 + 1 + width("binding-digest") + (
+        2 + 5 + width("native-memory-cold") + width("binding-digest")
+        + run_width + width("capture") + 20 + 2 + 2 + 66 + 20 + 66)
+    labels = 100 * ordinary_label + delta_count * delta_label + 21 * binding_label
+    pairs = 121 * (3 + 20) + delta_count * (3 + 20) + labels
+    count = 121 + delta_count
+    # Each add materializes its label/pair and list slot; final tuple copies
+    # every pair. Delta staging additionally retains a pair/list before add.
+    vector = labels + 3 * pairs + 2 + max(0, count - 1)
+    vector += delta_count * (delta_label + 3 + 20) * 2
+    # Literal (stage,upper) source rosters and their enclosing tuples.
+    vector += 2 * 100 * (3 + 66 + 20)
+    # fields_upper creates one numeric tuple per10 fixed calls, one/new row
+    # and two/update. Every entry is a numeric width, not the body text.
+    vector += (10 + new_count + 2 * update_count) * (2 + max_fields * 21)
+    # Reference numeric maps: each event/new/update and the pending own ref.
+    vector += (event_count + new_count + update_count + 2) * (2 + 1 + 2 * (7 + 20))
+    # Locator4, receipt3, sealed7, pending4 and delta3 numeric field maps.
+    vector += (4 + 3 + 7 + 4 + 3) * (field_width + 1 + 20) + 5 * 3
+    vector += 3 * (2 + row_count * 21) + 3 * (2 + new_count * 21)
+    vector += 3 * (2 + (update_count + 1) * 21) + 2 * (2 + event_count * 21)
+    vector += 2 + max(0, event_count - 1) + event_tuple_width
+    # Source providers return117 pairs. Capture extends its own list with
+    # them and copies them again into its return tuple; their constructors
+    # belong to source_upper, these two caller containers do not.
+    source_pair = 3 + 20 + 2 + 2 + width("native-memory-source") + 66 + (2 + 2 + 66 + 20 + 66)
+    vector += 2 * 117 * (source_pair + 1)
+    return vector + source_upper + binding_upper
+
+
+async def _native_memory_effect_numeric_schedule(db, run, operation, prepared, *,
+        existing_references, before_row, certificate):
+    """Compose only the original Source's closed, paid numeric contributions.
+
+    An unresolved owner contribution is a denial before ledger issuance. The
+    retained progress tuple describes already closed contributions; it is not
+    a partial reservation, certificate, reference roster or read permission.
+    """
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins import memory_producer
+    guard = db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_source_capacity_facts", None)
+    dimensions = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if (type(retained) is not tuple or len(retained) != 4
+            or type(dimensions) is not tuple or len(dimensions) != 4
+            or retained[0] is not operation or retained[1] is not prepared
+            or retained[2] is not certificate or dimensions[0] is not operation
+            or dimensions[1] is not prepared or dimensions[2] is not certificate):
+        raise HeaderBoundsError("memory_numeric_forecast_owner_changed")
+    facts, widths = retained[3], dimensions[3]
+    checked_guard, _rows, _own, _audit, _new, _candidate = (
+        _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, widths))
+    selected_before = None
+    for descriptor, key, row, _encoded in guard._native_memory_existing_source_rows[2]:
+        if descriptor.table == "workflow_run_states" and key == run.run_identity:
+            selected_before = row
+    if (checked_guard is not guard or guard.db is not db or operation.run is not run
+            or selected_before != before_row
+            or existing_references != guard._native_memory_existing_source_rows[1]):
+        raise HeaderBoundsError("memory_numeric_forecast_owner_changed")
+    call_vector = _native_memory_minimal_call_vector(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    # The roster is a literal source constant, not a constructed projection.
+    # Retain only its original-owner lineage after paying the pointer tuple.
+    guard.header_budget.debit(2 + 4 + 5 * 20,
+        appearance=("native-memory-composer", "call-vector-lineage"))
+    guard._native_memory_effect_numeric_call_vector = (
+        operation, prepared, certificate, widths, call_vector)
+    publication = getattr(guard, "_native_memory_publication_allocation_numeric", None)
+    journals = getattr(guard, "_native_memory_private_journal_numeric", None)
+    if (type(publication) is not tuple or len(publication) != 6
+            or publication[0] is not operation or publication[1] is not prepared
+            or publication[2] is not certificate or publication[3] is not widths
+            or type(publication[5]) is not tuple
+            or type(journals) is not tuple or len(journals) != 7
+            or journals[0] is not operation or journals[1] is not prepared
+            or journals[2] is not certificate or journals[3] is not widths):
+        raise HeaderBoundsError("memory_numeric_publication_contribution_unavailable")
+    capture_upper = completion_upper = appearances = 0
+    for phase, _appearance, upper in publication[5]:
+        if type(upper) is not int or upper < 0:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        if phase == "capture":
+            capture_upper += upper
+        elif phase == "completion":
+            completion_upper += upper
+        else:
+            raise HeaderBoundsError("memory_numeric_publication_contribution_unavailable")
+        appearances += 1
+    for _appearance, upper in journals[4]:
+        capture_upper += upper
+        appearances += 1
+    for _appearance, upper in journals[5]:
+        completion_upper += upper
+        appearances += 1
+    for _proof, entries in journals[6]:
+        for _appearance, upper in entries:
+            capture_upper += upper
+            appearances += 1
+    # Six fixed scalar/pointer slots are paid before this progress record is
+    # materialized. No future appearance is enrolled by this diagnostic record.
+    guard.header_budget.debit(2 + 5 + 6 * 20,
+        appearance=("native-memory-composer", "closed-contribution-progress"))
+    guard._native_memory_effect_numeric_progress = (
+        operation, prepared, certificate, appearances, capture_upper, completion_upper)
+    dispatch_planning_owner = getattr(memory_producer,
+        "_original_native_memory_dispatch_planning_upper", None)
+    if dispatch_planning_owner is None:
+        raise HeaderBoundsError("memory_dispatch_planning_contribution_unavailable")
+    dispatch_planning = dispatch_planning_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(dispatch_planning,
+        appearance=("native-memory-composer", "dispatch-constructor"))
+    dispatch_allocations = memory_producer.original_native_memory_dispatch_validation_numeric_schedule(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=widths, result_present=True)
+    if type(dispatch_allocations) is not tuple or len(dispatch_allocations) != 185:
+        raise HeaderBoundsError("memory_dispatch_numeric_source_shape_changed")
+    from src.memory.composition_headers import _common_trace_label_width
+    dispatch_vector_width = 2 + max(0, len(dispatch_allocations) - 1)
+    for _phase, label, _amount in dispatch_allocations:
+        dispatch_vector_width += 4 + len("effect") + 2 + _common_trace_label_width(label) + 20
+    guard.header_budget.debit(2 + 5 + 5 * 20 + dispatch_vector_width,
+        appearance=("native-memory-composer", "dispatch-lineage"))
+    guard._native_memory_dispatch_allocation_numeric = (
+        operation, prepared, certificate, facts, widths, dispatch_allocations)
+    dispatch_reads = await memory_producer.original_native_memory_dispatch_validation_read_numeric_schedule(
+        operation, prepared, certificate=certificate, facts=facts, retention_widths=widths)
+    # Issue the capture vector exactly once on this original pre-effect
+    # writer. The later capture consumes these same objects, not a second
+    # helper allocation after M5 has changed the database.
+    capture_planning = _native_memory_capture_planning_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(capture_planning,
+        appearance=("native-memory-composer", "capture-constructor"))
+    capture_allocations = _native_memory_capture_allocation_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=widths)
+    capture_vector_width = 2 + max(0, len(capture_allocations) - 1)
+    capture_map_upper, capture_map_count = 2, 0
+    for label, _amount in capture_allocations:
+        capture_vector_width += 3 + _common_trace_label_width(label) + 20
+        if (type(label) is tuple and len(label) >= 3
+                and label[0] == "native-memory-capture" and label[1] == run.run_identity):
+            capture_map_count += 1
+            capture_map_upper += _common_trace_label_width(label[2]) + 1 + 20
+    capture_map_upper += max(0, capture_map_count - 1)
+    guard.header_budget.debit(2 + 4 + 4 * 20 + capture_vector_width,
+        appearance=("native-memory-composer", "capture-lineage"))
+    guard._native_memory_capture_allocation_numeric = (
+        operation, prepared, certificate, widths, capture_allocations)
+    guard.header_budget.debit(2 + 5 + 6 * 20,
+        appearance=("native-memory-composer", "capture-stage-map-lineage"))
+    guard._native_memory_capture_stage_map_numeric = (
+        operation, prepared, certificate, widths, capture_map_upper,
+        capture_map_count)
+    authority_owner = getattr(memory_producer,
+        "original_native_memory_source_authority_numeric_schedule", None)
+    if authority_owner is None:
+        raise HeaderBoundsError("memory_source_authority_numeric_contribution_unavailable")
+    # These unresolved multiplicities must be closed before combining vectors:
+    # full common/body snapshots, dispatch reads, capture/current builders,
+    # accounting bodies, and completion's original reader/writer lifecycle.
+    # Existing isolated helpers are not a license to omit those owner calls.
+    raise HeaderBoundsError("memory_complete_numeric_call_inventory_unavailable")
 
 
 async def begin_native_memory_effect(db, run, claim_ref, admission, *, source_operation, prepared):
@@ -854,14 +3714,26 @@ async def begin_native_memory_effect(db, run, claim_ref, admission, *, source_op
     from src.runtime_plugins.memory_producer import (
         _validate_memory_owner_source, prospective_memory_existing_references)
     from src.memory.m5 import validate_native_memory_mutation_plan
-    from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, _reserve_native_memory_effect_ledger
+    from src.memory.header_bounds import (
+        COMPOSITION_DESCRIPTORS, _reserve_native_memory_effect_ledger, _trace_memory_numeric_charges)
     source = await _validate_memory_owner_source(db, run, source_operation)
     if (source.admission is not admission or source_operation._prepared is not prepared
             or claim_ref != source._scope.witness["claim_ref"]
             or _MEMORY_RETENTIONS.get(id(source)) is not None):
         raise ProductionWorkspaceReconciliationError("memory_retention_original_source_changed")
     await validate_native_memory_mutation_plan(prepared, db=db, candidate_digest=admission.candidate_digest)
-    certificate = await _native_memory_source_snapshot(db, admission.header_budget)
+    from src.memory.composition_headers import native_memory_certification_numeric_trace
+    with _trace_memory_numeric_charges(admission.header_budget) as common_trace:
+        certificate = await _native_memory_source_snapshot(db, admission.header_budget)
+        issuer_trace = await (await db.connection()).run_sync(lambda connection:
+            native_memory_certification_numeric_trace(certificate, header_budget=admission.header_budget))
+    db.info["composition_guard"]._native_memory_source_common_numeric = (
+        source_operation, certificate, issuer_trace)
+    from src.memory.composition_headers import _metadata_size
+    admission.header_budget.debit(_metadata_size(common_trace),
+        appearance=("memory-source-capacity", "snapshot-trace-copy"))
+    db.info["composition_guard"]._native_memory_source_snapshot_numeric = (
+        source_operation, certificate, tuple(common_trace))
     rows = await _native_memory_source_rows(db, certificate, (("workflow_run_states", run.run_identity),))
     before = rows[0][2]
     if preflight_native_memory_reference_journal(before["checkpoint_receipts_json"]) != (None, None):
@@ -869,26 +3741,106 @@ async def begin_native_memory_effect(db, run, claim_ref, admission, *, source_op
     existing = await prospective_memory_existing_references(db, run, source_operation)
     references = tuple(sorted({("workflow_run_states", run.run_identity),
         *((item.table, item.row_ref) for item in existing)}))
+    selected_rows = await _native_memory_source_rows(db, certificate, references)
+    db.info["composition_guard"]._native_memory_existing_source_rows = (
+        source_operation, references, selected_rows)
     new_rows = []
+    future_slots = []
     for instance in prepared.original_rows():
         descriptor = COMPOSITION_DESCRIPTORS[instance.__tablename__]
-        row = _native_memory_transient_sql_row(instance)
+        slot = None
+        if descriptor.table == "work_board_events" and instance.event_id is None:
+            import asyncio
+            slot = _NativeMemoryFutureIntegerSlot(source_operation, prepared, instance, descriptor,
+                db, source_operation.transaction, source_operation.driver, asyncio.current_task(),
+                admission.header_budget, len(future_slots))
+            row = _native_memory_planned_sql_row(instance, transient=True, _capacity_slot=slot)
+            from types import MappingProxyType
+            slot.expected_columns = MappingProxyType({name: value for name, value in row.items()
+                if name != descriptor.key})
+            slot.prior_keys = frozenset(_composition_address(table, key) for table, key in certificate.rows
+                if table == descriptor.table)
+            future_slots.append(slot)
+        else:
+            row = _native_memory_transient_sql_row(instance)
         key = row[descriptor.key]
+        if descriptor.table == "work_board_events" and type(key) is int:
+            key = _composition_address(descriptor.table, key)
         # An unresolved database-generated address is not a reference grant.
-        if type(key) is not str:
+        if slot is not None:
+            key = slot
+        elif type(key) is not str:
             raise ProductionWorkspaceReconciliationError("memory_retention_future_address_unavailable")
         new_rows.append((descriptor, key, row))
     updates = []
     for instance, key, changes in prepared.original_update_rows():
         descriptor = COMPOSITION_DESCRIPTORS[instance.__tablename__]
+        key = _composition_address(descriptor.table, key)
         row = _native_memory_planned_sql_row(instance, changes)
         updates.append((descriptor, key, {name: row[name] for name in changes}))
+    affected = await _native_memory_retained_current_roster(db, run, source_operation, certificate)
+    db.info["composition_guard"]._native_memory_integer_slots = (source_operation, tuple(future_slots))
+    db.info["composition_guard"]._native_memory_source_projection = (
+        source_operation, tuple(new_rows), tuple(updates))
+    numeric_facts = await _native_memory_source_capacity_facts(db, run, source_operation, prepared, certificate)
+    db.info["composition_guard"]._native_memory_retention_numeric_facts = (
+        source_operation, prepared, certificate,
+        _native_memory_source_retention_widths(source_operation, prepared, before, certificate, numeric_facts))
+    _native_memory_source_affected_widths(source_operation, prepared, certificate, affected)
+    # Derive private publication dimensions from the original paid writer
+    # before issuing a complete reservation. In particular, retain the real
+    # old checkpoint/receipt reads; a smaller future output cannot price them.
+    guard = db.info["composition_guard"]
+    retained_widths = guard._native_memory_retention_numeric_facts[3]
+    # Close the supported private-journal branch on the original already-paid
+    # Source row BEFORE reserving or arming the first M5 effect. The later CAS
+    # rechecks remain separate original paid appearances in these vectors.
+    capture_journal = _native_memory_private_journal_numeric_entries(source_operation,
+        prepared, certificate=certificate, retention_widths=retained_widths, kind="capture")
+    completion_journal = _native_memory_private_journal_numeric_entries(source_operation,
+        prepared, certificate=certificate, retention_widths=retained_widths, kind="completion")
+    affected_widths = guard._native_memory_affected_numeric_facts[4]
+    guard.header_budget.debit(2,
+        appearance=("memory-private-journal-planning", "affected-vector-list"))
+    affected_journals = []
+    for proof in affected:
+        numeric = _native_memory_private_journal_numeric_entries(source_operation, prepared,
+            certificate=certificate, retention_widths=affected_widths[proof.before["run_identity"]],
+            kind="affected-unknown", affected_proof=proof)
+        guard.header_budget.debit(3 + 8 + _metadata_size(numeric),
+            appearance=("memory-private-journal-planning", "affected-vector-slot"))
+        affected_journals.append((proof, numeric))
+    guard.header_budget.debit(2 + max(0, len(affected_journals) - 1)
+        + sum(3 + 4 + _metadata_size(entries) for _proof, entries in affected_journals),
+        appearance=("memory-private-journal-planning", "affected-vector-tuple"))
+    guard.header_budget.debit(2 + 5 + 4 * 4 + _metadata_size(capture_journal)
+        + _metadata_size(completion_journal)
+        + 2 + sum(3 + 4 + _metadata_size(entries) for _proof, entries in affected_journals)
+        + max(0, len(affected_journals) - 1),
+        appearance=("memory-private-journal-planning", "owner-lineage"))
+    guard._native_memory_private_journal_numeric = (source_operation, prepared,
+        certificate, retained_widths, capture_journal, completion_journal, tuple(affected_journals))
+    await guard._native_memory_publication_numeric_widths(source_operation, prepared,
+        certificate=certificate, facts=numeric_facts, retention_widths=retained_widths)
     ledger = await _reserve_native_memory_effect_ledger(db, run, source_operation, prepared,
         existing_references=references, before_row=before, certificate=certificate)
     retention = _NativeMemoryRetention(source, source_operation, prepared, ledger, before,
-        tuple(new_rows), tuple(updates), references)
+        tuple(new_rows), tuple(updates), references, affected, tuple(future_slots))
+    retention._publication_numeric_facts = db.info["composition_guard"]._native_memory_retention_numeric_facts
+    # Numeric lineage survives the original reader's lifetime. It is never a
+    # certificate, retained guard or permission to reopen another owner's body.
+    retention._affected_publication_numeric_facts = db.info["composition_guard"]._native_memory_affected_numeric_facts
+    retention._engine_publication_numeric_facts = getattr(db.info["composition_guard"],
+        "_native_memory_publication_numeric_facts", None)
+    retention._prior_publication_numeric = getattr(db.info["composition_guard"],
+        "_native_memory_prior_publication_numeric", None)
+    retention._accounting_numeric = getattr(db.info["composition_guard"],
+        "_native_memory_accounting_numeric", None)
+    retention._accounting_certification_numeric = getattr(db.info["composition_guard"],
+        "_native_memory_accounting_certification_numeric", None)
     object.__setattr__(source, "_retention", retention)
     _MEMORY_RETENTIONS[id(source)] = retention
+    db.info["composition_guard"]._native_memory_source_retention = retention
     return retention
 
 
@@ -918,12 +3870,28 @@ async def _prepare_native_memory_source_publication(db, run, retention, before, 
     issuer = sys._getframe(1).f_code
     if ((kind == "capture" and issuer is not capture_native_memory_retention.__code__)
             or (kind == "completion" and issuer is not prepare_native_memory_lifecycle.__code__)
-            or kind not in {"capture", "completion"}):
+            or (kind == "affected-unknown" and issuer is not _native_memory_invalidate_affected_current.__code__)
+            or kind not in {"capture", "completion", "affected-unknown"}):
         raise ProductionWorkspaceReconciliationError("memory_publication_original_owner_required")
+    facts = retention._publication_numeric_facts
+    widths = facts[3]
+    if kind == "affected-unknown":
+        affected = getattr(retention, "_affected_publication_numeric_facts", None)
+        if type(affected) is not tuple or len(affected) != 5:
+            raise ProductionWorkspaceReconciliationError("memory_publication_numeric_shape_unavailable")
+        widths = affected[4].get(before['run_identity'])
+    for copy in ('list', 'tuple'):
+        retention.source.admission.header_budget.debit(_native_memory_source_publication_vector_upper(kind),
+            appearance=('memory-source-sql', kind, 'numeric-plan-' + copy))
+    numeric = _native_memory_source_publication_numeric_entries(retention.operation, retention.prepared,
+        certificate=facts[2], retention_widths=widths, kind=kind)
+    for appearance, upper in numeric:
+        if appearance[-1] in {"pending-copy", "planned-row", "conditions", "statement"}:
+            retention.source.admission.header_budget.debit(upper, appearance=appearance)
     pending = dict(pending_changes, checkpoint_receipts_json=after["checkpoint_receipts_json"])
-    if _native_memory_planned_sql_row(run, pending) != after:
+    if kind != "affected-unknown" and _native_memory_planned_sql_row(run, pending) != after:
         raise ProductionWorkspaceReconciliationError("memory_publication_bind_changed")
-    statement = update(WorkflowRunState).where(
+    conditions = (
         WorkflowRunState.run_identity == before["run_identity"],
         WorkflowRunState.status == before["status"], WorkflowRunState.revision == before["revision"],
         WorkflowRunState.attempt_count == before["attempt_count"],
@@ -931,12 +3899,16 @@ async def _prepare_native_memory_source_publication(db, run, retention, before, 
         WorkflowRunState.fencing_token == before["fencing_token"],
         WorkflowRunState.checkpoint_receipts_json == before["checkpoint_receipts_json"],
         WorkflowRunState.checkpoint_context_json == before["checkpoint_context_json"],
-        WorkflowRunState.deadline_at > datetime.now(timezone.utc),
-        WorkflowRunState.lease_expires_at > datetime.now(timezone.utc),
-    ).execution_options(synchronize_session=False).values(**pending)
+    )
+    if kind != "affected-unknown":
+        conditions += (WorkflowRunState.deadline_at > datetime.now(timezone.utc),
+            WorkflowRunState.lease_expires_at > datetime.now(timezone.utc))
+    statement = update(WorkflowRunState).where(*conditions).execution_options(
+        synchronize_session=False).values(**pending)
     transaction, driver, changes = await _connection_state(db)
     plan = _NativeMemorySourcePublication(retention, db, run, statement, before, after, certificate,
-        transaction, driver, changes, asyncio.current_task(), _native_memory_statement_signature(statement), kind)
+        transaction, driver, changes, asyncio.current_task(), _native_memory_statement_signature(statement, native_memory_retention=retention, kind=kind, publication_widths=widths), kind)
+    plan._numeric_widths = widths
     _MEMORY_PUBLICATIONS[id(plan)] = plan
     return plan
 
@@ -951,7 +3923,7 @@ def _consume_native_memory_source_publication(db, statement, run_id, before, aft
             or before != plan.before["checkpoint_receipts_json"] or after != plan.after["checkpoint_receipts_json"]
             or db.sync_session.get_transaction() is not plan.transaction
             or current_budget() is not retention.source.admission.header_budget
-            or _native_memory_statement_signature(statement) != plan.signature):
+            or _native_memory_statement_signature(statement, native_memory_retention=retention, kind=plan.kind, publication_widths=plan._numeric_widths) != plan.signature):
         raise ProductionWorkspaceReconciliationError("memory_publication_source_changed")
     connection = db.sync_session.connection()
     _validate(connection, plan.certificate)
@@ -975,11 +3947,38 @@ def _consume_native_memory_source_publication(db, statement, run_id, before, aft
                 or current.get(MEMORY_ORIGINAL_CHECKPOINT) != retention.original):
             raise ProductionWorkspaceReconciliationError("memory_publication_original_changed")
         permission = (current[MEMORY_CURRENT_CHECKPOINT],)
+    elif plan.kind == "affected-unknown":
+        proof = plan.affected_proof
+        footprint = {(descriptor.table, key) for descriptor, key, _changes in retention.updates}
+        replacement = current.get(MEMORY_CURRENT_CHECKPOINT)
+        if (type(proof) is not _NativeMemoryRetainedCurrentProof
+                or not any(value is proof for value in retention.affected)
+                or proof.operation is not retention.operation or proof.task is not plan.task
+                or proof.seal is not _MEMORY_PUBLICATION_SEAL
+                or proof.connection is not connection
+                or proof.guard is not db.info.get("composition_guard")
+                or proof.before != plan.before
+                or retention.operation._effect is None or not retention.prepared.consumed
+                or not any((ref["table"], ref["key"]) in footprint
+                    for ref in proof.current["payload"]["refs"])
+                or previous.get(MEMORY_ORIGINAL_CHECKPOINT) != proof.original
+                or current.get(MEMORY_ORIGINAL_CHECKPOINT) != proof.original
+                or previous.get(MEMORY_CURRENT_CHECKPOINT) != proof.current
+                or replacement is None or replacement["payload"]["state"] != "unknown"
+                or replacement["payload"]["reason_code"] != "current_source_unavailable"
+                or replacement["payload"]["refs"] != proof.current["payload"]["refs"]
+                or replacement["payload"]["projection_revision"] != proof.current["payload"]["projection_revision"] + 1
+                or plan.after["revision"] != plan.before["revision"] + 1
+                or any(plan.after[name] != value for name, value in plan.before.items()
+                    if name not in {"checkpoint_receipts_json", "revision", "updated_at"})):
+            raise ProductionWorkspaceReconciliationError("memory_affected_current_owner_changed")
+        permission = (replacement,)
     else:
         raise ProductionWorkspaceReconciliationError("memory_publication_kind_invalid")
     expected = preflight_native_memory_reference_journal(plan.after["checkpoint_receipts_json"])
     if (expected != (current.get(MEMORY_ORIGINAL_CHECKPOINT), current.get(MEMORY_CURRENT_CHECKPOINT))
-            or expected[1]["payload"]["state"] != "validated"):
+            or expected[1]["payload"]["state"] != (
+                "unknown" if plan.kind == "affected-unknown" else "validated")):
         raise ProductionWorkspaceReconciliationError("memory_publication_current_changed")
     plan.consumed = True
     return permission
@@ -1142,10 +4141,39 @@ async def apply_native_memory_unknown(db, run, plan):
         _MEMORY_PUBLICATIONS.pop(id(plan), None)
 
 
-def _native_memory_row_witnesses(rows):
-    return [{"ref": {"table": descriptor.table, "key": key},
-        "tuple_digest": hashlib.sha256(encoded).hexdigest(), "encoded_bytes": len(encoded)}
-        for descriptor, key, row, encoded in rows]
+def _native_memory_row_witness_numeric_entries(table, key, *, encoded_upper, reference_upper):
+    from src.memory.header_bounds import _native_memory_object_width
+    witness_upper = _native_memory_object_width({
+        "ref": reference_upper, "tuple_digest": 66, "encoded_bytes": 7})
+    return tuple((("memory-row-witness", table, key, stage), upper)
+        for stage, upper in (("hash-input", encoded_upper), ("digest", 66),
+            ("reference", reference_upper), ("record", witness_upper)))
+
+
+def _native_memory_row_witnesses(rows, *, header_budget=None):
+    from src.memory.composition_headers import current_budget
+    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    payer = header_budget if header_budget is not None else current_budget()
+    if payer is not None:
+        list_upper = 2 + max(0, len(rows) - 1) + sum(_native_memory_object_width({
+            "ref": _native_memory_object_width({"table": _native_memory_ascii_string_width(descriptor.table),
+                "key": _native_memory_ascii_string_width(key)}), "tuple_digest": 66, "encoded_bytes": 7})
+            for descriptor, key, row, encoded in rows)
+        payer.debit(list_upper, appearance=("memory-row-witness-list", "construction"))
+    result = []
+    for descriptor, key, row, encoded in rows:
+        if payer is not None:
+            reference_upper = _native_memory_object_width({
+                "table": _native_memory_ascii_string_width(descriptor.table),
+                "key": _native_memory_ascii_string_width(key)})
+            for appearance, upper in _native_memory_row_witness_numeric_entries(
+                    descriptor.table, key, encoded_upper=len(encoded), reference_upper=reference_upper):
+                payer.debit(upper, appearance=appearance)
+        result.append({"ref": {"table": descriptor.table, "key": key},
+            "tuple_digest": hashlib.sha256(encoded).hexdigest(), "encoded_bytes": len(encoded)})
+    if payer is not None:
+        payer.debit(_native_memory_closed_value_width(result), appearance=("memory-row-witness-list", "return"))
+    return result
 
 
 async def _apply_native_memory_source_publication(db, run, plan):
@@ -1160,8 +4188,8 @@ async def _apply_native_memory_source_publication(db, run, plan):
     guard = db.info.get("composition_guard")
     if type(guard) is not CompositionSessionGuard or guard.db is not db:
         raise ProductionWorkspaceReconciliationError("memory_publication_guard_missing")
-    if plan.kind == "capture":
-        await _validate_memory_owner_source(db, run, retention.operation, effect=retention.operation._effect)
+    if plan.kind in {"capture", "affected-unknown"}:
+        await _validate_memory_owner_source(db, retention.operation.run, retention.operation, effect=retention.operation._effect)
     else:
         await _validate_memory_lifecycle_source(db, run, retention.source.claim)
     token = _ARMED_MEMORY_PUBLICATION.set(plan)
@@ -1181,15 +4209,299 @@ async def _apply_native_memory_source_publication(db, run, plan):
         await (await db.connection()).run_sync(read_back)
         # Populate this exact original ORM instance from actual SQL readback;
         # this does not leave a dirty object to flush a second publication.
-        retention.source.admission.header_budget.debit(
-            certificate.rows[("workflow_run_states", run.run_identity)][1],
-            appearance=("memory-source-publication", "refresh", run.run_identity))
-        await db.refresh(run)
+        if plan.kind != "affected-unknown":
+            retention.source.admission.header_budget.debit(
+                certificate.rows[("workflow_run_states", run.run_identity)][1],
+                appearance=("memory-source-publication", "refresh", run.run_identity))
+            await db.refresh(run)
         plan.applied = True
         return result
     finally:
         _ARMED_MEMORY_PUBLICATION.reset(token)
-        _MEMORY_PUBLICATIONS.pop(id(plan), None)
+        # The original completion writer's engine exit consumes this exact
+        # applied proof for numerical payment only. All failure/capture paths
+        # release it here; guard.publish releases completion on every exit.
+        if not (plan.kind == "completion" and plan.consumed and plan.applied):
+            _MEMORY_PUBLICATIONS.pop(id(plan), None)
+
+
+async def _native_memory_invalidate_affected_current(db, retention):
+    """Retain uncertainty caused by this exact, already consumed M5 effect.
+
+    The pre-effect accounting owner supplied these concrete validated proofs.
+    This never borrows their historical Sources, leases or mutation grants.
+    """
+    import asyncio
+    from sqlalchemy.dialects.sqlite import dialect
+    from src.db.models import WorkflowRunState
+    from src.memory.header_bounds import WRS_BY_RUN, _native_memory_current_payload_upper
+    from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+    from src.workflows.job_runtime import _digest
+    retention._checked()
+    if not retention.affected:
+        return
+    operation = retention.operation
+    await _validate_memory_owner_source(db, operation.run, operation, effect=operation._effect)
+    if operation._effect is None or not retention.prepared.consumed:
+        raise ProductionWorkspaceReconciliationError("memory_affected_current_owner_changed")
+    footprint = {(descriptor.table, key) for descriptor, key, _changes in retention.updates}
+    frame = retention.source.admission.header_budget
+    for proof in retention.affected:
+        if (type(proof) is not _NativeMemoryRetainedCurrentProof
+                or proof.operation is not operation or proof.guard is not db.info.get("composition_guard")
+                or proof.task is not asyncio.current_task() or proof.seal is not _MEMORY_PUBLICATION_SEAL
+                or not any((ref["table"], ref["key"]) in footprint for ref in proof.current["payload"]["refs"])):
+            raise ProductionWorkspaceReconciliationError("memory_affected_current_owner_changed")
+        certificate = await _native_memory_source_snapshot(db, frame)
+        target = proof.before["run_identity"]
+        delivered = await _native_memory_source_rows(db, certificate, (("workflow_run_states", target),))
+        before = delivered[0][2]
+        if before != proof.before:
+            raise ProductionWorkspaceReconciliationError("memory_affected_current_before_changed")
+        frame.debit(_native_memory_closed_value_width(proof.current["payload"]["refs"]),
+            appearance=("memory-affected-unknown", target, "reference-tuples"))
+        refs = tuple((ref["table"], ref["key"]) for ref in proof.current["payload"]["refs"])
+        payload_upper, record_upper = _native_memory_current_payload_upper(refs, (),
+            method=operation._effect.method, unknown_reason="current_source_unavailable")
+        def pay(stage, upper):
+            frame.debit(upper, appearance=("memory-affected-unknown", target, stage))
+        pay("pending-map", certificate.rows[("workflow_run_states", target)][1])
+        now = datetime.now(timezone.utc)
+        processor = WorkflowRunState.__table__.columns.updated_at.type.dialect_impl(dialect()).bind_processor(dialect())
+        updated_at = processor(now) if processor is not None else now
+        pending_raw = {"revision": before["revision"] + 1, "updated_at": updated_at}
+        if not -(2**63) <= pending_raw["revision"] < 2**63:
+            raise ProductionWorkspaceReconciliationError("memory_affected_current_revision_unavailable")
+        pay("delta-construction", certificate.rows[("workflow_run_states", target)][1])
+        delta = _native_memory_selected_delta_preimage([], [(WRS_BY_RUN, target, pending_raw)], [])
+        delta_upper = _native_memory_closed_value_width(delta)
+        for stage in ("delta-canonical", "delta-utf8"):
+            pay(stage, delta_upper)
+        pay("delta-digest", 66)
+        for stage in ("original-canonical", "original-utf8"):
+            pay(stage, _native_memory_closed_value_width(proof.original))
+        pay("original-digest", 66)
+        pay("payload-construction", payload_upper)
+        payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
+            "original_checkpoint_digest": _digest(proof.original),
+            "projection_revision": proof.current["payload"]["projection_revision"] + 1,
+            "state": "unknown", "reason_code": "current_source_unavailable",
+            "refs": proof.current["payload"]["refs"], "absences": [], "rows": [],
+            "rows_digest": None, "encoded_bytes": 0,
+            "owner_operation_kind": operation._effect.method, "owner_events": [],
+            "selected_delta_digest": _digest(delta)}
+        for _ in range(32):
+            size = preflight_native_memory_reference_payload(payload, current=True, header_budget=frame)
+            pay("encoded-count", size)
+            if payload["encoded_bytes"] == size:
+                break
+            payload["encoded_bytes"] = size
+        else:
+            raise ProductionWorkspaceReconciliationError("memory_unknown_count_not_convergent")
+        for stage in ("payload-canonical", "payload-utf8"):
+            pay(stage, payload_upper)
+        pay("payload-digest", 66)
+        pay("record-construction", record_upper)
+        replacement = {"checkpoint_id": MEMORY_CURRENT_CHECKPOINT, "safe": True,
+            "state_digest": _digest(payload), "payload": payload}
+        journal = _splice_native_memory_current_checkpoint(before["checkpoint_receipts_json"],
+            replacement, header_budget=frame)
+        pay("row-copy", certificate.rows[("workflow_run_states", target)][1])
+        after = dict(before, **pending_raw, checkpoint_receipts_json=journal)
+        # These are the original SQL typed binds; the raw projection above is
+        # checked by the private publication hook and real SQL readback.
+        plan = await _prepare_native_memory_source_publication(db, operation.run, retention,
+            before, after, certificate, "affected-unknown", pending_changes={
+                "revision": pending_raw["revision"], "updated_at": now})
+        plan.affected_proof = proof
+        await _apply_native_memory_source_publication(db, operation.run, plan)
+
+
+def _native_memory_capture_allocation_numeric_entries(operation, prepared, *, certificate, retention_widths):
+    """ONE capture allocation vector, not its authority/read/publication vector.
+
+    The retained pre-effect certificate supplies numeric provenance only.
+    Actual capture still obtains and validates its original current readset.
+    """
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import (HeaderBoundsError, MAX_BYTES, MAX_ROWS,
+        _native_memory_ascii_string_width as width, _native_memory_object_width as obj,
+        _native_memory_array_width as array, WRS_BY_RUN)
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    from src.memory.m5 import PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS
+    from src.runtime_plugins import memory_producer as source_owner
+    guard = operation.db.info.get("composition_guard") if type(operation) is source_owner._MemoryOwnerSourceOperation else None
+    retained = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    capacity = getattr(guard, "_native_memory_source_capacity_facts", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (type(guard) is not CompositionSessionGuard or guard.db is not operation.db
+            or source_owner._MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or operation._seal is not source_owner._MEMORY_SOURCE_SEAL or operation._issued_id != id(operation)
+            or source_owner._MEMORY_SOURCES.get(id(operation.source)) is not operation.source
+            or operation.source._seal is not source_owner._MEMORY_SOURCE_SEAL
+            or operation.source._issued_id != id(operation.source) or not operation.source._live.is_set()
+            or operation.source._scope is not operation.scope
+            or operation.source.admission.header_budget is not guard.header_budget
+            or type(prepared) is not PreparedNativeMemoryMutation
+            or source_owner._MEMORY_OPERATIONS.get(id(operation))._prepared is not prepared
+            or _NATIVE_MUTATION_PLANS.get(id(prepared)) is not prepared
+            or type(certificate) is not CompositionHeaderCertificate or certificate.seal is not _SEAL
+            or certificate.issued_id != id(certificate) or certificate.budget is not guard.header_budget
+            or certificate.driver is not operation.driver
+            or type(retention_widths) is not MappingProxyType
+            or retained is None or retained[0] is not operation or retained[1] is not prepared
+            or retained[2] is not certificate or retained[3] is not retention_widths
+            or owner is None or owner[0] is not operation or owner[1] is not prepared
+            or owner[2] is not certificate or owner[3] is not asyncio.current_task()
+            or owner[4] is not operation.transaction
+            or owner[4] is not operation.db.sync_session.get_transaction()
+            or owner[5] is not operation.driver or not operation.driver.in_transaction
+            or capacity is None or capacity[0] is not operation or capacity[1] is not prepared
+            or capacity[2] is not certificate or type(capacity[3]) is not MappingProxyType
+            or projection is None or projection[0] is not operation
+            or prepared.consumed is not (operation._effect is not None)):
+        raise HeaderBoundsError("memory_capture_numeric_owner_changed")
+    w, facts, run_id = retention_widths, capacity[3], operation.run.run_identity
+    if (any(type(amount) is not int or not 0 <= amount <= MAX_BYTES
+            for name, amount in w.items() if name not in {"future_text_bytes", "completion_future_text_bytes", "claimed"})
+            or type(w["future_text_bytes"]) is not MappingProxyType
+            or set(w["future_text_bytes"]) != {"checkpoint_context_json", "checkpoint_receipts_json", "updated_at"}
+            or any(type(name) is not str or type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                for name, amount in w["future_text_bytes"].items())
+            or type(w.get("completion_future_text_bytes")) is not MappingProxyType
+            or set(w["completion_future_text_bytes"]) != {"checkpoint_context_json", "checkpoint_receipts_json",
+                "updated_at", "status", "result_digest", "result_summary", "finished_at"}
+            or any(type(name) is not str or type(amount) is not int or not 0 <= amount <= MAX_BYTES
+                for name, amount in w["completion_future_text_bytes"].items())
+            or not 1 <= w["row_count"] <= MAX_ROWS
+            or w["row_count"] != len(facts["row_uppers"])):
+        raise HeaderBoundsError("memory_capture_numeric_shape_unavailable")
+    def ref_upper(table, key):
+        return obj({"table": width(table), "key":
+            22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)})
+    def fields_upper(names):
+        return array(tuple(width(name) for name in names))
+    refs_tuple = array(tuple(3 + width(table) + (
+        22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
+        for table, key in facts["row_uppers"]))
+    locator_upper = obj({"profile": width(MEMORY_REFERENCE_PROFILE), "invocation_ref": width(run_id),
+        "original_checkpoint_id": width(MEMORY_ORIGINAL_CHECKPOINT), "original_checkpoint_digest": 66})
+    receipt_preimage = obj({"invocation": width(run_id),
+        "claim": width(operation.scope.witness["claim_ref"]), "candidate": 66})
+    sealed_upper = obj({"invocation_ref": width(run_id), "claim_ref": width(operation.scope.witness["claim_ref"]),
+        "candidate_digest": 66, "result_digest": 66, "payload": w["result_upper"],
+        "effect": w["effect_upper"], "retention": locator_upper})
+    pending_columns = obj({"checkpoint_context_json": w["context_upper"],
+        "checkpoint_receipts_json": w["journal_upper"], "revision": 20, "updated_at": 194})
+    events = tuple((descriptor.table, key) for descriptor, key, _row in projection[1]
+        if descriptor.table in {"audit_events", "work_board_events"})
+    event_refs = array(tuple(ref_upper(table, key) for table, key in events))
+    new_bounds, update_bounds, delta_stages = [], [], []
+    for ordinal, (descriptor, key, row) in enumerate(projection[1]):
+        address = (descriptor.table, key)
+        upper, raw_upper = facts["row_uppers"][address], facts["raw_tuple_uppers"][address]
+        new_bounds.append(obj({"ref": ref_upper(*address), "values": upper}))
+        for stage, amount in (("row-field-set", fields_upper(descriptor.columns)),
+                ("raw-codec-fields", upper), ("raw-codec-pairs", raw_upper),
+                ("raw-codec-canonical", raw_upper), ("raw-codec-utf8", raw_upper),
+                ("bind-map-copy", upper), ("reference", ref_upper(*address))):
+            delta_stages.append((("delta-new", ordinal, stage), amount))
+        for field, kind in zip(descriptor.columns, descriptor.kinds):
+            if kind == "real" and row[field] is not None:
+                delta_stages.append((("delta-new", ordinal, "float-hex", field), 64))
+    for ordinal, (descriptor, key, changes) in enumerate(projection[2]):
+        upper = _native_memory_closed_value_width(changes)
+        update_bounds.append(obj({"ref": ref_upper(descriptor.table, key), "columns": upper}))
+        for stage, amount in (("row-field-set", fields_upper(changes)),
+                ("schema-field-set", fields_upper(descriptor.columns)),
+                ("bind-map-copy", upper), ("reference", ref_upper(descriptor.table, key))):
+            delta_stages.append((("delta-update", ordinal, stage), amount))
+    update_bounds.append(obj({"ref": ref_upper("workflow_run_states", run_id), "columns": pending_columns}))
+    delta_upper = obj({"schema_version": 1, "new_rows": array(tuple(new_bounds)),
+        "updates": array(tuple(update_bounds)), "owner_events": event_refs})
+    entries = []
+    def add(stage, upper):
+        entries.append((("native-memory-capture", run_id, stage), upper))
+    for stage in ("expected-value-parser", "expected-value-pairs", "expected-value-dicts"):
+        add(stage, w["effect_upper"])
+    for stage in ("receipt-object", "receipt-canonical", "receipt-utf8"):
+        add(stage, receipt_preimage)
+    add("receipt-digest", 66)
+    add("receipt-locator", width("native-memory-receipt:") + 64)
+    add("expected-result", max(w["result_upper"], obj({"status": width("blocked"),
+        "reason_code": width("native_memory_owner_outcome_unsupported"), "memory_status": width("no_learning")})))
+    value_fields = ("proposal_ref", "revision", "state") if prepared._method == "memory.propose" else ("record_ref", "receipt_ref")
+    for stage, upper in (("result-validator-map", fields_upper(("status", "value", "memory_status"))),
+            ("result-outer-field-set", fields_upper(("status", "value", "memory_status"))),
+            ("result-value-field-set", fields_upper(value_fields)),
+            ("result-status-set", fields_upper(("succeeded",))),
+            ("result-memory-status-set", fields_upper(("proposal_only", "reviewed_update", "forgotten"))),
+            ("result-proposal-state-set", fields_upper(("proposed", "blocked")))):
+        add(stage, upper)
+    for stage in ("reference-set", "reference-sort", "reference-tuple"):
+        add(stage, refs_tuple)
+    add("lookup-map", refs_tuple + w["selected_rows_upper"] + sum(facts["raw_tuple_uppers"].values()))
+    add("audit-hash-input", facts["raw_tuple_uppers"][("audit_events",
+        prepared.audit_event.id if prepared.audit_event is not None else prepared._result["audit_event_id"])])
+    add("audit-hash-return", 66)
+    for stage in ("original-effect-asdict-fields", "original-effect-asdict-values",
+            "original-effect-canonical", "original-effect-utf8", "sealed-effect-asdict-fields", "sealed-effect-asdict-values"):
+        add(stage, w["effect_upper"])
+    for stage, upper in (("original-effect-digest", 66), ("source-canonical", w["source_upper"]),
+            ("source-utf8", w["source_upper"]), ("source-digest", 66), ("original-audit-reference", ref_upper("audit_events",
+                prepared.audit_event.id if prepared.audit_event is not None else prepared._result["audit_event_id"])),
+            ("original-audit-object", w["audit_upper"] + 66), ("original-ref-objects", w["refs_upper"]),
+            ("original-payload", w["original_upper"]), ("witnesses-canonical", w["rows_upper"]),
+            ("witnesses-utf8", w["rows_upper"]), ("witnesses-digest", 66),
+            ("original-payload-canonical", w["original_upper"]), ("original-payload-utf8", w["original_upper"]),
+            ("original-payload-digest", 66), ("original-record", w["original_record_upper"]),
+            ("locator-original-canonical", w["original_record_upper"]), ("locator-original-utf8", w["original_record_upper"]),
+            ("locator-original-digest", 66), ("locator-object", locator_upper),
+            ("result-canonical", w["result_upper"]), ("result-utf8", w["result_upper"]), ("result-digest", 66),
+            ("sealed-object", sealed_upper), ("context-copy", w["context_upper"]),
+            ("context-canonical", w["context_upper"]), ("pending-map", pending_columns),
+            ("append-journal-utf8", w["journal_upper"]), ("append-journal-parser", w["journal_upper"]),
+            ("append-journal-pairs", w["journal_upper"]), ("append-journal-dicts", w["journal_upper"]),
+            ("append-journal-rstrip", w["journal_upper"]), ("append-journal-prefix", w["journal_upper"]),
+            ("append-original-canonical", w["original_record_upper"]), ("append-journal-suffix", w["journal_upper"]),
+            ("append-journal-join-first", w["journal_upper"]), ("append-journal-join-second", w["journal_upper"]),
+            ("append-journal-join-third", w["journal_upper"]), ("planned-row-fields", fields_upper(WRS_BY_RUN.columns)),
+            ("planned-row-schema-fields", fields_upper(WRS_BY_RUN.columns)), ("planned-row", w["row_upper"]),
+            ("planned-date-bind", 194), ("events-tuple", refs_tuple), ("events-sort", refs_tuple),
+            ("pending-columns-copy", pending_columns), ("delta-updates-tuple", array(tuple(update_bounds))),
+            ("delta-new-list", array(tuple(new_bounds))), ("delta-new-sort", refs_tuple), ("delta-new-address-set", refs_tuple),
+            ("delta-update-list", array(tuple(update_bounds))), ("delta-update-sort", refs_tuple),
+            ("delta-update-address-set", refs_tuple), ("delta-pending-reference", ref_upper("workflow_run_states", run_id)),
+            ("delta-pending-bind-copy", pending_columns), ("delta-pending-fields", fields_upper((
+                "checkpoint_context_json", "checkpoint_receipts_json", "revision", "updated_at"))),
+            ("delta-pending-schema-fields", fields_upper(WRS_BY_RUN.columns)), ("delta-events-set", refs_tuple),
+            ("delta-events-sort", refs_tuple), ("delta-events-objects", event_refs), ("delta-object", delta_upper),
+            ("delta-validation-canonical", delta_upper), ("delta-canonical", delta_upper),
+            ("delta-utf8", delta_upper), ("delta-digest", 66),
+            ("current-original-canonical", w["original_record_upper"]), ("current-original-utf8", w["original_record_upper"]),
+            ("current-original-digest", 66), ("current-witness-copy", w["rows_upper"]),
+            ("current-own-update", w["rows_upper"]), ("current-rows-canonical", w["rows_upper"]),
+            ("current-rows-utf8", w["rows_upper"]), ("current-rows-digest", 66),
+            ("current-event-objects", event_refs), ("current-payload", w["current_upper"])):
+        add(stage, upper)
+    for stage, upper in delta_stages:
+        add(stage, upper)
+    for appearance, upper in _native_memory_cold_binding_digest_numeric_entries(run_id,
+            w["binding_text_bytes"], owner="capture", occurrences=1):
+        add(("binding-digest", appearance), upper)
+    candidate_owner = getattr(source_owner, "original_native_memory_source_candidate_numeric_entries", None)
+    context_owner = getattr(source_owner, "original_native_memory_source_context_numeric_entries", None)
+    if not callable(candidate_owner) or not callable(context_owner):
+        raise HeaderBoundsError("memory_capture_source_numeric_unavailable")
+    entries.extend(candidate_owner(candidate_upper=w["source_upper"]))
+    entries.extend(context_owner(context_upper=w["context_upper"], candidate_upper=w["source_upper"],
+        binding_text_bytes=w["binding_text_bytes"], result_upper=w["result_upper"], effect_upper=w["effect_upper"],
+        locator_upper=locator_upper, result_present=False))
+    if any(type(upper) is not int or not 0 <= upper <= MAX_BYTES for _appearance, upper in entries):
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return tuple(entries)
 
 
 async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_operation, prepared, result):
@@ -1198,8 +4510,62 @@ async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_
     from src.runtime_plugins.memory_producer import (
         _validate_memory_owner_source, memory_owner_references, memory_context)
     from src.memory.m5 import validate_native_memory_mutation_plan
-    from src.memory.header_bounds import WRS_BY_RUN
+    from src.memory.header_bounds import WRS_BY_RUN, _MEMORY_LEDGER_PHASE
     from src.workflows.job_runtime import _canonical, _digest
+    # Check the genuine capture phase before opaque Source readers allocate.
+    from src.runtime_plugins import memory_producer as source_owner
+    from src.runtime_plugins.dispatch import NativeServiceBlocked
+    if (type(source_operation) is not source_owner._MemoryOwnerSourceOperation
+            or source_operation._seal is not source_owner._MEMORY_SOURCE_SEAL
+            or source_operation._issued_id != id(source_operation)
+            or source_owner._MEMORY_OPERATIONS.get(id(source_operation)) is not source_operation
+            or source_operation.db is not db or source_operation.run is not run):
+        raise NativeServiceBlocked("native_memory_actual_operation_unavailable")
+    issued_source = getattr(source_operation, "source", None)
+    issued_retention = _MEMORY_RETENTIONS.get(id(issued_source))
+    phase = _MEMORY_LEDGER_PHASE.get()
+    if (type(issued_retention) is not _NativeMemoryRetention
+            or issued_retention.operation is not source_operation
+            or issued_retention.prepared is not prepared
+            or phase is None or phase[0] is not issued_retention.ledger or phase[1] != "capture"):
+        raise ProductionWorkspaceReconciliationError("memory_retention_capture_phase_unavailable")
+    issued_retention._checked()
+    numeric = getattr(db.info.get("composition_guard"), "_native_memory_retention_numeric_facts", None)
+    if numeric is None or numeric[0] is not source_operation or numeric[1] is not prepared:
+        raise ProductionWorkspaceReconciliationError("memory_retention_capture_numeric_unavailable")
+    retained_allocations = getattr(db.info.get("composition_guard"),
+        "_native_memory_capture_allocation_numeric", None)
+    if (type(retained_allocations) is not tuple or len(retained_allocations) != 5
+            or retained_allocations[0] is not source_operation
+            or retained_allocations[1] is not prepared
+            or retained_allocations[2] is not numeric[2]
+            or retained_allocations[3] is not numeric[3]
+            or type(retained_allocations[4]) is not tuple):
+        raise ProductionWorkspaceReconciliationError("memory_retention_capture_allocation_lineage_unavailable")
+    # Reuse only the complete composer's original already-paid vector. No
+    # numeric delta/Source/parser/helper vector is rebuilt after the M5 effect.
+    allocations = retained_allocations[4]
+    from src.memory.composition_headers import _metadata_size
+    map_upper, selected_count = 2, 0
+    for appearance, upper in allocations:
+        if (type(appearance) is tuple and len(appearance) >= 3
+                and appearance[0] == "native-memory-capture" and appearance[1] == run.run_identity):
+            selected_count += 1
+            map_upper += _metadata_size(appearance[2]) + 1 + 20
+    map_upper += max(0, selected_count - 1)
+    issued_source.admission.header_budget.debit(map_upper,
+        appearance=("native-memory-capture", run.run_identity, "allocation-stage-map"))
+    allocation_bounds = {appearance[2]: upper for appearance, upper in allocations
+        if (type(appearance) is tuple and len(appearance) >= 3
+                and appearance[0] == "native-memory-capture" and appearance[1] == run.run_identity)}
+    def pay(*stages):
+        for stage in stages:
+            issued_source.admission.header_budget.debit(allocation_bounds[stage],
+                appearance=("native-memory-capture", run.run_identity, stage))
+    def pay_group(name):
+        for stage in allocation_bounds:
+            if type(stage) is tuple and stage[0] == name:
+                pay(stage)
     source = await _validate_memory_owner_source(db, run, source_operation, effect=effect)
     retention = _MEMORY_RETENTIONS.get(id(source))
     if (type(retention) is not _NativeMemoryRetention or retention._checked().captured
@@ -1208,26 +4574,46 @@ async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_
         raise ProductionWorkspaceReconciliationError("memory_retention_effect_changed")
     await validate_native_memory_mutation_plan(prepared, db=db,
         candidate_digest=source.admission.candidate_digest, consumed=True)
+    await _native_memory_invalidate_affected_current(db, retention)
     from src.runtime_plugins.contracts import succeeded, blocked
     if effect.status == "succeeded":
+        pay("expected-value-parser", "expected-value-pairs", "expected-value-dicts")
         expected_value = json.loads(effect.value_json)
         if effect.method != "memory.propose":
+            pay("receipt-object", "receipt-canonical", "receipt-utf8", "receipt-digest", "receipt-locator")
             expected_value["receipt_ref"] = "native-memory-receipt:" + _digest({
                 "invocation": run.run_identity, "claim": claim_ref,
                 "candidate": source.admission.candidate_digest})
+        pay("expected-result", "result-validator-map", "result-outer-field-set", "result-value-field-set",
+            "result-status-set", "result-memory-status-set")
+        if effect.method == "memory.propose":
+            pay("result-proposal-state-set")
         expected_result = succeeded(effect.method, expected_value)
     else:
+        pay("expected-result")
         expected_result = blocked("native_memory_owner_outcome_unsupported")
     if result != expected_result:
         raise ProductionWorkspaceReconciliationError("memory_retention_result_changed")
     certificate = await _native_memory_source_snapshot(db, source.admission.header_budget)
     actual_refs = await memory_owner_references(db, source.admission, effect)
+    # Source locators may not expand the sealed capture allocation footprint.
+    # Compare against real retained addresses before building the union set.
+    if any((item.table, item.row_ref) not in retention.existing_references
+            and not any(descriptor.table == item.table and key == item.row_ref
+                for descriptor, key, _row in retention.new_rows)
+            and not any(descriptor.table == item.table and key == item.row_ref
+                for descriptor, key, _changes in retention.updates)
+            and (item.table, item.row_ref) != ("audit_events", effect.audit_event_id)
+            for item in actual_refs):
+        raise ProductionWorkspaceReconciliationError("memory_retention_capture_footprint_changed")
+    pay("reference-set", "reference-sort", "reference-tuple")
     refs = tuple(sorted({*retention.existing_references,
         *((item.table, item.row_ref) for item in actual_refs),
         *((descriptor.table, key) for descriptor, key, row in retention.new_rows),
         *((descriptor.table, key) for descriptor, key, row in retention.updates),
         ("audit_events", effect.audit_event_id)}))
     rows = await _native_memory_source_rows(db, certificate, refs)
+    pay("lookup-map")
     lookup = {(descriptor.table, key): (row, encoded) for descriptor, key, row, encoded in rows}
     for descriptor, key, expected in retention.new_rows:
         if lookup[(descriptor.table, key)][0] != expected:
@@ -1238,9 +4624,15 @@ async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_
     before = lookup[("workflow_run_states", run.run_identity)][0]
     if before != retention.before:
         raise ProductionWorkspaceReconciliationError("memory_retention_original_run_changed")
-    witnesses = _native_memory_row_witnesses(rows)
+    witnesses = _native_memory_row_witnesses(rows, header_budget=source.admission.header_budget)
     candidate = source.admission.candidate()
+    pay("audit-hash-input", "audit-hash-return")
     audit_digest = hashlib.sha256(lookup[("audit_events", effect.audit_event_id)][1]).hexdigest()
+    pay_group("binding-digest")
+    pay("original-effect-asdict-fields", "original-effect-asdict-values", "original-effect-canonical",
+        "original-effect-utf8", "original-effect-digest", "source-canonical", "source-utf8", "source-digest",
+        "original-audit-reference", "original-audit-object", "original-ref-objects", "original-payload",
+        "witnesses-canonical", "witnesses-utf8", "witnesses-digest")
     original_payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
         "invocation_ref": run.run_identity, "claim_ref": claim_ref,
         "candidate_digest": source.admission.candidate_digest,
@@ -1254,25 +4646,44 @@ async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_
             "tuple_digest": audit_digest},
         "refs": [{"table": table, "key": key} for table, key in refs],
         "rows_digest": _digest(witnesses), "encoded_bytes": sum(item["encoded_bytes"] for item in witnesses)}
-    preflight_native_memory_reference_payload(original_payload)
+    preflight_native_memory_reference_payload(original_payload, header_budget=source.admission.header_budget)
+    pay("original-payload-canonical", "original-payload-utf8", "original-payload-digest", "original-record")
     original = {"checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT, "safe": True,
         "state_digest": _digest(original_payload), "payload": original_payload}
     retention.original = original
+    pay("locator-original-canonical", "locator-original-utf8", "locator-original-digest", "locator-object")
     locator = {"profile": MEMORY_REFERENCE_PROFILE, "invocation_ref": run.run_identity,
         "original_checkpoint_id": MEMORY_ORIGINAL_CHECKPOINT, "original_checkpoint_digest": _digest(original)}
     context = memory_context(run)
+    pay("result-canonical", "result-utf8", "result-digest", "sealed-effect-asdict-fields",
+        "sealed-effect-asdict-values", "sealed-object")
     sealed = {"invocation_ref": run.run_identity, "claim_ref": claim_ref,
         "candidate_digest": source.admission.candidate_digest, "result_digest": _digest(result),
         "payload": result, "effect": asdict(effect), "retention": locator}
+    pay("context-copy", "context-canonical", "pending-map", "append-journal-utf8", "append-journal-parser",
+        "append-journal-pairs", "append-journal-dicts", "append-journal-rstrip", "append-journal-prefix",
+        "append-original-canonical", "append-journal-suffix", "append-journal-join-first",
+        "append-journal-join-second", "append-journal-join-third")
     pending = {"checkpoint_context_json": _canonical(dict(context, result=sealed)),
         "checkpoint_receipts_json": _append_native_memory_original(before["checkpoint_receipts_json"], original),
         "revision": before["revision"] + 1, "updated_at": datetime.now(timezone.utc)}
+    pay("planned-row-fields", "planned-row-schema-fields", "planned-row", "planned-date-bind")
     row = _native_memory_planned_sql_row(run, pending)
+    pay("events-tuple", "events-sort")
     events = tuple(sorted((descriptor.table, key) for descriptor, key, values in retention.new_rows
         if descriptor.table in {"audit_events", "work_board_events"}))
+    pay_group("delta-new")
+    pay_group("delta-update")
+    pay("pending-columns-copy", "delta-updates-tuple", "delta-new-list", "delta-new-sort", "delta-new-address-set",
+        "delta-update-list", "delta-update-sort", "delta-update-address-set", "delta-pending-reference",
+        "delta-pending-bind-copy", "delta-pending-fields", "delta-pending-schema-fields", "delta-events-set",
+        "delta-events-sort", "delta-events-objects", "delta-object", "delta-validation-canonical")
     delta = _native_memory_selected_delta_preimage(retention.new_rows,
         (*retention.updates, (WRS_BY_RUN, run.run_identity,
             {name: row[name] for name in pending})), events)
+    pay("delta-canonical", "delta-utf8", "delta-digest", "current-original-canonical", "current-original-utf8",
+        "current-original-digest", "current-witness-copy", "current-own-update", "current-rows-canonical",
+        "current-rows-utf8", "current-rows-digest", "current-event-objects", "current-payload")
     payload = {"schema_version": 2, "profile": MEMORY_REFERENCE_PROFILE,
         "original_checkpoint_digest": _digest(original), "projection_revision": 1,
         "state": "validated", "reason_code": None, "refs": original_payload["refs"],
@@ -1292,11 +4703,31 @@ async def capture_native_memory_retention(db, run, claim_ref, effect, *, source_
 async def validate_native_memory_retention(db, run, sealed):
     """Current cold evidence plus the still-live original Source; no reissuer."""
     from src.runtime_plugins.memory_producer import _validate_memory_lifecycle_source, memory_context
-    matches = [value for value in tuple(_MEMORY_RETENTIONS.values())
-        if value.before["run_identity"] == run.run_identity]
-    if len(matches) != 1:
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger
+    active = _MEMORY_LEDGER_PHASE.get()
+    if active is None or type(active[0]) is not _NativeMemoryNumericLedger or active[1] != "completion":
         raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
-    retention = matches[0]._checked()
+    ledger = active[0]
+    _native_memory_capacity_slots(ledger)
+    if ledger.bindings["completion"][0] is not db:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+    for stage, upper in (("registry-view", 4), ("registry-iterator", 4),
+            ("matching-count", 20), ("matching-count", 20)):
+        ledger.budget.debit(upper, appearance=("memory-retention-validation", stage))
+    # Preserve the original uniqueness check without copying the unrelated
+    # global registry into a tuple and list. At the second matching identity
+    # the original len(matches)!=1 condition is already decisive.
+    retention = None
+    for value in _MEMORY_RETENTIONS.values():
+        if value.before["run_identity"] == run.run_identity:
+            if retention is not None:
+                raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+            retention = value
+    if retention is None:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+    retention = retention._checked()
+    if retention.ledger is not ledger:
+        raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
     source = await _validate_memory_lifecycle_source(db, run, retention.source.claim)
     if source is not retention.source or not retention.captured or retention.completed:
         raise ProductionWorkspaceReconciliationError("memory_retention_source_changed")
@@ -1309,7 +4740,54 @@ async def validate_native_memory_retention(db, run, sealed):
             _, row, _ = _native_memory_reference_row_on_connection(connection, "workflow_run_states", run.run_identity)
             return _checked_memory_reference_row(connection, row)
     await (await db.connection()).run_sync(validate)
+    guard = db.info.get("composition_guard")
+    if type(guard) is not CompositionSessionGuard or guard.header_budget is not source.admission.header_budget:
+        raise ProductionWorkspaceReconciliationError("memory_retention_guard_changed")
+    guard._native_memory_source_retention = retention
     return retention
+
+
+def _native_memory_lifecycle_allocation_amounts(run_id, widths):
+    """Closed successful completion construction dimensions, no future row."""
+    from src.memory.header_bounds import (_native_memory_object_width as obj,
+        _native_memory_array_width as array, _native_memory_ascii_string_width as width,
+        _native_memory_utf8_width, WRS_BY_RUN)
+    names = ("status", "result_digest", "result_summary", "failure_reason", "finished_at", "updated_at",
+        "lease_owner", "lease_expires_at", "revision", "checkpoint_context_json")
+    fields = array(width(name) for name in names)
+    schema = array(width(name) for name in WRS_BY_RUN.columns)
+    pending = obj({"status": width("succeeded"), "result_digest": 66,
+        "result_summary": width("Native Memory owner result committed"), "failure_reason": 4,
+        "finished_at": 194, "updated_at": 194, "lease_owner": 4, "lease_expires_at": 4,
+        "revision": 20, "checkpoint_context_json": widths["context_upper"]})
+    reference = obj({"table": width("workflow_run_states"), "key": width(run_id)})
+    update = obj({"ref": reference, "columns": pending})
+    updates = array((update,))
+    address = array((3 + width("workflow_run_states") + width(run_id),))
+    delta = obj({"schema_version": 1, "new_rows": 2, "updates": updates, "owner_events": 2})
+    return {"allowed-set": fields, "pending-field-set": fields,
+        "planned-row-fields": schema, "planned-row-schema-fields": schema,
+        "planned-row": max(widths["own_upper"], widths["own_raw_upper"]), "planned-date-bind": 194,
+        "reference-tuples": widths["refs_upper"], "delta-empty-input": 2,
+        "delta-pending-bind-copy": pending, "delta-update-input": 5 + 4 + width(run_id) + pending,
+        "delta-new-list": 2, "delta-update-list": updates,
+        "delta-update-key-utf8": _native_memory_utf8_width(run_id),
+        "delta-update-fields": fields, "delta-update-schema-fields": schema,
+        "delta-update-bind-copy": pending, "delta-update-record": update,
+        "delta-update-sort": address, "delta-update-address-set": address,
+        "delta-events-set": 2, "delta-events-sort": 2, "delta-events-list": 2,
+        "delta-object": delta, "delta-validation-canonical": delta,
+        "delta-canonical": delta, "delta-utf8": delta, "delta-digest": 66,
+        "current-payload-copy": widths["current_upper"] + widths["rows_upper"] + 20 + 66 + 2,
+        "current-count-update": 20}
+
+
+def _native_memory_lifecycle_allocation_numeric_entries(operation, prepared, *, certificate,
+        facts, retention_widths):
+    """ONE successful lifecycle constructor; rows, journal and Current separate."""
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    return ((("memory-lifecycle-allocation", "numeric-map"), 2 + 28 + 29 * (6 * 32 + 2 + 1 + 20)),) + tuple((("memory-lifecycle-allocation", stage), upper) for stage, upper in
+        _native_memory_lifecycle_allocation_amounts(operation.run.run_identity, retention_widths).items())
 
 
 async def prepare_native_memory_lifecycle(db, run, *, original_claim, pending_changes, header_budget):
@@ -1321,16 +4799,33 @@ async def prepare_native_memory_lifecycle(db, run, *, original_claim, pending_ch
     if type(retention) is not _NativeMemoryRetention or source.admission.header_budget is not header_budget:
         raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
     retention._checked()
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+    if _MEMORY_LEDGER_PHASE.get() != (retention.ledger, "completion"):
+        raise ProductionWorkspaceReconciliationError("memory_lifecycle_numeric_owner_unavailable")
+    _native_memory_capacity_slots(retention.ledger)
+    lineage = getattr(retention, "_publication_numeric_facts", None)
+    if (lineage is None or lineage[0] is not retention.operation or lineage[1] is not retention.prepared):
+        raise ProductionWorkspaceReconciliationError("memory_lifecycle_numeric_owner_unavailable")
+    # The fixed 29-field numeric map is itself a separately prepaid owner
+    # construction. It holds only literal source labels and int64 capacities.
+    amount_map_upper = 2 + 28 + 29 * (6 * 32 + 2 + 1 + 20)
+    header_budget.debit(amount_map_upper, appearance=("memory-lifecycle-allocation", "numeric-map"))
+    amounts = _native_memory_lifecycle_allocation_amounts(run.run_identity, lineage[3])
+    def pay(*stages):
+        for stage in stages:
+            header_budget.debit(amounts[stage], appearance=("memory-lifecycle-allocation", stage))
     certificate = await _native_memory_source_snapshot(db, header_budget)
     own = await _native_memory_source_rows(db, certificate, (("workflow_run_states", run.run_identity),))
     before = own[0][2]
-    original, current = preflight_native_memory_reference_journal(before["checkpoint_receipts_json"])
+    original, current = preflight_native_memory_reference_journal(before["checkpoint_receipts_json"], header_budget=header_budget)
     if not retention.captured or retention.completed or original != retention.original or current is None:
         raise ProductionWorkspaceReconciliationError("memory_retention_original_changed")
+    pay("allowed-set", "pending-field-set")
     allowed = {"status", "result_digest", "result_summary", "failure_reason", "finished_at", "updated_at",
         "lease_owner", "lease_expires_at", "revision", "checkpoint_context_json"}
     if set(pending_changes) != allowed:
         raise ProductionWorkspaceReconciliationError("memory_retention_completion_patch_invalid")
+    pay("planned-row-fields", "planned-row-schema-fields", "planned-row", "planned-date-bind")
     row = _native_memory_planned_sql_row(run, pending_changes)
     sealed = memory_context(run)["result"]
     if (row["status"] != ("succeeded" if sealed["payload"]["status"] == "succeeded" else "blocked")
@@ -1341,12 +4836,18 @@ async def prepare_native_memory_lifecycle(db, run, *, original_claim, pending_ch
             or row["failure_reason"] != sealed["payload"].get("reason_code")
             or row["finished_at"] is None or row["updated_at"] != row["finished_at"]):
         raise ProductionWorkspaceReconciliationError("memory_retention_completion_patch_invalid")
+    pay("reference-tuples")
     refs = tuple((item["table"], item["key"]) for item in current["payload"]["refs"])
     rows = await _native_memory_source_rows(db, certificate, refs)
+    for stage in amounts:
+        if stage.startswith("delta-"):
+            pay(stage)
+    pay("current-payload-copy")
     payload = dict(current["payload"], projection_revision=current["payload"]["projection_revision"] + 1,
-        rows=_native_memory_row_witnesses(rows), selected_delta_digest=_digest(
+        rows=_native_memory_row_witnesses(rows, header_budget=header_budget), selected_delta_digest=_digest(
             _native_memory_selected_delta_preimage([], [(WRS_BY_RUN, run.run_identity,
                 {name: row[name] for name in pending_changes})], [])), owner_events=[])
+    pay("current-count-update")
     payload["encoded_bytes"] = sum(item["encoded_bytes"] for item in payload["rows"])
     after, record = _native_memory_prepare_current_row(row, payload, header_budget=header_budget)
     return await _prepare_native_memory_source_publication(db, run, retention, before, after, certificate, "completion",
@@ -1357,6 +4858,7 @@ async def apply_native_memory_lifecycle(db, run, plan):
     if type(plan) is not _NativeMemorySourcePublication or plan.kind != "completion":
         raise ProductionWorkspaceReconciliationError("memory_publication_plan_unavailable")
     result = await _apply_native_memory_source_publication(db, run, plan)
+    plan.retention._completion_publication = plan
     plan.retention.completed = True
     return result
 
@@ -1742,6 +5244,81 @@ def _original_native_closure_projected_entries(trace, *, constructor, publicatio
     return tuple(result)
 
 
+def _native_memory_cold_text_upper(value):
+    from src.memory.header_bounds import _native_memory_utf8_width
+    return 6 * _native_memory_utf8_width(value) + 2
+
+
+def _native_memory_cold_numeric_entries(run_id, owner, upper, stages):
+    """One encoded-unit upper for each original owner's named appearance."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    if type(upper) is not int or not 0 <= upper <= MAX_BYTES:
+        raise HeaderBoundsError("memory_cold_numeric_unavailable")
+    return tuple((("native-memory-cold", owner, run_id, stage),
+        66 if stage.endswith("digest-return") else upper) for stage in stages)
+
+
+def _native_memory_cold_prepay(entries):
+    from src.memory.composition_headers import current_budget
+    payer = current_budget()
+    if payer is not None:
+        for appearance, upper in entries:
+            payer.debit(upper, appearance=appearance)
+
+
+def _native_memory_cold_candidate_numeric_entries(run_id, *, row_upper,
+        context_upper, arguments_upper, authority_upper):
+    """Cold fence allocations outside the independently paid Source reader.
+
+    memory_context owns its parser, admission/candidate, binding and result
+    allocations. Direct immutable-binding parsing has its separate owner.
+    """
+    entries = list(_native_memory_cold_numeric_entries(run_id, "candidate", row_upper,
+        ("run-namespace", "deadline", "return-tuple")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "context", context_upper,
+        ("safe-input-keys", "safe-input-sort", "safe-input-projection",
+         "safe-input-canonical", "safe-input-utf8", "safe-input-digest-return")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "arguments", arguments_upper,
+        ("size-utf8", "json-parser", "json-pairs", "json-dicts", "canonical")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "authority", authority_upper,
+        ("size-utf8", "json-parser", "json-pairs", "json-dicts", "field-set", "grants-set", "grants-sort",
+         "digest-canonical", "digest-utf8", "digest-return")))
+    # Both original fingerprint objects consist of two fixed SHA strings.
+    from src.memory.header_bounds import _native_memory_object_width
+    fingerprint = _native_memory_object_width({"candidate": 66, "binding": 66})
+    composed = _native_memory_object_width({"native_fingerprint": 66, "composition_binding_digest": 66})
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "fingerprint", fingerprint,
+        ("object", "canonical", "utf8", "digest-return", "spec-namespace")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "composition-fingerprint", composed,
+        ("object", "canonical", "utf8", "digest-return")))
+    return tuple(entries)
+
+
+def _native_memory_cold_claim_numeric_entries(run_id, journal_upper, *, claimed):
+    entries = list(_native_memory_cold_numeric_entries(run_id, "claim", journal_upper,
+        ("journal-size-utf8", "journal-parser", "journal-pairs", "journal-dicts", "claims-list", "checkpoint-strings")))
+    if claimed:
+        entries.extend(_native_memory_cold_numeric_entries(run_id, "claim", journal_upper,
+            ("record-field-set", "witness-payload-copy", "witness-closed-copy", "witness-field-set",
+             "witness-canonical", "witness-utf8", "witness-digest-return", "methods-set", "methods-sort",
+             "witness-return-copy", "methods-tuple")))
+    return tuple(entries)
+
+
+def _native_memory_cold_binding_digest_numeric_entries(run_id, text_bytes, *, owner, occurrences):
+    """The existing binding payload/manifest grammar for actual digest calls."""
+    from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+    payload_stages = {"payload-methods-list", "payload-dependencies-list", "binding-payload", "binding-canonical",
+        "binding-encoded", "binding-digest", "dependency-payloads"}
+    entries = []
+    for occurrence in range(occurrences):
+        for appearance, upper in _original_native_binding_numeric_entries(run_id, text_bytes):
+            stage = appearance[2]
+            if stage in payload_stages or (type(stage) is tuple and stage[:2] == ("manifest", 1)):
+                entries.append((("native-memory-cold", "binding-digest", run_id, owner, occurrence, stage), upper))
+    return tuple(entries)
+
+
 def _checked_memory_candidate_row(row):
     """Original input encodings and immutable binding, without a Source grant."""
     from src.runtime_plugins.memory_producer import memory_context
@@ -1750,6 +5327,22 @@ def _checked_memory_candidate_row(row):
     from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
     from src.workflows.job_runtime import _canonical, _digest, _safe_durable_inputs, _composition_fingerprint
     try:
+        from src.memory.composition_headers import current_budget
+        payer = current_budget()
+        if payer is not None:
+            _native_memory_cold_prepay(_native_memory_cold_candidate_numeric_entries(row["run_identity"],
+                row_upper=_native_memory_closed_value_width(row),
+                context_upper=_native_memory_cold_text_upper(row["checkpoint_context_json"]),
+                arguments_upper=_native_memory_cold_text_upper(row["arguments_json"]),
+                authority_upper=_native_memory_cold_text_upper(row["declared_authority_json"])))
+        # Source memory_context pays its own binding parse and digest. Only
+        # the two subsequent direct fingerprint digest calls belong here.
+        from src.memory.composition_headers import current_budget
+        payer = current_budget()
+        if payer is not None:
+            from src.memory.header_bounds import _native_memory_utf8_width
+            _native_memory_cold_prepay(_native_memory_cold_binding_digest_numeric_entries(row["run_identity"],
+                _native_memory_utf8_width(row["composition_binding_json"]), owner="candidate", occurrences=2))
         run = SimpleNamespace(**row)
         run.deadline_at = datetime.fromisoformat(row["deadline_at"])
         context = memory_context(run)
@@ -1790,6 +5383,10 @@ def _checked_memory_claim_row(row, run, context, binding, *, unverified_unknown=
     from src.runtime_plugins.ownership import RuntimeCompositionBinding
     from src.memory.header_bounds import HeaderBoundsError, strict_json_loads
     try:
+        from src.memory.composition_headers import current_budget
+        if current_budget() is not None:
+            _native_memory_cold_prepay(_native_memory_cold_claim_numeric_entries(row["run_identity"],
+                _native_memory_cold_text_upper(row["checkpoint_receipts_json"]), claimed=False))
         entries = strict_json_loads(row["checkpoint_receipts_json"])
         claims = [entry for entry in entries if type(entry) is dict
                   and str(entry.get("checkpoint_id", "")).startswith("runtime-service-invocation:")]
@@ -1801,6 +5398,12 @@ def _checked_memory_claim_row(row, run, context, binding, *, unverified_unknown=
         else:
             if len(claims) != 1:
                 raise ValueError("memory_preoriginal_claim_changed")
+            if current_budget() is not None:
+                _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"], "claim",
+                    _native_memory_closed_value_width(claims[0]),
+                    ("record-field-set", "witness-payload-copy", "witness-closed-copy", "witness-field-set",
+                     "witness-canonical", "witness-utf8", "witness-digest-return", "methods-set", "methods-sort",
+                     "witness-return-copy", "methods-tuple")))
             if set(claims[0]) != {"checkpoint_id", "state_digest", "safe", "payload"}:
                 raise ValueError("memory_preoriginal_claim_changed")
             claim = _receipt_witness(claims[0])
@@ -1811,6 +5414,8 @@ def _checked_memory_claim_row(row, run, context, binding, *, unverified_unknown=
                 original_text = row["composition_binding_json"]
                 text_bytes = sum(1 if ord(c) < 128 else 2 if ord(c) < 2048 else 3 if ord(c) < 65536 else 4 for c in original_text)
                 _accounting_prepay(payer, _original_native_binding_numeric_entries(row["run_identity"], text_bytes))
+                _native_memory_cold_prepay(_native_memory_cold_binding_digest_numeric_entries(row["run_identity"],
+                    text_bytes, owner="claim", occurrences=1))
             binding = RuntimeCompositionBinding.from_json(row["composition_binding_json"])
             if (any(claim[field] != row[column] for field, column in (
                     ("invocation_ref", "run_identity"), ("input_digest", "input_digest"),
@@ -1867,12 +5472,19 @@ def _checked_memory_unknown_unverified_row(row, run, context, binding, current):
 def _native_memory_reference_row_on_connection(connection, table, key):
     """Read one current certified raw reference tuple, never Source authority."""
     from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, MEMORY_DESCRIPTORS, HeaderBoundsError
-    from src.memory.composition_headers import charge_row, current_budget
+    from src.memory.composition_headers import charge_row, current_budget, _CURRENT
     descriptor = COMPOSITION_DESCRIPTORS.get(table)
     if (current_budget() is None or descriptor is None
             or table not in {*RETAINED_FIELDS, *MEMORY_DESCRIPTORS}):
         raise HeaderBoundsError("memory_current_bound_not_certified")
     charge_row(connection, table, key)
+    certificate = _CURRENT.get()
+    header_key = int(_composition_address(table, key)) if table == "work_board_events" else key
+    upper = certificate.rows[(table, header_key)][1]
+    # SQL delivery, the named mapping, canonical text and encoded return are
+    # distinct appearances on the same original certificate/frame.
+    for appearance in ("mapping", "canonical", "encoded-return"):
+        certificate.budget.debit(upper, appearance=("memory-reference-output", appearance, table, key))
     columns = ",".join('"' + name + '"' for name in descriptor.columns)
     parameter = int(_composition_address(table, key)) if table == "work_board_events" else key
     records = list(_sql(connection, f'SELECT {columns} FROM "{table}" WHERE "{descriptor.key}"=? LIMIT 2', (parameter,)))
@@ -1903,6 +5515,23 @@ def _programme_reference_row_on_connection(connection, table, key):
     return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
 
 
+def _native_memory_cold_original_numeric_entries(run_id, *, effect_upper, source_upper, original_upper):
+    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    entries = list(_native_memory_cold_numeric_entries(run_id, "original-effect", effect_upper,
+        ("kwargs-copy", "construction", "field-set", "typed-field-set", "asdict-field-copy", "asdict-value-copy",
+         "digest-asdict-copy", "digest-asdict-value-copy", "digest-canonical", "digest-utf8", "digest-return")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "original-source", source_upper,
+        ("digest-canonical", "digest-utf8", "digest-return")))
+    for owner in ("original-current-binding", "original-result-binding"):
+        entries.extend(_native_memory_cold_numeric_entries(run_id, owner, original_upper,
+            ("digest-canonical", "digest-utf8", "digest-return")))
+    # The already selected Effect encoding bounds its retained audit key.
+    audit_ref = _native_memory_object_width({"table": _native_memory_ascii_string_width("audit_events"),
+        "key": effect_upper})
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "original-audit", audit_ref, ("reference",)))
+    return tuple(entries)
+
+
 def _checked_memory_original_bindings(row, run, context, binding, original, current):
     """Immutable cold evidence shape only; no SQL, M5 MAC or owner authority."""
     from dataclasses import asdict
@@ -1913,6 +5542,15 @@ def _checked_memory_original_bindings(row, run, context, binding, original, curr
     result = context["result"]
     if result is None or type(result["effect"]) is not dict:
         raise ValueError("memory_original_effect_missing")
+    from src.memory.composition_headers import current_budget
+    if current_budget() is not None:
+        _native_memory_cold_prepay(_native_memory_cold_original_numeric_entries(row["run_identity"],
+            effect_upper=_native_memory_closed_value_width(result["effect"]),
+            source_upper=_native_memory_closed_value_width(candidate.get("source")),
+            original_upper=_native_memory_closed_value_width(original)))
+        from src.memory.header_bounds import _native_memory_utf8_width
+        _native_memory_cold_prepay(_native_memory_cold_binding_digest_numeric_entries(row["run_identity"],
+            _native_memory_utf8_width(row["composition_binding_json"]), owner="original", occurrences=2))
     effect = MemoryOwnerEffect(**result["effect"])
     if (set(result["effect"]) != set(asdict(effect)) or effect.status not in {"succeeded", "blocked"}
             or effect.method != candidate["method"]
@@ -1948,6 +5586,117 @@ def _checked_memory_original_bindings(row, run, context, binding, original, curr
     return effect, audit_ref
 
 
+def _native_memory_cold_reference_numeric_entries(run_id, *, rows_upper, row_count,
+        selected_rows_upper, own_upper, own_journal_upper):
+    """Current aggregate, own tuple and output appearances, excluding reads.
+
+    Reference delivery and shared journal/projection parsers have their own
+    owner schedules. The historical unlabelled own-body debit is separate.
+    """
+    from src.memory.header_bounds import (
+        HeaderBoundsError, MAX_ROWS, _native_memory_object_width, _native_memory_ascii_string_width)
+    if type(row_count) is not int or not 1 <= row_count <= MAX_ROWS:
+        raise HeaderBoundsError("memory_cold_numeric_unavailable")
+    own_ref = _native_memory_object_width({"table": _native_memory_ascii_string_width("workflow_run_states"),
+        "key": _native_memory_ascii_string_width(run_id)})
+    entries = list(_native_memory_cold_numeric_entries(run_id, "current-reference", own_ref, ("own-reference",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-aggregate", rows_upper,
+        ("normalized-list", "normalized-row-copies", "normalized-own-update", "digest-canonical", "digest-utf8", "digest-return")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-aggregate", own_ref * row_count,
+        ("own-reference-comparisons",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-row-hash", 66 * row_count,
+        ("digest-outputs",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-own-row", own_upper,
+        ("raw-codec-fields", "raw-codec-container", "raw-codec-canonical", "raw-codec-utf8",
+         "projection-row-copy", "projected-codec-fields", "projected-codec-container",
+         "projected-codec-canonical", "projected-codec-utf8")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-own-row", own_journal_upper,
+        ("projection-kwargs",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-reference", selected_rows_upper + rows_upper,
+        ("raw-rows-map",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "current-reference", rows_upper, ("raw-row-key-tuples",)))
+    return tuple(entries)
+
+
+def _native_memory_cold_audit_numeric_entries(run_id, *, audit_upper, details_upper):
+    entries = list(_native_memory_cold_numeric_entries(run_id, "audit", audit_upper,
+        ("tuple-digest-return",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "audit-details", details_upper,
+        ("size-utf8", "json-parser", "json-pairs", "json-dicts")))
+    expected = _native_memory_closed_value_width([
+        "memory_learning_accepted", "memory_corrected", "memory_learning_rejected", "memory_learning_expired",
+        "memory_learning_rolled_back"])
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "audit", expected, ("expected-event-types",)))
+    return tuple(entries)
+
+
+def _native_memory_cold_receipt_numeric_entries(run_id, *, receipt_upper, proposal_upper, evidence_upper):
+    """The two original receipt checks, including their nested source projection.
+
+    Original raw rows bound retained values; the literal envelopes below bound
+    added keys/defaults and normalized timestamp strings. This constructs no
+    MAC payload and supplies neither the signing key nor verification result.
+    """
+    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    from src.memory.m5 import M5_NONE_DIGEST, M5_NONE_MEMORY, M5_NONE_PROPOSAL, M5_RECEIPT_SCHEMA_VERSION
+    source_fields = ("owner_principal_id", "owner_session_id", "source_task_id", "source_task_revision",
+        "source_attempt_id", "source_attempt_fence", "workflow_run_id", "workflow_run_revision", "goal_id",
+        "goal_revision", "capability_id", "capability_version", "typed_input_digest", "source_context_digest",
+        "candidate_set_digest", "evidence_digest", "readback_kind", "readback_ref", "readback_digest",
+        "artifact_ref", "artifact_digest", "proposal_job_id", "request_idempotency_key", "request_binding_digest",
+        "source_evidence_ids")
+    source_upper = proposal_upper + _native_memory_object_width({name: 4 for name in source_fields})
+    mac_upper = receipt_upper + _native_memory_object_width({
+        "version": _native_memory_ascii_string_width("work-board-m5-receipt-integrity.v1"), "receipt": 4}) + 4 * 34
+    binding_upper = receipt_upper + proposal_upper + _native_memory_object_width({
+        "version": _native_memory_ascii_string_width(M5_RECEIPT_SCHEMA_VERSION), "stage": 4, "status": 4,
+        "accepted_proposal_id": _native_memory_ascii_string_width(M5_NONE_PROPOSAL),
+        "accepted_memory_id": _native_memory_ascii_string_width(M5_NONE_MEMORY),
+        "accepted_memory_content_digest": _native_memory_ascii_string_width(M5_NONE_DIGEST)})
+    entries = list(_native_memory_cold_numeric_entries(run_id, "receipt-integrity", mac_upper,
+        ("payload", "retrieval-evidence-parser", "timestamp-normalization", "envelope",
+         "canonical-copy", "canonical-sort", "canonical-json", "canonical-utf8", "digest-return")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "receipt-source", source_upper,
+        ("normalized-source", "source-evidence-copy", "source-strings")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "receipt-source", proposal_upper,
+        ("proposal-evidence-parser",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "receipt-source", evidence_upper,
+        ("receipt-evidence-parser",)))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "receipt-binding", binding_upper,
+        ("field-normalization", "payload", "canonical-copy", "canonical-sort", "canonical-json", "canonical-utf8",
+         "digest-return")))
+    return tuple(entries)
+
+
+def _native_memory_cold_selection_numeric_entries(run_id, *, memory_upper, proposal_upper, metadata_upper, scope_upper):
+    """Original accepted-selection verification and all repeated projections."""
+    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    from src.memory.repository import _M5_SELECTION_BINDING_SCHEMA_VERSION
+    envelope = _native_memory_object_width({name: 4 for name in (
+        "proposal_id", "accepted_content_digest", "owner_principal_id", "owner_session_id", "source_context_digest",
+        "verified_source_binding", "decision_effect", "memory_scope", "correction_target",
+        "recovered_from_proposal_id", "lifecycle_state")})
+    upper = memory_upper + proposal_upper + envelope + _native_memory_ascii_string_width(_M5_SELECTION_BINDING_SCHEMA_VERSION)
+    entries = list(_native_memory_cold_numeric_entries(run_id, "selection", metadata_upper,
+        ("metadata-size-utf8", "metadata-parser", "metadata-pairs", "metadata-dicts")))
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "selection", scope_upper,
+        ("scope-size-utf8", "scope-parser", "scope-pairs", "scope-dicts")))
+    # Matches() projects expected and canonical scope/source once; its MAC
+    # owner projects the canonical values once more. Every call remains paid.
+    entries.extend(_native_memory_cold_numeric_entries(run_id, "selection", upper,
+        ("text-newlines-crlf", "text-newlines-cr", "text-nfc", "text-strip", "text-utf8", "text-digest-return",
+         "expected-scope", "expected-scope-list", "expected-scope-model", "expected-scope-projection",
+         "canonical-scope", "canonical-scope-list", "canonical-scope-model", "canonical-scope-projection",
+         "expected-source-parser", "expected-source", "expected-source-list", "expected-source-strings",
+         "canonical-source", "canonical-source-list", "canonical-source-strings",
+         "correction", "correction-strings", "recovery-strings", "key-id-utf8", "key-id-digest-return",
+         "mac-scope", "mac-scope-list", "mac-scope-model", "mac-scope-projection",
+         "mac-source", "mac-source-list", "mac-source-strings", "mac-correction-input", "mac-correction",
+         "mac-correction-strings", "mac-recovery-strings", "mac-payload", "mac-canonical-copy", "mac-canonical-sort",
+         "mac-canonical-json", "mac-canonical-utf8", "mac-digest-return")))
+    return tuple(entries)
+
+
 def _checked_memory_reference_row(connection, row):
     """Source-independent current evidence inspection; never publication permission."""
     from src.memory.header_bounds import HeaderBoundsError, WRS_BY_RUN, strict_json_loads
@@ -1960,6 +5709,8 @@ def _checked_memory_reference_row(connection, row):
         run, context, binding = _checked_memory_candidate_row(row)
         original, current = preflight_native_memory_reference_journal(row["checkpoint_receipts_json"])
         if original is None and current is None:
+            _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"], "current-output",
+                _native_memory_cold_text_upper(row["checkpoint_context_json"]) + 7, ("result-tuple",)))
             return _checked_preoriginal_memory_row(row), None
         if current is None:
             raise ValueError("memory_current_projection_missing")
@@ -1967,10 +5718,17 @@ def _checked_memory_reference_row(connection, row):
         if ((original is None or payload["state"] != "unknown")
                 and payload["owner_operation_kind"] != candidate["method"]):
             raise ValueError("memory_current_operation_changed")
+        from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+        own_ref_upper = _native_memory_object_width({"table": _native_memory_ascii_string_width("workflow_run_states"),
+            "key": _native_memory_ascii_string_width(row["run_identity"])})
+        _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"],
+            "current-reference", own_ref_upper, ("own-reference",)))
         own_ref = {"table": "workflow_run_states", "key": row["run_identity"]}
         if own_ref not in payload["refs"]:
             raise ValueError("memory_current_own_reference_missing")
         if original is None:
+            _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"], "current-output",
+                _native_memory_closed_value_width(candidate) + 7, ("result-tuple",)))
             return _checked_memory_unknown_unverified_row(row, run, context, binding, current)
         effect, audit_ref = _checked_memory_original_bindings(row, run, context, binding, original, current)
         if payload["state"] == "unknown":
@@ -1979,8 +5737,13 @@ def _checked_memory_reference_row(connection, row):
             # an intervening owner, or a historical CAS. In particular, the
             # closed operation value can describe a different later M5 owner.
             # Only the validated branch below reports verified audit evidence.
+            _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"], "current-output",
+                _native_memory_closed_value_width(candidate) + 7, ("result-tuple",)))
             return candidate, None
         _, audit, audit_bytes = _native_memory_reference_row_on_connection(connection, "audit_events", effect.audit_event_id)
+        _native_memory_cold_prepay(_native_memory_cold_audit_numeric_entries(row["run_identity"],
+            audit_upper=_native_memory_closed_value_width(audit),
+            details_upper=_native_memory_cold_text_upper(audit["details_json"])))
         audit_digest = hashlib.sha256(audit_bytes).hexdigest()
         details = strict_json_loads(audit["details_json"])
         expected_types = ({"memory_learning_proposed"} if candidate["method"] == "memory.propose" else
@@ -1998,6 +5761,17 @@ def _checked_memory_reference_row(connection, row):
             raise ValueError("memory_original_audit_changed")
         if payload["absences"]:
             raise ValueError("memory_current_absence_unavailable")
+        from src.memory.composition_headers import _CURRENT
+        own_upper = _CURRENT.get().rows[("workflow_run_states", row["run_identity"])][1]
+        reference_entries = _native_memory_cold_reference_numeric_entries(row["run_identity"],
+            rows_upper=_native_memory_closed_value_width(payload["rows"]), row_count=len(payload["rows"]),
+            selected_rows_upper=sum(_CURRENT.get().rows[(item["ref"]["table"],
+                int(item["ref"]["key"]) if item["ref"]["table"] == "work_board_events"
+                else item["ref"]["key"])][1]
+                for item in payload["rows"]),
+            own_upper=own_upper, own_journal_upper=_native_memory_cold_text_upper(row["checkpoint_receipts_json"]))
+        # own-reference was constructed and prepaid before the Unknown branch.
+        _native_memory_cold_prepay(reference_entries[1:])
         if _native_memory_current_rows_digest(payload["rows"], row["run_identity"]) != payload["rows_digest"]:
             raise ValueError("memory_current_aggregate_changed")
         raw_rows = {}
@@ -2021,6 +5795,11 @@ def _checked_memory_reference_row(connection, row):
         for (table, key), actual in raw_rows.items():
             if table == "work_board_decision_receipts":
                 proposal = raw_rows.get(("memory_proposals", actual["source_proposal_id"]))
+                certificate = _CURRENT.get()
+                _native_memory_cold_prepay(_native_memory_cold_receipt_numeric_entries(row["run_identity"],
+                    receipt_upper=certificate.rows[(table, key)][1],
+                    proposal_upper=0 if proposal is None else certificate.rows[("memory_proposals", actual["source_proposal_id"])][1],
+                    evidence_upper=_native_memory_cold_text_upper(actual["retrieval_evidence_ids_json"])))
                 if not _m5_receipt_integrity_matches(actual) or not _m5_receipt_binding_matches(actual, proposal):
                     raise ValueError("memory_current_mac_changed")
             if table == "memory_proposals" and actual["status"] == "accepted":
@@ -2028,6 +5807,12 @@ def _checked_memory_reference_row(connection, row):
                 if memory is None:
                     raise ValueError("memory_current_accepted_memory_missing")
                 from src.memory.m5 import m5_text_digest
+                certificate = _CURRENT.get()
+                _native_memory_cold_prepay(_native_memory_cold_selection_numeric_entries(row["run_identity"],
+                    memory_upper=certificate.rows[("memories", actual["accepted_memory_id"])][1],
+                    proposal_upper=certificate.rows[(table, key)][1],
+                    metadata_upper=_native_memory_cold_text_upper(memory["metadata_json"]),
+                    scope_upper=_native_memory_cold_text_upper(actual["memory_scope_json"])))
                 provenance = strict_json_loads(memory["metadata_json"]).get("work_board_provenance")
                 if (m5_text_digest(memory["content"]) != actual["accepted_memory_content_digest"]
                         or not _m5_selection_binding_matches(provenance, proposal_id=actual["proposal_id"],
@@ -2036,6 +5821,10 @@ def _checked_memory_reference_row(connection, row):
                             source_binding=actual, corrects_memory_id=actual["corrects_memory_id"],
                             recovered_from_proposal_id=actual["recovered_from_proposal_id"])):
                     raise ValueError("memory_current_mac_changed")
+        _native_memory_cold_prepay(_native_memory_cold_numeric_entries(row["run_identity"], "current-output",
+            _native_memory_closed_value_width(candidate) + _native_memory_closed_value_width(effect.audit_event_id) + 66 + 6,
+            ("audit-tuple", "result-tuple")))
+        _record_native_memory_retained_current(connection, row, original, current)
         return candidate, (effect.audit_event_id, audit_digest)
     except (ValueError, TypeError, KeyError, AttributeError, HeaderBoundsError) as error:
         raise ProductionWorkspaceReconciliationError("composition_native_memory_reference_invalid") from error
@@ -3223,6 +7012,131 @@ _WRITER_FIRST_METADATA_GUARDS = WeakSet()
 # A shallow copy never ran the original guard constructor.
 _COMPOSITION_METADATA_GUARDS = WeakSet()
 
+def _native_memory_private_journal_numeric_entries(operation, prepared, *, certificate,
+        retention_widths, kind, affected_proof=None):
+    """ONE visible journal CAS vector; sibling owner forecasts remain separate.
+
+    Only already paid Source rows supply branch facts. Unsupported sibling
+    checkpoints stop this forecast before the first Memory effect.
+    """
+    import asyncio
+    from types import MappingProxyType
+    from src.memory.header_bounds import (HeaderBoundsError, MAX_BYTES,
+        _native_memory_utf8_width, _native_memory_ascii_string_width)
+    from src.runtime_plugins.memory_producer import _MEMORY_OPERATIONS, _MEMORY_SOURCES
+    if _MEMORY_OPERATIONS.get(id(operation)) is not operation:
+        raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+    source = operation.source
+    guard = operation.db.info.get("composition_guard")
+    retention = getattr(source, "_retention", None)
+    facts = (getattr(retention, "_publication_numeric_facts", None) if retention is not None
+        else getattr(guard, "_native_memory_retention_numeric_facts", None))
+    owner = getattr(guard, "_native_memory_source_capacity_owner", None)
+    if (_MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or operation._prepared is not prepared or type(guard) is not CompositionSessionGuard
+            or guard.db is not operation.db or source.admission.header_budget is not guard.header_budget
+            or asyncio.current_task() is None
+            or not ((type(owner) is tuple and len(owner) == 6 and owner[0] is operation
+                and owner[1] is prepared and owner[2] is certificate and owner[3] is asyncio.current_task())
+                or source._owner_task is asyncio.current_task())
+            or type(facts) is not tuple or len(facts) != 4 or facts[0] is not operation
+            or facts[1] is not prepared or facts[2] is not certificate
+            or certificate.budget is not guard.header_budget
+            or certificate.metadata_budget is not guard.header_budget
+            or type(retention_widths) is not MappingProxyType
+            or kind not in {"capture", "completion", "affected-unknown"}):
+        raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+    if retention is not None:
+        retention._checked()
+    if kind == "affected-unknown":
+        affected = (getattr(retention, "_affected_publication_numeric_facts", None) if retention is not None
+            else getattr(guard, "_native_memory_affected_numeric_facts", None))
+        if (type(affected) is not tuple or len(affected) != 5 or affected[0] is not operation
+                or affected[1] is not prepared or affected[2] is not certificate
+                or type(affected[4]) is not MappingProxyType
+                or type(affected_proof) is not _NativeMemoryRetainedCurrentProof
+                or not any(value is affected_proof for value in affected[3])
+                or affected_proof.operation is not operation
+                or affected[4].get(affected_proof.before['run_identity']) is not retention_widths):
+            raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+        before = affected_proof.before
+    else:
+        if facts[3] is not retention_widths:
+            raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+        if retention is not None:
+            before = retention.before
+        else:
+            selected = getattr(guard, "_native_memory_existing_source_rows", None)
+            if type(selected) is not tuple or selected[0] is not operation:
+                raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+            before = None
+            for descriptor, key, row in selected[2]:
+                if descriptor.table == "workflow_run_states" and key == operation.run.run_identity:
+                    if before is not None:
+                        raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+                    before = row
+            if before is None:
+                raise HeaderBoundsError("memory_private_journal_owner_unavailable")
+    old = 6 * _native_memory_utf8_width(before['checkpoint_receipts_json'] or '[]') + 2
+    future = retention_widths.get('journal_upper')
+    if type(future) is not int or not 0 <= future <= MAX_BYTES or old > MAX_BYTES:
+        raise HeaderBoundsError("memory_private_journal_bound_unavailable")
+    bound = max(old, future)
+    # This paid original-row parse is a forecast observation, never a new body
+    # or writer grant. The same appearance is retained in the invocation vector.
+    guard.header_budget.debit(old, appearance=('memory-private-journal', kind, 'source-branch-parse'))
+    records = json.loads(before['checkpoint_receipts_json'] or '[]')
+    if type(records) is not list:
+        raise HeaderBoundsError("memory_private_journal_bound_unavailable")
+    for item in records:
+        identifier = item.get('checkpoint_id') if type(item) is dict else None
+        if type(identifier) is str and (identifier.startswith('runtime-service-invocation:task-capability:')
+                or identifier.startswith('runtime-service-invocation:programme-start:')
+                or identifier in {'conversation:cancel', 'conversation:callback-closure',
+                    'conversation:operation-family', 'inference:owned-output-intent.v1',
+                    'inference:owned-output.v1', 'inference:original-candidate.v1'}):
+            raise HeaderBoundsError("memory_private_journal_sibling_schedule_unavailable")
+    permission = 2 + 2 * bound + 1
+    for name in ('composition_native_claim_receipt', 'composition_native_turn_receipt',
+            'composition_native_turn_family_receipt'):
+        permission += _native_memory_closed_value_width(operation.db.info.get(name)) + 1
+    stages = ('source-branch-parse', 'old-json', 'new-json', 'old-selected-map', 'new-selected-map',
+        'old-checkpoint-text', 'new-checkpoint-text', 'memory-permission-tuple', 'task-id-strings',
+        'memory-id-set', 'task-id-set', 'task-intersection', 'permission-tuple',
+        'programme-key-difference', 'control-id-set', 'control-intersection', 'output-id-set',
+        'selected-pair-tuple', 'old-items-output', 'new-key-difference',
+        'numeric-amounts-tuple', 'numeric-vector')
+    task_strings = sum(_native_memory_ascii_string_width('runtime-service-invocation:task-capability:')
+        + _native_memory_ascii_string_width(phase) - 2
+        for phase in ('admission', 'source', 'invoke', 'outcome', 'cleanup'))
+    amounts_upper = 2 + 7 * len(stages) + len(stages) - 1
+    vector_upper = 3 * (2 + len(stages) - 1 + sum(2 + 2
+        + _native_memory_ascii_string_width('memory-private-journal') + 1
+        + _native_memory_ascii_string_width(kind) + 1
+        + _native_memory_ascii_string_width(stage) + 1 + 7 for stage in stages))
+    guard.header_budget.debit(amounts_upper,
+        appearance=('memory-private-journal', kind, 'numeric-amounts-tuple'))
+    guard.header_budget.debit(vector_upper,
+        appearance=('memory-private-journal', kind, 'numeric-vector'))
+    # Each selected key occurs in its original receipt and as the map key;
+    # twice the complete journal therefore bounds the selected map/output.
+    amounts = (old, bound, bound, 2 * bound + 2, 2 * bound + 2,
+        2 * bound + 2, 2 * bound + 2, 2 * bound + 3, task_strings,
+        3 + _native_memory_ascii_string_width(MEMORY_ORIGINAL_CHECKPOINT)
+            + _native_memory_ascii_string_width(MEMORY_CURRENT_CHECKPOINT),
+        2 + task_strings + 4,
+        2 * bound + 2, permission, 4 * bound + 3,
+        _native_memory_closed_value_width(('conversation:cancel', 'conversation:callback-closure')),
+        2 * bound + 2,
+        _native_memory_closed_value_width(('inference:owned-output-intent.v1',
+            'inference:owned-output.v1', 'inference:original-candidate.v1')),
+        4 * bound + 3, 2 * bound + 2, 4 * bound + 3, amounts_upper, vector_upper)
+    if any(amount > MAX_BYTES for amount in amounts):
+        raise HeaderBoundsError("memory_private_journal_bound_unavailable")
+    return tuple((('memory-private-journal', kind, stage), amount)
+        for stage, amount in zip(stages, amounts))
+
+
 class CompositionSessionGuard:
     """One existing session, external lock and precommit publisher.
 
@@ -3553,6 +7467,142 @@ class CompositionSessionGuard:
         for appearance in ("identity-order", "identity-return"):
             entries.append((("programme-selector", appearance), identity_upper))
         return tuple(entries)
+
+    async def _native_memory_publication_numeric_widths(self, operation, prepared, *, certificate, facts, retention_widths):
+        """Original writer's private publication capacities, never target facts."""
+        from types import MappingProxyType
+        from src.memory.header_bounds import HeaderBoundsError, _native_memory_object_width as obj, _native_memory_array_width as array
+        from src.workspace.production import (_publication_json_upper as width,
+            MAX_ACCOUNTING_CHECKPOINT_BYTES, MAX_LIFECYCLE_RECEIPT_BYTES)
+        guard, _rows, own, audit, _new, _candidate = _native_memory_generic_future_bound_inputs(
+            operation, prepared, certificate, facts, retention_widths)
+        if (guard is not self or type(self.base) is not dict or self.base.get("schema_version") != 2
+                or type(self.base.get("native")) is not dict):
+            raise HeaderBoundsError("memory_publication_numeric_shape_unavailable")
+        native = self.base["native"]
+        if audit in self.members:
+            raise HeaderBoundsError("memory_publication_numeric_graph_unavailable")
+        self.header_budget.debit(width(native), appearance=("memory-publication-width", "native-numeric-map"))
+        counts = dict(native["table_counts"])
+        counts["audit_events"] = counts.get("audit_events", 0) + 1
+        self.header_budget.debit(width(native["relation_counts"]) + width("audit_event_session_fk") + 20,
+            appearance=("memory-publication-width", "relation-numeric-map"))
+        relations = dict(native["relation_counts"])
+        relations["audit_event_session_fk"] = relations.get("audit_event_session_fk", 0) + 1
+        self.header_budget.debit(2 + sum(width(key) + 21 for key in native) + max(0, len(native) - 1),
+            appearance=("memory-publication-width", "native-field-width-map"))
+        native_width = obj({key: (width(native["total_rows"] + 1) if key == "total_rows"
+            else width(counts) if key == "table_counts" else width(relations) if key == "relation_counts"
+            else width(value)) for key, value in native.items()})
+        self.header_budget.debit(2 + sum(width(key) + 21 for key in self.base) + max(0, len(self.base) - 1),
+            appearance=("memory-publication-width", "target-field-width-map"))
+        target_width = obj({key: native_width if key == "native" else width(value)
+            for key, value in self.base.items()})
+        # Only genuine existing member changes enter the original generic delta.
+        projection = self._native_memory_source_projection
+        affected = self._native_memory_affected_numeric_facts[4]
+        members_upper = array(width(item) for item in self.members)
+        self.header_budget.debit(members_upper + width(audit) + width(own),
+            appearance=("memory-publication-width", "member-key-projection"))
+        changed = {own, audit}
+        changed.update((descriptor.table, key) for descriptor, key, _changes in projection[2]
+            if (descriptor.table, key) in self.members)
+        changed.update(("workflow_run_states", key) for key in affected
+            if ("workflow_run_states", key) in self.members)
+        self.header_budget.debit(members_upper + 2 * width(audit) + 4,
+            appearance=("memory-publication-width", "members-copy"))
+        members = self.members | {audit}
+        self.header_budget.debit(width(changed), appearance=("memory-publication-width", "delta-key-sort"))
+        self.header_budget.debit(width(changed), appearance=("memory-publication-width", "delta-key-tuple"))
+        keys = tuple(sorted(changed))
+        self.header_budget.debit(len(keys) * (2 + sum(width(name) + 21 for name in (
+            "table_id", "key", "before_digest", "after_digest")) + 3) + 2 + 21 * len(keys),
+            appearance=("memory-publication-width", "delta-numeric-projection"))
+        delta_width = array(tuple(obj({"table_id": width(table), "key": width(key),
+            "before_digest": 66, "after_digest": 66}) for table, key in keys))
+        accounting = await self._publication_accounting_payload(
+            _numeric_body_certificate=certificate, _native_memory_operation=operation)
+        self.header_budget.debit(2 + sum(width(key) + 21 for key in accounting)
+            + max(0, len(accounting) - 1),
+            appearance=("memory-publication-width", "checkpoint-numeric-map"))
+        checkpoint_fields = {key: width(value) for key, value in accounting.items()}
+        self.header_budget.debit(2 + sum(width(key) + 21 for key in (
+            "schema_version", "composition_base", "composition_target", "composition_delta",
+            "secret_values_included")) + 4,
+            appearance=("memory-publication-width", "checkpoint-numeric-update"))
+        checkpoint_fields.update(schema_version=1, composition_base=max(width(self.base), target_width),
+            composition_target=target_width, composition_delta=delta_width, secret_values_included=5)
+        checkpoint_width = obj(checkpoint_fields)
+        prior = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget)
+        receipt_copy_upper = width(prior) if prior else 2 + width("secret_values_included") + 1 + 5
+        self.header_budget.debit(receipt_copy_upper,
+            appearance=("memory-publication-width", "receipt-numeric-map"))
+        receipt = prior or {"secret_values_included": False}
+        self.header_budget.debit(2 + sum(width(key) + 21 for key in receipt) + max(0, len(receipt) - 1),
+            appearance=("memory-publication-width", "receipt-field-width-map"))
+        receipt_fields = {key: width(value) for key, value in receipt.items()}
+        receipt_fields["runtime_composition"] = target_width
+        witness_width = width(accounting["witness"]) if accounting.get("witness") is not None else 0
+        if witness_width:
+            receipt_fields["inference_accounting"] = witness_width
+        receipt_width = obj(receipt_fields)
+        if checkpoint_width > MAX_ACCOUNTING_CHECKPOINT_BYTES or receipt_width > MAX_LIFECYCLE_RECEIPT_BYTES:
+            raise HeaderBoundsError("composition_publication_size_exceeded")
+        names = ("target_bytes", "native_bytes", "programme_bytes", "checkpoint_bytes", "receipt_bytes",
+            "members_bytes", "delta_bytes", "delta_key_bytes", "changed_members_bytes", "changed_touched_bytes",
+            "delta_sort_bytes", "witness_bytes", "receipt_default_bytes", "receipt_target_update_bytes",
+            "receipt_witness_update_bytes", "added_members")
+        self.header_budget.debit(2 + sum(width(name) + 21 for name in names) + len(names) - 1 + width((audit,)),
+            appearance=("memory-publication-width", "numeric-output"))
+        result = {"target_bytes": target_width, "native_bytes": native_width,
+            "programme_bytes": width(self.base["programme"]), "checkpoint_bytes": checkpoint_width,
+            "receipt_bytes": receipt_width, "members_bytes": array(width(item) for item in members),
+            "delta_bytes": delta_width, "delta_key_bytes": width(keys), "delta_sort_bytes": width(keys),
+            "changed_members_bytes": width((audit,)),
+            "changed_touched_bytes": 2 + sum(width((table, key)) + 1 + 66 for table, key in keys) + max(0, len(keys) - 1),
+            "witness_bytes": witness_width, "receipt_default_bytes": 0 if prior else width(receipt),
+            "receipt_target_update_bytes": receipt_width + width("runtime_composition") + 1 + target_width,
+            "receipt_witness_update_bytes": receipt_width + width("inference_accounting") + 1 + witness_width,
+            "added_members": (audit,)}
+        # A's final receipt is B's prior receipt. Both replacements reserve the
+        # complete larger copy; a smaller actual appearance receives no refund.
+        retained = MappingProxyType(result)
+        self._native_memory_publication_numeric_facts = (operation, prepared, certificate, retention_widths, retained)
+        # These are two ORIGINAL engine publications, not two synthetic
+        # snapshots. Their body/accounting/certification vectors are composed
+        # separately. Preserve each allocation and private read occurrence.
+        # The helper's largest label has three ASCII fields, each <=31 bytes;
+        # its amount is an original int64 numerical bound. Pay its list and
+        # tuple before either helper constructs a vector.
+        engine_vector_upper = 2 + 27 + 28 * (3 + 2 + 2 + 3 * (31 + 2) + 20)
+        for copy in ("list", "tuple"):
+            self.header_budget.debit(engine_vector_upper,
+                appearance=("memory-publication-vector", "engine", copy))
+        engine_entries = _native_memory_engine_publication_numeric_entries(operation, prepared,
+            certificate=certificate, retention_widths=retention_widths,
+            publication_widths=retained)
+        prior_reads = getattr(self, "_native_memory_prior_publication_numeric", None)
+        for copy in ("list", "tuple"):
+            self.header_budget.debit(_native_memory_prior_publication_vector_upper(),
+                appearance=("memory-publication-vector", "prior", copy))
+        prior_entries = _native_memory_prior_publication_numeric_entries(operation, prepared,
+            certificate=certificate, retention_widths=retention_widths,
+            publication_widths=retained, prior_reads=prior_reads)
+        from src.memory.composition_headers import _metadata_size
+        # Each phase triple adds its literal phase to one paid source pair.
+        # The two phases retain all 56 pairs, including every None raw read.
+        pair_bytes = _metadata_size(engine_entries) + _metadata_size(prior_entries)
+        vector_upper = 2 + 111 + 2 * pair_bytes + 56 * (width("capture") + width("completion") + 4)
+        for copy in ("phase-triples", "tuple", "owner-lineage"):
+            self.header_budget.debit(vector_upper,
+                appearance=("memory-publication-vector", "combined", copy))
+        entries = tuple((phase, appearance, upper)
+            for phase in ("capture", "completion")
+            for vector in (engine_entries, prior_entries)
+            for appearance, upper in vector)
+        self._native_memory_publication_allocation_numeric = (
+            operation, prepared, certificate, retention_widths, retained, entries)
+        return retained
 
     async def _discovery_publication_numeric_widths(self, *, constructor):
         """Measure original target/output RESOURCE widths without predicting hashes.
@@ -4393,6 +8443,27 @@ class CompositionSessionGuard:
         if (self not in _COMPOSITION_METADATA_GUARDS or self._retention_closed
                 or self.db.info.get("composition_guard") is not self):
             raise HeaderBoundsError("memory_retention_writer_changed")
+        from src.memory.header_bounds import (_MEMORY_LEDGER_PHASE,
+            _NativeMemoryNumericLedger, _MEMORY_LEDGER_SEAL)
+        active_memory = _MEMORY_LEDGER_PHASE.get()
+        if (type(active_memory) is tuple and len(active_memory) == 2
+                and type(active_memory[0]) is _NativeMemoryNumericLedger):
+            ledger = active_memory[0]
+            retention = getattr(self, "_native_memory_source_retention", None)
+            if (ledger._complete_owner is not _MEMORY_LEDGER_SEAL
+                    or type(retention) is not _NativeMemoryRetention
+                    or retention.ledger is not ledger or retention.source is not ledger.source
+                    or retention.operation is not ledger.operation
+                    or ledger.budget is not self.header_budget):
+                raise HeaderBoundsError("memory_retention_writer_changed")
+            # The original publisher selects the same already-issued numeric
+            # payer. Current Source/task/transaction/driver/guard and any
+            # completion publication proof are checked by the existing owner;
+            # this supplies neither a certificate nor body permission.
+            from src.memory.composition_headers import _metadata_memory_capacity
+            current_connection = connection if connection is not None else self.db.sync_session.connection()
+            _metadata_memory_capacity(current_connection, self.header_budget, active_memory)
+            return self.header_budget
         if self._discovery_writer_metadata_owner is not None:
             owned = self._discovery_writer_metadata_owner
             owned.validate(db=self.db, header_budget=self.header_budget)
@@ -4543,6 +8614,41 @@ class CompositionSessionGuard:
         self.touched[(table, key)] = before
 
     def _check_private_journal(self, before, after, *, run_id, statement=None):
+        plan = _ARMED_MEMORY_PUBLICATION.get()
+        if type(plan) is _NativeMemorySourcePublication:
+            import asyncio
+            from src.memory.composition_headers import current_budget, _CURRENT
+            from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _native_memory_utf8_width
+            if (_MEMORY_PUBLICATIONS.get(id(plan)) is not plan
+                    or plan.seal is not _MEMORY_PUBLICATION_SEAL or plan.db is not self.db
+                    or plan.statement is not statement or plan.task is not asyncio.current_task()):
+                raise ProductionWorkspaceReconciliationError("memory_private_journal_owner_changed")
+            retention = plan.retention._checked()
+            active = _MEMORY_LEDGER_PHASE.get()
+            if (_MEMORY_PUBLICATIONS.get(id(plan)) is not plan or plan.seal is not _MEMORY_PUBLICATION_SEAL
+                    or plan.consumed or plan.applied or plan.db is not self.db
+                    or plan.statement is not statement or plan.task is not asyncio.current_task()
+                    or self.db.sync_session.get_transaction() is not plan.transaction
+                    or run_id != plan.before['run_identity']
+                    or before != plan.before['checkpoint_receipts_json']
+                    or after != plan.after['checkpoint_receipts_json']
+                    or current_budget() is not self.header_budget
+                    or _CURRENT.get() is not plan.certificate
+                    or plan.certificate.connection.connection.driver_connection is not plan.driver
+                    or retention.source.admission.header_budget is not self.header_budget
+                    or active is None or active[0] is not retention.ledger
+                    or active[1] != ('completion' if plan.kind == 'completion' else 'capture')):
+                raise ProductionWorkspaceReconciliationError("memory_private_journal_owner_changed")
+            facts = retention._publication_numeric_facts
+            numeric = _native_memory_private_journal_numeric_entries(retention.operation,
+                retention.prepared, certificate=facts[2], retention_widths=plan._numeric_widths,
+                kind=plan.kind, affected_proof=plan.affected_proof)
+            if max(6 * _native_memory_utf8_width(before or '[]') + 2,
+                    6 * _native_memory_utf8_width(after or '[]') + 2) > plan._numeric_widths['journal_upper']:
+                raise ProductionWorkspaceReconciliationError("memory_private_journal_bound_changed")
+            for appearance, upper in numeric:
+                if appearance[-1] not in {'source-branch-parse', 'numeric-amounts-tuple', 'numeric-vector'}:
+                    self.header_budget.debit(upper, appearance=appearance)
         from src.workflows.job_runtime import _protected_composition_checkpoint
         def protected(raw):
             records = json.loads(raw or "[]")
@@ -4824,10 +8930,42 @@ class CompositionSessionGuard:
             self.listeners.append((name, guarded))
 
     async def _publication_accounting_payload(self, *, _numeric_body_certificate=None,
-            discovery_session=None):
+                                              discovery_session=None, _native_memory_operation=None):
         """Original unchanged ledger/readback predicates, in this same session."""
         if _numeric_body_certificate is not None:
             from src.memory.composition_headers import _validate
+            from src.memory.header_bounds import (_MEMORY_LEDGER_PHASE,
+                _NativeMemoryNumericLedger, _NativeProgrammeNumericLedger)
+            active_native = _MEMORY_LEDGER_PHASE.get()
+            native_owner = False
+            if _native_memory_operation is not None:
+                from src.runtime_plugins.memory_producer import _validate_memory_owner_source
+                source = await _validate_memory_owner_source(self.db,
+                    _native_memory_operation.run, _native_memory_operation)
+                projection = getattr(self, "_native_memory_source_projection", None)
+                if (projection is None or projection[0] is not _native_memory_operation
+                        or _native_memory_operation._effect is not None
+                        or _native_memory_operation._prepared.consumed
+                        or source.admission.header_budget is not self.header_budget
+                        or self.db.info.get("composition_guard") is not self):
+                    raise ProductionWorkspaceReconciliationError("memory_numeric_publication_unavailable")
+                native_owner = True
+            if active_native is not None:
+                ledger, phase = active_native
+                ledger._checked()
+                retention = getattr(self, "_native_memory_source_retention", None)
+                programme = getattr(self, "_native_programme_start_numeric_owner", None)
+                if type(ledger) is _NativeMemoryNumericLedger:
+                    native_owner = (type(retention) is _NativeMemoryRetention
+                        and retention.ledger is ledger and retention.source is ledger.source
+                        and phase in {"capture", "completion"})
+                elif type(ledger) is _NativeProgrammeNumericLedger:
+                    native_owner = (type(programme) is tuple and len(programme) == 3
+                        and programme[0] is ledger.source and phase == "publication")
+                if (not native_owner or ledger.budget is not self.header_budget
+                        or ledger.bindings.get(phase, (None,))[0] is not self.db
+                        or self.db.info.get("composition_guard") is not self):
+                    raise ProductionWorkspaceReconciliationError("composition_numeric_publication_unavailable")
             prospective = self._prospective_admission
             if discovery_session is not None:
                 from src.guardian.goal_discovery import _OwnedDiscoverySession
@@ -4836,13 +8974,13 @@ class CompositionSessionGuard:
                 discovery_session.validate(db=self.db, header_budget=self.header_budget)
                 if discovery_session.guard is not self or discovery_session._candidate is None:
                     raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
-            elif (prospective is None or _numeric_body_certificate is not prospective[0].common33
+            elif not native_owner and (prospective is None or _numeric_body_certificate is not prospective[0].common33
                     or _numeric_body_certificate.budget is not self.header_budget
                     or self.db.info.get("composition_guard") is not self):
                 raise ProductionWorkspaceReconciliationError("programme_numeric_publication_unavailable")
             connection = await self.db.connection()
             def validate_numeric_reader(conn):
-                if discovery_session is None:
+                if discovery_session is None and not native_owner:
                     self._validate_programme_selection(prospective[0])
                 elif (_numeric_body_certificate.connection is not conn
                         or _numeric_body_certificate.budget is not self.header_budget
@@ -4858,18 +8996,66 @@ class CompositionSessionGuard:
             from src.db.models import InferenceAccountingOwner, InferenceCostReservation
             from src.workflows.inference_accounting import _witness, _ledger_digest
             from src.workspace.production import read_accounting_checkpoint
-            prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
-            lifecycle = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {}
+            if _native_memory_operation is None:
+                prior = read_accounting_checkpoint(self.workspace, header_budget=self.header_budget)
+                lifecycle = read_lifecycle_receipt(self.workspace, header_budget=self.header_budget) or {}
+            else:
+                # Observe only the two original reads already owned here.
+                # Pair/list storage is prepaid before entering the tracer;
+                # the original private bytes never enter the retained facts.
+                import asyncio
+                from src.memory.header_bounds import _trace_memory_numeric_charges
+                from src.memory.composition_headers import _metadata_size
+                def read_prior(reader, label):
+                    stages = (("json-parse", "materialization", "return") if label == "checkpoint"
+                        else ("decode", "json-parse", "materialization", "return"))
+                    pair_upper = 2 + 4 + 1 + 20
+                    storage_upper = 2 + 2 * pair_upper + 1
+                    for stage in stages:
+                        pair_upper = 2 + _metadata_size(("composition-publication", label, stage)) + 1 + 20
+                        storage_upper += 2 * pair_upper + 1
+                    self.header_budget.debit(storage_upper,
+                        appearance=("memory-publication-prior-trace", label, "pair-list-storage"))
+                    with _trace_memory_numeric_charges(self.header_budget) as trace:
+                        value = reader(self.workspace, header_budget=self.header_budget)
+                    self.header_budget.debit(_metadata_size(trace),
+                        appearance=("memory-publication-prior-trace", label, "retained-tuple"))
+                    from src.workspace.production import _publication_json_upper
+                    self.header_budget.debit(3 + _publication_json_upper(value) + _metadata_size(trace),
+                        appearance=("memory-publication-prior-trace", label, "reader-return"))
+                    return value, tuple(trace)
+                prior, checkpoint_trace = read_prior(read_accounting_checkpoint, "checkpoint")
+                lifecycle, receipt_trace = read_prior(read_lifecycle_receipt, "receipt")
+                lifecycle = lifecycle or {}
+                self.header_budget.debit(2 + 6 + 5 * 4
+                    + _metadata_size(checkpoint_trace) + _metadata_size(receipt_trace),
+                    appearance=("memory-publication-prior-trace", "owner-lineage"))
+                self._native_memory_prior_publication_numeric = (
+                    _native_memory_operation, _native_memory_operation._prepared,
+                    _numeric_body_certificate, self.header_budget, asyncio.current_task(),
+                    checkpoint_trace, receipt_trace)
             if self.header_budget is not None:
                 from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
                 from src.memory.composition_headers import locate_exact_rows
                 payer = self.header_budget if _numeric_body_certificate is not None else None
-                ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment",
-                    self.header_budget, _header_budget=payer)
-                await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids,
-                    _header_budget=payer)
-                await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"],
-                    _header_budget=payer)
+                if _native_memory_operation is None:
+                    ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment",
+                        self.header_budget, _header_budget=payer)
+                    await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids,
+                        _header_budget=payer)
+                    await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"],
+                        _header_budget=payer)
+                else:
+                    self.header_budget.debit(2 + 6 * (6 * 32 + 2 + 4 + 2) + 16 + 2,
+                        appearance=("native-memory-accounting-certification-trace", "context-wrapper"))
+                    async with _native_memory_accounting_certification_capture(
+                            self, _native_memory_operation, _numeric_body_certificate):
+                        ids = await locate_exact_rows(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], "deployment",
+                            self.header_budget, _header_budget=payer)
+                        await self.header_budget.certify(self.db, COMPOSITION_DESCRIPTORS["inference_accounting_owners"], ids,
+                            _header_budget=payer)
+                        await self.header_budget.certify_all(self.db, COMPOSITION_DESCRIPTORS["inference_cost_reservations"],
+                            _header_budget=payer)
             if _numeric_body_certificate is not None:
                 from src.memory.composition_headers import snapshot_reads, charge_row, charge_table
                 def pay_owner(conn):
@@ -4883,10 +9069,51 @@ class CompositionSessionGuard:
                     with snapshot_reads(_numeric_body_certificate):
                         charge_table(conn, "inference_cost_reservations")
                 await connection.run_sync(pay_costs)
+                self.header_budget.debit(2 + sum(upper + 1
+                    for (table, _key), (_row, upper) in _numeric_body_certificate.rows.items()
+                    if table == "inference_cost_reservations"),
+                    appearance=("publication-accounting", "reservation-list"))
             rows = list((await self.db.execute(select(InferenceCostReservation))).scalars())
+            if _native_memory_operation is not None:
+                # These are the SAME original ORM bodies read above. Retain
+                # only their source-owned witness/ledger numeric schedule for
+                # the later two engine publications; no model/body survives
+                # as permission and no additional query is performed.
+                from src.workflows.inference_accounting import (
+                    original_accounting_witness_numeric_schedule, _accounting_scalar_upper)
+                from src.memory.composition_headers import _metadata_size
+                import asyncio
+                count = 17
+                pair_sum = 17 * (4 + 20 + 2 + 3 + 4 * 128)
+                if account is not None:
+                    # At most fourteen operation appearances: two dumps and
+                    # three for each of four nullable datetime fields. Fixed
+                    # label strings are <=21 ASCII bytes; IDs are original
+                    # paid typed model strings, measured without serialization.
+                    pair_sum += 17 * _accounting_scalar_upper(account.deployment_id)
+                    for row in rows:
+                        count += 14
+                        pair_sum += 14 * (4 + 20 + 2 + 3 + 4 * 128
+                            + _accounting_scalar_upper(row.operation_id))
+                if account is None:
+                    numeric = ()  # original absent-owner branch constructs no vector
+                else:
+                    vector_upper = 2 + max(0, count - 1) + pair_sum
+                    self.header_budget.debit(6 * vector_upper,
+                        appearance=("memory-publication-accounting", "planning-structures"))
+                    numeric = original_accounting_witness_numeric_schedule(account, rows)
+                self.header_budget.debit(2 + 6 + 5 * 20 + _metadata_size(numeric),
+                    appearance=("memory-publication-accounting", "owner-lineage"))
+                self._native_memory_accounting_numeric = (
+                    _native_memory_operation, _native_memory_operation._prepared,
+                    _numeric_body_certificate, self.header_budget, asyncio.current_task(),
+                    numeric)
             if account is None:
                 if rows or lifecycle.get("inference_accounting") is not None or (prior and prior.get("witness") is not None):
                     raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
+                if _numeric_body_certificate is not None:
+                    self.header_budget.debit(2,
+                        appearance=("publication-accounting", "empty-payload"))
                 accounting = {}
             else:
                 witness = _witness(account, header_budget=self.header_budget if _numeric_body_certificate is not None else None)
@@ -4897,6 +9124,15 @@ class CompositionSessionGuard:
                     or prior.get("secret_values_included") is not False
                     or not isinstance(prior.get("account"), dict)):
                     raise ProductionWorkspaceReconciliationError("accounting_continuity_unavailable")
+                if _numeric_body_certificate is not None:
+                    from src.workspace.production import _publication_json_upper
+                    from src.memory.header_bounds import _native_memory_object_width
+                    self.header_budget.debit(_native_memory_object_width({
+                        "base": _publication_json_upper(prior.get("base")),
+                        "account": _publication_json_upper(prior["account"]),
+                        "operations": 2, "witness": _publication_json_upper(witness),
+                        "secret_values_included": 5}),
+                        appearance=("publication-accounting", "payload-construction"))
                 accounting = {"base": prior.get("base"), "account": prior["account"],
                     "operations": [], "witness": witness, "secret_values_included": False}
         return accounting
@@ -4957,8 +9193,10 @@ class CompositionSessionGuard:
             delta.append({"table_id": table, "key": key, "before_digest": before, "after_digest": after})
         from src.db.engine import _original_discovery_exit_completion
         owned_exit = _original_discovery_exit_completion.get()
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+        native_exit = _MEMORY_LEDGER_PHASE.get()
         accounting = await self._publication_accounting_payload(
-            _numeric_body_certificate=self._publication_common if owned_exit is not None else None,
+            _numeric_body_certificate=self._publication_common if owned_exit is not None or native_exit is not None else None,
             discovery_session=owned_exit[0] if owned_exit is not None else None)
         if target == self.base and not self.db.info.get("composition_accounting_payload"):
             pay("return", width(target) + 12)
@@ -5081,6 +9319,85 @@ class CompositionSessionGuard:
             raise ProductionWorkspaceReconciliationError("session_mutation_changed")
 
     async def publish(self):
+        """The original engine exit consumes the actual native owner's frame."""
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger
+        retention = getattr(self, "_native_memory_source_retention", None)
+        programme_owner = getattr(self, "_native_programme_start_numeric_owner", None)
+        if retention is not None and programme_owner is not None:
+            raise ProductionWorkspaceReconciliationError("composition_numeric_owner_ambiguous")
+        if retention is not None:
+            if (type(retention) is not _NativeMemoryRetention
+                    or _MEMORY_RETENTIONS.get(id(retention.source)) is not retention
+                    or retention.source._retention is not retention
+                    or type(retention.ledger) is not _NativeMemoryNumericLedger
+                    or self.db.info.get("composition_guard") is not self
+                    or self.header_budget is not retention.ledger.budget
+                    or not retention.captured or _MEMORY_LEDGER_PHASE.get() is not None):
+                raise ProductionWorkspaceReconciliationError("memory_publication_source_changed")
+            retention.ledger._checked()
+            phase = "capture" if self.db is retention.operation.db else "completion"
+            if phase == "completion" and not retention.completed:
+                raise ProductionWorkspaceReconciliationError("memory_publication_completion_missing")
+            if phase == "completion":
+                import asyncio
+                plan = getattr(retention, "_completion_publication", None)
+                binding = retention.ledger.bindings.get("completion")
+                if (type(plan) is not _NativeMemorySourcePublication
+                        or _MEMORY_PUBLICATIONS.get(id(plan)) is not plan
+                        or plan.retention is not retention or plan.kind != "completion"
+                        or not plan.consumed or not plan.applied
+                        or plan.db is not self.db or plan.task is not asyncio.current_task()
+                        or plan.transaction is not self.db.sync_session.get_transaction()
+                        or not plan.driver.in_transaction or binding is None
+                        or binding[0] is not self.db or binding[1] is not plan.transaction
+                        or binding[2] is not plan.driver or binding[5] is not plan.task
+                        or getattr(plan, "_capacity_publication_live", False)
+                        or getattr(plan, "_capacity_publication_spent", False)):
+                    if type(plan) is _NativeMemorySourcePublication and plan.retention is retention:
+                        plan._capacity_publication_spent = True
+                        if _MEMORY_PUBLICATIONS.get(id(plan)) is plan:
+                            _MEMORY_PUBLICATIONS.pop(id(plan))
+                    retention._completion_publication = None
+                    raise ProductionWorkspaceReconciliationError("memory_publication_completion_proof_changed")
+                # This grants numerical payment only for the original writer's
+                # engine exit. Completed Sources cannot acquire another writer.
+                plan._capacity_publication_live = True
+                try:
+                    with retention.ledger.phase("completion"):
+                        await self._publish_current_writer()
+                finally:
+                    plan._capacity_publication_live = False
+                    plan._capacity_publication_spent = True
+                    if _MEMORY_PUBLICATIONS.get(id(plan)) is plan:
+                        _MEMORY_PUBLICATIONS.pop(id(plan))
+                    retention._completion_publication = None
+            else:
+                await retention.ledger.bind(self.db, phase)
+                with retention.ledger.phase(phase):
+                    await self._publish_current_writer()
+            return
+        if programme_owner is not None:
+            from src.runtime_plugins.programme_producer import _ProgrammeSource, _StartPublication
+            from src.memory.header_bounds import _NativeProgrammeNumericLedger
+            source, called, run = programme_owner
+            proof = self.db.info.get("composition_native_programme_start")
+            ledger = getattr(source, "_numeric_reservation", None)
+            if (type(source) is not _ProgrammeSource or type(proof) is not _StartPublication
+                    or type(ledger) is not _NativeProgrammeNumericLedger
+                    or source.publication is not proof or proof.source is not source
+                    or proof.called is not called or proof.db is not self.db
+                    or run.run_identity != source.job_id or not proof.checked or proof.committed
+                    or self.header_budget is not ledger.budget
+                    or self.db.info.get("composition_guard") is not self
+                    or _MEMORY_LEDGER_PHASE.get() is not None):
+                raise ProductionWorkspaceReconciliationError("programme_publication_source_changed")
+            await ledger.bind(self.db, "publication")
+            with ledger.phase("publication"):
+                await self._publish_current_writer()
+            return
+        await self._publish_current_writer()
+
+    async def _publish_current_writer(self):
         from src.workspace.production import (write_accounting_checkpoint, write_lifecycle_receipt,
             _verify_composition_publication_bytes)
         if self.db.info.get("composition_sticky_failure") is not None:
@@ -5115,7 +9432,8 @@ class CompositionSessionGuard:
             prepared = await self._prepare_publication()
             target, checkpoint, receipt = prepared
             if checkpoint is not None:
-                if discovery_reservation is None:
+                from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+                if discovery_reservation is None and _MEMORY_LEDGER_PHASE.get() is None:
                     write_accounting_checkpoint(self.workspace, checkpoint)
                     write_lifecycle_receipt(self.workspace, receipt, _accounting_lock_held=True)
                 else:
@@ -5158,6 +9476,17 @@ class CompositionSessionGuard:
 
     def close(self):
         from sqlalchemy import event
+        retention = getattr(self, "_native_memory_source_retention", None)
+        if type(retention) is _NativeMemoryRetention:
+            plan = getattr(retention, "_completion_publication", None)
+            if (type(plan) is _NativeMemorySourcePublication
+                    and plan.retention is retention and plan.db is self.db
+                    and plan.kind == "completion"):
+                plan._capacity_publication_live = False
+                plan._capacity_publication_spent = True
+                if _MEMORY_PUBLICATIONS.get(id(plan)) is plan:
+                    _MEMORY_PUBLICATIONS.pop(id(plan))
+                retention._completion_publication = None
         for name, callback in self.listeners:
             event.remove(self.db.sync_session, name, callback)
         for connection, callback in self.connection_listeners:
@@ -5175,10 +9504,25 @@ class CompositionSessionGuard:
         self.lock.__exit__(None, None, None)
 
 
-async def prepare_composition_session(db, *, fresh=False, header_budget=None):
+async def prepare_composition_session(db, *, fresh=False, header_budget=None, _native_memory_source=None):
     """Acquire external ownership BEFORE any native SQL writer starts."""
     from sqlalchemy import text
     from config.settings import settings
+    memory_retention = None
+    if _native_memory_source is not None:
+        import asyncio
+        from src.runtime_plugins.memory_producer import (
+            _NativeMemoryDispatchSource, _validate_memory_completion_capacity_source)
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+        if type(_native_memory_source) is not _NativeMemoryDispatchSource:
+            raise ProductionWorkspaceReconciliationError("memory_retention_source_unavailable")
+        source = _validate_memory_completion_capacity_source(
+            _native_memory_source, _native_memory_source.claim)
+        memory_retention = source._retention
+        if (header_budget is not memory_retention.ledger.budget
+                or _MEMORY_LEDGER_PHASE.get() != (memory_retention.ledger, "completion")
+                or memory_retention.ledger._completion_capacity_task is not asyncio.current_task()):
+            raise ProductionWorkspaceReconciliationError("memory_retention_source_changed")
     if db.in_transaction():
         raise ProductionWorkspaceReconciliationError("composition_lock_before_writer_required")
     exists = await db.scalar(text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_composition_states'"))
@@ -5195,6 +9539,7 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         receipt = read_lifecycle_receipt(workspace, header_budget=header_budget) or {}
         expected = receipt.get("runtime_composition")
         programme_guard = None
+        memory_guard = None
         if type(expected) is dict and expected.get("schema_version") == 2:
             if header_budget is None:
                 raise ProductionWorkspaceReconciliationError("programme_original_budget_required")
@@ -5202,13 +9547,25 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
             programme_guard = CompositionSessionGuard(db, workspace, lock, expected, set(), header_budget=header_budget)
             db.info["composition_guard"] = programme_guard
         connection = await db.connection()
+        if memory_retention is not None:
+            # Retain the same original guard that this preparation installs
+            # below; moving its creation precedes numerical binding, not reads.
+            memory_guard = programme_guard or CompositionSessionGuard(
+                db, workspace, lock, expected, set(), header_budget=header_budget)
+            db.info["composition_guard"] = memory_guard
+            memory_guard._native_memory_source_retention = memory_retention
+            raw = await connection.get_raw_connection()
+            if not raw.driver_connection.in_transaction:
+                await connection.exec_driver_sql("BEGIN")
+            await memory_retention.ledger.bind(db, "completion")
         def checked_snapshot(conn):
             if header_budget is None:
                 return composition_closure(conn, verify_files=native_composition_files)
             from src.memory.composition_headers import _certify_current_memory_snapshot_on_connection, snapshot_reads
             if not conn.connection.driver_connection.in_transaction:
                 conn.exec_driver_sql("BEGIN")
-            certificate = _certify_current_memory_snapshot_on_connection(conn, header_budget)
+            certificate = _certify_current_memory_snapshot_on_connection(
+                conn, header_budget, _header_budget=header_budget)
             if programme_guard is not None:
                 return programme_guard._programme_snapshot(conn, certificate, expected)
             with snapshot_reads(certificate):
@@ -5224,7 +9581,7 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         read_guard = db.info.pop("composition_read_guard", None)
         if read_guard is not None:
             read_guard.close()
-        guard = programme_guard or CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
+        guard = programme_guard or memory_guard or CompositionSessionGuard(db, workspace, lock, base, members, header_budget=header_budget)
         guard.base, guard.members = base, members
         if programme_guard is not None:
             guard._programme_base_leaves = dict(guard._programme_current_leaves)
@@ -5233,9 +9590,10 @@ async def prepare_composition_session(db, *, fresh=False, header_budget=None):
         guard.install()
         return guard
     except BaseException:
-        if db.info.get("composition_guard") is locals().get("programme_guard") and programme_guard is not None:
+        prepared_guard = locals().get("programme_guard") or locals().get("memory_guard")
+        if prepared_guard is not None and db.info.get("composition_guard") is prepared_guard:
             db.info.pop("composition_guard", None)
-            _HELD_COMPOSITION_WORKSPACE.reset(programme_guard.token)
+            _HELD_COMPOSITION_WORKSPACE.reset(prepared_guard.token)
         lock.__exit__(None, None, None)
         raise
 

@@ -284,7 +284,7 @@ class GoalDiscoveryService:
         await validated_discovery_strategy(result)
         return result
 
-    async def _validate_pinned_strategy(self, binding, original, *, db=None, discovery_session=None):
+    async def _validate_pinned_strategy(self, binding, original, *, db=None, discovery_session=None, native_programme_source=None):
         """Validate the immutable admitted version, never the current pointer.
 
         The delegated programme supplies authority; its issuer Root remains
@@ -293,6 +293,19 @@ class GoalDiscoveryService:
         """
         self._ready()
         continuation = {}
+        if native_programme_source is not None:
+            from src.runtime_plugins.programme_producer import _ProgrammeSource
+            from src.memory.task_methods import TaskMethodStrategyResolver, CurrentMethod
+            source = native_programme_source
+            if (type(source) is not _ProgrammeSource or discovery_session is not None
+                    or source.service is not self or source.jobs is not self.jobs
+                    or type(self.strategy_resolver) is not TaskMethodStrategyResolver
+                    or type(self.strategy_resolver.current) is not CurrentMethod):
+                raise RuntimeError("programme_original_strategy_owner_unavailable")
+            guard, identity = source.authority_selection(db)
+            row = identity.common_certificate.rows[("goals", binding.goal_id)]
+            source.header_budget.debit(row[1], appearance=("native-programme-strategy", source.job_id, "binding-model"))
+            continuation["native_programme_source"] = source
         if discovery_session is not None:
             discovery_session.validate(db=db, jobs=self.jobs)
             from src.memory.task_methods import TaskMethodStrategyResolver, CurrentMethod
@@ -598,6 +611,7 @@ class GoalDiscoveryService:
         self._tasks.add(task)
         owner = "native:goal-public-discovery"
         source = None
+        legacy_verified = False
         try:
             if self._lifecycle_host is not None:
                 from src.runtime_plugins.programme_producer import reserve_programme_source
@@ -607,6 +621,7 @@ class GoalDiscoveryService:
                 source.close()
                 source = None
             witness = await physical_discovery_inputs(self.jobs, job_id)
+            legacy_verified = True
             async def current(db, run):
                 await assert_discovery_authority(db, run.declared_authority_json, run=run)
             async with discovery_writer_scope(witness=witness):
@@ -628,6 +643,10 @@ class GoalDiscoveryService:
             if source is not None:
                 # A committed START with lost ACK remains held. Never renew or
                 # translate it into an ordinary recoverable execution attempt.
+                raise
+            if not legacy_verified:
+                # A missing Source may not escape its pre-body denial through
+                # the ordinary error path's later private job inspection.
                 raise
             # Invalid late authority may reject this ordinary transition. Its
             # original running/effect/cost state then remains visible and held.

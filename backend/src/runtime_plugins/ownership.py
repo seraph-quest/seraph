@@ -257,11 +257,14 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
 
 
 async def inventory(db, *, header_budget=None):
+    certificate = None
     if header_budget is not None:
         from src.memory.header_bounds import HeaderReadBudget, RUNTIME_COMPOSITION
         if type(header_budget) is not HeaderReadBudget:
             raise CompositionBindingError("composition_header_budget_required")
-        await header_budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS))
+        certificate = await header_budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS), _header_budget=header_budget)
+    from .memory_producer import _native_memory_authority_owner_pay
+    _native_memory_authority_owner_pay(db, "inventory", certificate=certificate)
     rows = list((await db.execute(select(RuntimeCompositionState))).scalars())
     if len(rows) != 14 or {row.runtime_domain for row in rows} != set(DOMAINS):
         raise CompositionBindingError("composition_inventory_incomplete")
@@ -367,6 +370,8 @@ async def validate_invocation(db, binding, *, header_budget=None):
     if not isinstance(binding, RuntimeCompositionBinding):
         raise CompositionBindingError("composition_binding_required")
     rows = await inventory(db, header_budget=header_budget)
+    from .memory_producer import _native_memory_authority_owner_pay
+    _native_memory_authority_owner_pay(db, "dependencies", binding=binding)
     for dependency in binding.dependency_vector:
         row = rows[dependency.runtime_domain]
         if row.state != "ready" or dependency != CompositionDependency(row.runtime_domain,
@@ -496,7 +501,7 @@ async def transition_owner(db, *, runtime_domain, expected: CompositionDependenc
         raise CompositionBindingError("composition_owner_changed")
 
 
-async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
+async def begin_native_writer(db, *, owner, fresh=False, header_budget=None, _native_memory_source=None):
     """Private native ingress/maintenance seam, before any Message/row insert."""
     from sqlalchemy import text
     from src.workspace.accounting_witness import prepare_composition_session
@@ -511,12 +516,31 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
         if (type(guard) is not CompositionSessionGuard or guard.header_budget is not header_budget
                 or guard._retention_closed):
             raise CompositionBindingError("composition_native_writer_budget_changed")
+    if _native_memory_source is not None:
+        from src.runtime_plugins.memory_producer import _validate_memory_completion_capacity_source
+        from src.workspace.accounting_witness import CompositionSessionGuard
+        source = _validate_memory_completion_capacity_source(
+            _native_memory_source, _native_memory_source.claim)
+        if (owner != "durable_jobs" or fresh or type(guard) is not CompositionSessionGuard
+                or guard.db is not db or guard.header_budget is not header_budget
+                or source.admission.header_budget is not header_budget
+                or getattr(guard, "_native_memory_source_retention", None) is not source._retention):
+            raise CompositionBindingError("native_memory_completion_writer_guard_changed")
     if db.in_transaction():
         raise CompositionBindingError("composition_native_writer_not_fresh")
     await db.execute(text("BEGIN IMMEDIATE"))
+    if _native_memory_source is not None:
+        # Only capacity enrollment follows the original owner's actual BEGIN;
+        # existing current certificate/body/authority checks still run below.
+        await source._retention.ledger.bind(db, "completion")
     if header_budget is not None:
         from src.memory.composition_headers import certify_composition_superset
-        await certify_composition_superset(db, header_budget)
+        if _native_memory_source is not None:
+            # The genuine completion Source/frame was checked before BEGIN
+            # and bound to this original writer above; pay metadata on it too.
+            await certify_composition_superset(db, header_budget, _header_budget=header_budget)
+        else:
+            await certify_composition_superset(db, header_budget)
     db.info["native_writer_started"] = True
     db.info["composition_writer_owner"] = owner
     if header_budget is not None and guard is not None:

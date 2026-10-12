@@ -170,7 +170,27 @@ class HeaderReadBudget:
     def debit(self, amount, *, appearance=None):
         trace = _MEMORY_CHARGE_TRACE.get()
         if trace is not None and trace[0] is self:
-            trace[1].append((appearance, amount))
+            from src.memory.composition_headers import _CommonCertificationTraceCollector
+            if type(trace[1]) is _CommonCertificationTraceCollector:
+                trace[1].append_charge(appearance, amount)
+            else:
+                from src.runtime_plugins.memory_producer import _MemoryAuthorityTraceCollector
+                if type(trace[1]) is _MemoryAuthorityTraceCollector:
+                    trace[1].append_charge(appearance, amount)
+                else:
+                    from src.workflows.job_runtime import _NativeMemoryClaimTraceCollector
+                    if type(trace[1]) is _NativeMemoryClaimTraceCollector:
+                        trace[1].append_charge(appearance, amount)
+                    else:
+                        from src.workspace.accounting_witness import _NativeMemoryAccountingTraceCollector
+                        if type(trace[1]) is _NativeMemoryAccountingTraceCollector:
+                            trace[1].append_charge(appearance, amount)
+                        else:
+                            from src.runtime_plugins.memory_producer import _NativeMemoryReportTraceCollector
+                            if type(trace[1]) is _NativeMemoryReportTraceCollector:
+                                trace[1].append_charge(appearance, amount)
+                            else:
+                                trace[1].append((appearance, amount))
         discovery = _DISCOVERY_NUMERIC_READS.get()
         if discovery is not None and discovery.budget is self:
             discovery.consume(appearance, amount)
@@ -240,6 +260,24 @@ class HeaderReadBudget:
         self.future_references.add(ref)
 
     def resolve_future(self, descriptor, identity, rowid, *, database_identity=None):
+        active = _MEMORY_LEDGER_PHASE.get()
+        if (active is not None and type(active[0]) is _NativeMemoryNumericLedger
+                and active[0].budget is self):
+            from src.workspace import accounting_witness
+            resolve = getattr(accounting_witness, "_native_memory_resolve_numeric_slot", None)
+            if resolve is not None:
+                slot = resolve(active[0], descriptor, identity, rowid, database_identity)
+                if slot is not None:
+                    from src.workspace.accounting_witness import _NativeMemoryFutureIntegerSlot
+                    physical = (descriptor.table, rowid)
+                    if (type(slot) is not _NativeMemoryFutureIntegerSlot
+                            or slot not in self.future_references or slot.budget is not self
+                            or slot.descriptor is not descriptor or database_identity is not None
+                            or type(rowid) is not int or rowid <= 0
+                            or physical in self.physical_references):
+                        raise HeaderBoundsError("memory_future_integer_slot_changed")
+                    self.future_references.remove(slot)
+                    self.physical_references.add(physical)
         ref=(descriptor.table,descriptor.key,identity)
         if database_identity is not None:
             ref=(database_identity,*ref)
@@ -249,6 +287,29 @@ class HeaderReadBudget:
             self.future_references.remove(ref)
             self.physical_references.add((descriptor.table,rowid) if database_identity is None
                 else (database_identity,descriptor.table,rowid))
+
+    def _reserve_native_memory_integer_slot(self, ledger, slot):
+        """Count the original sealed plan's liability without inventing an id."""
+        import sys
+        from src.workspace.accounting_witness import _NativeMemoryFutureIntegerSlot
+        if (sys._getframe(1).f_code is not _reserve_native_memory_effect_ledger.__code__
+                or type(ledger) is not _NativeMemoryNumericLedger
+                or ledger.budget is not self or type(slot) is not _NativeMemoryFutureIntegerSlot):
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+        ledger._checked()
+        slot._checked()
+        cohort = slot.db.info["composition_guard"]._native_memory_integer_slots
+        if (type(cohort) is not tuple or len(cohort) != 2 or cohort[0] is not ledger.operation
+                or type(cohort[1]) is not tuple or not any(item is slot for item in cohort[1])
+                or slot.operation is not ledger.operation or slot.prepared is not ledger.prepared
+                or slot.budget is not self or slot.bound_key is not None
+                or slot.expected_columns is None or slot in self.future_references):
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+        if len(self.physical_references) + len(self.future_references) + 1 > MAX_ROWS:
+            raise HeaderBoundsError("header_reference_bound")
+        # The complete ledger already paid all byte liability. This marker
+        # affects only cardinality and is never a body or payload reference.
+        self.future_references.add(slot)
 
     async def certify_all(self, db, descriptor, *, _header_budget=None):
         from src.memory.composition_headers import discover_rows
@@ -292,11 +353,57 @@ def _native_memory_ascii_string_width(value):
 
 
 def _native_memory_tuple_skeleton_width(descriptor, identity):
+    return _native_memory_tuple_skeleton_from_width(descriptor, _native_memory_ascii_string_width(identity))
+
+
+def _native_memory_tuple_skeleton_from_width(descriptor, key_width):
     fields = 2 + max(0, len(descriptor.columns) - 1) + sum(
         7 + _native_memory_ascii_string_width(name) for name in descriptor.columns)
     return (5 + _native_memory_ascii_string_width("native-composition-memory.v1")
         + _native_memory_ascii_string_width(descriptor.table)
-        + _native_memory_ascii_string_width(identity) + fields)
+        + key_width + fields)
+
+
+def _native_memory_integer_slot_row_widths(slot, row):
+    """An issued plan's int64 capacity; no invented identity or body grant."""
+    from src.workspace.accounting_witness import _NativeMemoryFutureIntegerSlot
+    if type(slot) is not _NativeMemoryFutureIntegerSlot:
+        raise HeaderBoundsError("memory_numeric_projection_identity_unassigned")
+    slot._checked()
+    descriptor = slot.descriptor
+    if (descriptor is not COMPOSITION_DESCRIPTORS["work_board_events"]
+            or slot.bound_key is not None or type(row) is not dict
+            or len(row) != len(descriptor.columns) or slot.expected_columns is None
+            or len(slot.expected_columns) != len(descriptor.columns) - 1
+            or any(name not in row or row[name] != value for name, value in slot.expected_columns.items())
+            or row.get(descriptor.key) is not None):
+        raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+    # SQLite header locators retain the integer key; the Memory reference
+    # codec retains its canonical decimal string, hence two quote bytes.
+    header = _native_memory_tuple_skeleton_from_width(descriptor, 20) + 128
+    raw = _native_memory_tuple_skeleton_from_width(descriptor, 22)
+    for name, kind, nullable in zip(descriptor.columns, descriptor.kinds, descriptor.nullable):
+        value = row[name]
+        if name == descriptor.key:
+            header += 20 - 4
+            raw += 20 - 4
+        elif value is None:
+            if not nullable:
+                raise HeaderBoundsError("header_scalar_unavailable")
+        elif kind == "text" and type(value) is str:
+            header += 6 * _native_memory_utf8_width(value) + 2 - 4
+            raw += _native_memory_ascii_string_width(value) - 4
+        elif kind == "integer" and type(value) is int and -(2**63) <= value < 2**63:
+            header += 20 - 4
+            raw += 20 - 4
+        elif kind == "real" and type(value) is float and math.isfinite(value):
+            header += 64 - 4
+            raw += 128 - 4
+        else:
+            raise HeaderBoundsError("header_scalar_type_unsupported")
+    if header > MAX_BYTES or raw > MAX_BYTES:
+        raise HeaderBoundsError("canonical_bound_not_certified")
+    return header, raw
 
 
 def _native_memory_resolved_row_widths(descriptor, identity, row):
@@ -446,18 +553,168 @@ def _native_memory_future_wrs_widths(before_row, *, text_bytes, null_fields=(), 
     return header, raw_tuple
 
 
-def _native_memory_projected_superset_charges(certificate, trace, new_rows, updated_rows):
+def _native_memory_projected_row_header_entries(descriptor, identity):
+    """The five original _headers appearances for one future physical row."""
+    from src.memory.composition_headers import _metadata_upper
+    from src.workspace.accounting_witness import _NativeMemoryFutureIntegerSlot
+    if COMPOSITION_DESCRIPTORS.get(descriptor.table) is not descriptor:
+        raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+    if type(identity) is _NativeMemoryFutureIntegerSlot:
+        identity._checked()
+        if identity.descriptor is not descriptor:
+            raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+        key_upper = 20
+    elif descriptor.table == "work_board_events" and type(identity) is int:
+        if not -(2**63) <= identity < 2**63:
+            raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+        key_upper = 20
+    elif type(identity) is str and 0 < _native_memory_utf8_width(identity) <= 512:
+        key_upper = 6 * _native_memory_utf8_width(identity) + 2
+    else:
+        raise HeaderBoundsError("memory_numeric_projection_identity_unassigned")
+    upper = _metadata_upper(2, (20, *([44, 20, 64] * len(descriptor.columns))))
+    return tuple((("metadata-prequery", "row-header", stage), upper)
+        for stage in ("delivery", "row-copy", "encoded-copy")) + (
+        (("metadata-prequery", "row-header", "skeleton-copy"), key_upper
+            + 6 * len(descriptor.table) + sum(6 * len(name) + 12 for name in descriptor.columns) + 256),
+        (("metadata-prequery", "row-header", "header-fact-copy"),
+            key_upper + 6 * len(descriptor.table) + 256))
+
+
+def _native_memory_source_superset_charges(certificate, trace, new_rows, updated_rows, operation):
+    """ONE original common certification over exact retained Source dimensions."""
+    from src.workspace.accounting_witness import (
+        _native_memory_generic_future_bound_inputs, _NativeMemoryFutureIntegerSlot)
+    from src.runtime_plugins.memory_producer import _MemoryOwnerSourceOperation
+    if type(operation) is not _MemoryOwnerSourceOperation:
+        raise HeaderBoundsError("memory_future_header_source_unavailable")
+    guard = operation.db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_source_capacity_facts", None)
+    retention = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if retained is None or retention is None:
+        raise HeaderBoundsError("memory_future_header_source_unavailable")
+    facts, widths = retained[3], retention[3]
+    guard, _rows, own, _audit, _new_addresses, _value = _native_memory_generic_future_bound_inputs(
+        operation, operation._prepared, certificate, facts, widths)
+    common = getattr(guard, "_native_memory_source_common_numeric", None)
+    projection = guard._native_memory_source_projection
+    if (common is None or common[0] is not operation or common[1] is not certificate
+            or common[2] is not trace or type(trace) is not tuple
+            or projection[1] is not new_rows or projection[2] is not updated_rows
+            or certificate.metadata_budget is not guard.header_budget):
+        raise HeaderBoundsError("memory_future_header_source_changed")
+    headers = dict(certificate.rows)
+    old_ids = {table: tuple(key for name, key in headers if name == table)
+        for table in COMPOSITION_DESCRIPTORS}
+    added = {table: [] for table in COMPOSITION_DESCRIPTORS}
+    def physical_key(table, key):
+        if table != "work_board_events" or type(key) is _NativeMemoryFutureIntegerSlot:
+            return key
+        try:
+            value = int(key) if type(key) is str and key else None
+        except ValueError:
+            value = None
+        if value is None or str(value) != key or not -(2**63) <= value < 2**63:
+            raise HeaderBoundsError("memory_numeric_projection_identity_changed")
+        return value
+    for descriptor, key, _row in new_rows:
+        identity = physical_key(descriptor.table, key)
+        if ((descriptor.table, identity) in headers
+                or any(value == 2**63 - 1 for (table, _key), (value, _upper) in certificate.rows.items()
+                    if table == descriptor.table)):
+            raise HeaderBoundsError("memory_future_header_locator_order_unavailable")
+        if descriptor.table != "work_board_events" and added[descriptor.table]:
+            # No source-owned flush-order fact exists for multiple text inserts.
+            raise HeaderBoundsError("memory_future_header_locator_order_unavailable")
+        upper = facts["row_uppers"][(descriptor.table, key)]
+        headers[(descriptor.table, identity)] = (None, upper)
+        added[descriptor.table].append(identity)
+    for descriptor, key, _changes in updated_rows:
+        identity = physical_key(descriptor.table, key)
+        if (descriptor.table, identity) not in certificate.rows:
+            raise HeaderBoundsError("memory_future_header_source_changed")
+        headers[(descriptor.table, identity)] = (None, facts["row_uppers"][(descriptor.table, key)])
+    if own not in certificate.rows:
+        raise HeaderBoundsError("memory_future_header_source_changed")
+    headers[own] = (None, widths["own_upper"])
+    affected = getattr(guard, "_native_memory_affected_numeric_facts", None)
+    if affected is not None:
+        if (affected[0] is not operation or affected[1] is not operation._prepared
+                or affected[2] is not certificate):
+            raise HeaderBoundsError("memory_future_header_source_changed")
+        for run_id, dimensions in affected[4].items():
+            if ("workflow_run_states", run_id) not in certificate.rows:
+                raise HeaderBoundsError("memory_future_header_source_changed")
+            headers[("workflow_run_states", run_id)] = (None, dimensions["row_upper"])
+    if len(headers) > MAX_ROWS:
+        raise HeaderBoundsError("header_reference_bound")
+    future_ids = {}
+    for table, identities in old_ids.items():
+        extra = added[table]
+        if table == "work_board_events":
+            assigned = sorted((*identities, *(key for key in extra if type(key) is int)))
+            slots = tuple(key for key in extra if type(key) is _NativeMemoryFutureIntegerSlot)
+            if ((slots and any(type(key) is int for key in extra))
+                    or tuple(slot.ordinal for slot in slots) != tuple(sorted(slot.ordinal for slot in slots))):
+                raise HeaderBoundsError("memory_future_header_locator_order_unavailable")
+            future_ids[table] = (*assigned, *slots)
+        else:
+            future_ids[table] = (*identities, *extra)
+    result, current_table, seen = [], None, []
+    stages = ("delivery", "row-copy", "encoded-copy")
+    for appearance, amount in trace:
+        if (type(appearance) is not tuple or not appearance
+                or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+            raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+        if len(appearance) == 3 and appearance[:2] == ("metadata-prequery", "descriptor-compiler"):
+            current_table = appearance[2]
+            if current_table not in COMPOSITION_DESCRIPTORS:
+                raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+        if (current_table is not None and appearance[:2] == ("metadata-prequery", "row-locator")
+                and appearance[-1] in stages):
+            extra = added[current_table]
+            # Original selected-whole SQL:90+escaped text(orNULL)+integer(orNULL).
+            amount += sum(114 if type(key) in (int, _NativeMemoryFutureIntegerSlot)
+                else 96 + 6 * _native_memory_utf8_width(key) for key in extra)
+            amount += max(0, len(future_ids[current_table]) - 1) - max(0, len(old_ids[current_table]) - 1)
+        if appearance[0] == "complete-headers":
+            _, table, identities = appearance
+            if table != current_table or identities != old_ids[table] or table in seen:
+                raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+            for identity in added[table]:
+                result.extend(_native_memory_projected_row_header_entries(COMPOSITION_DESCRIPTORS[table], identity))
+            amount = sum(headers[(table, key)][1] for key in future_ids[table])
+            appearance = ("complete-headers", table, future_ids[table])
+            seen.append(table)
+        if appearance[0] == "table-body":
+            _, table, identities = appearance
+            if identities != old_ids[table]:
+                raise HeaderBoundsError("memory_numeric_projection_trace_invalid")
+            amount = sum(headers[(table, key)][1] for key in future_ids[table])
+            appearance = ("table-body", table, future_ids[table])
+        if amount > MAX_BYTES:
+            raise HeaderBoundsError("canonical_bound_not_certified")
+        result.append((appearance, amount))
+    if tuple(seen) != tuple(COMPOSITION_DESCRIPTORS):
+        raise HeaderBoundsError("memory_future_header_complete_trace_unavailable")
+    return tuple(result), headers
+
+
+def _native_memory_projected_superset_charges(certificate, trace, new_rows, updated_rows, *, source_operation=None):
     """Forecast original complete-header appearances, never a certificate.
 
     This view does no SQL and grants no body read. Actual post-effect reads
-    still require their fresh original full33 certificate. Constructor ids
-    here must already have been assigned by the original sealed M5 plan;
-    an unassigned numeric slot is never promoted to a reference address.
+    still require their fresh original full33 certificate. A privately issued
+    unassigned integer slot is retained only as numerical capacity, never
+    promoted to a reference address or a future body certificate.
     """
-    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_cost
+    from src.memory.composition_headers import CompositionHeaderCertificate, _validate, _metadata_upper
+    from src.workspace.accounting_witness import _NativeMemoryFutureIntegerSlot
     if type(certificate) is not CompositionHeaderCertificate:
         raise HeaderBoundsError("header_certificate_unavailable")
     _validate(certificate.connection, certificate)
+    if source_operation is not None:
+        return _native_memory_source_superset_charges(certificate, trace, new_rows, updated_rows, source_operation)
     headers = dict(certificate.rows)
     old_ids = {table: tuple(key for name, key in headers if name == table)
         for table in COMPOSITION_DESCRIPTORS}
@@ -465,11 +722,16 @@ def _native_memory_projected_superset_charges(certificate, trace, new_rows, upda
     selected = set()
     for creating, values in ((True, new_rows), (False, updated_rows)):
         for descriptor, identity, row in values:
+            is_slot = type(identity) is _NativeMemoryFutureIntegerSlot
+            if is_slot and (not creating or identity.descriptor is not descriptor):
+                raise HeaderBoundsError("memory_numeric_projection_identity_changed")
             ref = (descriptor.table, identity)
             if ref in selected or (creating == (ref in headers)):
                 raise HeaderBoundsError("memory_numeric_projection_identity_changed")
             selected.add(ref)
-            headers[ref] = (None, _native_memory_projected_header_upper(descriptor, identity, row))
+            upper = (_native_memory_integer_slot_row_widths(identity, row)[0] if is_slot
+                else _native_memory_projected_header_upper(descriptor, identity, row))
+            headers[ref] = (None, upper)
             if creating:
                 new_ids[descriptor.table].append(identity)
     if len(headers) > MAX_ROWS:
@@ -486,9 +748,13 @@ def _native_memory_projected_superset_charges(certificate, trace, new_rows, upda
             # Actual rowid aliases are unknown until the original flush. Only
             # their finite int64 byte bound participates in this resource view.
             for identity in new_ids[table]:
-                if type(identity) is not str:
+                if type(identity) is _NativeMemoryFutureIntegerSlot:
+                    amount += _metadata_upper(1, (20, 9, 20, 4, 20))
+                elif type(identity) is str:
+                    amount += _metadata_upper(1, (20, 6, 20,
+                        _native_memory_ascii_string_width(identity), 4))
+                else:
                     raise HeaderBoundsError("memory_numeric_projection_identity_unassigned")
-                amount += _metadata_cost([[2**63 - 1, "text", len(identity.encode("utf-8")), identity, None]])
             appearance = ("locator-metadata", table, None, False, tuple(identities))
         elif appearance[0] == "complete-headers":
             _, table, identities = appearance
@@ -700,27 +966,70 @@ class _NativeMemoryNumericLedger:
     bindings: dict = field(default_factory=dict)
     consumed: list = field(default_factory=list)
     closed: bool = False
+    _complete_owner: object = field(default=None, repr=False)
+    _completion_capacity_task: object = field(default=None, repr=False)
 
     def _checked(self):
+        import asyncio
         if (self.closed or self.seal is not _MEMORY_LEDGER_SEAL
                 or _MEMORY_LEDGERS.get(id(self)) is not self
                 or self.operation._prepared is not self.prepared
                 or self.operation.source is not self.source
                 or self.source.admission.header_budget is not self.budget
-                or not self.source._live.is_set()):
+                or not self.source._live.is_set()
+                or (self._completion_capacity_task is not None
+                    and self._completion_capacity_task is not asyncio.current_task())):
             raise HeaderBoundsError("memory_numeric_ledger_unavailable")
+
+    @asynccontextmanager
+    async def source_phase(self, source, phase):
+        """Completion capacity before its writer; this grants no body access."""
+        import asyncio
+        from src.runtime_plugins.memory_producer import _validate_memory_completion_capacity_source
+        self._checked()
+        if (source is not self.source or phase != "completion"
+                or self._complete_owner is not _MEMORY_LEDGER_SEAL
+                or self._completion_capacity_task is not None
+                or _MEMORY_LEDGER_PHASE.get() is not None
+                or _DISCOVERY_NUMERIC_READS.get() is not None
+                or _SESSION_NUMERIC_READS.get() is not None):
+            raise HeaderBoundsError("memory_numeric_ledger_phase_invalid")
+        current = _validate_memory_completion_capacity_source(source, source.claim)
+        if current is not source or source._retention.ledger is not self:
+            raise HeaderBoundsError("memory_numeric_ledger_unavailable")
+        self._completion_capacity_task = asyncio.current_task()
+        token = _MEMORY_LEDGER_PHASE.set((self, phase))
+        try:
+            yield self
+        finally:
+            # Completion may already be durable here. Cleanup cannot reassert
+            # an uncompleted state or erase the genuine publication binding.
+            _MEMORY_LEDGER_PHASE.reset(token)
+            self._completion_capacity_task = None
 
     def available(self, phase, appearance):
         self._checked()
+        if type(self) is _NativeMemoryNumericLedger:
+            from src.workspace import accounting_witness
+            normalize = getattr(accounting_witness, "_native_memory_normalize_numeric_appearance", None)
+            if normalize is not None:
+                appearance = normalize(self, appearance)
         pending = self.entries.get((phase, appearance), ())
         return pending[0] if pending else 0
 
     def consume(self, phase, appearance, amount):
         self._checked()
+        if type(self) is _NativeMemoryNumericLedger:
+            from src.workspace import accounting_witness
+            normalize = getattr(accounting_witness, "_native_memory_normalize_numeric_appearance", None)
+            if normalize is not None:
+                appearance = normalize(self, appearance)
         if type(amount) is not int or amount < 0:
             raise HeaderBoundsError("memory_numeric_ledger_charge_invalid")
         pending = self.entries.get((phase, appearance))
         if not pending:
+            if type(self) is _NativeMemoryNumericLedger and self._complete_owner is _MEMORY_LEDGER_SEAL:
+                raise HeaderBoundsError("memory_numeric_appearance_unreserved")
             return False
         maximum = pending[0]
         if amount > maximum:
@@ -731,12 +1040,39 @@ class _NativeMemoryNumericLedger:
         return True
 
     async def bind(self, db, phase, *, certificate=None):
+        import asyncio
         self._checked()
+        if self._complete_owner is _MEMORY_LEDGER_SEAL and phase == "completion":
+            from sqlalchemy.ext.asyncio import AsyncSession
+            from src.workspace.accounting_witness import CompositionSessionGuard
+            if type(db) is not AsyncSession:
+                raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+            guard = db.info.get("composition_guard")
+            prior = self.bindings.get(phase)
+            capacity = (self._completion_capacity_task is asyncio.current_task()
+                and _MEMORY_LEDGER_PHASE.get() == (self, "completion"))
+            if (type(guard) is not CompositionSessionGuard or guard.db is not db
+                    or guard.header_budget is not self.budget
+                    or (not capacity and (prior is None or prior[0] is not db
+                        or prior[5] is not asyncio.current_task()))):
+                raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
         transaction, driver, changes = await _connection_state(db)
         if phase not in {"effect", "capture", "completion"}:
             raise HeaderBoundsError("memory_numeric_ledger_phase_invalid")
         prior = self.bindings.get(phase)
-        if prior is not None and (prior[0] is not db or prior[1] is not transaction or prior[2] is not driver):
+        completion_capacity = (phase == "completion"
+            and self._completion_capacity_task is asyncio.current_task()
+            and _MEMORY_LEDGER_PHASE.get() == (self, "completion"))
+        if self._complete_owner is _MEMORY_LEDGER_SEAL and phase == "completion":
+            from src.workspace.accounting_witness import CompositionSessionGuard
+            guard = db.info.get("composition_guard")
+            if (type(guard) is not CompositionSessionGuard or guard.db is not db
+                    or guard.header_budget is not self.budget
+                    or (not completion_capacity and (prior is None
+                        or prior[0] is not db or prior[1] is not transaction
+                        or prior[2] is not driver or prior[5] is not asyncio.current_task()))):
+                raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+        if prior is not None and not completion_capacity and (prior[0] is not db or prior[1] is not transaction or prior[2] is not driver):
             raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
         if phase != "completion" and (db is not self.operation.db
                 or transaction is not self.operation.transaction or driver is not self.operation.driver):
@@ -746,14 +1082,20 @@ class _NativeMemoryNumericLedger:
             await validate_composition_certificate(db, certificate)
             if certificate.budget is not self.budget:
                 raise HeaderBoundsError("memory_numeric_ledger_certificate_changed")
-        self.bindings[phase] = (db, transaction, driver, changes, certificate)
+        self.bindings[phase] = (db, transaction, driver, changes, certificate, asyncio.current_task())
 
     @contextmanager
     def phase(self, phase):
+        import asyncio
         self._checked()
         binding = self.bindings.get(phase)
-        if binding is None or binding[0].sync_session.get_transaction() is not binding[1] or not binding[2].in_transaction:
+        if (binding is None or binding[0].sync_session.get_transaction() is not binding[1]
+                or not binding[2].in_transaction or binding[5] is not asyncio.current_task()):
             raise HeaderBoundsError("memory_numeric_ledger_writer_changed")
+        active = _MEMORY_LEDGER_PHASE.get()
+        if self._complete_owner is _MEMORY_LEDGER_SEAL and active is not None and not (phase == "completion" and active == (self, phase)
+                and self._completion_capacity_task is asyncio.current_task()):
+            raise HeaderBoundsError("memory_numeric_ledger_phase_invalid")
         token = _MEMORY_LEDGER_PHASE.set((self, phase))
         try:
             yield
@@ -833,7 +1175,18 @@ async def _reserve_native_memory_effect_ledger(db, run, operation, prepared, *,
         raise HeaderBoundsError("memory_complete_numeric_forecast_unavailable")
     # The original ledger checks every amount and deducts the complete sum
     # atomically before installing any prepaid effect phase. No slack refund.
-    return await _reserve_native_memory_numeric_ledger(db, run, operation, prepared, appearances)
+    ledger = await _reserve_native_memory_numeric_ledger(db, run, operation, prepared, appearances)
+    try:
+        cohort = db.info["composition_guard"]._native_memory_integer_slots
+        if type(cohort) is not tuple or len(cohort) != 2 or cohort[0] is not operation or type(cohort[1]) is not tuple:
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+        for slot in cohort[1]:
+            budget._reserve_native_memory_integer_slot(ledger, slot)
+        ledger._complete_owner = _MEMORY_LEDGER_SEAL
+    except BaseException:
+        ledger.close()
+        raise
+    return ledger
 
 
 @dataclass(eq=False)
@@ -985,6 +1338,67 @@ class _NativeProgrammeNumericLedger:
             _MEMORY_LEDGER_PHASE.reset(token)
 
 
+def original_native_programme_delivered_numeric_schedule(source, called, *, future_row_upper, future_text_bytes):
+    """Project the original physical-reader terms of delivered revalidation.
+
+    The exact original trace supplies occurrence counts, including repeated
+    immutable reads. Header/Identity/native-authority terms remain the original
+    guard composer's responsibility; this helper neither enrolls nor grants.
+    Unsupported physical derivation graphs stop before START.
+    """
+    from src.runtime_plugins.programme_producer import _ProgrammeSource
+    from src.workflows.research_sources import _discovery_physical_function_entries
+    if type(source) is not _ProgrammeSource:
+        raise HeaderBoundsError("programme_start_numeric_owner_changed")
+    source.validate(called=called)
+    held = source._physical_numeric_owner
+    facts, trace = source._physical_numeric_facts, source._physical_numeric_trace
+    if (source.state != "claimed" or source.publication is not None or source.writer is None
+            or type(held) is not tuple or len(held) != 5
+            or held[0] is not source or held[1] is not source.claim
+            or held[2] is not source.scope or held[3] is not source.header_budget
+            or held[4] is not called or source._service_call is None
+            or source._service_call[0] is not called
+            or type(facts) is not MappingProxyType or type(trace) is not tuple
+            or type(future_row_upper) is not int or not 0 <= future_row_upper <= MAX_BYTES
+            or type(future_text_bytes) is not MappingProxyType):
+        raise HeaderBoundsError("programme_start_physical_numeric_facts_changed")
+    source.authority_selection(source.writer[1])
+    widths = dict(facts["widths"])
+    for name, amount in future_text_bytes.items():
+        if type(name) is not str or type(amount) is not int or not 0 <= amount <= MAX_BYTES:
+            raise HeaderBoundsError("programme_start_physical_numeric_facts_changed")
+        widths[name] = amount
+    widths["row_header_bytes"] = future_row_upper
+    bounds = {}
+    for function in ("original-rows", "records", "references", "provenance", "input-reader"):
+        for appearance, amount in _discovery_physical_function_entries(function,
+                job_id=source.job_id, widths=widths, count=facts["count"],
+                plan_bytes=facts["plan_bytes"], brief_bytes=facts["brief_bytes"]):
+            bounds[appearance] = max(amount, bounds.get(appearance, 0))
+    entries = []
+    for appearance, amount in trace:
+        if type(amount) is not int or not 0 <= amount <= MAX_BYTES:
+            raise HeaderBoundsError("programme_start_physical_numeric_facts_changed")
+        if appearance is None:
+            # These actual immutable file reads retain their original sizes.
+            entries.append(("delivered", None, amount))
+        elif type(appearance) is not tuple or not appearance:
+            raise HeaderBoundsError("programme_start_physical_numeric_facts_changed")
+        elif appearance[0] == "discovery-physical":
+            if appearance not in bounds:
+                raise HeaderBoundsError("programme_start_physical_graph_unavailable")
+            entries.append(("delivered", appearance, max(amount, bounds[appearance])))
+        elif appearance[0] == "native-programme-physical":
+            if appearance not in {("native-programme-physical", source.job_id, "authority-model"),
+                    ("native-programme-physical", source.job_id, "row-copy")}:
+                raise HeaderBoundsError("programme_start_physical_graph_unavailable")
+            entries.append(("delivered", appearance, max(amount, future_row_upper)))
+    if not entries:
+        raise HeaderBoundsError("programme_start_physical_numeric_facts_changed")
+    return tuple(entries)
+
+
 async def _reserve_native_programme_start_numeric_ledger(guard, source, called, run, entries):
     """Enroll only the exact complete vector retained by the original guard."""
     from src.runtime_plugins.programme_producer import _ProgrammeSource
@@ -1084,7 +1498,7 @@ class _SessionNumericReservation:
 @dataclass(frozen=True, eq=False)
 class HeaderCertificate:
     descriptor: ClosedRowDescriptor
-    row_ids: tuple[str, ...]
+    row_ids: tuple[str | int, ...]
     rowids: tuple[int, ...]
     row_upper_bytes: tuple[int, ...]
     upper_bytes: int
@@ -1129,13 +1543,16 @@ def _quoted(identifier):
 async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes, *, _header_budget=None):
     if not any(descriptor is item for item in _DESCRIPTORS):
         raise HeaderBoundsError("header_descriptor_unavailable")
+    event_identity = descriptor is COMPOSITION_DESCRIPTORS["work_board_events"] and descriptor.key == "event_id"
     if (type(exact_row_ids) is not tuple or len(exact_row_ids) > MAX_ROWS
-            or any(type(value) is not str or not value for value in exact_row_ids)
+            or any((type(value) is not int or not -(2**63) <= value < 2**63)
+                   if event_identity else (type(value) is not str or not value)
+                   for value in exact_row_ids)
             or type(remaining_bytes) is not int or not 0 <= remaining_bytes <= MAX_BYTES):
         raise HeaderBoundsError("header_request_bound")
     try:
         valid_ids = (len(set(exact_row_ids)) == len(exact_row_ids)
-                     and all(len(value.encode("utf-8")) <= 512 for value in exact_row_ids))
+                     and (event_identity or all(len(value.encode("utf-8")) <= 512 for value in exact_row_ids)))
     except UnicodeEncodeError:
         valid_ids = False
     if not valid_ids:
@@ -1193,7 +1610,10 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes, *
         if len(rows) != 1:
             raise HeaderBoundsError("header_row_unavailable")
         row = rows[0]
-        if type(row[0]) is not int:
+        if (type(row[0]) is not int or (event_identity and (
+                row[0] != identity or row[1 + 3 * descriptor.columns.index("event_id")] != "integer"
+                or type(row[3 + 3 * descriptor.columns.index("event_id")]) is not int
+                or row[3 + 3 * descriptor.columns.index("event_id")] != identity))):
             raise HeaderBoundsError("header_rowid_unavailable")
         # This exact skeleton covers field/key/tuple punctuation. Every text
         # value can require at most six JSON bytes per original UTF-8 byte.

@@ -11,6 +11,52 @@ from src.db.models import AuditEvent
 from src.db.session_refs import ensure_sessions_exist
 
 
+_PREPARED_AUDIT_EXPECTED_FIELDS = (
+    "session_id", "actor", "event_type", "tool_name", "risk_level",
+    "policy_mode", "summary", "details_json",
+)
+
+
+def _native_prepared_audit_expected_upper(event):
+    from src.memory.m5 import _native_prepared_value_width
+    return 2 + 7 + sum(_native_prepared_value_width(name) + 1
+        + _native_prepared_value_width(getattr(event, name))
+        for name in _PREPARED_AUDIT_EXPECTED_FIELDS)
+
+
+def _native_prepared_audit_details_upper(value):
+    """Default json.dumps separators add one space per colon and comma."""
+    from src.memory.m5 import _native_prepared_value_width
+    def spaces(item):
+        if type(item) is dict:
+            return len(item) + max(0, len(item) - 1) + sum(spaces(v) for v in item.values())
+        if type(item) in {tuple, list}:
+            return max(0, len(item) - 1) + sum(spaces(v) for v in item)
+        return 0
+    return _native_prepared_value_width(value) + spaces(value)
+
+
+def original_native_memory_prepared_audit_numeric_schedule(plan):
+    """One original prepared audit validation; capacity, never permission."""
+    from src.memory.m5 import (PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS,
+        _NATIVE_MUTATION_PLAN_SEAL, _native_prepared_value_width)
+    if (type(plan) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+            or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or plan.consumed):
+        raise ValueError("prepared_memory_mutation_changed")
+    event = plan.audit_event
+    if event is None:
+        return ()
+    if type(event) is not AuditEvent:
+        raise ValueError("prepared_audit_event_changed")
+    expected_upper = _native_prepared_audit_expected_upper(event)
+    if event.details_json is None:
+        return (("effect", ("memory-prepared-audit", "expected-map"), expected_upper),)
+    return (("effect", ("memory-prepared-audit", "details-json"),
+            _native_prepared_value_width(event.details_json)),
+        ("effect", ("memory-prepared-audit", "expected-map"), expected_upper))
+
+
 class AuditRepository:
     def _prepare_event(
         self, *, event_type: str, summary: str, session_id: str | None = None,
@@ -40,9 +86,42 @@ class AuditRepository:
                 event_id=event_id)
         else:
             from sqlalchemy import inspect
+            from src.memory.header_bounds import (_MEMORY_LEDGER_PHASE,
+                _NativeMemoryNumericLedger, HeaderBoundsError)
+            active = _MEMORY_LEDGER_PHASE.get()
+            if active is not None:
+                from src.memory.m5 import (_native_prepared_numeric_frame,
+                    _native_prepared_value_width)
+                ledger, _phase = active
+                if type(ledger) is not _NativeMemoryNumericLedger:
+                    raise HeaderBoundsError("memory_prepared_numeric_owner_changed")
+                frame = _native_prepared_numeric_frame(db, ledger.prepared)
+                if (type(_prepared_event) is not AuditEvent
+                        or ledger.prepared.audit_event is not _prepared_event
+                        or session_id != _prepared_event.session_id
+                        or actor != _prepared_event.actor
+                        or event_type != _prepared_event.event_type
+                        or tool_name != _prepared_event.tool_name
+                        or risk_level != _prepared_event.risk_level
+                        or policy_mode != _prepared_event.policy_mode
+                        or summary != _prepared_event.summary
+                        or ((details is None) != (_prepared_event.details_json is None))):
+                    raise ValueError("prepared_audit_event_changed")
+                if details is not None:
+                    details_upper = _native_prepared_value_width(_prepared_event.details_json)
+                    if _native_prepared_audit_details_upper(details) > details_upper:
+                        raise ValueError("prepared_audit_event_changed")
+                    frame.debit(details_upper,
+                        appearance=("memory-prepared-audit", "details-json"))
+            serialized_details = json.dumps(details) if details is not None else None
+            if active is not None:
+                if serialized_details != _prepared_event.details_json:
+                    raise ValueError("prepared_audit_event_changed")
+                frame.debit(_native_prepared_audit_expected_upper(_prepared_event),
+                    appearance=("memory-prepared-audit", "expected-map"))
             expected = {"session_id": session_id, "actor": actor, "event_type": event_type,
                 "tool_name": tool_name, "risk_level": risk_level, "policy_mode": policy_mode,
-                "summary": summary, "details_json": json.dumps(details) if details is not None else None}
+                "summary": summary, "details_json": serialized_details}
             if (type(_prepared_event) is not AuditEvent or not inspect(_prepared_event).transient
                 or (event_id is not None and _prepared_event.id != event_id)
                 or any(getattr(_prepared_event, key) != value for key, value in expected.items())):

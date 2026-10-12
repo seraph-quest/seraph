@@ -120,3 +120,53 @@ async def test_genuine_complete_owner_keeps_custody_and_original_order(actual_re
         "task_id": task.task_id, "expected_task_revision": task.task_revision,
         "attempt_id": attempt.attempt_id, "idempotency_key": "complete-source-owner-observer"})
     assert response.status_code == 409 and len(observations) == 1
+
+
+@pytest.mark.asyncio
+async def test_genuine_report_all_three_persist_and_read_back(actual_report_memory):
+    client, operator, jobs, host, task, attempt = actual_report_memory
+    import json
+    from sqlalchemy import select
+    from src.db.engine import get_session
+    from src.db.models import MemoryProposal, Memory, AuditEvent
+    proposal_body = {"task_id": task.task_id, "expected_task_revision": task.task_revision,
+        "attempt_id": attempt.attempt_id, "idempotency_key": "proposal-original"}
+    response = await client.post("/api/memory/task-proposals/native", json=proposal_body)
+    assert response.status_code == 200, response.text
+    proposed = response.json()
+    assert proposed["job"]["status"] == "succeeded" and proposed["result"]["memory_status"] == "proposal_only"
+    proposal_id = proposed["result"]["value"]["proposal_ref"]
+    async with get_session() as db:
+        proposal = await db.get(MemoryProposal, proposal_id)
+        assert proposal.status.value == "proposed" and proposal.source_attempt_id == attempt.attempt_id
+        assert proposal.owner_session_id == operator.session_id
+    review_body = {"action": "accept", "expected_revision": proposal.revision,
+        "expected_preview_text_digest": proposal.preview_text_digest, "expected_task_revision": task.task_revision,
+        "expected_goal_revision": task.goal_revision, "idempotency_key": "review-original"}
+    response = await client.post(f"/api/memory/task-proposals/{proposal_id}/native-review", json=review_body)
+    assert response.status_code == 200, response.text
+    adopted = response.json()
+    assert adopted["job"]["status"] == "succeeded" and adopted["result"]["memory_status"] == "reviewed_update"
+    memory_id = adopted["result"]["value"]["record_ref"]
+    assert adopted["result"]["value"]["receipt_ref"].startswith("native-memory-receipt:")
+    async with get_session() as db:
+        saved = await db.get(Memory, memory_id)
+        assert saved is not None and saved.source_session_id == operator.session_id
+        assert saved.content and saved.content != "[forgotten by operator]"
+    response = await client.post(f"/api/memory/records/{memory_id}/native-forget",
+        json={"mode": "redact", "privacy_boundary": "private", "idempotency_key": "forget-original"})
+    assert response.status_code == 200, response.text
+    forgotten = response.json()
+    assert forgotten["job"]["status"] == "succeeded" and forgotten["result"]["memory_status"] == "forgotten"
+    async with get_session() as db:
+        memory = await db.get(Memory, memory_id)
+        assert memory.source_session_id == operator.session_id and memory.status.value == "archived"
+        assert memory.content == "[forgotten by operator]"
+        assert len(list((await db.execute(select(AuditEvent).where(AuditEvent.event_type.in_(
+            {"memory_learning_proposed", "memory_learning_accepted", "memory_forgotten"})))).scalars())) == 3
+    for result in (proposed, adopted, forgotten):
+        assert result["job"]["attempt_count"] == 1 and result["job"]["max_attempts"] == 1
+        assert "prepared_text" not in json.dumps(result) and "sanitized_text" not in json.dumps(result)
+    retried = await client.post("/api/memory/task-proposals/native", json=proposal_body)
+    assert retried.status_code == 200 and retried.json()["replayed"] is True
+    assert "result" not in retried.json()

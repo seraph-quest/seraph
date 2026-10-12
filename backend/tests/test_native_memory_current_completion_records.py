@@ -4,11 +4,13 @@ import json
 
 import pytest
 
-from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget, WRS_BY_RUN
+from src.memory.header_bounds import (
+    HeaderBoundsError, HeaderReadBudget, WRS_BY_RUN, _trace_memory_numeric_charges,
+)
 from src.workspace.accounting_witness import (
     MEMORY_ORIGINAL_CHECKPOINT, MEMORY_REFERENCE_PROFILE,
     _native_memory_current_lifecycle_numeric_entries,
-    _native_memory_prepare_current_row, _trace_memory_numeric_charges,
+    _native_memory_prepare_current_row,
 )
 from src.workflows.job_runtime import _canonical, _digest
 

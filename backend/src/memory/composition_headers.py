@@ -767,12 +767,10 @@ def _original_locator_schema_width(connection, table, model, budget, *, column_n
         if not name.isascii():
             return None
         upper = max(upper, len(name) + 2)
-    for name in _SCHEMA_TABLES:
-        if not name.isascii():
-            return None
-        upper = max(upper, len("sqlite_autoindex_") + len(name) + 1
-            + _census_decimal_width(_AUTO_MAX.get(name, 1)) + 2)
-    return upper
+    # The accepted autoindex grammar permits leading-zero decimal suffixes.
+    # The unchanged delivery SQL limits names to 128 bytes; the paid schema
+    # census proves their ASCII prefix/digits, so quotes give an upper of 130.
+    return max(upper, 130)
 
 
 def _validate_locator(connection, table, column, model=None, *, budget=None, _header_budget=None):

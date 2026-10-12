@@ -184,7 +184,20 @@ async def test_locator_schema_width_cannot_escape_original_issuer(original_auth_
         pass
     with pytest.raises(ObservedRollback):
         async with get_session(header_budget=budget) as db:
-            await begin_native_writer(db, owner="finite_service", header_budget=budget)
+            widths = []
+            prior_profile = sys.getprofile()
+            def observe_width(frame, action, result):
+                if action == "return" and frame.f_code is headers._original_locator_schema_width.__code__:
+                    if type(result) is int:
+                        widths.append(result)
+                if prior_profile is not None:
+                    prior_profile(frame, action, result)
+            sys.setprofile(observe_width)
+            try:
+                await begin_native_writer(db, owner="finite_service", header_budget=budget)
+            finally:
+                sys.setprofile(prior_profile)
+            assert 130 in widths and all(0 < width <= 130 for width in widths)
             connection = await db.connection()
             spent = budget.remaining
             with original_effects(connection) as (queries, compiles):

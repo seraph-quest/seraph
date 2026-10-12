@@ -14,6 +14,386 @@ from types import MappingProxyType, SimpleNamespace
 _PROGRAMME_SELECTION_SEAL = object()
 
 
+def _programme_value_upper(value, *, budget=None):
+    """Closed JSON width of an already paid value; no serialization/copy."""
+    from collections.abc import Mapping
+    from src.memory.header_bounds import HeaderBoundsError
+    if budget is not None:
+        # Numeric width work is itself a paid allocation. The original paid
+        # <=1MiB body bounds lengths/counts (7 digits), JSON widths (8), and
+        # bit_length*30103 (12); 64 covers these scalar/iterator locals.
+        budget.debit(64, appearance=("programme-constructor", "width-scratch"))
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is int:
+        # 30103/100000 > log10(2); unlike the SQL codec this admits big ints.
+        return 1 + (value.bit_length() * 30103) // 100000 + (value < 0)
+    if type(value) is float:
+        return 64
+    if type(value) is str:
+        if budget is not None:
+            budget.debit(4 * (4 + 4),
+                appearance=("programme-constructor", "string-method-references"))
+        size = len(value)
+        if not size:
+            return 2
+        if value.isascii() and value.isprintable():
+            return 2 + size + value.count('"') + value.count("\\")
+        # No second encoding or code-point walk; includes lone surrogates.
+        return 24 * size + 2
+    if type(value) in (tuple, list):
+        total = 2
+        for item in value:
+            if budget is not None:
+                budget.debit(24, appearance=("programme-constructor", "width-add-scratch"))
+            total += _programme_value_upper(item, budget=budget) + 1
+        return total - 1 if value else total
+    if isinstance(value, Mapping):
+        total = 2
+        for key in value:
+            if budget is not None:
+                budget.debit(32, appearance=("programme-constructor", "width-add-scratch"))
+            if budget is not None:
+                # Two receiver/method pairs16, three bools15 (including
+                # exact str type), len/add14 and key/result references8.
+                budget.debit(53, appearance=("programme-constructor", "key-width-scratch"))
+            key_upper = (len(key) + 2 if type(key) is str and key.isascii()
+                and key.isidentifier() else _programme_value_upper(key, budget=budget))
+            total += key_upper + 1 + _programme_value_upper(value[key], budget=budget) + 1
+        return total - 1 if value else total
+    if type(value) is datetime:
+        # Full datetime.isoformat with microseconds and an offset with seconds
+        # and microseconds fits 42 ASCII characters, plus its JSON quotes.
+        return 44
+    from src.goals.contracts import (GoalProgramme, GoalProgrammeAuthorityBinding,
+        GoalProgrammeBudget, GoalProgrammeNotifications)
+    if type(value) in (GoalProgramme, GoalProgrammeAuthorityBinding,
+            GoalProgrammeBudget, GoalProgrammeNotifications):
+        fields = type(value).model_fields
+        total = 2
+        for name in fields:
+            if budget is not None:
+                budget.debit(36, appearance=("programme-constructor", "model-width-scratch"))
+            total += len(name) + 3 + _programme_value_upper(getattr(value, name), budget=budget) + 1
+        return total - 1
+    raise HeaderBoundsError("programme_numeric_shape_unavailable")
+
+
+def _programme_paid_map_upper(table, encoded, budget):
+    """Map bound from the already-paid original raw encoder, without a walk."""
+    from src.memory.header_bounds import COMPOSITION_DESCRIPTORS
+    budget.debit(96, appearance=("programme-constructor", "paid-map-width-scratch"))
+    descriptor = COMPOSITION_DESCRIPTORS[table]
+    # Original outer = [tag, table, key, fields]; pair lists add two brackets
+    # per field compared with a map. Subtract only the key's minimum width2.
+    # A real's hex string may be narrower than its numeric map representation;
+    # 64 per real preserves the original real scalar bound.
+    return (len(encoded) - 30 - (len(table) + 2) - 5 - 2
+        - 2 * len(descriptor.columns) + 64 * descriptor.kinds.count("real"))
+
+
+def _programme_utf8_upper(value, *, budget=None):
+    from src.memory.header_bounds import HeaderBoundsError
+    if type(value) is not str:
+        raise HeaderBoundsError("programme_numeric_shape_unavailable")
+    if budget is not None:
+        # Receiver/method8 + boolean5 + len7 + non-ASCII multiply8.
+        budget.debit(28, appearance=("programme-constructor", "utf8-width-scratch"))
+    return len(value) if value.isascii() else 4 * len(value)
+
+
+
+def _programme_parse_upper(raw, *, budget):
+    """Prepaid byte lexical expansion counter, never JSON validation."""
+    budget.debit(2 + 4 * 5 + 20 + 14 + 5,
+        appearance=("programme-constructor", "json-width-scratch"))
+    encoded_upper = _programme_utf8_upper(raw, budget=budget)
+    budget.debit(encoded_upper, appearance=("programme-constructor", "json-scan-input"))
+    # Every yielded byte scalar is <=255 (at most three decimal digits),
+    # prepaid even if this interpreter happens to cache small integers.
+    budget.debit(3 * encoded_upper, appearance=("programme-constructor", "json-scan-byte-scalars"))
+    encoded = raw.encode("utf-8", errors="surrogatepass")
+    quoted = escaped = numeric = floating = False
+    extra = 0
+    for char in encoded:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == 92:
+                escaped = True
+            elif char == 34:
+                quoted = False
+            continue
+        if numeric and char not in b"0123456789.eE+-":
+            if floating:
+                budget.debit(20, appearance=("programme-constructor", "json-counter-update"))
+                extra += 64
+            numeric = floating = False
+        # Python's original json.loads also accepts these nonfinite tokens.
+        # Counting any outside-string N/I is conservative for malformed words;
+        # only the original parser validates the token.
+        if char in b"NI":
+            budget.debit(20, appearance=("programme-constructor", "json-counter-update"))
+            extra += 64
+        if char == 34:
+            quoted = True
+        elif char in b"0123456789-" and not numeric:
+            numeric = True
+        elif numeric and char in b".eE":
+            floating = True
+    if numeric and floating:
+        budget.debit(20, appearance=("programme-constructor", "json-counter-update"))
+        extra += 64
+    return _programme_value_upper(raw, budget=budget) + extra
+
+
+def _programme_model_upper(value, model, *, budget=None):
+    """Declared defaults/nested/date output before the original constructor."""
+    from src.goals.contracts import (GoalProgramme, GoalProgrammeRequest,
+        GoalProgrammeBudget, GoalProgrammeNotifications)
+    from src.memory.header_bounds import HeaderBoundsError
+    if model not in (GoalProgramme, GoalProgrammeRequest, GoalProgrammeBudget, GoalProgrammeNotifications):
+        raise HeaderBoundsError("programme_numeric_shape_unavailable")
+    if type(value) is not dict:
+        return _programme_value_upper(value, budget=budget)
+    total = 2
+    for name in model.model_fields:
+        if budget is not None:
+            budget.debit(36, appearance=("programme-constructor", "model-width-scratch"))
+        definition = model.model_fields[name]
+        total += len(name) + 3
+        if name in value:
+            item = value[name]
+        elif name == "notification_limits" and model is GoalProgrammeRequest:
+            total += 2 + _programme_value_upper("per_day") + 1 + 1
+            continue
+        elif definition.is_required():
+            # Invalid original input has no successful output; reserve its
+            # actual input width and let the original model reject it.
+            total += 4
+            continue
+        else:
+            item = definition.default
+        if name in {"expires_at", "confirmed_at"}:
+            total += 44
+        elif name == "budget":
+            total += _programme_model_upper(item, GoalProgrammeBudget, budget=budget)
+        elif name == "notification_limits":
+            total += _programme_model_upper(item, GoalProgrammeNotifications, budget=budget)
+        else:
+            total += _programme_value_upper(item, budget=budget)
+    return total + len(model.model_fields) - 1
+
+
+from weakref import WeakKeyDictionary
+_PROGRAMME_CONSTRUCTOR_PAYERS = WeakKeyDictionary()
+
+
+class _ProgrammeConstructorPayer:
+    """Private numeric lifetime; never a programme/read/effect permission."""
+    def __init__(self, connection, certificate):
+        import sys
+        from src.memory.composition_headers import (_checked_current_snapshot_scope,
+            _snapshot_current_task)
+        from src.memory.header_bounds import HeaderBoundsError
+        if sys._getframe(1).f_code is not _programme_constructor_payer.__code__:
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        self.connection, self.certificate = connection, certificate
+        self.scope = _checked_current_snapshot_scope(certificate.budget)
+        self.task, self.thread = _snapshot_current_task(), threading.get_ident()
+        self.transaction, self.driver = certificate.transaction, certificate.driver
+        self.widths = {}
+        self.budget = certificate.budget
+        _PROGRAMME_CONSTRUCTOR_PAYERS[self] = (certificate, self.scope, self.widths, self.budget)
+
+    def _checked(self):
+        from src.memory.composition_headers import (_checked_current_snapshot_scope,
+            _snapshot_current_task, CompositionHeaderCertificate, _SEAL)
+        from src.memory.header_bounds import HeaderBoundsError
+        if type(self) is not _ProgrammeConstructorPayer:
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        issued = _PROGRAMME_CONSTRUCTOR_PAYERS.get(self)
+        if type(issued) is not tuple:
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        cert = self.certificate
+        if (issued[0] is not cert or issued[1] is not self.scope
+                or issued[2] is not self.widths or issued[3] is not self.budget
+                or cert.budget is not self.budget):
+            raise HeaderBoundsError("programme_constructor_owner_changed")
+        if (type(cert) is not CompositionHeaderCertificate or cert.seal is not _SEAL
+                or cert.issued_id != id(cert) or cert.connection is not self.connection
+                or cert.transaction is not self.transaction or cert.driver is not self.driver
+                or _snapshot_current_task() is not self.task or threading.get_ident() != self.thread
+                or _checked_current_snapshot_scope(cert.budget) is not self.scope
+                or self.driver.total_changes != cert.changes):
+            raise HeaderBoundsError("programme_constructor_owner_changed")
+        if cert.raw_owner is not None:
+            owner = cert.raw_owner
+            if (type(owner) is not _RawRollbackConnection or owner._db is not self.connection
+                    or not owner._live or owner._poisoned or owner._token is not self.transaction
+                    or not owner._db.in_transaction):
+                raise HeaderBoundsError("programme_constructor_owner_changed")
+        elif (self.scope is None or self.scope.connection is not self.connection
+                or self.connection.get_transaction() is not self.transaction
+                or self.connection.connection.driver_connection is not self.driver
+                or not self.driver.in_transaction):
+            raise HeaderBoundsError("programme_constructor_owner_changed")
+        return cert.budget
+
+    def remember(self, value, upper):
+        import sys
+        from src.guardian.goal_programmes import _paid_programme_generation
+        from src.memory.header_bounds import HeaderBoundsError
+        if sys._getframe(1).f_code not in (
+                _paid_programme_generation.__code__, _programme_matching_generation.__code__,
+                _ProgrammeConstructorPayer.generations.__code__):
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        budget = self._checked()
+        budget.debit(20 + 1 + 2 + 4 + 1 + 8 + 1,
+            appearance=("programme-constructor", "retained-model-width"))
+        self.widths[id(value)] = (value, upper)
+
+    def generations(self, values):
+        import sys
+        from src.guardian.goal_programmes import _load
+        from src.goals.contracts import GoalProgramme
+        from src.memory.header_bounds import HeaderBoundsError
+        if sys._getframe(1).f_code is not _load.__code__:
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        budget = self._checked()
+        budget.debit(32, appearance=("programme-constructor", "generation-width-state"))
+        upper = 2
+        for item in values:
+            budget.debit(24, appearance=("programme-constructor", "generation-width-add"))
+            width = _programme_model_upper(item, GoalProgramme, budget=budget)
+            self.remember(item, width)
+            upper += width + 1
+        if values:
+            upper -= 1
+        budget.debit(upper, appearance=("programme-constructor", "generation-list"))
+
+    def binding(self, programme, capability):
+        budget = self._checked()
+        from src.goals.contracts import GoalProgramme
+        from src.memory.header_bounds import HeaderBoundsError
+        if type(programme) is not GoalProgramme or type(capability) is not str:
+            raise HeaderBoundsError("programme_numeric_shape_unavailable")
+        budget.debit(2 + 13 * (2 + 4 + 1 + 4) + 12,
+            appearance=("programme-constructor", "binding-width-roster"))
+        # Exact original from_programme's thirteen fields; field-name JSON
+        # widths are fixed by Source, values come from the paid typed model.
+        upper = 2
+        for name, item in (("goal_id", programme.goal_id),
+                ("goal_revision", programme.goal_revision), ("programme_id", programme.id),
+                ("grant_revision", programme.grant_revision),
+                ("owner_identity_id", programme.owner_identity_id),
+                ("issuer_root_id", programme.issuer_root_id),
+                ("issuer_principal_id", programme.issuer_principal_id),
+                ("brief_digest", programme.brief_digest), ("capability_id", capability),
+                ("route_epoch", programme.route_epoch), ("route_digest", programme.route_digest),
+                ("expires_at", programme.expires_at),
+                ("cost_ceiling_microusd", programme.budget.max_inference_microusd)):
+            budget.debit(28, appearance=("programme-constructor", "binding-width-add-scratch"))
+            upper += len(name) + 3 + _programme_value_upper(item, budget=budget) + 1
+        upper -= 1
+        budget.debit(upper, appearance=("programme-constructor", "binding-kwargs"))
+        budget.debit(upper, appearance=("programme-constructor", "binding-model"))
+        return upper
+
+    def pay(self, stage, value, *, model=None):
+        budget = self._checked()
+        if stage == "matching-list":
+            from src.memory.header_bounds import HeaderBoundsError
+            budget.debit(32, appearance=("programme-constructor", "matching-width-scratch"))
+            upper = 2
+            for item in value:
+                budget.debit(44, appearance=("programme-constructor", "matching-width-entry"))
+                retained = self.widths.get(id(item))
+                if retained is None or retained[0] is not item:
+                    raise HeaderBoundsError("programme_constructor_model_width_unavailable")
+                upper += retained[1] + 1
+            if value:
+                upper -= 1
+        elif stage == "json":
+            upper = _programme_parse_upper(value, budget=budget)
+        elif stage == "envelope-keys":
+            budget.debit(32, appearance=("programme-constructor", "envelope-width-scratch"))
+            upper = 2
+            if type(value) is dict:
+                for key in value:
+                    budget.debit(24, appearance=("programme-constructor", "envelope-width-add-scratch"))
+                    upper += _programme_value_upper(key, budget=budget) + 1
+                if value:
+                    upper -= 1
+        else:
+            budget.debit(20, appearance=("programme-constructor", "retained-width-lookup"))
+            retained = self.widths.get(id(value))
+            if retained is not None and retained[0] is value:
+                upper = retained[1]
+            else:
+                upper = _programme_value_upper(value, budget=budget) if model is None else _programme_model_upper(value, model, budget=budget)
+        budget.debit(upper, appearance=("programme-constructor", stage))
+        if model is not None:
+            from src.goals.contracts import (GoalProgramme, GoalProgrammeRequest,
+                GoalProgrammeBudget, GoalProgrammeNotifications)
+            budget.debit(2 + 2 * (2 + 4 + 1 + 4) + 1,
+                appearance=("programme-constructor", "nested-model-roster"))
+            for name, nested in (("budget", GoalProgrammeBudget), ("notification_limits", GoalProgrammeNotifications)):
+                if name in value:
+                    budget.debit(_programme_model_upper(value[name], nested, budget=budget),
+                        appearance=("programme-constructor", stage, name))
+            if model is GoalProgrammeRequest and "notification_limits" not in value:
+                budget.debit(13, appearance=("programme-constructor", stage, "notification-default-model"))
+            if "public_brief" in value:
+                if model is GoalProgrammeRequest:
+                    budget.debit(_programme_value_upper(value["public_brief"], budget=budget),
+                        appearance=("programme-constructor", stage, "brief-strip"))
+                    budget.debit(7, appearance=("programme-constructor", stage, "brief-length"))
+                budget.debit(_programme_utf8_upper(value["public_brief"], budget=budget),
+                    appearance=("programme-constructor", stage, "brief-utf8"))
+                if model is GoalProgramme:
+                    budget.debit(4, appearance=("programme-constructor", stage, "brief-hash-owner"))
+                    budget.debit(66, appearance=("programme-constructor", stage, "brief-digest"))
+            for name in ("expires_at", "confirmed_at"):
+                if name in value:
+                    budget.debit(44, appearance=("programme-constructor", stage, name))
+            if "expires_at" in value and "confirmed_at" in value:
+                budget.debit(4 + 64, appearance=("programme-constructor", stage, "duration"))
+        return upper
+
+
+def _programme_constructor_payer(connection, certificate):
+    import sys
+    from src.memory.header_bounds import HeaderBoundsError
+    if sys._getframe(1).f_code not in (
+            _derive_programme_rows.__code__, _derive_programme_admission_rows.__code__):
+        raise HeaderBoundsError("programme_constructor_owner_unavailable")
+    # The enclosing original validator and paid row read already ran. No
+    # second validation query is introduced by this capacity-only lifetime.
+    # Seven fixed attribute names (quoted widths total 68), six opaque
+    # references and a signed thread-id scalar; delimiters/colons included.
+    certificate.budget.debit(2 + 68 + 7 + 6 + 6 * 4 + 20 + 16 + 34,
+        appearance=("programme-constructor", "payer-storage"))
+    payer = _ProgrammeConstructorPayer(connection, certificate)
+    payer._checked()
+    return payer
+
+
+def _programme_matching_generation(value, payer):
+    import sys
+    from src.goals.contracts import GoalProgramme
+    from src.memory.header_bounds import HeaderBoundsError
+    if sys._getframe(1).f_code not in (
+            _derive_programme_rows.__code__, _derive_programme_admission_rows.__code__):
+        raise HeaderBoundsError("programme_constructor_owner_unavailable")
+    upper = payer.pay("generation-model", value, model=GoalProgramme)
+    programme = GoalProgramme.model_validate(value)
+    payer.remember(programme, upper)
+    return programme
+
+
 @dataclass(frozen=True, eq=False)
 class _ProgrammeSelection:
     owner: object
@@ -39,9 +419,6 @@ def _derive_programme_rows(connection, common33, *, fail):
         upper = common33.rows[(table, key)][1]
         for appearance in appearances:
             common33.budget.debit(upper, appearance=("programme-selector", appearance, table, key))
-    def generation(value, key):
-        pay("goals", key, "generation-model")
-        return GoalProgramme.model_validate(value)
     goals, issuers, runs, identities = {}, {}, {}, set()
     def full(table, key):
         with snapshot_reads(common33):
@@ -72,12 +449,17 @@ def _derive_programme_rows(connection, common33, *, fail):
                 or run["authority_digest"] != _digest(json.loads(run["declared_authority_json"]))
                 or run["input_digest"] != _digest(json.loads(run["arguments_json"]))):
             fail("programme_original_lineage_changed")
-        goal = full("goals", binding.goal_id)
-        pay("goals", binding.goal_id, "programme-namespace", "programme-json", "programme-envelope", "generation-list")
-        stored = _load(SimpleNamespace(**goal))
-        matching = [generation(value, binding.goal_id) for value in stored["generations"]
+        with snapshot_reads(common33):
+            _, goal, goal_bytes = _programme_reference_row_on_connection(connection, "goals", binding.goal_id)
+        payer = _programme_constructor_payer(connection, common33)
+        goal_upper = _programme_paid_map_upper("goals", goal_bytes, common33.budget)
+        common33.budget.debit(goal_upper, appearance=("programme-constructor", "programme-namespace"))
+        stored = _load(SimpleNamespace(**goal), _programme_payer=payer)
+        payer.pay("matching-list", stored["generations"])
+        matching = [_programme_matching_generation(value, payer) for value in stored["generations"]
             if value["id"] == binding.programme_id and value["grant_revision"] == binding.grant_revision]
-        pay("goals", binding.goal_id, "programme-binding-model")
+        if matching:
+            payer.binding(matching[0], authority.capability_id)
         if len(matching) != 1 or GoalProgrammeAuthorityBinding.from_programme(matching[0], authority.capability_id) != binding:
             fail("programme_original_generation_changed")
         issuer = full("operator_sessions", binding.issuer_root_id)
@@ -120,23 +502,18 @@ def _derive_programme_admission_rows(connection, common33, *, goal_id, programme
     from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
     from src.work_board.research_parent import DISCOVERY_CAPABILITY
     _validate(connection, common33)
-    def pay(*appearances):
-        upper = common33.rows[("goals", goal_id)][1]
-        for appearance in appearances:
-            common33.budget.debit(upper,
-                appearance=("programme-prospective-selector", appearance, goal_id))
-    def generation(value):
-        pay("generation-model")
-        return GoalProgramme.model_validate(value)
     if (any(type(value) is not str or not 0 < len(value.encode("utf-8")) <= 512
             for value in (goal_id, programme_id))
             or type(grant_revision) is not int or grant_revision < 1):
         fail("programme_original_generation_changed")
     with snapshot_reads(common33):
         _, goal, goal_bytes = _programme_reference_row_on_connection(connection, "goals", goal_id)
-    pay("programme-namespace", "programme-json", "programme-envelope", "generation-list")
-    stored = _load(SimpleNamespace(**goal))
-    matching = [generation(value) for value in stored["generations"] if value["id"] == programme_id]
+    payer = _programme_constructor_payer(connection, common33)
+    goal_upper = _programme_paid_map_upper("goals", goal_bytes, common33.budget)
+    common33.budget.debit(goal_upper, appearance=("programme-constructor", "programme-namespace"))
+    stored = _load(SimpleNamespace(**goal), _programme_payer=payer)
+    payer.pay("matching-list", stored["generations"])
+    matching = [_programme_matching_generation(value, payer) for value in stored["generations"] if value["id"] == programme_id]
     if len(matching) != 1:
         fail("programme_original_generation_changed")
     programme = matching[0]
@@ -144,7 +521,7 @@ def _derive_programme_admission_rows(connection, common33, *, goal_id, programme
             or programme.goal_id != goal_id or programme.goal_revision != goal["revision"]
             or DISCOVERY_CAPABILITY not in programme.capability_ids):
         fail("programme_original_generation_changed")
-    pay("programme-binding-model")
+    payer.binding(programme, DISCOVERY_CAPABILITY)
     binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
     with snapshot_reads(common33):
         _, issuer, issuer_bytes = _programme_reference_row_on_connection(connection, "operator_sessions", binding.issuer_root_id)
@@ -153,11 +530,16 @@ def _derive_programme_admission_rows(connection, common33, *, goal_id, programme
         fail("programme_original_issuer_changed")
     # Pay canonical retained facts and typed return appearances in the same frame
     # before issuing/storing the private selection or delivering its outputs.
-    # Both typed model dumps and their returned maps are separate from the
+    # Both typed model returns and their returned maps are separate from the
     # canonical raw tuple delivery, and paid before constructing those copies.
-    pay("programme-output-model", "binding-output-model")
+    payer.pay("programme-output-model", programme)
+    payer.pay("binding-output-model", binding)
+    common33.budget.debit(96, appearance=("programme-constructor", "return-width-scratch"))
     common33.budget.debit(len(goal_bytes) + len(issuer_bytes)
-        + 2 * common33.rows[("goals", goal_id)][1],
+        + goal_upper
+        + _programme_paid_map_upper("operator_sessions", issuer_bytes, common33.budget)
+        + _programme_value_upper(goal_id, budget=common33.budget)
+        + _programme_value_upper(binding.issuer_root_id, budget=common33.budget) + 19,
         appearance=("programme-admission-output", goal_id, programme_id, grant_revision))
     return programme, binding, {goal_id: MappingProxyType(goal)}, {
         binding.issuer_root_id: MappingProxyType(issuer)}

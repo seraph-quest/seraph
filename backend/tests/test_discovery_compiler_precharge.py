@@ -1,5 +1,6 @@
 """Original compiler preservation and fail-before-effect prepayment checks."""
 from contextlib import contextmanager
+import json
 import sys
 
 import pytest
@@ -253,10 +254,13 @@ async def test_genuine_nonempty_identity_compiler_occurrences(genuine_live_selec
         assert requested["goal_id"] == case.goal_id
         budget = HeaderReadBudget()
         async with get_session(header_budget=budget) as db:
-            guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
-            connection = await db.connection()
-            common = await connection.run_sync(lambda current:
-                headers._certify_current_memory_snapshot_on_connection(current, budget, _header_budget=budget))
+            factory_remaining = budget.remaining
+            with _trace_memory_numeric_charges(budget) as prefix_trace:
+                guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
+                writer_remaining = budget.remaining
+                connection = await db.connection()
+                common = await connection.run_sync(lambda current:
+                    headers._certify_current_memory_snapshot_on_connection(current, budget, _header_budget=budget))
             spent = budget.remaining
             compile_payment_order = []
             with _trace_memory_numeric_charges(budget) as trace, original_effects(connection,
@@ -274,6 +278,23 @@ async def test_genuine_nonempty_identity_compiler_occurrences(genuine_live_selec
                         guard._select_programme_admission(current, common, service=goal_discovery_service,
                             host=cordis_host, goal_id=case.goal_id, programme_id=case.programme["id"],
                             grant_revision=case.programme["grant_revision"]))
+                except HeaderBoundsError:
+                    # Original debit records the attempted charge before denial.
+                    # Export numerical facts only; retain the original exception.
+                    print("PROGRAMME_PREFIX_NUMERIC " + json.dumps({
+                        "initial_capacity": 1048576,
+                        "factory_remaining": factory_remaining,
+                        "writer_remaining": writer_remaining,
+                        "before_selection_remaining": spent,
+                        "failure_remaining": budget.remaining,
+                        "prefix_amounts": [amount for _appearance, amount in prefix_trace],
+                        "selection_amounts": [amount for _appearance, amount in trace],
+                        "prefix_attempted_total": sum(amount for _appearance, amount in prefix_trace),
+                        "selection_attempted_total": sum(amount for _appearance, amount in trace),
+                        "selection_spent": spent - budget.remaining,
+                        "denied_amount": trace[-1][1] if trace else None,
+                    }, sort_keys=True, separators=(",", ":")))
+                    raise
                 finally:
                     event.remove(connection.sync_connection, "before_cursor_execute", before_query)
                 selection = identity.original_selection

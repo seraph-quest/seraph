@@ -65,22 +65,69 @@ def _policy_binding() -> tuple[int, str, str | None]:
             "revoked": configuration.egress_revoked, "epoch": configuration.egress_revision}), "provider_policy_unavailable"
 
 
-def _load(goal: Goal) -> dict:
+def _paid_programme_generation(item, payer):
+    """Same original validate/dump pair, with prepaid owner numerical reuse."""
+    import sys
+    from src.memory.header_bounds import HeaderBoundsError
+    if sys._getframe(1).f_code is not _load.__code__:
+        raise HeaderBoundsError("programme_constructor_owner_unavailable")
+    upper = payer.pay("stored-generation-model", item, model=GoalProgramme)
+    programme = GoalProgramme.model_validate(item)
+    payer.remember(programme, upper)
+    payer.pay("stored-generation-dump", programme)
+    result = programme.model_dump(mode="json")
+    payer.remember(result, upper)
+    return result
+
+
+def _load(goal: Goal, *, _programme_payer=None) -> dict:
+    if _programme_payer is not None:
+        from src.workspace.accounting_continuity import _ProgrammeConstructorPayer
+        from src.memory.header_bounds import HeaderBoundsError
+        if type(_programme_payer) is not _ProgrammeConstructorPayer:
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        import sys
+        from src.workspace.accounting_continuity import _derive_programme_rows, _derive_programme_admission_rows
+        if sys._getframe(1).f_code not in (_derive_programme_rows.__code__, _derive_programme_admission_rows.__code__):
+            raise HeaderBoundsError("programme_constructor_owner_unavailable")
+        _programme_payer._checked()
     raw = getattr(goal, "goal_programmes_json", None)
     if not raw:
+        if _programme_payer is not None:
+            _programme_payer._checked().debit(48,
+                appearance=("programme-constructor", "empty-envelope"))
         return {"revision": 0, "preview": None, "generations": []}
     try:
+        if _programme_payer is not None:
+            _programme_payer.pay("json", raw)
         stored = json.loads(raw)
+        if _programme_payer is not None:
+            _programme_payer.pay("envelope-keys", stored)
+            _programme_payer._checked().debit(38,
+                appearance=("programme-constructor", "expected-envelope-keys"))
         if (not isinstance(stored, dict) or set(stored) != {"revision", "preview", "generations"}
                 or type(stored["revision"]) is not int or stored["revision"] < 0
                 or not isinstance(stored["generations"], list) or len(stored["generations"]) > MAX_GENERATIONS):
             raise ValueError("invalid programme storage")
-        stored["generations"] = [GoalProgramme.model_validate(item).model_dump(mode="json") for item in stored["generations"]]
+        if _programme_payer is None:
+            stored["generations"] = [GoalProgramme.model_validate(item).model_dump(mode="json") for item in stored["generations"]]
+        else:
+            _programme_payer.generations(stored["generations"])
+            stored["generations"] = [_paid_programme_generation(item, _programme_payer)
+                for item in stored["generations"]]
         if stored["preview"] is not None:
             preview = stored["preview"]
+            if _programme_payer is not None:
+                _programme_payer.pay("envelope-keys", preview)
+                _programme_payer._checked().debit(26,
+                    appearance=("programme-constructor", "expected-preview-keys"))
             if not isinstance(preview, dict) or set(preview) != {"programme", "request"}:
                 raise ValueError("invalid programme preview")
+            if _programme_payer is not None:
+                _programme_payer.pay("preview-programme-model", preview["programme"], model=GoalProgramme)
             GoalProgramme.model_validate(preview["programme"])
+            if _programme_payer is not None:
+                _programme_payer.pay("preview-request-model", preview["request"], model=GoalProgrammeRequest)
             GoalProgrammeRequest.model_validate(preview["request"])
         return stored
     except (ValueError, TypeError, KeyError):

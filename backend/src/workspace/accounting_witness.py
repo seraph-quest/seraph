@@ -1386,6 +1386,72 @@ def _native_memory_reference_row_on_connection(connection, table, key):
     return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
 
 
+def _programme_paid_row_copy_bounds(descriptor, key, values, budget):
+    """Numerical roster from the original already-paid raw tuple only."""
+    from src.workspace.accounting_continuity import _programme_value_upper, _programme_utf8_upper
+    # Count2; final map20/fields20/table6; key quote arithmetic and
+    # booleans45 plus four method/receiver pairs32; outer29/text40;
+    # validation-set arithmetic17; initial locals/references/iterator28.
+    # 239 <=256, prepaid before all such work. Key width/UTF8 visitors,
+    # returned containers and per-field scratch are paid separately.
+    budget.debit(256, appearance=("programme-row-output", "width-state"))
+    mapping = pairs = names = quotes = index = 0
+    # The three original programme descriptors contain at most66 columns.
+    # Their paid body is bounded by the same1MiB frame. Scalar expansion24x,
+    # field delimiters and immutable descriptor names keep each accumulated
+    # width below100,000,000: eight decimal digits. Direct iteration avoids
+    # the former enumerate pair; the counter result needs three digits.
+    for name in descriptor.columns:
+        # name len/add6; names add4; mapping intermediates19; pair
+        # intermediates22; quotes intermediates16; index add2; ASCII count
+        # arithmetic/bools45; type bools10; class refs8; yielded refs8;
+        # iterator/returned-width refs8; four method receivers and method
+        # appearances32, without depending on interpreter call optimization.
+        budget.debit(6 + 4 + 19 + 22 + 16 + 2 + 45 + 10 + 8 + 8 + 8 + 32,
+            appearance=("programme-row-output", "field-width-scratch"))
+        name_upper = len(name) + 2  # Source descriptor names are ASCII identifiers.
+        value = values[index]
+        if type(value) is float:
+            # float.hex is signed, finite or nonfinite ASCII, <=24characters.
+            value_upper, extra = 26, 2
+            budget.debit(26, appearance=("programme-row-output", "float-hex"))
+        else:
+            value_upper = _programme_value_upper(value, budget=budget)
+            if type(value) is str:
+                if value.isascii() and value.isprintable():
+                    extra = 2 + 2 * (value.count('"') + value.count("\\"))
+                else:
+                    extra = value_upper
+            else:
+                extra = 0
+        names += name_upper
+        mapping += name_upper + 1 + value_upper
+        pairs += 2 + name_upper + 1 + value_upper
+        quotes += 2 + extra
+        index += 1
+    count = len(descriptor.columns)
+    mapping += 2 + max(0, count - 1)
+    fields = 2 + pairs + max(0, count - 1)
+    tag_upper = 30  # quoted native-composition-memory.v1 (28chars).
+    table_upper = len(descriptor.table) + 2
+    key_upper = _programme_value_upper(key, budget=budget)
+    key_extra = (2 + 2 * (key.count('"') + key.count("\\"))
+        if key.isascii() and key.isprintable() else key_upper)
+    outer = 2 + tag_upper + table_upper + key_upper + fields + 3
+    text = 2 + outer + quotes + 2 + 2 + key_extra
+    # Two actual validation sets and key UTF8 precede the original encoder.
+    budget.debit(2 * (2 + names + max(0, count - 1)),
+        appearance=("programme-row-output", "validation-sets"))
+    budget.debit(_programme_utf8_upper(key, budget=budget),
+        appearance=("programme-row-output", "key-utf8"))
+    budget.debit(mapping, appearance=("programme-row-output", "dict-copy", descriptor.table, key))
+    budget.debit(2 + 5 * (2 + 4 + 1 + 8) + 4,
+        appearance=("programme-row-output", "encoded-roster"))
+    for label, upper in (("encoded-pairs", pairs), ("encoded-fields", fields),
+            ("encoded-outer", outer), ("encoded-text", text), ("encoded-utf8", outer)):
+        budget.debit(upper, appearance=("programme-row-output", label, descriptor.table, key))
+
+
 def _programme_reference_row_on_connection(connection, table, key):
     """Named common33 programme provenance, using unchanged raw tuple bytes."""
     from src.memory.header_bounds import COMPOSITION_DESCRIPTORS, HeaderBoundsError
@@ -1395,14 +1461,12 @@ def _programme_reference_row_on_connection(connection, table, key):
     descriptor = COMPOSITION_DESCRIPTORS[table]
     certificate = _CURRENT.get()
     _validate(connection, certificate)
-    upper = certificate.rows[(table, key)][1]
-    for appearance in ("dict-copy", "encoded-copy"):
-        certificate.budget.debit(upper, appearance=("programme-row-output", appearance, table, key))
     charge_row(connection, table, key)
     columns = ",".join('"' + name + '"' for name in descriptor.columns)
     records = list(_sql(connection, f'SELECT {columns} FROM "{table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,)))
     if len(records) != 1:
         raise HeaderBoundsError("programme_reference_row_missing")
+    _programme_paid_row_copy_bounds(descriptor, key, records[0], certificate.budget)
     row = dict(zip(descriptor.columns, records[0]))
     return descriptor, row, _native_memory_row_bytes(descriptor, key, row)
 

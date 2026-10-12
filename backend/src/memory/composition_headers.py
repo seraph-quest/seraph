@@ -792,7 +792,11 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
         raise HeaderBoundsError("header_locator_changed")
     column_width = (_original_locator_schema_width(connection, table, model, _header_budget, column_names=True)
         if _header_budget is not None else None)
-    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770 if column_width is None else column_width,770,20,20,20)), appearance=('locator-parts',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3')
+    # Only this issuer's already-paid mapped schema proof narrows collation.
+    # Key rows accept BINARY only; nonkey collation is not an authority input.
+    # NULL preserves rejection for a non-BINARY key without bounding its raw
+    # collation name. Ordinary/default and other metered callers stay unchanged.
+    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770 if column_width is None else column_width,770 if column_width is None else 8,20,20,20)), appearance=('locator-parts',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3' if column_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN coll=\'BINARY\' THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3'))
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
@@ -804,9 +808,19 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
 
 def _headers(connection, descriptor, identities, *, _header_budget=None):
     fields=['_rowid_']
-    for name in descriptor.columns:
-        fields += [f'typeof("{name}")', f'octet_length("{name}")',
-                   f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"]
+    for index, name in enumerate(descriptor.columns):
+        if _header_budget is None:
+            storage = f'typeof("{name}")'
+            number = f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"
+        else:
+            storage = (f'CASE typeof("{name}") '
+                "WHEN 'null' THEN 'null' WHEN 'text' THEN 'text' "
+                "WHEN 'integer' THEN 'integer' WHEN 'real' THEN 'real' "
+                "WHEN 'blob' THEN 'blob' ELSE NULL END")
+            kind = descriptor.kinds[index]
+            number = ("NULL" if kind == "text" else
+                f"CASE WHEN typeof(\"{name}\")='{kind}' THEN \"{name}\" END")
+        fields += [storage, f'octet_length("{name}")', number]
     result={}
     for key in identities:
         if _header_budget is not None:
@@ -823,7 +837,10 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
                 key_copy_upper = 20
         row_bound = (1 if _header_budget is not None
             and _original_common_header_single_row(connection, descriptor, identities, _header_budget) else 2)
-        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(row_bound, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
+        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(row_bound, (20, *(
+            [width for kind in descriptor.kinds for width in
+                (9, 20, 4 if kind == "text" else 20 if kind == "integer" else 64)]
+            if _header_budget is not None else [44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
@@ -902,6 +919,46 @@ def _selected_whole_locator_bound(connection, descriptor, budget, *, remaining):
     return count, 2 + summed_width + max(0, count - 1)
 
 
+def _original_programme_identity_key_upper(connection, descriptor, budget, key, metadata_budget):
+    """Numerical width only after the original selected Identity BINARY proof."""
+    if metadata_budget is None or key is None:
+        return None
+    if metadata_budget is not budget:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    discover = sys._getframe(1)
+    caller = discover.f_back
+    if discover.f_code is not _discover.__code__ or caller is None or caller.f_code is not preflight_programme_identity_component.__code__:
+        return None
+    # The pinned original caller has exactly one _discover call, after its
+    # genuine selection and complete BINARY locator checks. Its Source-owned
+    # arguments establish this seam without materializing frame.f_locals.
+    from src.memory.header_bounds import ClosedRowDescriptor
+    if (type(descriptor) is not ClosedRowDescriptor or descriptor.table != "operator_identities"
+            or descriptor.key != "id" or type(key) is not str):
+        raise HeaderBoundsError("programme_identity_locator_changed")
+    # Native len and isascii results plus multiply/add output, before inspection.
+    _metadata_precharge(connection, budget, 20 + 5 + 20 + 20, ("identity-key-width", "planning"))
+    size = len(key)
+    if size > 512:
+        raise HeaderBoundsError("header_request_bound")
+    if key.isascii():
+        octets = size
+    else:
+        # Pay character, ord and counter scalar appearances before the
+        # original Unicode width traversal; no encoder/generator is created.
+        _metadata_precharge(connection, budget, 24 * size,
+            ("identity-key-width", "unicode-scratch"))
+        octets = 0
+        for character in key:
+            point = ord(character)
+            octets += 1 if point < 128 else 2 if point < 2048 else 3 if point <= 65535 else 4
+            if octets > 512:
+                raise HeaderBoundsError("header_request_bound")
+    if octets > 512:
+        raise HeaderBoundsError("header_request_bound")
+    return 6 * octets + 2
+
+
 def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None, _header_budget=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
@@ -929,6 +986,12 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
     else:
         locator_upper = _metadata_upper((2 if key is not None or tombstone else
             (MAX_ROWS if remaining is None else remaining)+1), (20,44,20,3074,20))
+    identity_key_upper = _original_programme_identity_key_upper(connection, descriptor, budget, key, _header_budget)
+    if identity_key_upper is not None:
+        # The proved index collation does not establish the column's declared
+        # collation. Pin this original protected comparison to that BINARY key.
+        suffix = f' WHERE "{descriptor.key}" COLLATE BINARY=?'
+        locator_upper = _metadata_upper(2, (20,44,20,identity_key_upper,20))
     column=descriptor.key
     if selected_whole:
         locator_query = (f'SELECT _rowid_,typeof("{column}"),octet_length("{column}"),'
@@ -1208,19 +1271,19 @@ def preflight_programme_identity_component(common33, *, original_selection):
     if common33.metadata_budget is None:
         budget.debit(schema_cost, appearance=("programme-identity-schema",))
     # Validate the exact source-owned single text PK BINARY ascending locator.
-    indexes = _descriptor_metadata_rows(connection, 'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 2', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(2, (20,770,20,14,20)), appearance=('identity-indexes',), bounded_query='SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT 2')
+    indexes = _descriptor_metadata_rows(connection, 'SELECT seq,name,"unique",origin,partial FROM pragma_index_list(?) LIMIT 2', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(2, (20,40,20,4,20)), appearance=('identity-indexes',), bounded_query="SELECT seq,CASE WHEN name='sqlite_autoindex_operator_identities_1' THEN name END,\"unique\",CASE WHEN origin='pk' THEN origin END,partial FROM pragma_index_list(?) LIMIT 2")
     if common33.metadata_budget is None:
         budget.debit(_metadata_cost([list(row) for row in indexes]), appearance=("programme-identity-indexes",))
     if ((common33.metadata_budget is None and (len(indexes) != 1 or tuple(indexes[0]) != (0, "sqlite_autoindex_operator_identities_1", 1, "pk", 0)))
             or (common33.metadata_budget is not None and not _identity_index_matches(indexes))):
         raise HeaderBoundsError("programme_identity_locator_changed")
-    parts = _descriptor_metadata_rows(connection, 'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 3', (indexes[0][1],), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (20,20,770,20,770,20)), appearance=('identity-parts',), bounded_query='SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,desc,CASE WHEN octet_length(coll)<=128 THEN coll END,key FROM pragma_index_xinfo(?) LIMIT 3')
+    parts = _descriptor_metadata_rows(connection, 'SELECT seqno,cid,name,desc,coll,key FROM pragma_index_xinfo(?) LIMIT 3', (indexes[0][1],), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (20,20,4,20,8,20)), appearance=('identity-parts',), bounded_query="SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT 3")
     if common33.metadata_budget is None:
         budget.debit(_metadata_cost([list(row) for row in parts]), appearance=("programme-identity-index-parts",))
     if ((common33.metadata_budget is None and [tuple(row) for row in parts] != [(0, 0, "id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0)])
             or (common33.metadata_budget is not None and not _identity_parts_match(parts))):
         raise HeaderBoundsError("programme_identity_locator_changed")
-    objects = _descriptor_metadata_rows(connection, 'SELECT type,name FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (44,770)), appearance=('identity-objects',), bounded_query='SELECT CASE WHEN octet_length(type)<=7 THEN type END,CASE WHEN octet_length(name)<=128 THEN name END FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3')
+    objects = _descriptor_metadata_rows(connection, 'SELECT type,name FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3', (descriptor.table,), _header_budget=common33.metadata_budget, upper=_metadata_upper(3, (7,40)), appearance=('identity-objects',), bounded_query="SELECT CASE WHEN type IN ('table','index') THEN type END,CASE WHEN name IN ('operator_identities','sqlite_autoindex_operator_identities_1') THEN name END FROM sqlite_schema WHERE tbl_name=? ORDER BY rowid LIMIT 3")
     if common33.metadata_budget is None:
         budget.debit(_metadata_cost([list(row) for row in objects]), appearance=("programme-identity-objects",))
     if ((common33.metadata_budget is None and [tuple(row) for row in objects] != [("table", descriptor.table), ("index", indexes[0][1])])
@@ -1259,8 +1322,10 @@ def read_programme_identity(certificate, identity):
             return None
         raise HeaderBoundsError("header_row_unavailable")
     certificate.budget.debit(row[1], appearance=("programme-identity-body", identity))
-    records = list(_sql(certificate.connection,
-        'SELECT "id","created_at","revoked_at" FROM operator_identities WHERE id=? LIMIT 2', (identity,)))
+    query = ('SELECT "id","created_at","revoked_at" FROM operator_identities WHERE id COLLATE BINARY=? LIMIT 2'
+        if certificate.metadata_budget is not None and certificate.raw_owner is None else
+        'SELECT "id","created_at","revoked_at" FROM operator_identities WHERE id=? LIMIT 2')
+    records = list(_sql(certificate.connection, query, (identity,)))
     if len(records) != 1:
         raise HeaderBoundsError("header_row_unavailable")
     return tuple(records[0])
@@ -1317,10 +1382,12 @@ async def read_current_method_pointer(db, *, original_selection):
         if [tuple(row) for row in layout] != [(0,)]:
             raise HeaderBoundsError("task_method_pointer_schema_changed")
         indexes = _metadata_rows(connection,
-            'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
-            'CASE WHEN octet_length(origin)<=2 THEN origin END,partial '
+            "SELECT seq,CASE WHEN name IN ('sqlite_autoindex_task_method_active_1',"
+            "'sqlite_autoindex_task_method_active_2','ix_task_method_active_owner_identity_id',"
+            "'ix_task_method_active_goal_id') THEN name END,\"unique\","
+            "CASE WHEN origin IN ('pk','u','c') THEN origin END,partial "
             'FROM pragma_index_list(?) LIMIT 5', ("task_method_active",),
-            _header_budget=budget, upper=_metadata_upper(5, (20, 770, 20, 14, 20)),
+            _header_budget=budget, upper=_metadata_upper(5, (20, 41, 20, 4, 20)),
             appearance=("task-method-pointer-indexes",))
         definitions = {
             "sqlite_autoindex_task_method_active_1": (1, "pk", ("id",)),
@@ -1336,29 +1403,46 @@ async def read_current_method_pointer(db, *, original_selection):
                     or (unique, origin, partial) != (*definitions[name][:2], 0)):
                 raise HeaderBoundsError("task_method_pointer_locator_changed")
             keys = definitions[name][2]
-            parts = _metadata_rows(connection,
-                'SELECT seqno,cid,CASE WHEN octet_length(name)<=128 THEN name END,desc,'
-                'CASE WHEN octet_length(coll)<=128 THEN coll END,key '
-                'FROM pragma_index_xinfo(?) LIMIT ?', (name, len(keys) + 2),
-                _header_budget=budget, upper=_metadata_upper(len(keys) + 2, (20,20,770,20,770,20)),
+            if name == "sqlite_autoindex_task_method_active_1":
+                parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
+                name_upper = 4
+            elif name == "sqlite_autoindex_task_method_active_2":
+                parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name IN ('owner_identity_id','goal_id','goal_revision','family') THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
+                name_upper = 19
+            elif name == "ix_task_method_active_owner_identity_id":
+                parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='owner_identity_id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
+                name_upper = 19
+            else:
+                parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='goal_id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
+                name_upper = 9
+            parts = _metadata_rows(connection, parts_query, (name, len(keys) + 2),
+                _header_budget=budget, upper=_metadata_upper(len(keys) + 2, (20,20,name_upper,20,8,20)),
                 appearance=("task-method-pointer-index-parts", name))
             expected_parts = [(index, columns.index(key), key, 0, "BINARY", 1)
                 for index, key in enumerate(keys)] + [(len(keys), -1, None, 0, "BINARY", 0)]
             if [tuple(row) for row in parts] != expected_parts:
                 raise HeaderBoundsError("task_method_pointer_locator_changed")
         # Exact compound scope, no status filter or unbounded ID delivery.
+        # All four compound keys are NOT NULL and the exact UNIQUE,
+        # nonpartial, ascending BINARY index was checked immediately above.
+        # Keep the original LIMIT 2 and ambiguity denial; only its delivery
+        # upper uses uniqueness under the identical current transaction.
+        scope_rows_upper = (1 if connection is common33.connection
+            and connection.get_transaction() is common33.transaction else 2)
         selected = _metadata_rows(connection,
             'SELECT CASE WHEN typeof(id)=\'text\' AND octet_length(id) BETWEEN 1 AND 512 '
             'THEN id END,_rowid_ FROM task_method_active '
-            'WHERE owner_identity_id=? AND goal_id=? AND goal_revision=? AND family=? LIMIT 2',
-            scope, _header_budget=budget, upper=_metadata_upper(2, (3074, 20)),
+            'WHERE owner_identity_id COLLATE BINARY=? AND goal_id COLLATE BINARY=? '
+            'AND goal_revision COLLATE BINARY=? AND family COLLATE BINARY=? LIMIT 2',
+            scope, _header_budget=budget, upper=_metadata_upper(scope_rows_upper, (3074, 20)),
             appearance=("task-method-pointer-scope",))
         if len(selected) > 1:
             raise HeaderBoundsError("task_method_pointer_ambiguous")
         if not selected:
             foreign = _metadata_rows(connection,
                 'SELECT _rowid_ FROM task_method_active '
-                'WHERE goal_id=? AND goal_revision=? AND family=? LIMIT 1',
+                'WHERE goal_id COLLATE BINARY=? AND goal_revision COLLATE BINARY=? '
+                'AND family COLLATE BINARY=? LIMIT 1',
                 scope[1:], _header_budget=budget, upper=_metadata_upper(1, (20,)),
                 appearance=("task-method-pointer-foreign-existence",))
             for row in foreign:
@@ -1366,6 +1450,9 @@ async def read_current_method_pointer(db, *, original_selection):
                 budget.enroll({("task_method_active", row[0])})
             _validate(connection, common33)
             guard._validate_programme_selection(original_selection)
+            # Boolean result and the two-field absent return are separate
+            # output appearances, paid before either constructor.
+            budget.debit(5 + 12, appearance=("task-method-pointer", "absent-output"))
             return None, bool(foreign)
         identifier, rowid = selected[0]
         if type(identifier) is not str or not identifier:
@@ -1383,7 +1470,7 @@ async def read_current_method_pointer(db, *, original_selection):
         _validate(connection, common33)
         guard._validate_programme_selection(original_selection)
         rows = list(_sql(connection, 'SELECT ' + ','.join('"' + name + '"' for name in columns)
-            + ' FROM task_method_active WHERE id=? LIMIT 2', (identifier,)))
+            + ' FROM task_method_active WHERE id COLLATE BINARY=? LIMIT 2', (identifier,)))
         if len(rows) != 1:
             raise HeaderBoundsError("task_method_pointer_locator_changed")
         pointer = TaskMethodActive.model_validate(dict(zip(columns, rows[0])))

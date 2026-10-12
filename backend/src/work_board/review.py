@@ -28,6 +28,7 @@ from src.db.models import (
     WorkBoardEvent,
     WorkBoardHandoff,
     WorkBoardLink,
+    WorkBoardProposal,
     WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,

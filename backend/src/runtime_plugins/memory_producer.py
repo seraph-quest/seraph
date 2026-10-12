@@ -5234,7 +5234,7 @@ def original_native_memory_dispatch_validation_numeric_schedule(operation, prepa
     """
     _native_memory_dispatch_validation_numeric_owner(operation, prepared,
         certificate=certificate, facts=facts, retention_widths=retention_widths)
-    from src.memory.header_bounds import WRS_BY_RUN
+    from src.memory.header_bounds import WRS_BY_RUN, HeaderBoundsError
     if type(result_present) is not bool:
         raise HeaderBoundsError("memory_dispatch_validation_numeric_shape_unavailable")
     address = (WRS_BY_RUN.table, operation.run.run_identity)
